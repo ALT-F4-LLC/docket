@@ -77,6 +77,9 @@ a step that does not exist is not found.
 
 With --follow, --tail N is the STARTING CURSOR: the stream opens with the newest
 N and then follows live, instead of replaying the whole retained history first.
+Each streamed event prints as its own result: under --json, one envelope per
+event holding one item with total 1. --limit then sizes each read from the
+store, not the output.
 
 Human mode escapes stored strings on their way to the terminal; --json carries
 the raw bytes, because the consumer there is a program.`,
@@ -377,8 +380,8 @@ func init() {
 	// bypasses the other's floor.
 	//
 	// So `events list` joins `watchEligible` instead: `--watch` polls on the
-	// flag, and `--follow` uses it as its stream's wake period. The period
-	// therefore has ONE definition, one default, and one minimum.
+	// flag, and `--follow` checks for appends on it before waking its stream.
+	// The period therefore has ONE definition, one default, and one minimum.
 
 	eventsCmd.AddCommand(eventsListCmd)
 	rootCmd.AddCommand(eventsCmd)

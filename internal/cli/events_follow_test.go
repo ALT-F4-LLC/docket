@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // The `--follow` stream's properties, and `--watch`'s polling beside it.
@@ -123,7 +126,8 @@ func (b *syncBuffer) String() string {
 func followOpts(conn *sql.DB, stdout, stderr *syncBuffer) followOptions {
 	return followOptions{
 		conn:        conn,
-		stream:      openEventStream(conn, 5*time.Millisecond),
+		stream:      openEventStream(conn, eventHeadWake{conn: conn, every: 5 * time.Millisecond}),
+		retryEvery:  time.Millisecond,
 		query:       engine.EventQuery{Limit: eventsDefaultLimit},
 		jsonMode:    true,
 		jsonVersion: output.JSONV2,
@@ -529,6 +533,241 @@ func TestFollowStopsOnAStreamPruneMarker(t *testing.T) {
 	}
 }
 
+// awaitWake waits a bounded time for one ring on wake.
+func awaitWake(t *testing.T, wake <-chan struct{}, after string) {
+	t.Helper()
+	select {
+	case <-wake:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the wake never rang after %s", after)
+	}
+}
+
+// TestEventHeadWakeRingsOnlyWhenTheLogGrows: `--follow`'s wake source rings
+// after an append or a prune and stays silent over an idle log, so the stream
+// it wakes lists the store after a change rather than on every period.
+func TestEventHeadWakeRingsOnlyWhenTheLogGrows(t *testing.T) {
+	conn := newTestDB(t)
+	followTrustEvent(t, conn, "before")
+
+	wake, cancel := eventHeadWake{conn: conn, every: time.Millisecond}.Subscribe()
+	defer cancel()
+
+	// A bounded window, not a wait for success: an idle log must never ring,
+	// and fifty periods is ample for a timer-driven wake to show itself.
+	select {
+	case <-wake:
+		t.Fatal("the wake rang over an idle log: the stream would list the store every period")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	followTrustEvent(t, conn, "appended")
+	awaitWake(t, wake, "an append")
+
+	head, err := newestEventSeq(conn)
+	testsupport.Must(t, err, "newestEventSeq: %v", err)
+	if _, err := engine.PruneEvents(conn, engine.PruneQuery{
+		Before: head, NowMS: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("PruneEvents: %v", err)
+	}
+	awaitWake(t, wake, "a prune")
+}
+
+// handWake is an AppendNotifier the test rings by hand. Its channel is
+// unbuffered, so a ring is received only by a stream waiting on it.
+type handWake struct {
+	wake       chan struct{}
+	subscribed atomic.Int32
+}
+
+func (h *handWake) Subscribe() (<-chan struct{}, func()) {
+	h.subscribed.Add(1)
+	return h.wake, func() {}
+}
+
+func (h *handWake) ring(t *testing.T) {
+	t.Helper()
+	select {
+	case h.wake <- struct{}{}:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stream never waited on the notifier it was opened with")
+	}
+}
+
+// TestFollowStreamWaitsOnItsNotifier: the stream openEventStream builds
+// waits on the notifier it is given, and an append reaches the follow after
+// a ring. A source that ignored the notifier would never take the ring.
+func TestFollowStreamWaitsOnItsNotifier(t *testing.T) {
+	conn := newTestDB(t)
+	notify := &handWake{wake: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = openEventStream(conn, notify)
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+
+	notify.ring(t)
+	followTrustEvent(t, conn, "appended")
+	notify.ring(t)
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 1 })
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	if n := notify.subscribed.Load(); n != 1 {
+		t.Errorf("the stream subscribed to its notifier %d times, want 1", n)
+	}
+}
+
+var errStoreBusy = errors.New("database is locked")
+
+// streamOpen is one open of a scriptedEventStream: it sends frames, then
+// fails with err, or holds the stream open until its context ends when err
+// is nil.
+type streamOpen struct {
+	frames []daemon.StreamFrame
+	err    error
+}
+
+// scriptedEventStream plays its opens in order and records the cursor each
+// open started from.
+type scriptedEventStream struct {
+	mu    sync.Mutex
+	opens []streamOpen
+	since []int64
+}
+
+func (s *scriptedEventStream) stream(ctx context.Context, q engine.EventQuery,
+	send func(daemon.StreamFrame) error) error {
+	s.mu.Lock()
+	open := s.opens[len(s.since)]
+	s.since = append(s.since, q.Since)
+	s.mu.Unlock()
+	for _, frame := range open.frames {
+		if err := send(frame); err != nil {
+			return err
+		}
+	}
+	if open.err != nil {
+		return open.err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *scriptedEventStream) cursors() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int64(nil), s.since...)
+}
+
+// TestFollowReopensTheStreamAfterATransientError: a failed stream is reported
+// on stderr and reopened from the cursor, and a delivered event resets the
+// count of failures in a row, so four failures, never three in a row, do not
+// end the follow.
+func TestFollowReopensTheStreamAfterATransientError(t *testing.T) {
+	conn := newTestDB(t)
+	script := &scriptedEventStream{opens: []streamOpen{
+		{frames: []daemon.StreamFrame{streamedEvent(5)}, err: errStoreBusy},
+		{err: errStoreBusy},
+		{frames: []daemon.StreamFrame{streamedEvent(6)}, err: errStoreBusy},
+		{err: errStoreBusy},
+		{frames: []daemon.StreamFrame{streamedEvent(7)}},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = script.stream
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 3 })
+	cancel()
+	testsupport.Must(t, <-done, "a follow that recovered from transient errors returned an error")
+
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[5 6 7]" {
+		t.Errorf("the follow printed %v, want [5 6 7]", got)
+	}
+	if got := script.cursors(); fmt.Sprint(got) != "[0 5 5 6 6]" {
+		t.Errorf("the stream reopened from cursors %v, want [0 5 5 6 6]", got)
+	}
+	if n := strings.Count(stderr.String(), "Error: "+errStoreBusy.Error()); n != 4 {
+		t.Errorf("stderr reported %d stream errors, want 4:\n%s", n, stderr.String())
+	}
+}
+
+// TestFollowEndsAfterThreeStreamErrorsInARow: three failures with no event
+// between them end the follow with the last error.
+func TestFollowEndsAfterThreeStreamErrorsInARow(t *testing.T) {
+	conn := newTestDB(t)
+	script := &scriptedEventStream{opens: []streamOpen{
+		{frames: []daemon.StreamFrame{streamedEvent(5)}, err: errStoreBusy},
+		{err: errStoreBusy},
+		{err: errStoreBusy},
+		{frames: []daemon.StreamFrame{streamedEvent(6)}},
+	}}
+
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = script.stream
+
+	err := followEvents(context.Background(), opts)
+	if !errors.Is(err, errStoreBusy) {
+		t.Fatalf("a follow whose stream failed three times in a row returned %v; want %v",
+			err, errStoreBusy)
+	}
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[5]" {
+		t.Errorf("the follow printed %v, want [5]", got)
+	}
+	if n := len(script.cursors()); n != 3 {
+		t.Errorf("the follow opened the stream %d times, want 3", n)
+	}
+}
+
+// TestEventsListFollowChecksForAppendsOnTheIntervalFlag: `events list
+// --follow` prints what the stream sends, and the stream it opens is woken by
+// an eventHeadWake on the command's connection that checks every --interval.
+func TestEventsListFollowChecksForAppendsOnTheIntervalFlag(t *testing.T) {
+	conn := newTestDB(t)
+	fake := &fakeEventStream{frames: []daemon.StreamFrame{streamedEvent(101), streamedEvent(205)}}
+	var notifiers []daemon.AppendNotifier
+	saved := openEventStream
+	openEventStream = func(_ *sql.DB, notify daemon.AppendNotifier) eventStream {
+		notifiers = append(notifiers, notify)
+		return fake.stream
+	}
+	t.Cleanup(func() { openEventStream = saved })
+
+	stdout := pipeStdout(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := eventsListTestCmd(t, ctx, conn, map[string]string{
+		"follow": "true", "json": "true", "all-projects": "true", "interval": "750ms",
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- eventsListCmd.RunE(cmd, nil) }()
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 2 })
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	want := eventHeadWake{conn: conn, every: 750 * time.Millisecond}
+	if len(notifiers) != 1 || notifiers[0] != daemon.AppendNotifier(want) {
+		t.Fatalf("events list --follow opened streams woken by %+v, want one woken by %+v",
+			notifiers, want)
+	}
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[101 205]" {
+		t.Errorf("events list --follow printed %v, want the streamed seqs [101 205]", got)
+	}
+}
+
 // pipeStdout points os.Stdout at a pipe drained into the returned buffer,
 // for code that writes to os.Stdout directly, and restores it at cleanup.
 func pipeStdout(t *testing.T) *syncBuffer {
@@ -562,32 +801,17 @@ func TestEventsListWatchPollsWithoutTheStream(t *testing.T) {
 
 	fake := &fakeEventStream{frames: []daemon.StreamFrame{streamedEvent(999)}}
 	saved := openEventStream
-	openEventStream = func(*sql.DB, time.Duration) eventStream { return fake.stream }
+	openEventStream = func(*sql.DB, daemon.AppendNotifier) eventStream { return fake.stream }
 	t.Cleanup(func() { openEventStream = saved })
 
 	stdout := pipeStdout(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cmd := cmdWithDB(conn)
-	cmd.SetContext(context.WithValue(ctx, dbKey, conn))
-	cmd.Flags().Duration("interval", 5*time.Millisecond, "")
-	cmd.Flags().Bool("follow", false, "")
-	cmd.Flags().Int64("since", 0, "")
-	cmd.Flags().Int("limit", 0, "")
-	cmd.Flags().Int("tail", 0, "")
-	cmd.Flags().String("kind", "", "")
-	cmd.Flags().String("step", "", "")
-	cmd.Flags().String("run", "", "")
-	cmd.Flags().Bool("all-projects", false, "")
 	// The feed under test is the whole store, as followOpts' follows read it.
-	for name, value := range map[string]string{
-		"watch": "true", "json": "true", "all-projects": "true",
-	} {
-		if err := cmd.Flags().Set(name, value); err != nil {
-			t.Fatalf("Set(%s): %v", name, err)
-		}
-	}
+	cmd := eventsListTestCmd(t, ctx, conn, map[string]string{
+		"watch": "true", "json": "true", "all-projects": "true", "interval": "5ms",
+	})
 
 	done := make(chan error, 1)
 	go func() { done <- eventsListCmd.RunE(cmd, nil) }()
@@ -616,6 +840,39 @@ func TestEventsListWatchPollsWithoutTheStream(t *testing.T) {
 				"--watch re-reads the list rather than following a cursor", i, page, first)
 		}
 	}
+}
+
+// eventsListTestCmd is a command under ctx carrying `events list`'s flags and
+// the root flags it reads, with values set. It fails when `events list`
+// declares a flag this copy lacks, so the copy cannot drift from init().
+func eventsListTestCmd(t *testing.T, ctx context.Context, conn *sql.DB,
+	values map[string]string) *cobra.Command {
+	t.Helper()
+	cmd := cmdWithDB(conn)
+	cmd.SetContext(context.WithValue(ctx, dbKey, conn))
+	cmd.Flags().Duration("interval", 2*time.Second, "")
+	cmd.Flags().Bool("follow", false, "")
+	cmd.Flags().Int64("since", 0, "")
+	cmd.Flags().Int("limit", 0, "")
+	cmd.Flags().Int("tail", 0, "")
+	cmd.Flags().String("kind", "", "")
+	cmd.Flags().String("step", "", "")
+	cmd.Flags().String("run", "", "")
+	cmd.Flags().Bool("all-projects", false, "")
+	eventsListCmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		if len(f.Annotations[cobra.FlagSetByCobraAnnotation]) > 0 {
+			return
+		}
+		if got := cmd.Flags().Lookup(f.Name); got == nil || got.Value.Type() != f.Value.Type() {
+			t.Fatalf("eventsListTestCmd lacks events list's --%s (%s)", f.Name, f.Value.Type())
+		}
+	})
+	for name, value := range values {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("Set(%s): %v", name, err)
+		}
+	}
+	return cmd
 }
 
 // TestFollowWritesNothing: reading a log cannot advance a run, and a follow
