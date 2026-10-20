@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The mid-run scope refresh (DKT-869), and why it exists after DKT-741 said it
@@ -103,7 +103,7 @@ type RefreshedScope struct {
 // `retry` re-executes it and records a fresh diff — over the refreshed scope,
 // which is the entire point of authorizing the widen.
 var refreshBlockingStepStatuses = []string{
-	db.StepClaimed, db.StepRunning, db.StepGated,
+	store.StepClaimed, store.StepRunning, store.StepGated,
 }
 
 // RefreshIssueScopeInRun re-reads `issues.scope_globs` and overwrites the
@@ -140,8 +140,9 @@ func RefreshIssueScopeInRun(
 	}
 	defer tx.Rollback()
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -230,14 +231,14 @@ func RefreshIssueScopeInRun(
 	case err != nil:
 		return nil, err
 	}
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
+	if open, err := st.OpenDispatchTx(runID); err == nil {
 		return nil, conflictErr(
 			"a dispatch is open for %s (%s, expiring at %d); close or abandon "+
 				"it before refreshing — its manifest was offered under the "+
 				"frozen scope, and a relay spawning from it would claim rows "+
 				"whose packets no longer say what the manifest's reader saw",
 			run.Ref(), FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	} else if !errors.Is(err, store.ErrNoOpenDispatch) {
 		return nil, err
 	}
 
@@ -245,7 +246,7 @@ func RefreshIssueScopeInRun(
 	if err != nil {
 		return nil, err
 	}
-	if err := db.SetRunIssueSnapshotTx(tx, runID, issueID, refreshed); err != nil {
+	if err := st.SetRunIssueSnapshotTx(runID, issueID, refreshed); err != nil {
 		return nil, err
 	}
 
@@ -308,7 +309,7 @@ func refreshableSteps(
 		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
 		  ORDER BY id`,
 		runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted)
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted)
 	if err != nil {
 		return nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
 	}
@@ -351,8 +352,8 @@ func quiescenceErr(cause error) *Error {
 // runIssueTx loads one `run_issues` row, distinguishing "not in this run" from
 // a read failure — the membership check `run abandon --issue` makes, returning
 // the row because the caller needs its snapshot.
-func runIssueTx(tx *sql.Tx, runID, issueID int) (*db.RunIssue, error) {
-	all, err := db.ListRunIssuesTx(tx, runID)
+func runIssueTx(tx *sql.Tx, runID, issueID int) (*store.RunIssue, error) {
+	all, err := store.TxOn(tx).ListRunIssuesTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +362,7 @@ func runIssueTx(tx *sql.Tx, runID, issueID int) (*db.RunIssue, error) {
 			return ri, nil
 		}
 	}
-	return nil, notFoundErr(db.ErrNotFound, "issue %s is not part of run %s",
+	return nil, notFoundErr(store.ErrNotFound, "issue %s is not part of run %s",
 		model.FormatID(issueID), model.FormatRunID(runID))
 }
 
@@ -370,7 +371,7 @@ func runIssueTx(tx *sql.Tx, runID, issueID int) (*db.RunIssue, error) {
 // standalone read and the UPDATE would otherwise be reported as the `to` of an
 // event that wrote something else.
 func liveIssueScopeTx(tx *sql.Tx, issueID int) ([]string, error) {
-	stored, err := db.IssueScopeGlobsTx(tx, issueID)
+	stored, err := store.TxOn(tx).IssueScopeGlobsTx(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the live scope for %s: %w",
 			model.FormatID(issueID), err)
