@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -36,11 +36,11 @@ var voteLinkCmd = &cobra.Command{
 			return err
 		}
 
-		if err := db.LinkProposalIssue(conn, proposalID, issueID); err != nil {
+		if err := store.StoreOn(conn).LinkProposalIssue(proposalID, issueID); err != nil {
 			if e := notFound(err, "proposal or issue"); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrConflict) {
+			if errors.Is(err, store.ErrConflict) {
 				return cmdErr(fmt.Errorf("link already exists"), output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("linking proposal to issue: %w", err), output.ErrGeneral)
@@ -67,7 +67,7 @@ var voteUnlinkCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		proposalID, err := model.ParseProposalID(args[0])
 		if err != nil {
@@ -80,7 +80,7 @@ var voteUnlinkCmd = &cobra.Command{
 			return err
 		}
 
-		if err := db.UnlinkProposalIssue(conn, proposalID, issueID); err != nil {
+		if err := st.UnlinkProposalIssue(proposalID, issueID); err != nil {
 			if e := notFound(err, "link"); e != nil {
 				return e
 			}

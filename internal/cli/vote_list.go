@@ -1,13 +1,12 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -37,7 +36,7 @@ var voteListCmd = &cobra.Command{
 
 // runVoteList contains the query + render + output logic for vote list.
 func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	status, _ := cmd.Flags().GetString("status")
 	criticality, _ := cmd.Flags().GetString("criticality")
@@ -70,7 +69,7 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		status = ""
 	}
 
-	proposals, total, err := db.ListProposals(conn, getProjectID(cmd), status, criticality, domainTag, limit)
+	proposals, total, err := st.ListProposals(getProjectID(cmd), status, criticality, domainTag, limit)
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing proposals: %w", err), output.ErrGeneral)
 	}
@@ -84,7 +83,7 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	var message string
 	if !w.JSONMode {
 		// Fetch vote counts per proposal for human-readable output.
-		voteCounts, err := getVoteCounts(conn, proposals)
+		voteCounts, err := getVoteCounts(st, proposals)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching vote counts: %w", err), output.ErrGeneral)
 		}
@@ -103,10 +102,10 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 }
 
 // getVoteCounts returns a map of proposal ID to votes cast count.
-func getVoteCounts(conn *sql.DB, proposals []*model.Proposal) (map[int]int, error) {
+func getVoteCounts(st store.Store, proposals []*model.Proposal) (map[int]int, error) {
 	counts := make(map[int]int, len(proposals))
 	for _, p := range proposals {
-		votes, err := db.GetProposalVotes(conn, p.ID)
+		votes, err := st.GetProposalVotes(p.ID)
 		if err != nil {
 			return nil, fmt.Errorf("fetching votes for %s: %w", model.FormatProposalID(p.ID), err)
 		}
