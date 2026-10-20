@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // FactSourceEngine marks a `step-deferred` event the engine derived itself, in
@@ -24,10 +24,10 @@ const FactSourceEngine = "engine"
 //
 // Rows at stage 0 are unstaged and carry no ordering, so they never qualify.
 func chainDeferredRows(
-	rows []db.DispatchRow, steps []*db.Step, attempted map[int]bool,
-) ([]*db.Step, error) {
+	rows []store.DispatchRow, steps []*store.Step, attempted map[int]bool,
+) ([]*store.Step, error) {
 	status := make(map[int]string, len(steps))
-	byID := make(map[int]*db.Step, len(steps))
+	byID := make(map[int]*store.Step, len(steps))
 	for _, s := range steps {
 		status[s.ID], byID[s.ID] = s.Status, s
 	}
@@ -45,17 +45,17 @@ func chainDeferredRows(
 		manifest = append(manifest, placed{r.StepID, row.Issue, row.Stage})
 	}
 
-	var out []*db.Step
+	var out []*store.Step
 	for _, row := range manifest {
-		if row.issue == "" || row.stage == 0 || status[row.step] != db.StepPending {
+		if row.issue == "" || row.stage == 0 || status[row.step] != store.StepPending {
 			continue
 		}
 		for _, prior := range manifest {
 			if prior.issue != row.issue || prior.stage >= row.stage || !attempted[prior.step] {
 				continue
 			}
-			if st := status[prior.step]; st != db.StepDone && st != db.StepSkipped &&
-				st != db.StepSuperseded {
+			if st := status[prior.step]; st != store.StepDone && st != store.StepSkipped &&
+				st != store.StepSuperseded {
 				out = append(out, byID[row.step])
 				break
 			}
@@ -70,10 +70,10 @@ func chainDeferredRows(
 // step and dispatch is not recorded again. The cause `budget` stays
 // conductor-filed: the engine does not observe a budget hold.
 func recordChainDeferralsTx(
-	tx *sql.Tx, runID int, open *db.Dispatch, steps []*db.Step, nowMS int64,
+	tx *sql.Tx, runID int, open *store.Dispatch, steps []*store.Step, nowMS int64,
 ) error {
 	dispatchID := open.ID
-	rows, err := db.ListDispatchRowsTx(tx, dispatchID)
+	rows, err := store.TxOn(tx).ListDispatchRowsTx(dispatchID)
 	if err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func engineChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
 		         ORDER BY closed_at_ms DESC, id DESC LIMIT 1)
 		  ORDER BY seq DESC LIMIT 1`,
 		runID, stepID, EventStepDeferred, DeferralChain, FactSourceEngine,
-		runID, db.DispatchClosed).Scan(&seq, &data)
+		runID, store.DispatchClosed).Scan(&seq, &data)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}
