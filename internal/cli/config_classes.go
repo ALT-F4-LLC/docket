@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -43,7 +43,7 @@ import (
 // that can actually appear in the column. Re-parsing the source would be a
 // second interpretation, and the one that disagreed would be this one.
 func declaredClasses(conn *sql.DB, projectID int) ([]string, error) {
-	workflows, _, err := db.ListWorkflows(conn, db.WorkflowListOptions{
+	workflows, _, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{
 		ProjectID: projectID,
 	})
 	if err != nil {
@@ -98,8 +98,8 @@ func declaredClasses(conn *sql.DB, projectID int) ([]string, error) {
 // nothing to disagree with, and a warning naming an empty list would be noise
 // on a fresh project's very first configuration.
 func leaseTTLClassWarning(conn *sql.DB, projectID int, key string) string {
-	class, ok := strings.CutPrefix(key, db.KeyLeaseTTLPrefix)
-	if !ok || class == "" || key == db.KeyLeaseTTLDefault {
+	class, ok := strings.CutPrefix(key, store.KeyLeaseTTLPrefix)
+	if !ok || class == "" || key == store.KeyLeaseTTLDefault {
 		return ""
 	}
 

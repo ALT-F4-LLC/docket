@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -17,8 +17,8 @@ import (
 // key, so the listing renders as {items,total,truncated} like every other list
 // verb.
 type configEntryList struct {
-	Entries []db.ConfigEntry `json:"entries"`
-	Total   int              `json:"total"`
+	Entries []store.ConfigEntry `json:"entries"`
+	Total   int                 `json:"total"`
 }
 
 func (c configEntryList) CollectionItems() any      { return c.Entries }
@@ -84,7 +84,7 @@ mid-run.`,
 		// activity log uses, so a rewrite of a security-load-bearing key is
 		// detectable even though nothing yet prevents it.
 		if err := engine.SetConfig(conn, projectID, key, value, config.DefaultAuthor()); err != nil {
-			if errors.Is(err, db.ErrUnknownConfigKey) {
+			if errors.Is(err, store.ErrUnknownConfigKey) {
 				return cmdErr(err, output.ErrValidation)
 			}
 			// A validation failure on the value is the other expected case;
@@ -105,7 +105,7 @@ mid-run.`,
 			message += "\n" + warning
 		}
 
-		entry := db.ConfigEntry{Key: key, Value: value, Source: "set"}
+		entry := store.ConfigEntry{Key: key, Value: value, Source: "set"}
 		w.Success(entry, message)
 		return nil
 	},
@@ -126,7 +126,7 @@ nothing.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		projectID := getProjectID(cmd)
 		if global, _ := cmd.Flags().GetBool("global"); global {
@@ -134,7 +134,7 @@ nothing.`,
 		}
 
 		if len(args) == 0 {
-			entries, err := db.ListConfig(conn, projectID)
+			entries, err := st.ListConfig(projectID)
 			if err != nil {
 				return cmdErr(fmt.Errorf("listing config: %w", err), output.ErrGeneral)
 			}
@@ -145,9 +145,9 @@ nothing.`,
 			return nil
 		}
 
-		entry, err := db.GetConfig(conn, projectID, args[0])
+		entry, err := st.GetConfig(projectID, args[0])
 		if err != nil {
-			if errors.Is(err, db.ErrUnknownConfigKey) {
+			if errors.Is(err, store.ErrUnknownConfigKey) {
 				return cmdErr(err, output.ErrValidation)
 			}
 			return cmdErr(fmt.Errorf("reading config: %w", err), output.ErrGeneral)
@@ -178,7 +178,7 @@ const unsetConfigValue = "<unset>"
 // erase exactly the distinction `source` exists to carry. JSON is untouched —
 // the envelope already distinguishes the two, and a consumer parsing `value`
 // must not have to strip a human marker out of it.
-func configValueForHuman(entry db.ConfigEntry) string {
+func configValueForHuman(entry store.ConfigEntry) string {
 	if entry.Value == "" && entry.Source != "set" {
 		return unsetConfigValue
 	}
@@ -186,7 +186,7 @@ func configValueForHuman(entry db.ConfigEntry) string {
 }
 
 // formatConfigEntries renders the listing for human mode, aligned on the key.
-func formatConfigEntries(entries []db.ConfigEntry) string {
+func formatConfigEntries(entries []store.ConfigEntry) string {
 	width := 0
 	for _, e := range entries {
 		if len(e.Key) > width {
