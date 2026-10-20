@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -167,8 +167,8 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 		return err
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -197,13 +197,13 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	// left behind. `step resolve` remains the verb for a run that must move past
 	// an open vote, which is what R11's vote clause already provides.
 	if step.Materialized && step.Kind == workflow.TypeVote {
-		if step.Status != db.StepWaitingHuman {
+		if step.Status != store.StepWaitingHuman {
 			return validationErr(
 				"step %s is a held cluster decided by vote and is %s, not %s: "+
 					"the vote has not finished. approve and reject apply once a "+
 					"vote that did not pass parks it for you; to move the run past "+
 					"an open vote, use `docket step resolve %s --as %s`",
-				step.Instance, step.Status, db.StepWaitingHuman,
+				step.Instance, step.Status, store.StepWaitingHuman,
 				step.Instance, strings.Join(resolveValues, "|"))
 		}
 		return e.decideMaterializedStep(conn, step, opts)
@@ -220,7 +220,7 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	// parked executor step reads "not a human gate" and has no next move
 	// without a help dig; naming `resolve` here saves that round-trip.
 	if step.Kind != workflow.TypeHuman {
-		if step.Status == db.StepWaitingHuman {
+		if step.Status == store.StepWaitingHuman {
 			return validationErr(
 				"step %s is %s %s step, not a `type=\"human\"` gate, and is "+
 					"parked waiting-human; use `docket step resolve %s --as "+
@@ -264,7 +264,7 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 			step.Instance, step.StepName)
 	}
 
-	if db.StepTerminal(step.Status) {
+	if store.StepTerminal(step.Status) {
 		return conflictErr("step %s is already %s", step.Instance, step.Status)
 	}
 
@@ -314,13 +314,14 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 		parkReason = loopBoundParkReason(loop)
 	}
 
-	if err := db.SetStepRoutingWithParkReasonTx(
-		tx, step.ID, routing, note, status, class, parkReason, nowMS,
+	stx := store.TxOn(tx)
+	if err := stx.SetStepRoutingWithParkReasonTx(
+		step.ID, routing, note, status, class, parkReason, nowMS,
 	); err != nil {
 		return err
 	}
-	if err := db.SetStepAuthorityTx(
-		tx, step.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
+	if err := stx.SetStepAuthorityTx(
+		step.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
 	); err != nil {
 		return err
 	}
@@ -419,8 +420,8 @@ func (e *Engine) resolveStep(
 		return err
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -483,12 +484,12 @@ func (e *Engine) resolveStep(
 	// not be hostage to a quorum that never arrives — so it is offered whatever
 	// the step's status, short of `superseded` (refused inside the transaction
 	// below).
-	resolvable := step.Status == db.StepWaitingHuman || step.Kind == workflow.TypeVote
+	resolvable := step.Status == store.StepWaitingHuman || step.Kind == workflow.TypeVote
 	if !resolvable {
 		return validationErr(
 			"step %s is %s, not %s; resolve applies to parked steps "+
 				"(and to `type=\"vote\"` steps, whose voters it moves a run past)",
-			step.Instance, step.Status, db.StepWaitingHuman)
+			step.Instance, step.Status, store.StepWaitingHuman)
 	}
 
 	// A resolution that REOPENS WORK is refused under a terminal run. `retry`
@@ -505,7 +506,7 @@ func (e *Engine) resolveStep(
 	// resolved at ANY status, which is the door a terminal run's skipped vote
 	// walked through.
 	if as == ResolveRetry || as == ResolveFixRound {
-		run, err := db.GetRun(conn, step.RunID)
+		run, err := store.StoreOn(conn).GetRun(step.RunID)
 		if err != nil {
 			return err
 		}
@@ -549,7 +550,7 @@ func (e *Engine) resolveStep(
 	// question is still open and the operator can simply answer it, which is
 	// what the park exists for.
 	if as == ResolveRetry && step.Materialized &&
-		step.Kind == workflow.TypeVote && step.Status == db.StepWaitingHuman {
+		step.Kind == workflow.TypeVote && step.Status == store.StepWaitingHuman {
 		return validationErr(
 			"step %s cannot be retried: it is parked because its vote did not "+
 				"pass, and retry resets the retry budget, which is not what is "+
@@ -640,7 +641,7 @@ func (e *Engine) resolveStep(
 	// connection, which inside the transaction would deadlock. `retry` is
 	// excluded because it returns the step to `pending` rather than deciding
 	// it — there is nothing for the aggregate to resume on.
-	var heldRoutingStep *db.Step
+	var heldRoutingStep *store.Step
 	if step.Materialized && as != ResolveRetry {
 		if heldRoutingStep, err = routingStepOf(conn, step); err != nil {
 			return err
@@ -700,9 +701,9 @@ func (e *Engine) resolveStep(
 	// gap-only completion — has no signature to grant from, and refusing is
 	// honest where recording a grant that can never match would look like it
 	// did something.
-	var grantRows []db.GateResultRow
+	var grantRows []store.GateResultRow
 	if batch {
-		rows, err := db.GateResultsForStep(conn, step.ID)
+		rows, err := store.StoreOn(conn).GateResultsForStep(step.ID)
 		if err != nil {
 			return err
 		}
@@ -720,7 +721,7 @@ func (e *Engine) resolveStep(
 		// than it does.
 		var skipped []string
 		for _, r := range grantRows {
-			if r.Verdict == db.GateVerdictSkipped {
+			if r.Verdict == store.GateVerdictSkipped {
 				skipped = append(skipped, fmt.Sprintf("%q", r.Gate))
 			}
 		}
@@ -776,16 +777,17 @@ func (e *Engine) resolveStep(
 		return fmt.Errorf("beginning the resolution: %w", err)
 	}
 	defer tx.Rollback()
+	stx := store.TxOn(tx)
 
 	// R11's vote exception ends where a fix round has superseded the step: the
 	// round answers the question, and resolving again would grant another loop
 	// and mint another round over it. Read inside the transaction so a second
 	// resolution racing the first sees the status the first one committed.
-	current, err := db.GetStepTx(tx, step.ID)
+	current, err := stx.GetStepTx(step.ID)
 	if err != nil {
 		return err
 	}
-	if current.Kind == workflow.TypeVote && current.Status == db.StepSuperseded {
+	if current.Kind == workflow.TypeVote && current.Status == store.StepSuperseded {
 		return conflictErr(
 			"step %s is %s: a fix round already answers it, so it cannot be "+
 				"resolved again; resolve the round's own steps instead",
@@ -802,7 +804,7 @@ func (e *Engine) resolveStep(
 		// ledger's key half, so the re-execution's claim mints a FRESH attempt
 		// number and its usage records beside the first execution's instead of
 		// colliding with it.
-		if err := db.ResetStepRetryBudgetTx(tx, step.ID, nowMS); err != nil {
+		if err := stx.ResetStepRetryBudgetTx(step.ID, nowMS); err != nil {
 			return err
 		}
 		// THE LEASE IS RELEASED (DKT-259). Without this the step went back to
@@ -816,29 +818,29 @@ func (e *Engine) resolveStep(
 		// unrecordable because `UNIQUE(step_id, attempt, unit)` was taken.
 		//
 		// Releasing is what makes the comment below true rather than aspirational.
-		if err := db.ReleaseStepLeaseTx(tx, step.ID, nowMS); err != nil {
+		if err := stx.ReleaseStepLeaseTx(step.ID, nowMS); err != nil {
 			return err
 		}
-		if err := db.ClearStepStartTx(tx, step.ID); err != nil {
+		if err := stx.ClearStepStartTx(step.ID); err != nil {
 			return err
 		}
-		if err := db.AdvanceSagaTx(tx, step.ID, step.SagaStage, "", nowMS); err != nil &&
-			!errors.Is(err, db.ErrSagaStageMoved) {
+		if err := stx.AdvanceSagaTx(step.ID, step.SagaStage, "", nowMS); err != nil &&
+			!errors.Is(err, store.ErrSagaStageMoved) {
 			return err
 		}
-		routing, status = ResolveRetry, db.StepPending
+		routing, status = ResolveRetry, store.StepPending
 	case ResolveSkip:
-		routing, status = workflow.OnFailSkip, db.StepSkipped
+		routing, status = workflow.OnFailSkip, store.StepSkipped
 	case ResolveAbandonIssue:
-		routing, status = workflow.OnFailAbandonIssue, db.StepFailedRouted
+		routing, status = workflow.OnFailAbandonIssue, store.StepFailedRouted
 	case ResolveOverridePass:
-		routing, status = RoutingPass, db.StepDone
+		routing, status = RoutingPass, store.StepDone
 	case ResolveFixRound:
 		// The GRANT and the loop entry are one transaction (DKT-237). A grant
 		// raised without a round entered would leave an issue authorized for
 		// work nothing scheduled; a round entered without the grant recorded
 		// would leave the bound looking untouched to every later reader.
-		if _, err := db.GrantLoopTx(tx, step.RunID, step.IssueID); err != nil {
+		if _, err := stx.GrantLoopTx(step.RunID, step.IssueID); err != nil {
 			return validationErr("%v", err)
 		}
 		// AUTHORIZED (DKT-340). The operator has read whatever park stands
@@ -863,7 +865,7 @@ func (e *Engine) resolveStep(
 		// The parked step itself is SUPERSEDED, not passed and not failed: the
 		// question it asked is being answered by the new round's own work, and
 		// calling it done would assert a verdict nobody reached.
-		routing, status = workflow.OnFailFixLoop, db.StepSuperseded
+		routing, status = workflow.OnFailFixLoop, store.StepSuperseded
 	case ResolveRerunGates:
 		// REWIND, DO NOT RE-EXECUTE (DKT-259). `recorded` is the saga stage at
 		// which the artifact is in and no gate has run, so resuming from it
@@ -880,8 +882,8 @@ func (e *Engine) resolveStep(
 		// to be routed again, and leaving the old verdict standing until the
 		// new one lands would let a reader in that window see a decision that
 		// is no longer in force.
-		if err := db.AdvanceSagaTx(tx, step.ID, "", db.SagaRecorded, nowMS); err != nil {
-			if errors.Is(err, db.ErrSagaStageMoved) {
+		if err := stx.AdvanceSagaTx(step.ID, "", store.SagaRecorded, nowMS); err != nil {
+			if errors.Is(err, store.ErrSagaStageMoved) {
 				return conflictErr(
 					"step %s is already inside a saga stage; its gates are "+
 						"running or about to, so there is nothing to rewind",
@@ -889,7 +891,7 @@ func (e *Engine) resolveStep(
 			}
 			return err
 		}
-		routing, status = "", db.StepGated
+		routing, status = "", store.StepGated
 	}
 
 	// The re-pin lands BEFORE the routing record and the resolution event, so
@@ -907,11 +909,11 @@ func (e *Engine) resolveStep(
 
 	// A resolution ANSWERS a park; every `--as` above leaves a non-parked status,
 	// so this write never sets a class and never clears the one it is answering.
-	if err := db.SetStepRoutingTx(tx, step.ID, routing, note, status, "", nowMS); err != nil {
+	if err := stx.SetStepRoutingTx(step.ID, routing, note, status, "", nowMS); err != nil {
 		return err
 	}
-	if err := db.SetStepAuthorityTx(
-		tx, step.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
+	if err := stx.SetStepAuthorityTx(
+		step.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
 	); err != nil {
 		return err
 	}
@@ -938,7 +940,7 @@ func (e *Engine) resolveStep(
 			// failing row (DKT-1796) rather than recomputed: the ruling must
 			// bind to the content and the command the operator read before
 			// resolving, not to a later re-run's or a later trust entry's.
-			grantID, err := db.InsertGateOverrideGrantTx(tx, db.GateOverrideGrant{
+			grantID, err := stx.InsertGateOverrideGrantTx(store.GateOverrideGrant{
 				RunID: step.RunID, OriginStepID: step.ID, Gate: r.Gate,
 				Exit: r.Exit, Reason: r.Reason, Fingerprint: r.Fingerprint,
 				Argv: r.Argv, Note: note, CreatedAtMS: nowMS,
@@ -1031,7 +1033,7 @@ func (e *Engine) resolveStep(
 // call and print before that call commits anything — the operator sees the
 // blast radius of what they are about to approve.
 func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return nil
 	}
@@ -1092,8 +1094,8 @@ func overridePassInterposedWarning(instance string, spec *workflow.Step) string 
 // Validated BEFORE the transaction opens, same as stage zero's C5 ordering: a
 // refusal costs the caller nothing and consumes no attempt.
 func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string, nowMS int64) error {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -1126,10 +1128,11 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 		return fmt.Errorf("beginning the failure: %w", err)
 	}
 	defer tx.Rollback()
+	stx := store.TxOn(tx)
 
 	// The same three-way authorize every lease-mediated verb passes through,
 	// so R1-R4 hold identically here and at `complete`.
-	if _, err := db.AuthorizeStepTx(tx, step.ID, token, nowMS); err != nil {
+	if _, err := stx.AuthorizeStepTx(step.ID, token, nowMS); err != nil {
 		return err
 	}
 
@@ -1143,7 +1146,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 		if err != nil {
 			return err
 		}
-		if err := db.SetStepMetadataTx(tx, step.ID, merged, nowMS); err != nil {
+		if err := stx.SetStepMetadataTx(step.ID, merged, nowMS); err != nil {
 			return err
 		}
 	}
@@ -1180,10 +1183,10 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 		// ended in a recorded failure, so it counts into `failed_attempts`,
 		// never `reaped_claims` (DKT-490) — the breakdown is what lets a
 		// dispatcher escalate on measured failures and shrug at silences.
-		if err := db.ReapStepTx(tx, step.ID, nowMS); err != nil {
+		if err := stx.ReapStepTx(step.ID, nowMS); err != nil {
 			return err
 		}
-		if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
+		if err := stx.MarkStepAttemptFailedTx(step.ID, nowMS); err != nil {
 			return err
 		}
 		if err := recordEvent(tx, eventRecord{
@@ -1232,7 +1235,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	// worker's `--note`: the note stays in the routing record, on the
 	// step-failed event, and in the trail comment, where it always was, and an
 	// empty note no longer leaves a parked row with nothing to say.
-	class := db.ParkClassAttemptsExhausted
+	class := store.ParkClassAttemptsExhausted
 	parkReason := attemptsExhaustedParkReason(attempt, max)
 	if bound, ok := loopBoundClass(loop); ok {
 		class = bound
@@ -1253,7 +1256,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	if err != nil {
 		return err
 	}
-	if panelRouting != routing && panelStatus == db.StepWaitingHuman {
+	if panelRouting != routing && panelStatus == store.StepWaitingHuman {
 		parkReason = attemptsExhaustedParkReason(attempt, max) + "; " + panelReason
 		if note != "" {
 			note += "; " + panelReason
@@ -1263,17 +1266,17 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	}
 	routing, status = panelRouting, panelStatus
 
-	if err := db.RetireStepTokenTx(tx, step.ID); err != nil {
+	if err := stx.RetireStepTokenTx(step.ID); err != nil {
 		return err
 	}
 	// The exhausting failure counts like every other (DKT-490): the routed
 	// step's row still answers "how many attempts failed" — which is exactly
 	// what an operator reading the park, or a `step show` beside it, asks.
-	if err := db.MarkStepAttemptFailedTx(tx, step.ID, nowMS); err != nil {
+	if err := stx.MarkStepAttemptFailedTx(step.ID, nowMS); err != nil {
 		return err
 	}
-	if err := db.SetStepRoutingWithParkReasonTx(
-		tx, step.ID, routing, note, status, class, parkReason, nowMS,
+	if err := stx.SetStepRoutingWithParkReasonTx(
+		step.ID, routing, note, status, class, parkReason, nowMS,
 	); err != nil {
 		return err
 	}
@@ -1331,7 +1334,7 @@ func failureNote(instance, note string, attempt, max int) string {
 // waiting: not one failure, but the budget. The park is reached only through
 // `exhausted`, which requires `max > 0`, so the denominator is always stated.
 func attemptsExhaustedParkReason(attempt, max int) string {
-	return fmt.Sprintf("%s: %d of %d", db.ParkClassAttemptsExhausted, attempt, max)
+	return fmt.Sprintf("%s: %d of %d", store.ParkClassAttemptsExhausted, attempt, max)
 }
 
 // loopBoundParkReason is the engine's `park_reason` for a step whose fix loop
@@ -1364,8 +1367,8 @@ func commit(tx *sql.Tx, err error) error {
 func HeartbeatStep(
 	conn *sql.DB, stepID int, token string, nowMS int64,
 ) (*model.Lease, error) {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -1387,7 +1390,7 @@ func HeartbeatStep(
 	}
 	ttl := ttls.forClass(limit, step.Class)
 
-	return db.HeartbeatStep(conn, stepID, token, ttl.Milliseconds(), nowMS)
+	return store.StoreOn(conn).HeartbeatStep(stepID, token, ttl.Milliseconds(), nowMS)
 }
 
 // contains reports slice membership, for the closed `--as` vocabulary.

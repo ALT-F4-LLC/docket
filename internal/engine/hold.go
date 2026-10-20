@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket step hold` (DKT-3287): the conductor parks ONE ready step for the
@@ -43,8 +43,8 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 	if err := opts.By.require("step hold"); err != nil {
 		return err
 	}
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -68,7 +68,7 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 	if err != nil {
 		return err
 	}
-	var fresh *db.Step
+	var fresh *store.Step
 	for _, s := range sched.Steps() {
 		if s.ID == stepID {
 			fresh = s
@@ -78,7 +78,7 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 	if fresh == nil {
 		return notFoundErr(nil, "step %s is not in its run's schedule", model.FormatStepID(stepID))
 	}
-	if fresh.Status != db.StepPending {
+	if fresh.Status != store.StepPending {
 		return conflictErr(
 			"step %s is %s; `step hold` parks a READY step only — a claimed step "+
 				"is force-reaped first (`step reap`), and a parked one is already "+
@@ -89,8 +89,8 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 			fresh.Instance, cond)
 	}
 
-	if err := db.SetStepRoutingWithParkReasonTx(tx, fresh.ID, "hold", reason,
-		db.StepWaitingHuman, db.ParkClassHeld, reason, opts.NowMS); err != nil {
+	if err := store.TxOn(tx).SetStepRoutingWithParkReasonTx(fresh.ID, "hold", reason,
+		store.StepWaitingHuman, store.ParkClassHeld, reason, opts.NowMS); err != nil {
 		return err
 	}
 	data, err := rulingData(opts.By, map[string]any{"reason": reason, "held_by": "step hold"})
