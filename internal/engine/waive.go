@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // DKT-742 — the run-scoped stale-target waiver.
@@ -81,8 +81,8 @@ func (e *Engine) WaiveStaleTargets(
 		return nil, err
 	}
 
-	if _, err := db.GetRun(conn, runID); err != nil {
-		if errors.Is(err, db.ErrRunNotFound) {
+	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
+		if errors.Is(err, store.ErrRunNotFound) {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
 		return nil, err
@@ -98,9 +98,10 @@ func (e *Engine) WaiveStaleTargets(
 		return nil, err
 	}
 
+	st := store.TxOn(tx)
 	out := make([]WaivedTarget, 0, len(instances))
 	for _, instance := range instances {
-		id, err := db.InsertStaleTargetWaiverTx(tx, db.StaleTargetWaiver{
+		id, err := st.InsertStaleTargetWaiverTx(store.StaleTargetWaiver{
 			RunID: runID, StepInstance: instance, TargetSHA: targetSHA,
 			Note: note, CreatedAtMS: nowMS,
 		})
