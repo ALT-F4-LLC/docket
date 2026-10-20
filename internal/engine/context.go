@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -270,7 +270,7 @@ const (
 // returns is what a claim made now would hand over. For a step that HAS been
 // handed out, the answer to "what did this step see" is AssembleRecordedContext.
 func AssembleContext(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, ttls ttlConfig,
 ) (*Context, error) {
 	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssue, liveNotes)
 }
@@ -308,22 +308,22 @@ func AssembleContext(
 // step's completion-side gate rows on a read-back that were not yet recorded
 // at claim; that is the one engine-produced input whose read-back can grow.
 func AssembleRecordedContext(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, ttls ttlConfig,
 ) (*Context, error) {
 	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssue, recordedNotes)
 }
 
 // artifactSource loads the artifact set one assembly resolves over.
-type artifactSource func(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error)
+type artifactSource func(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error)
 
 // liveArtifacts is the run's whole artifact table — the claim's view.
-func liveArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
-	return db.ListRunArtifactsTx(tx, step.RunID)
+func liveArtifacts(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error) {
+	return store.TxOn(tx).ListRunArtifactsTx(step.RunID)
 }
 
 // recordedArtifacts is the set the step's claim recorded — the read-back's view.
-func recordedArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
-	return db.ListStepInputArtifactsTx(tx, step.ID)
+func recordedArtifacts(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error) {
+	return store.TxOn(tx).ListStepInputArtifactsTx(step.ID)
 }
 
 // issueSource corrects the `context.issue` an assembly states, given the one
@@ -335,10 +335,10 @@ func recordedArtifacts(tx *sql.Tx, step *db.Step) ([]*db.Artifact, error) {
 // unlike `step_inputs` there is nothing a claim recorded to read back — and a
 // read-back that took the live columns would report a body or a scope the step
 // was never given the moment `run refresh-body` or `run refresh-scope` ran.
-type issueSource func(tx *sql.Tx, step *db.Step, issue *ContextIssue) error
+type issueSource func(tx *sql.Tx, step *store.Step, issue *ContextIssue) error
 
 // liveIssue leaves the columns as they stand — the claim's view.
-func liveIssue(*sql.Tx, *db.Step, *ContextIssue) error { return nil }
+func liveIssue(*sql.Tx, *store.Step, *ContextIssue) error { return nil }
 
 // recordedIssue rewinds the body and the scope to the ones the step's claim
 // was given, reconstructed from the refresh ledger.
@@ -372,7 +372,7 @@ func liveIssue(*sql.Tx, *db.Step, *ContextIssue) error { return nil }
 // removed that claim row, a missing refresh row no longer means "no refresh",
 // and the read-back reports the body and scope GONE instead of stating the
 // live columns as what this attempt was handed.
-func recordedIssue(tx *sql.Tx, step *db.Step, issue *ContextIssue) error {
+func recordedIssue(tx *sql.Tx, step *store.Step, issue *ContextIssue) error {
 	if step.StartedMS == nil {
 		return nil
 	}
@@ -404,7 +404,7 @@ func recordedIssue(tx *sql.Tx, step *db.Step, issue *ContextIssue) error {
 
 // recordedIssueBody is the body the claim at claimedAtMS was given (DKT-2291):
 // the superseding refresh's `from_body`, or the column when none followed.
-func recordedIssueBody(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot string) (string, error) {
+func recordedIssueBody(tx *sql.Tx, step *store.Step, claimedAtMS int64, snapshot string) (string, error) {
 	var refresh struct {
 		FromBody string `json:"from_body"`
 	}
@@ -417,7 +417,7 @@ func recordedIssueBody(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot st
 
 // recordedIssueScope is the scope the claim at claimedAtMS was given (DKT-869):
 // the superseding refresh's `from`, or the snapshot's when none followed.
-func recordedIssueScope(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot []string) ([]string, error) {
+func recordedIssueScope(tx *sql.Tx, step *store.Step, claimedAtMS int64, snapshot []string) ([]string, error) {
 	var refresh struct {
 		From []string `json:"from"`
 	}
@@ -437,7 +437,7 @@ func recordedIssueScope(tx *sql.Tx, step *db.Step, claimedAtMS int64, snapshot [
 // given: the earliest later `issue-files-refreshed` event's `from`, or the
 // snapshot's frozen list when none followed. It shares recordedIssue's anchor,
 // and with no anchor the frozen list is the same fallback.
-func recordedAttachedPaths(conn *sql.DB, step *db.Step) ([]string, error) {
+func recordedAttachedPaths(conn *sql.DB, step *store.Step) ([]string, error) {
 	frozen, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
 	if err != nil || step.StartedMS == nil {
 		return frozen, err
@@ -463,7 +463,7 @@ type rowQuerier interface {
 // exists. None means nothing superseded what the claim was handed, so the
 // column still holds it.
 func refreshAfterClaim(
-	q rowQuerier, step *db.Step, claimedAtMS int64, kind string, into any,
+	q rowQuerier, step *store.Step, claimedAtMS int64, kind string, into any,
 ) (bool, error) {
 	var data string
 	err := q.QueryRow(
@@ -502,12 +502,12 @@ func refreshAfterClaim(
 // will hand over — not the bindings of an attempt that is over. A step never
 // claimed (`attempt == 0`: every `action`, `human`, and `vote` step, and every
 // executor step still waiting) has no snapshot, so it reads live too.
-func recordedClaim(step *db.Step) bool {
-	return step.Attempt > 0 && step.Status != db.StepPending
+func recordedClaim(step *store.Step) bool {
+	return step.Attempt > 0 && step.Status != store.StepPending
 }
 
 func assembleContext(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, ttls ttlConfig,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, ttls ttlConfig,
 	source artifactSource, issueView issueSource, notesOf noteSource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
@@ -548,7 +548,7 @@ func assembleContext(
 	// pass below: both read the same snapshot, and the table's bodies scale
 	// with the run's whole recorded output, so a second load doubled exactly
 	// the cost this path pays most of.
-	var artifacts []*db.Artifact
+	var artifacts []*store.Artifact
 	if len(spec.Inputs) > 0 || loopReentryEmitter(sched, step, spec) {
 		artifacts, err = source(tx, step)
 		if err != nil {
@@ -624,10 +624,10 @@ func assembleContext(
 // claim: notes are append-only run state with no per-step record, so a
 // read-back that took the whole table would report notes added after the
 // claim as guidance the step was given.
-type noteSource func(tx *sql.Tx, step *db.Step) ([]RunNote, error)
+type noteSource func(tx *sql.Tx, step *store.Step) ([]RunNote, error)
 
 // liveNotes is every note the run holds — the claim's view.
-func liveNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
+func liveNotes(tx *sql.Tx, step *store.Step) ([]RunNote, error) {
 	return contextNotes(tx, step.RunID)
 }
 
@@ -638,7 +638,7 @@ func liveNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
 //
 // A nil anchor falls back to the live notes, by the rule and for the reasons
 // recordedIssueBody documents.
-func recordedNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
+func recordedNotes(tx *sql.Tx, step *store.Step) ([]RunNote, error) {
 	notes, err := contextNotes(tx, step.RunID)
 	if err != nil || step.StartedMS == nil {
 		return notes, err
@@ -658,7 +658,7 @@ func recordedNotes(tx *sql.Tx, step *db.Step) ([]RunNote, error) {
 // but a nil keeps the in-memory bundle a test compares field-by-field equal to
 // one assembled before the field existed.
 func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
-	rows, err := db.ListRunNotesTx(tx, runID)
+	rows, err := store.TxOn(tx).ListRunNotesTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -678,11 +678,11 @@ func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
 // is pure over the step row and this one needs the gate table. Keeping the
 // split makes the extra read visibly bounded to steps that have a routing
 // record at all — a first-attempt packet performs none.
-func attachGateOutcomes(tx *sql.Tx, step *db.Step, res *ContextResolution) error {
+func attachGateOutcomes(tx *sql.Tx, step *store.Step, res *ContextResolution) error {
 	if res == nil || step == nil {
 		return nil
 	}
-	rows, err := db.GateResultsForStepTx(tx, step.ID)
+	rows, err := store.TxOn(tx).GateResultsForStepTx(step.ID)
 	if err != nil {
 		return err
 	}
@@ -710,7 +710,7 @@ func attachGateOutcomes(tx *sql.Tx, step *db.Step, res *ContextResolution) error
 // nil when the step carries no routing record at all: a step on its first
 // attempt has nothing to render, and a packet that grew an empty section for
 // every such step would be noise on the overwhelming majority of packets.
-func resolutionOf(step *db.Step) *ContextResolution {
+func resolutionOf(step *store.Step) *ContextResolution {
 	if step == nil || step.Routing == "" {
 		return nil
 	}
@@ -808,7 +808,7 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]i
 // The hash IS the contract; re-reading would make the bundle depend on the
 // working tree, which is exactly what the pin exists to prevent.
 func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
-	rows, err := db.ListPinsTx(tx, runID)
+	rows, err := store.TxOn(tx).ListPinsTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -816,7 +816,7 @@ func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
 	for _, p := range rows {
 		path := p.Ref
 		switch p.Kind {
-		case db.PinKindWorkflow, db.PinKindSchema:
+		case store.PinKindWorkflow, store.PinKindSchema:
 			// Pins have one shape, so a registered-object pin renders its
 			// ref into the `path` slot with its KIND as a scheme, rather than
 			// growing a second shape a consumer must branch on. A bare
@@ -869,14 +869,14 @@ func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
 // `artifacts` is the caller's already-loaded snapshot (AssembleContext loads
 // it once for this and the declared-input pass together).
 func previousRoundInputs(
-	sched *Scheduler, step *db.Step, spec *workflow.Step, artifacts []*db.Artifact,
+	sched *Scheduler, step *store.Step, spec *workflow.Step, artifacts []*store.Artifact,
 ) []ContextInput {
 	if !loopReentryEmitter(sched, step, spec) {
 		return nil
 	}
 	lineage := previousRoundLineage(sched.defs[step.WorkflowID], step.StepName, spec.Emits)
 
-	var matched []*db.Artifact
+	var matched []*store.Artifact
 	for _, a := range artifacts {
 		p := sched.stepByID[a.StepID]
 		if p == nil || p.IssueID != step.IssueID ||
@@ -946,7 +946,7 @@ func previousRoundLineage(def *workflow.Definition, name, kind string) map[strin
 // name, the producer instance, body beside payload), shared by the
 // declared-input tail and the prior-round pass so the bundle shape cannot
 // drift between them.
-func artifactInputs(artifacts []*db.Artifact, producers map[int]*db.Step) []ContextInput {
+func artifactInputs(artifacts []*store.Artifact, producers map[int]*store.Step) []ContextInput {
 	out := make([]ContextInput, 0, len(artifacts))
 	for _, a := range artifacts {
 		out = append(out, ContextInput{
@@ -1017,7 +1017,7 @@ func dedupeInputs(inputs []ContextInput) []ContextInput {
 // loopReentryEmitter is previousRoundInputs' applicability rule, named so
 // AssembleContext can consult it too — it decides whether the artifact
 // table needs loading at all when the step declares no inputs.
-func loopReentryEmitter(sched *Scheduler, step *db.Step, spec *workflow.Step) bool {
+func loopReentryEmitter(sched *Scheduler, step *store.Step, spec *workflow.Step) bool {
 	if step.Ordinal == 0 || spec == nil || spec.Emits == "" {
 		return false
 	}
@@ -1029,7 +1029,7 @@ func loopReentryEmitter(sched *Scheduler, step *db.Step, spec *workflow.Step) bo
 // `loop_entry` is the ordinal k and the routing that entered it, null at k=0.
 //
 // The routing that ENTERED the loop is recorded on the step at instantiation.
-func loopEntryOf(step *db.Step) *LoopEntry {
+func loopEntryOf(step *store.Step) *LoopEntry {
 	if step.Ordinal == 0 {
 		return nil
 	}
@@ -1048,8 +1048,8 @@ func loopEntryOf(step *db.Step) *LoopEntry {
 // `linked` is the issue snapshot's activation-pinned cross-issue artifact ids
 // (DKT-547), consulted only for `issue.linked.<relation>.<kind>` entries.
 func resolveInputs(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
-	bodySnapshot string, artifacts []*db.Artifact, linked map[string][]int,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, spec *workflow.Step,
+	bodySnapshot string, artifacts []*store.Artifact, linked map[string][]int,
 ) ([]ContextInput, error) {
 	if len(spec.Inputs) == 0 {
 		return []ContextInput{}, nil
@@ -1173,17 +1173,17 @@ func resolveInputs(
 // — they are prose and a diff, not a JSON array of clusters. A caller wanting
 // them as text still has the bundle.
 func ResolveInputArtifacts(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
-) ([]*db.Artifact, error) {
+	tx *sql.Tx, sched *Scheduler, step *store.Step, spec *workflow.Step,
+) ([]*store.Artifact, error) {
 	if len(spec.Inputs) == 0 {
 		return nil, nil
 	}
 
-	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
+	artifacts, err := store.TxOn(tx).ListRunArtifactsTx(step.RunID)
 	if err != nil {
 		return nil, err
 	}
-	producers := make(map[int]*db.Step, len(sched.steps))
+	producers := make(map[int]*store.Step, len(sched.steps))
 	for _, s := range sched.steps {
 		producers[s.ID] = s
 	}
@@ -1194,7 +1194,7 @@ func ResolveInputArtifacts(
 	var linked map[string][]int
 	linkedLoaded := false
 
-	var out []*db.Artifact
+	var out []*store.Artifact
 	for _, declared := range spec.Inputs {
 		if declared == inputIssueBody || declared == inputIssueDiff ||
 			declared == workflow.InputIssueFiles {
@@ -1241,9 +1241,9 @@ func ResolveInputArtifacts(
 // downstream of `after_loop` see the LOOP's latest emit instead — see its
 // doc comment for why `def` is what makes that decidable.
 func resolveDeclaredInput(
-	artifacts []*db.Artifact, producers map[int]*db.Step, def *workflow.Definition,
-	step *db.Step, declared string,
-) ([]*db.Artifact, error) {
+	artifacts []*store.Artifact, producers map[int]*store.Step, def *workflow.Definition,
+	step *store.Step, declared string,
+) ([]*store.Artifact, error) {
 	stepName, kind, ok := splitInput(declared)
 	if !ok {
 		// V11 rejects a malformed input at register time, so reaching here
@@ -1303,9 +1303,9 @@ func resolveDeclaredInput(
 // step's own output as an "input" it never saw, which is what "latest at or
 // below my ordinal" would otherwise do the moment the step's emit landed.
 func resolveLatestOfKind(
-	artifacts []*db.Artifact, producers map[int]*db.Step, step *db.Step, kind string,
-) []*db.Artifact {
-	var matched []*db.Artifact
+	artifacts []*store.Artifact, producers map[int]*store.Step, step *store.Step, kind string,
+) []*store.Artifact {
+	var matched []*store.Artifact
 	for _, a := range artifacts {
 		if a.Kind != kind || a.StepID == step.ID {
 			continue
@@ -1340,12 +1340,12 @@ func resolveLatestOfKind(
 // The key is the producer INSTANCE (step id), never the step name: fanned-out
 // siblings are distinct instances whose artifacts are all inputs under the
 // join rule, and this keeps every one of them.
-func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
+func latestPerProducer(matched []*store.Artifact) []*store.Artifact {
 	type emitKey struct {
 		stepID int
 		kind   string
 	}
-	latest := make(map[emitKey]*db.Artifact, len(matched))
+	latest := make(map[emitKey]*store.Artifact, len(matched))
 	for _, a := range matched {
 		k := emitKey{a.StepID, a.Kind}
 		// Artifact ids ascend with insertion, so the highest id is the newest
@@ -1358,7 +1358,7 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 	if len(latest) == len(matched) {
 		return matched
 	}
-	out := make([]*db.Artifact, 0, len(latest))
+	out := make([]*store.Artifact, 0, len(latest))
 	for _, a := range matched {
 		if latest[emitKey{a.StepID, a.Kind}] == a {
 			out = append(out, a)
@@ -1437,15 +1437,15 @@ func latestPerProducer(matched []*db.Artifact) []*db.Artifact {
 // stands in for its recorded GATES, so conditions 1–3 and 5 are shared
 // through loopRedirectBody, and only condition 4 differs by column.
 func loopProducerRedirect(
-	artifacts []*db.Artifact, producers map[int]*db.Step, def *workflow.Definition,
-	step *db.Step, stepName, kind string, boundOrdinal int,
-) []*db.Artifact {
+	artifacts []*store.Artifact, producers map[int]*store.Step, def *workflow.Definition,
+	step *store.Step, stepName, kind string, boundOrdinal int,
+) []*store.Artifact {
 	body := loopRedirectBody(def, step, stepName, kind, boundOrdinal)
 	if body == nil {
 		return nil
 	}
 
-	var out []*db.Artifact
+	var out []*store.Artifact
 	for _, a := range artifacts {
 		if kind != "*" && a.Kind != kind {
 			continue
@@ -1481,7 +1481,7 @@ func loopProducerRedirect(
 //
 // nil means no body stands in and the caller keeps the ordinary answer.
 func loopRedirectBody(
-	def *workflow.Definition, step *db.Step, stepName, kind string, boundOrdinal int,
+	def *workflow.Definition, step *store.Step, stepName, kind string, boundOrdinal int,
 ) *workflow.Step {
 	if def == nil || step.Ordinal == 0 || boundOrdinal >= step.Ordinal {
 		return nil
@@ -1563,14 +1563,14 @@ func loopRedirectBody(
 // by `resolve --as skip` may have recorded rows or opened a proposal before it
 // parked, and the operator moved past them.
 func recordedProducer(status string) bool {
-	return status == db.StepDone || status == db.StepSuperseded
+	return status == store.StepDone || status == store.StepSuperseded
 }
 
 // ledgerProducer reports whether an instance in this status pins the ordinal a
 // `<step>.gate-results` or `<step>.vote-record` input resolves at. It is
 // recordedProducer plus `skipped`; see recordedProducer for why.
 func ledgerProducer(status string) bool {
-	return recordedProducer(status) || status == db.StepSkipped
+	return recordedProducer(status) || status == store.StepSkipped
 }
 
 // matchingArtifacts selects the artifacts a `<step>.<kind>` or `<step>.*` input
@@ -1583,10 +1583,10 @@ func ledgerProducer(status string) bool {
 // `done` because it is not in-flight — see recordedProducer for why the
 // literal `done`-only reading was wrong (DKT-375).
 func matchingArtifacts(
-	artifacts []*db.Artifact, producers map[int]*db.Step,
+	artifacts []*store.Artifact, producers map[int]*store.Step,
 	issueID int, stepName, kind string,
-) []*db.Artifact {
-	var out []*db.Artifact
+) []*store.Artifact {
+	var out []*store.Artifact
 	for _, a := range artifacts {
 		producer := producers[a.StepID]
 		if producer == nil || producer.IssueID != issueID {
@@ -1631,8 +1631,8 @@ func matchingArtifacts(
 // this step's own ordinal" from "bound stale, at an earlier one" — the
 // distinction its whole rebind decision turns on.
 func ordinalScoped(
-	matched []*db.Artifact, producers map[int]*db.Step, ordinal int,
-) ([]*db.Artifact, int) {
+	matched []*store.Artifact, producers map[int]*store.Step, ordinal int,
+) ([]*store.Artifact, int) {
 	if len(matched) == 0 {
 		return matched, -1
 	}
@@ -1661,7 +1661,7 @@ func ordinalScoped(
 	// Every artifact AT that ordinal — not just one. A fanned-out producer has
 	// four `done` siblings at the same ordinal and all four are inputs (the
 	// join rule), which is what `review.*` resolves to for `synthesize`.
-	out := make([]*db.Artifact, 0, len(matched))
+	out := make([]*store.Artifact, 0, len(matched))
 	for _, a := range matched {
 		if producer := producers[a.StepID]; producer != nil && producer.Ordinal == best {
 			out = append(out, a)
@@ -1675,7 +1675,7 @@ func ordinalScoped(
 //
 // A nil sibling index (a step that is not fanned out) sorts before any index, so
 // the single-instance case is stable against a later fanout of the same step.
-func sortArtifacts(artifacts []*db.Artifact, producers map[int]*db.Step) {
+func sortArtifacts(artifacts []*store.Artifact, producers map[int]*store.Step) {
 	sort.SliceStable(artifacts, func(i, j int) bool {
 		si := siblingIndexOf(producers, artifacts[i].StepID)
 		sj := siblingIndexOf(producers, artifacts[j].StepID)
@@ -1686,7 +1686,7 @@ func sortArtifacts(artifacts []*db.Artifact, producers map[int]*db.Step) {
 	})
 }
 
-func siblingIndexOf(producers map[int]*db.Step, stepID int) int {
+func siblingIndexOf(producers map[int]*store.Step, stepID int) int {
 	step := producers[stepID]
 	if step == nil || step.SiblingIndex == nil {
 		return -1
@@ -1694,7 +1694,7 @@ func siblingIndexOf(producers map[int]*db.Step, stepID int) int {
 	return *step.SiblingIndex
 }
 
-func producerInstance(producers map[int]*db.Step, stepID int) string {
+func producerInstance(producers map[int]*store.Step, stepID int) string {
 	if step := producers[stepID]; step != nil {
 		return step.Instance
 	}
@@ -1713,9 +1713,9 @@ func producerInstance(producers map[int]*db.Step, stepID int) string {
 // error, and never a live `git diff`. Assembly reads no live state, and
 // "empty" is the truthful answer: nothing has changed the tree in this run.
 func resolveIssueDiff(
-	artifacts []*db.Artifact, producers map[int]*db.Step, step *db.Step,
+	artifacts []*store.Artifact, producers map[int]*store.Step, step *store.Step,
 ) (ContextInput, error) {
-	var best *db.Artifact
+	var best *store.Artifact
 	bestOrdinal := -1
 
 	for _, a := range artifacts {
@@ -1811,9 +1811,9 @@ func resolveIssueDiff(
 // says "this round ran no checks", which is truer than the previous round's
 // results.
 func resolveGateResults(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, stepName string,
+	tx *sql.Tx, sched *Scheduler, step *store.Step, stepName string,
 ) ([]ContextInput, error) {
-	var candidates []*db.Step
+	var candidates []*store.Step
 	best := -1
 	for _, s := range sched.steps {
 		if s.IssueID != step.IssueID || s.StepName != stepName {
@@ -1835,7 +1835,7 @@ func resolveGateResults(
 		return nil, nil
 	}
 
-	producers := make([]*db.Step, 0, len(candidates))
+	producers := make([]*store.Step, 0, len(candidates))
 	for _, s := range candidates {
 		if s.Ordinal == best {
 			producers = append(producers, s)
@@ -1857,10 +1857,10 @@ func resolveGateResults(
 
 	out := make([]ContextInput, 0, len(producers))
 	for _, producer := range producers {
-		var rows []db.GateResultRow
-		if producer.Status != db.StepSkipped {
+		var rows []store.GateResultRow
+		if producer.Status != store.StepSkipped {
 			var err error
-			if rows, err = db.GateResultsForStepTx(tx, producer.ID); err != nil {
+			if rows, err = store.TxOn(tx).GateResultsForStepTx(producer.ID); err != nil {
 				return nil, err
 			}
 		}
@@ -1900,8 +1900,8 @@ func resolveGateResults(
 // `failed-routed` — and the caller keeps the ordinary binding, as the
 // artifact form does when the body recorded no artifact.
 func loopRedirectGateProducers(
-	sched *Scheduler, step *db.Step, stepName string, boundOrdinal int,
-) []*db.Step {
+	sched *Scheduler, step *store.Step, stepName string, boundOrdinal int,
+) []*store.Step {
 	def := sched.defs[step.WorkflowID]
 	if def == nil {
 		return nil
@@ -1918,7 +1918,7 @@ func loopRedirectGateProducers(
 	if body == nil {
 		return nil
 	}
-	var out []*db.Step
+	var out []*store.Step
 	for _, s := range sched.steps {
 		if s.IssueID != step.IssueID || s.StepName != body.Name {
 			continue
@@ -1935,7 +1935,7 @@ func loopRedirectGateProducers(
 // plus the `stub` and `s3_migrated` flags `docket step gates` carries: a
 // consumer reading a `pass` here instead of re-running the check must be able
 // to tell a placeholder or migrated row from a measurement.
-func encodeGateResults(rows []db.GateResultRow) (string, error) {
+func encodeGateResults(rows []store.GateResultRow) (string, error) {
 	type wire struct {
 		Gate       string   `json:"gate"`
 		Ordinal    int      `json:"ordinal"`
