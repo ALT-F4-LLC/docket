@@ -7,10 +7,10 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -78,18 +78,18 @@ var linkAddCmd = &cobra.Command{
 			RelationType:  relType,
 		}
 
-		relID, err := db.CreateRelation(conn, rel)
+		relID, err := store.StoreOn(conn).CreateRelation(rel)
 		if err != nil {
 			if e := notFound(err, "issue"); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrSelfRelation) {
+			if errors.Is(err, store.ErrSelfRelation) {
 				return cmdErr(fmt.Errorf("cannot link an issue to itself"), output.ErrValidation)
 			}
-			if errors.Is(err, db.ErrDuplicateRelation) {
+			if errors.Is(err, store.ErrDuplicateRelation) {
 				return cmdErr(fmt.Errorf("relation already exists"), output.ErrConflict)
 			}
-			if errors.Is(err, db.ErrCycleDetected) {
+			if errors.Is(err, store.ErrCycleDetected) {
 				return cmdErr(err, output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("creating relation: %w", err), output.ErrGeneral)
@@ -126,7 +126,7 @@ var linkRemoveCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("invalid target ID: %w", err), output.ErrValidation)
 		}
 
-		if err := db.DeleteRelation(conn, sourceID, targetID, string(relType)); err != nil {
+		if err := store.StoreOn(conn).DeleteRelation(sourceID, targetID, string(relType)); err != nil {
 			if e := notFound(err, "relation"); e != nil {
 				return e
 			}
@@ -158,7 +158,8 @@ var linkListCmd = &cobra.Command{
 			return err
 		}
 
-		exists, err := db.IssueExists(conn, id)
+		st := store.StoreOn(conn)
+		exists, err := st.IssueExists(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("checking issue: %w", err), output.ErrGeneral)
 		}
@@ -166,7 +167,7 @@ var linkListCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("issue not found: %s", model.FormatID(id)), output.ErrNotFound)
 		}
 
-		relations, err := db.GetIssueRelations(conn, id)
+		relations, err := st.GetIssueRelations(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
 		}
