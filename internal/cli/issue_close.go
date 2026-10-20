@@ -7,9 +7,9 @@ import (
 	"os"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -20,6 +20,7 @@ var closeCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		conn := getDB(cmd)
+		st := store.StoreOn(conn)
 
 		id, err := issueArg(args[0])
 		if err != nil {
@@ -55,7 +56,7 @@ var closeCmd = &cobra.Command{
 		// keeps this verb byte-compatible for a repo that never claims.
 		token := tokenForClose(conn, id, os.Stdin)
 
-		err = db.UpdateIssueCASLease(conn, id, map[string]interface{}{"status": "done"}, config.DefaultAuthor(), ifVersion, token)
+		err = st.UpdateIssueCASLease(id, map[string]interface{}{"status": "done"}, config.DefaultAuthor(), ifVersion, token)
 		if err != nil {
 			label := fmt.Sprintf("issue %s", model.FormatID(id))
 			if e := leaseError(err, label); e != nil {
@@ -67,7 +68,7 @@ var closeCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("closing issue: %w", err), output.ErrGeneral)
 		}
 
-		issue, err = db.GetIssue(conn, id)
+		issue, err = st.GetIssue(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
 		}
@@ -89,7 +90,7 @@ var closeCmd = &cobra.Command{
 // the update transaction, where a lease claimed after this read still
 // refuses the empty token instead of being evicted.
 func tokenForClose(conn *sql.DB, id int, stdin io.Reader) string {
-	lease, err := db.GetIssueLease(conn, id)
+	lease, err := store.StoreOn(conn).GetIssueLease(id)
 	if err != nil || !lease.Live(model.NowMS()) {
 		return ""
 	}

@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +32,7 @@ func runIssueCommentList(cmd *cobra.Command, args []string, w *output.Writer) er
 		return err
 	}
 
-	comments, err := db.ListComments(conn, id)
+	comments, err := store.StoreOn(conn).ListComments(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
 	}
