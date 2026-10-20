@@ -12,9 +12,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -100,7 +100,7 @@ const packetFrontmatterFence = "---"
 // entry living in the shared root resolves identically from any cwd, including a
 // linked worktree that carries no `.docket/` of its own.
 func resolvePacketFiles(
-	runRef string, pins map[string]db.Pin, roots []string, entries []string,
+	runRef string, pins map[string]store.Pin, roots []string, entries []string,
 ) ([]PacketFile, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -180,7 +180,7 @@ func walkPacketFiles(entries []string, visit func(string) ([]string, error)) err
 // needs a run whose pin set includes it. Same code, same refusal — a true
 // sentence about which of the two it is.
 func readPinnedPacketFile(
-	runRef string, pins map[string]db.Pin, roots []string, ref string,
+	runRef string, pins map[string]store.Pin, roots []string, ref string,
 ) (body, hash string, err error) {
 	candidates := make([]string, 0, len(roots))
 	for _, root := range roots {
@@ -434,8 +434,9 @@ func checkPacketRef(ref, entry string) error {
 // It writes nothing: no lease, no lock, no event.
 func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
 	runRef := model.FormatRunID(runID)
-	run, err := db.GetRun(conn, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.StoreOn(conn)
+	run, err := st.GetRun(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return "", notFoundErr(err, "run %s not found", runRef)
 	}
 	if err != nil {
@@ -446,7 +447,7 @@ func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
 			"%s has no pin set because it has not been activated; activation "+
 				"pins the files its packets read", runRef)
 	}
-	pins, err := db.ListPins(conn, runID)
+	pins, err := st.ListPins(runID)
 	if err != nil {
 		return "", err
 	}
@@ -475,10 +476,10 @@ func sha256Hex(content []byte) string { return workflow.SHA256(content) }
 // and verify. Registered-object pins are excluded: a workflow or schema pin
 // names a version, not a path, and a packet entry naming one would be a path
 // collision rather than a reference.
-func packetFilePins(pins []db.Pin) map[string]db.Pin {
-	out := make(map[string]db.Pin, len(pins))
+func packetFilePins(pins []store.Pin) map[string]store.Pin {
+	out := make(map[string]store.Pin, len(pins))
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile {
+		if p.Kind == store.PinKindFile {
 			out[p.Ref] = p
 		}
 	}
@@ -487,10 +488,10 @@ func packetFilePins(pins []db.Pin) map[string]db.Pin {
 
 // packetPinsForRun indexes a run's FILE pins' hashes by ref, the baseline the
 // gate runner checks pinned gate scripts against.
-func packetPinsForRun(pins []db.Pin) map[string]string {
+func packetPinsForRun(pins []store.Pin) map[string]string {
 	out := make(map[string]string, len(pins))
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile {
+		if p.Kind == store.PinKindFile {
 			out[p.Ref] = p.SHA256
 		}
 	}
@@ -509,7 +510,7 @@ func packetPinsForRun(pins []db.Pin) map[string]string {
 // `executor` is a RESOLVED hint overriding the declared one (DKT-70), "" for
 // the declared behavior — see RenderStepAs.
 func stepPacketFiles(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, executor string,
+	conn *sql.DB, step *store.Step, spec *workflow.Step, executor string,
 ) ([]PacketFile, error) {
 	if spec == nil || len(spec.Packet) == 0 {
 		return nil, nil
@@ -524,7 +525,7 @@ func stepPacketFiles(
 		entries = append(entries, workflow.SubstitutePacketEntry(entry, hint))
 	}
 
-	pins, err := db.ListPins(conn, step.RunID)
+	pins, err := store.StoreOn(conn).ListPins(step.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +585,7 @@ const AttachmentMaxBytes = exec.CaptureCap
 // under the attached path. A hard link is not a path property, so os.Root does
 // not contain it.
 func issueAttachmentFiles(
-	conn *sql.DB, step *db.Step, spec *workflow.Step,
+	conn *sql.DB, step *store.Step, spec *workflow.Step,
 ) ([]PacketFile, error) {
 	if spec == nil || !slices.Contains(spec.Inputs, workflow.InputIssueFiles) {
 		return nil, nil
@@ -718,7 +719,7 @@ func frozenAttachedPaths(conn *sql.DB, runID, issueID int) ([]string, error) {
 		}
 	}
 	if frozen.Files == nil {
-		return db.GetIssueFiles(conn, issueID)
+		return store.StoreOn(conn).GetIssueFiles(issueID)
 	}
 	return *frozen.Files, nil
 }
