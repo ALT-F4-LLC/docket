@@ -360,6 +360,18 @@ func TestDetachedRunRecordsNothingItCouldNotMeasure(t *testing.T) {
 	}
 }
 
+// TestDetachedRunForAMissingStepIsNotFound: `docket step pregate` on a step
+// id with no row answers NOT_FOUND (exit 2), not a bare store error.
+func TestDetachedRunForAMissingStepIsNotFound(t *testing.T) {
+	withDetachedPreGateLockDir(t)
+	conn := mustDB(t)
+
+	_, err := testEngine().RunDetachedPreGates(conn, 999999, strings.Repeat("a", 40), nowMS)
+	if code, ok := CodeOf(err); !ok || code != CodeNotFound {
+		t.Fatalf("RunDetachedPreGates on a missing step: err = %v (code %q), want %s", err, code, CodeNotFound)
+	}
+}
+
 // movingTargetGates is a GateRunner whose FIRST spawn runs `move` before it
 // reports a pass: the seam through which a test makes the world change while
 // a detached run's gate is "running" — the step's target moves, or the step

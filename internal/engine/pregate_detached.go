@@ -12,7 +12,6 @@ import (
 	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -223,7 +222,7 @@ func detachedPreGateCandidates(
 		return nil, nil
 	}
 
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, err
 	}
@@ -539,7 +538,7 @@ func stepStillWantsDetachedPreGate(
 	conn *sql.DB, step *store.Step, defs map[int]*workflow.Definition,
 	targetSHA string, nowMS int64,
 ) (string, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return "", err
 	}
