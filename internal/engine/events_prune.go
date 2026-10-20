@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket events prune` — the event log's retention clause, implemented.
@@ -92,19 +92,19 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 	// from inside a transaction deadlocks (TestNoPoolReadsInsideTransactions).
 	// It is a config value, not a fact about the rows being pruned, so reading
 	// it a moment earlier changes no decision.
-	retain, err := db.EventsRetain(conn)
+	retain, err := store.StoreOn(conn).EventsRetain()
 	if err != nil {
 		return nil, err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return nil, fmt.Errorf("pruning events: %w", err)
 	}
 	defer tx.Rollback()
 
 	if q.BeforeRun != 0 {
-		if _, err := db.GetRunTx(tx, q.BeforeRun); err != nil {
+		if _, err := store.TxOn(tx).GetRunTx(q.BeforeRun); err != nil {
 			return nil, notFoundErr(err, "run %s not found",
 				model.FormatRunID(q.BeforeRun))
 		}

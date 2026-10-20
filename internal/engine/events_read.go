@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // THE EVENTS READ SURFACE — the public `event` shape, served.
@@ -142,7 +142,7 @@ type EventQuery struct {
 // The ordering is `seq ASC`, ALWAYS. There is no reverse mode: a cursor
 // feed that could run backwards is a cursor feed that skips.
 func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}
@@ -640,7 +640,7 @@ func EventKinds() []string {
 // It is here rather than in the report because the attribution is this file's
 // subject, and a rollup computed beside the table cannot disagree with it.
 func ActorCounts(conn *sql.DB, runID int) (map[Actor]int, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("counting events by kind: %w", err)
 	}
@@ -724,7 +724,7 @@ func ResolveRunFilter(conn *sql.DB, ref string) (int, error) {
 	if err != nil {
 		return 0, validationErr("%s is not a run reference (expected RUN-N)", ref)
 	}
-	if _, err := db.GetRun(conn, runID); err != nil {
+	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
 		return 0, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	return runID, nil
@@ -743,7 +743,7 @@ func ResolveStepFilter(conn *sql.DB, ref string) (int, error) {
 	if err != nil {
 		return 0, validationErr("%s is not a step reference (expected STEP-N)", ref)
 	}
-	if _, err := db.GetStep(conn, stepID); err != nil {
+	if _, err := store.StoreOn(conn).GetStep(stepID); err != nil {
 		return 0, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	return stepID, nil
@@ -782,7 +782,7 @@ type ActivationHead struct {
 // feed whose GONE probe refuses a zero cursor once anything was pruned, and
 // a status read must not fail because old events were retired.
 func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
-	tx, err := db.BeginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the activation head: %w", err)
 	}
