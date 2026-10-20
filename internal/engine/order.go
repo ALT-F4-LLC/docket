@@ -3,8 +3,8 @@ package engine
 import (
 	"database/sql"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -63,7 +63,7 @@ var _ OrderResolver = schemaOrder{}
 // REFUSAL, not a silent fall-back to nil. Falling back would evaluate an ordered
 // comparison as a park with the wrong reason, or worse, evaluate an equality
 // under schema-free rules while the operator believes a schema is in force.
-func stepOrder(conn *sql.DB, step *db.Step, spec *workflow.Step) (OrderResolver, error) {
+func stepOrder(conn *sql.DB, step *store.Step, spec *workflow.Step) (OrderResolver, error) {
 	if spec == nil || spec.Payload == "" {
 		return nil, nil
 	}
