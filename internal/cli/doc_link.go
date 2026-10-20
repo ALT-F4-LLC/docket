@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +26,7 @@ var docLinkAddCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		docID, err := model.ParseDocID(args[0])
 		if err != nil {
@@ -39,11 +39,11 @@ var docLinkAddCmd = &cobra.Command{
 			return err
 		}
 
-		if err := db.LinkDocIssue(conn, docID, issueID); err != nil {
+		if err := st.LinkDocIssue(docID, issueID); err != nil {
 			if e := notFound(err, "doc or issue"); e != nil {
 				return e
 			}
-			if errors.Is(err, db.ErrConflict) {
+			if errors.Is(err, store.ErrConflict) {
 				return cmdErr(fmt.Errorf("link already exists"), output.ErrConflict)
 			}
 			return cmdErr(fmt.Errorf("linking doc to issue: %w", err), output.ErrGeneral)
@@ -66,7 +66,7 @@ var docLinkRemoveCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		docID, err := model.ParseDocID(args[0])
 		if err != nil {
@@ -79,7 +79,7 @@ var docLinkRemoveCmd = &cobra.Command{
 			return err
 		}
 
-		if err := db.UnlinkDocIssue(conn, docID, issueID); err != nil {
+		if err := st.UnlinkDocIssue(docID, issueID); err != nil {
 			if e := notFound(err, "link"); e != nil {
 				return e
 			}

@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -16,21 +16,21 @@ var docEditCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		id, err := model.ParseDocID(args[0])
 		if err != nil {
 			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
 		}
 
-		if _, err := db.GetDoc(conn, id); err != nil {
+		if _, err := st.GetDoc(id); err != nil {
 			if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
 				return e
 			}
 			return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
 		}
 
-		upd := db.DocUpdate{Author: config.DefaultAuthor()}
+		upd := store.DocUpdate{Author: config.DefaultAuthor()}
 
 		if cmd.Flags().Changed("title") {
 			title, _ := cmd.Flags().GetString("title")
@@ -57,7 +57,7 @@ var docEditCmd = &cobra.Command{
 		}
 
 		if upd.Title == nil && upd.Type == nil && upd.Status == nil && upd.Body == nil {
-			doc, err := db.GetDoc(conn, id)
+			doc, err := st.GetDoc(id)
 			if err != nil {
 				return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
 			}
@@ -69,7 +69,7 @@ var docEditCmd = &cobra.Command{
 			return nil
 		}
 
-		rev, err := db.UpdateDoc(conn, id, upd)
+		rev, err := st.UpdateDoc(id, upd)
 		if err != nil {
 			if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
 				return e
@@ -77,7 +77,7 @@ var docEditCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("updating doc: %w", err), output.ErrGeneral)
 		}
 
-		doc, err := db.GetDoc(conn, id)
+		doc, err := st.GetDoc(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching updated doc: %w", err), output.ErrGeneral)
 		}
