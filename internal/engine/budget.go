@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -194,18 +194,19 @@ func (b budgetSnapshot) admits(cost float64) bool {
 // is for.
 func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
 	snap := budgetSnapshot{cap: run.Budget, source: BudgetFromRun}
+	st := store.TxOn(tx)
 
 	// The MEASURED dimension is loaded first and independently (DKT-238): the
 	// two caps are separate controls, so a run capped on tokens but not on
 	// declared cost must still be enforced. Its own dormancy is preserved —
 	// with no `usage_budget` on the row, not one query runs.
 	if run.UsageBudget > 0 {
-		usageUnit, err := db.UsageBudgetUnitTx(tx, run.ProjectID)
+		usageUnit, err := st.UsageBudgetUnitTx(run.ProjectID)
 		if err != nil {
 			return budgetSnapshot{}, err
 		}
 		if usageUnit != "" {
-			usageSpend, err := db.ReportedUsageTx(tx, run.ID, usageUnit)
+			usageSpend, err := st.ReportedUsageTx(run.ID, usageUnit)
 			if err != nil {
 				return budgetSnapshot{}, err
 			}
@@ -225,7 +226,7 @@ func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
 		}, nil
 	}
 
-	unit, err := db.BudgetUnitTx(tx, run.ProjectID)
+	unit, err := st.BudgetUnitTx(run.ProjectID)
 	if err != nil {
 		return budgetSnapshot{}, err
 	}
@@ -238,7 +239,7 @@ func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
 	snap.floor = floor
 
 	if snap.unit != "" {
-		reported, err := db.ReportedUsageTx(tx, run.ID, snap.unit)
+		reported, err := st.ReportedUsageTx(run.ID, snap.unit)
 		if err != nil {
 			return budgetSnapshot{}, err
 		}
@@ -343,7 +344,7 @@ func RunFloorTx(tx *sql.Tx, runID int) (float64, error) {
 		           FROM steps WHERE run_id = ? AND kind = ?
 		            AND status NOT IN (?, ?)), 0)`,
 		runID, EventStepClaimed, runID, workflow.TypeVote,
-		db.StepSkipped, db.StepSuperseded,
+		store.StepSkipped, store.StepSuperseded,
 	).Scan(&floor)
 	if err != nil {
 		return 0, fmt.Errorf("computing the floor for %s: %w",
@@ -360,7 +361,7 @@ func RunFloorTx(tx *sql.Tx, runID int) (float64, error) {
 // headroom check or in the offer would count the same declaration twice and
 // refuse a claimable batch a correct arithmetic admits. Every other step's
 // cost accrues at claim, so it is reserved here exactly as before.
-func reservableCost(step *db.Step) float64 {
+func reservableCost(step *store.Step) float64 {
 	if step.Kind == workflow.TypeVote {
 		return 0
 	}
@@ -424,12 +425,12 @@ func validateCostMultiplier(m float64) error {
 // `budget.unit` names one, they participate in `max()`. That is the whole
 // contract.
 
-// parseUsage is `--usage` validation, delegated to db.ParseUsage — the single
-// implementation the vote ledger's `--usage` shares (DKT-95) — with the
+// parseUsage is `--usage` validation, delegated to store.ParseUsage — the
+// single implementation the vote ledger's `--usage` shares (DKT-95) — with the
 // refusal re-raised as this surface's VALIDATION_ERROR naming this surface's
-// flag (db's refusals name only the offending key or value).
-func parseUsage(raw string) ([]db.UsageRow, error) {
-	rows, err := db.ParseUsage(raw)
+// flag (its refusals name only the offending key or value).
+func parseUsage(raw string) ([]store.UsageRow, error) {
+	rows, err := store.ParseUsage(raw)
 	if err != nil {
 		return nil, validationErr("--usage: %v", err)
 	}
@@ -448,7 +449,7 @@ func parseUsage(raw string) ([]db.UsageRow, error) {
 // back-fills from its dispatch journal, source recorded" describes that
 // harness's practice, not a core surface: no verb at this stage writes any
 // other value.
-func recordUsageTx(tx *sql.Tx, step *db.Step, raw string, nowMS int64) error {
+func recordUsageTx(tx *sql.Tx, step *store.Step, raw string, nowMS int64) error {
 	rows, err := parseUsage(raw)
 	if err != nil {
 		return err
@@ -457,13 +458,14 @@ func recordUsageTx(tx *sql.Tx, step *db.Step, raw string, nowMS int64) error {
 		return nil
 	}
 
+	st := store.TxOn(tx)
 	for _, row := range rows {
 		row.RunID, row.StepID, row.Attempt = step.RunID, step.ID, step.Attempt
-		if err := db.InsertUsageRowTx(tx, row, nowMS); err != nil {
+		if err := st.InsertUsageRowTx(row, nowMS); err != nil {
 			return err
 		}
 	}
-	return db.MarkStepUsageRecordedTx(tx, step.ID)
+	return st.MarkStepUsageRecordedTx(step.ID)
 }
 
 // cacheRunFloorTx recomputes the floor and writes it to `runs.usage_floor`.
@@ -478,7 +480,7 @@ func cacheRunFloorTx(tx *sql.Tx, runID int) error {
 	if err != nil {
 		return err
 	}
-	return db.CacheRunFloorTx(tx, runID, floor)
+	return store.TxOn(tx).CacheRunFloorTx(runID, floor)
 }
 
 // budgetHeadroom is the budget readiness clause.
@@ -494,7 +496,7 @@ func cacheRunFloorTx(tx *sql.Tx, runID int) error {
 // the conjunction's ordering rationale (cheapest and most global first, most
 // local last), and budget is the most local of all: it is the only clause
 // whose answer depends on the specific step's cost.
-func (s *Scheduler) budgetHeadroom(step *db.Step) bool {
+func (s *Scheduler) budgetHeadroom(step *store.Step) bool {
 	// The cost reserved is reservableCost, not ExpectedCost: a vote step's
 	// declared cost already sits in the floor (DKT-584), and reserving it here
 	// too would refuse the step for its own accrual.
@@ -512,7 +514,7 @@ func (s *Scheduler) budgetHeadroom(step *db.Step) bool {
 // variant scaling re-runs the same arithmetic over the same snapshot with the
 // cost that will actually accrue, so an escalated claim is priced at the cap
 // as what it is rather than as what the definition guessed.
-func (s *Scheduler) budgetAdmits(step *db.Step, cost float64) bool {
+func (s *Scheduler) budgetAdmits(step *store.Step, cost float64) bool {
 	// BOTH dimensions must admit (DKT-238). They are independent caps over
 	// different quantities, so neither can vouch for the other, and a step
 	// passes only when it crosses neither.
@@ -615,7 +617,7 @@ func UsageBudgetBreachReason(spend, cap float64, unit, instance string) string {
 // carries a `--cost-multiplier` (DKT-867). It is a parameter rather than
 // re-derived from the step because the step row cannot know which variant the
 // dispatcher resolved.
-func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, cost float64, nowMS int64) error {
+func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *store.Step, cost float64, nowMS int64) error {
 	if sched.budgetAdmits(step, cost) {
 		return nil
 	}
@@ -637,7 +639,7 @@ func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *db.Step, cost float64, 
 	// invocation that already flipped it matches zero rows and writes neither a
 	// second reason nor a second event — the transition is idempotent because
 	// the guard is the status itself rather than a flag we maintain.
-	flipped, err := db.BreachRunBudgetTx(tx, step.RunID, reason, nowMS)
+	flipped, err := store.TxOn(tx).BreachRunBudgetTx(step.RunID, reason, nowMS)
 	if err != nil {
 		return err
 	}
