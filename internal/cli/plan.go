@@ -10,11 +10,11 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -140,7 +140,7 @@ var planCmd = &cobra.Command{
 }
 
 func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	labels, _ := cmd.Flags().GetStringSlice("label")
@@ -174,7 +174,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	}
 
 	// Fetch all non-done issues.
-	issues, _, err := db.ListIssues(conn, db.ListOptions{
+	issues, _, err := st.ListIssues(store.ListOptions{
 		ProjectID:   getProjectID(cmd),
 		IncludeDone: false,
 		Limit:       0,
@@ -183,12 +183,12 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
 	}
 
-	if err := db.HydrateDocs(conn, issues); err != nil {
+	if err := st.HydrateDocs(issues); err != nil {
 		return cmdErr(fmt.Errorf("hydrating docs: %w", err), output.ErrGeneral)
 	}
 
 	// Fetch all directional relations.
-	relations, err := db.GetAllDirectionalRelations(conn)
+	relations, err := st.GetAllDirectionalRelations()
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
 	}
