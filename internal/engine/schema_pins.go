@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -38,10 +38,11 @@ func schemaPinsFor(
 	tx *sql.Tx,
 	projectID int,
 	runID int,
-	runIssues []*db.RunIssue,
+	runIssues []*store.RunIssue,
 	bindings map[int]*boundDefinition,
-) ([]db.Pin, error) {
-	pins := make([]db.Pin, 0, len(runIssues))
+) ([]store.Pin, error) {
+	st := store.TxOn(tx)
+	pins := make([]store.Pin, 0, len(runIssues))
 	for _, reference := range referencedSchemas(runIssues, bindings) {
 		name, version, err := workflow.ParsePayloadRef(reference.ref)
 		if err != nil {
@@ -53,8 +54,8 @@ func schemaPinsFor(
 				reference.workflow, reference.step, reference.ref)
 		}
 
-		registered, err := db.GetSchemaTx(tx, projectID, name, version)
-		if errors.Is(err, db.ErrSchemaNotFound) {
+		registered, err := st.GetSchemaTx(projectID, name, version)
+		if errors.Is(err, store.ErrSchemaNotFound) {
 			return nil, validationErr(
 				"workflow %s, step %q declares `payload = %q`, which is not registered; "+
 					"register it with `docket schema register %s <file.json>`",
@@ -81,8 +82,8 @@ func schemaPinsFor(
 				reference.workflow, reference.step, reference.ref)
 		}
 
-		pins = append(pins, db.Pin{
-			RunID: runID, Kind: db.PinKindSchema,
+		pins = append(pins, store.Pin{
+			RunID: runID, Kind: store.PinKindSchema,
 			Ref: registered.Ref(), SHA256: registered.SourceSHA256,
 		})
 	}
@@ -96,7 +97,7 @@ func schemaPinsFor(
 // Determinism matters because the pins are golden-diffed: an order that
 // varied with map iteration would make the golden flap on nothing.
 func referencedSchemas(
-	runIssues []*db.RunIssue,
+	runIssues []*store.RunIssue,
 	bindings map[int]*boundDefinition,
 ) []schemaReference {
 	var out []schemaReference

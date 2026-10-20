@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -29,7 +29,7 @@ import (
 func WorkflowsReferencingSchema(
 	conn *sql.DB, projectID int, name string, version int,
 ) ([]string, error) {
-	workflows, _, err := db.ListWorkflows(conn, db.WorkflowListOptions{
+	workflows, _, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{
 		ProjectID: projectID, ExcludeDeprecated: true,
 	})
 	if err != nil {
