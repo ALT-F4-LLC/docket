@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -95,15 +95,15 @@ const (
 type Scheduler struct {
 	run *model.Run
 	// steps are every step of THIS run only — LoadScheduler fills it from
-	// db.ListRunStepsTx(runID) below, scoped to one run. blockingLoopBodyAbsent
+	// ListRunStepsTx(runID) below, scoped to one run. blockingLoopBodyAbsent
 	// (stage.go) still guards on RunID explicitly even though that guard is
 	// unreachable today, protecting the invariant if this field's population
 	// ever widens.
-	steps []*db.Step
+	steps []*store.Step
 	// foreign holds the claimed/running steps of every OTHER active run: a
 	// step holding a scope there excludes just as surely as one in this run.
 	// Folded into scopeHolders locally, where a cross-run conflict is checked.
-	foreign []*db.Step
+	foreign []*store.Step
 	// loopHolds records every offer-time loop-body eviction this scheduler
 	// performed: withheld instance -> the open body's "instance (status)".
 	// Written by blockingLoopBodyAbsent when it answers true, read by
@@ -148,7 +148,7 @@ type Scheduler struct {
 	capOverrides map[string]ClassCapSource
 	defs         map[int]*workflow.Definition
 	nowMS        int64
-	stepByID     map[int]*db.Step
+	stepByID     map[int]*store.Step
 	// budget is R7's half of the snapshot, loaded once for the same reason the
 	// rest is: R3, R4, R5 and R7 are questions about the same rows at the
 	// same instant. With an effective cap of 0 it is loaded WITHOUT executing
@@ -167,7 +167,7 @@ type Scheduler struct {
 	// openReaps are the rows behind reapHold, kept so the REFUSAL can name the
 	// same reaps the predicate counted. A headroom denial with nothing running
 	// is baffling unless the message names why.
-	openReaps []db.ReapAck
+	openReaps []store.ReapAck
 	// holdTally is the project's configured decider for MATERIALIZED held
 	// steps, loaded with the rest of the snapshot so every spec this scheduler
 	// synthesizes answers to one state of the config. Readiness never consults
@@ -237,12 +237,13 @@ type issueFacts struct {
 
 // LoadScheduler reads everything the predicate needs, once, inside tx.
 func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, nowMS int64) (*Scheduler, error) {
-	run, err := db.GetRunTx(tx, runID)
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, err
 	}
 
-	steps, err := db.ListRunStepsTx(tx, runID)
+	steps, err := st.ListRunStepsTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +253,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		return nil, err
 	}
 
-	runIssues, err := db.ListRunIssuesTx(tx, runID)
+	runIssues, err := st.ListRunIssuesTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +284,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	// R2b's fact, from the snapshot already loaded: an issue with a step
 	// parked `waiting-human` holds every other row of that issue.
 	for _, step := range steps {
-		if step.Status != db.StepWaitingHuman {
+		if step.Status != store.StepWaitingHuman {
 			continue
 		}
 		if f, ok := facts[step.IssueID]; ok {
@@ -350,7 +351,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	// The pin LIST only, in the same transaction as the rest of the snapshot.
 	// The policy file behind its policy.toml entry is opened only when a
 	// rendered row asks for routing (runPolicy).
-	pins, err := db.ListPinsTx(tx, runID)
+	pins, err := st.ListPinsTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +366,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		frozenRouting: routing,
 		foreignScopes: foreignScopes,
 		defs:          defs, nowMS: nowMS,
-		stepByID:      make(map[int]*db.Step, len(steps)),
+		stepByID:      make(map[int]*store.Step, len(steps)),
 		limits:        limits,
 		limitSources:  limitSources,
 		capOverrides:  capOverrides,
@@ -518,7 +519,7 @@ func issueDependenciesSatisfiedTx(tx *sql.Tx, issueID int) (bool, error) {
 // repo qualifier, so without the project predicate `internal/**` in one
 // repository would block `internal/**` in every other repository sharing the
 // store.
-func foreignHoldingStepsTx(tx *sql.Tx, projectID, runID int) ([]*db.Step, error) {
+func foreignHoldingStepsTx(tx *sql.Tx, projectID, runID int) ([]*store.Step, error) {
 	rows, err := tx.Query(
 		`SELECT s.id, s.issue_id, s.status
 		   FROM steps s
@@ -526,18 +527,18 @@ func foreignHoldingStepsTx(tx *sql.Tx, projectID, runID int) ([]*db.Step, error)
 		  WHERE s.run_id != ? AND s.status IN (?, ?)
 		    AND r.status NOT IN (?, ?)
 		    AND r.project_id = ?`,
-		runID, db.StepClaimed, db.StepRunning,
+		runID, store.StepClaimed, store.StepRunning,
 		string(model.RunDone), string(model.RunAbandoned),
-		db.DefaultProjectIDOr(projectID),
+		store.DefaultProjectIDOr(projectID),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("reading steps holding scope elsewhere: %w", err)
 	}
 	defer rows.Close()
 
-	var out []*db.Step
+	var out []*store.Step
 	for rows.Next() {
-		var s db.Step
+		var s store.Step
 		if err := rows.Scan(&s.ID, &s.IssueID, &s.Status); err != nil {
 			return nil, fmt.Errorf("reading foreign step: %w", err)
 		}
@@ -610,7 +611,7 @@ func mergeLimits(defs map[int]*workflow.Definition) (map[string]workflow.Limit, 
 func applyClassMaxOverrides(
 	tx *sql.Tx, projectID int, limits map[string]workflow.Limit,
 ) (map[string]ClassCapSource, error) {
-	caps, err := db.ClassMaxOverridesTx(tx, projectID)
+	caps, err := store.TxOn(tx).ClassMaxOverridesTx(projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +668,7 @@ func (s *Scheduler) ClassCaps() map[string]ClassCap {
 
 // Steps returns the loaded step set, for callers that render alongside the
 // readiness answer.
-func (s *Scheduler) Steps() []*db.Step { return s.steps }
+func (s *Scheduler) Steps() []*store.Step { return s.steps }
 
 // Run returns the loaded run.
 func (s *Scheduler) Run() *model.Run { return s.run }
@@ -684,7 +685,7 @@ func (s *Scheduler) Limit(class string) workflow.Limit { return s.limits[class] 
 // most useful one — "the run is paused" explains a whole stalled dispatcher,
 // where "no headroom" on the same step would send someone hunting for a
 // concurrency problem that is not there.
-func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
+func (s *Scheduler) Ready(step *store.Step) (bool, ReadyCondition) {
 	// R1: the run is active.
 	if s.run.Status != model.RunActive {
 		return false, CondRunActive
@@ -699,7 +700,7 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 	// clauses are questions about a step that COULD run, and a done, skipped,
 	// or already-claimed step is not one. Asking whether a `done` step has
 	// concurrency headroom is a category error, not a cheaper path to `false`.
-	if step.Status != db.StepPending {
+	if step.Status != store.StepPending {
 		return false, CondStatus
 	}
 
@@ -802,8 +803,8 @@ func (s *Scheduler) Ready(step *db.Step) (bool, ReadyCondition) {
 // that R3 has exactly ONE implementation. A second copy — "are this step's
 // predecessors terminal", written out longhand next to the mirror — is what
 // would drift at the first fanout join or interposed gate that mattered.
-func (s *Scheduler) AwaitingDecision(step *db.Step) bool {
-	if step.Status != db.StepPending || step.Materialized {
+func (s *Scheduler) AwaitingDecision(step *store.Step) bool {
+	if step.Status != store.StepPending || step.Materialized {
 		return false
 	}
 	if step.Kind != workflow.TypeHuman && step.Kind != workflow.TypeVote {
@@ -845,7 +846,7 @@ func (s *Scheduler) IssueAwaitingDecision(issueID int) bool {
 // not terminal, so the join does not advance, and the issue is parked exactly
 // as J2 says. Writing J2 as its own branch would be writing the same condition
 // twice and inviting the two to disagree.
-func (s *Scheduler) predecessorsDone(step *db.Step) bool {
+func (s *Scheduler) predecessorsDone(step *store.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return false
@@ -886,7 +887,7 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 			if suspendedOnPanel(pred, step.StepName) {
 				continue
 			}
-			if !db.StepTerminal(pred.Status) {
+			if !store.StepTerminal(pred.Status) {
 				return false
 			}
 		}
@@ -926,7 +927,7 @@ func (s *Scheduler) predecessorsDone(step *db.Step) bool {
 // the work ordinal k just redid — so the step's own ordinal wins whenever it
 // has instances, and the fallback applies only where re-instantiation did not
 // reach.
-func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.Step {
+func (s *Scheduler) predecessorInstances(step *store.Step, predName string) []*store.Step {
 	return predecessorInstancesIn(s.steps, step, predName)
 }
 
@@ -936,7 +937,7 @@ func (s *Scheduler) predecessorInstances(step *db.Step, predName string) []*db.S
 // ordinal rule R3 uses. Two readings of "which instances of g does S wait on"
 // would disagree at the first loop that re-instantiated one of them and not
 // the other.
-func predecessorInstancesIn(steps []*db.Step, step *db.Step, predName string) []*db.Step {
+func predecessorInstancesIn(steps []*store.Step, step *store.Step, predName string) []*store.Step {
 	if at := instancesAt(steps, step.IssueID, predName, step.Ordinal); len(at) > 0 {
 		return at
 	}
@@ -973,7 +974,7 @@ func predecessorInstancesIn(steps []*db.Step, step *db.Step, predName string) []
 // A materialized held step is never a target — its name is minted, not
 // declared — and RoutingPredecessors answers empty for it, so it takes the
 // ordinary-path answer without a special case.
-func (s *Scheduler) routedTo(step *db.Step) bool {
+func (s *Scheduler) routedTo(step *store.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return true // predecessorsDone already refused this step.
@@ -984,7 +985,7 @@ func (s *Scheduler) routedTo(step *db.Step) bool {
 	}
 	for _, predName := range preds {
 		for _, pred := range s.predecessorInstances(step, predName) {
-			if pred.Status == db.StepDone && routingIs(pred.Routing, step.StepName) {
+			if pred.Status == store.StepDone && routingIs(pred.Routing, step.StepName) {
 				return true
 			}
 			// A triage panel's predecessor is SUSPENDED rather than done
@@ -1001,7 +1002,7 @@ func (s *Scheduler) routedTo(step *db.Step) bool {
 // hasRouterSuspendedOn reports whether an instance of one of the step's routing
 // predecessors is suspended on it as its triage panel. Instances resolve by
 // predecessorInstances' ordinal rule, as in routedTo.
-func (s *Scheduler) hasRouterSuspendedOn(step *db.Step) bool {
+func (s *Scheduler) hasRouterSuspendedOn(step *store.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return false
@@ -1023,8 +1024,8 @@ func (s *Scheduler) hasRouterSuspendedOn(step *db.Step) bool {
 // and the routing names the panel. Both halves are required: `gated` alone is
 // an ordinary step mid-saga, and the routing alone would also match the step
 // after the panel's verdict terminalized it.
-func suspendedOnPanel(step *db.Step, panel string) bool {
-	return step.Status == db.StepGated && routingIs(step.Routing, panel)
+func suspendedOnPanel(step *store.Step, panel string) bool {
+	return step.Status == store.StepGated && routingIs(step.Routing, panel)
 }
 
 // openInterposedGates returns the non-terminal interposed-gate instances that
@@ -1043,7 +1044,7 @@ func suspendedOnPanel(step *db.Step, panel string) bool {
 // work the routing chose to add — the corpus's drain-highs — and no downstream
 // reads its output, so holding for it bought a dispatch level and no ordering
 // anything needed.
-func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
+func (s *Scheduler) openInterposedGates(step *store.Step) []*store.Step {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return nil
@@ -1052,7 +1053,7 @@ func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 	if spec == nil {
 		return nil
 	}
-	var out []*db.Step
+	var out []*store.Step
 	for _, predName := range spec.After {
 		predSpec := workflow.StepByName(def, predName)
 		if predSpec == nil {
@@ -1066,7 +1067,7 @@ func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 				if gate.Kind != workflow.TypeVote && gate.Kind != workflow.TypeHuman {
 					continue
 				}
-				if !db.StepTerminal(gate.Status) {
+				if !store.StepTerminal(gate.Status) {
 					out = append(out, gate)
 				}
 			}
@@ -1090,8 +1091,8 @@ func (s *Scheduler) openInterposedGates(step *db.Step) []*db.Step {
 // The siblings are returned rather than routed here so the caller applies the
 // routing in a transaction it owns, alongside the events, exactly as the saga
 // does for an ordinary failure.
-func (s *Scheduler) QuorumMisses() []*db.Step {
-	var out []*db.Step
+func (s *Scheduler) QuorumMisses() []*store.Step {
+	var out []*store.Step
 
 	for _, step := range s.steps {
 		// The routing is carried by a sibling that itself ended `done` — the
@@ -1103,7 +1104,7 @@ func (s *Scheduler) QuorumMisses() []*db.Step {
 		if step.SiblingIndex == nil {
 			continue
 		}
-		if step.Status != db.StepDone && step.Routing == "" {
+		if step.Status != store.StepDone && step.Routing == "" {
 			continue
 		}
 		def := s.defs[step.WorkflowID]
@@ -1122,7 +1123,7 @@ func (s *Scheduler) QuorumMisses() []*db.Step {
 		siblings := s.instancesOf(step.IssueID, step.StepName, step.Ordinal)
 		joined := true
 		for _, sib := range siblings {
-			if !db.StepTerminal(sib.Status) {
+			if !store.StepTerminal(sib.Status) {
 				joined = false
 				break
 			}
@@ -1156,7 +1157,7 @@ func (s *Scheduler) QuorumMisses() []*db.Step {
 // A quorum is therefore checked only when the declaration is a REAL one: below
 // the sibling count. `min_siblings = len(fanout)` — whether written by an author
 // or materialized by the default — is J1 and nothing more.
-func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, siblings []*db.Step) bool {
+func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, siblings []*store.Step) bool {
 	predSpec := workflow.StepByName(def, predName)
 	if predSpec == nil || predSpec.MinSiblings == nil {
 		return true
@@ -1167,7 +1168,7 @@ func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, sibling
 
 	done := 0
 	for _, sib := range siblings {
-		if sib.Status == db.StepDone {
+		if sib.Status == store.StepDone {
 			done++
 		}
 	}
@@ -1176,14 +1177,14 @@ func (s *Scheduler) quorumMet(predName string, def *workflow.Definition, sibling
 
 // instancesOf returns every instance of a named step for one issue at an
 // ordinal — the fanout siblings when there are any, or the single instance.
-func (s *Scheduler) instancesOf(issueID int, name string, ordinal int) []*db.Step {
+func (s *Scheduler) instancesOf(issueID int, name string, ordinal int) []*store.Step {
 	return instancesAt(s.steps, issueID, name, ordinal)
 }
 
 // instancesAt is instancesOf over an explicit step set — see
 // predecessorInstancesIn for why the rule is shared rather than copied.
-func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.Step {
-	var out []*db.Step
+func instancesAt(steps []*store.Step, issueID int, name string, ordinal int) []*store.Step {
+	var out []*store.Step
 	for _, step := range steps {
 		if step.IssueID == issueID && step.StepName == name && step.Ordinal == ordinal {
 			out = append(out, step)
@@ -1197,7 +1198,7 @@ func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.
 //
 // Computed FRESH on every call, stored nowhere. Exclusion is symmetric, so
 // the comparison is over scope lists rather than over any recorded claim.
-func (s *Scheduler) scopeConflict(step *db.Step) bool {
+func (s *Scheduler) scopeConflict(step *store.Step) bool {
 	facts := s.issues[step.IssueID]
 	if facts == nil || len(facts.scopeGlobs) == 0 {
 		return false // S1: a scope-less issue is never excluded.
@@ -1213,7 +1214,7 @@ func (s *Scheduler) scopeConflict(step *db.Step) bool {
 		return false
 	}
 
-	holders := make([]*db.Step, 0, len(s.steps)+len(s.foreign))
+	holders := make([]*store.Step, 0, len(s.steps)+len(s.foreign))
 	for _, other := range s.steps {
 		// The second half: a non-holder excludes nobody. Without this a
 		// running judge would still block another issue's writer, which is the
@@ -1265,7 +1266,7 @@ func (s *Scheduler) foreignScope(issueID int) []string {
 // ReadyCondition, would be two mechanisms answering one question ("how many
 // things may write to this tree right now"), and the two would disagree the
 // first time somebody changed one of them.
-func (s *Scheduler) classHeadroom(step *db.Step) bool {
+func (s *Scheduler) classHeadroom(step *store.Step) bool {
 	limit, ok := s.limits[step.Class]
 	if !ok || limit.Max <= 0 {
 		// An unbounded class gets neither ack rows nor the hold, and
@@ -1286,7 +1287,7 @@ func (s *Scheduler) classHeadroom(step *db.Step) bool {
 // The sum is PER STEP, not per class: the reap-hold term excludes a hold on
 // the step itself (the reaped step is re-offered), so two steps of one class
 // can legitimately see different occupancy.
-func (s *Scheduler) classInFlight(step *db.Step) int {
+func (s *Scheduler) classInFlight(step *store.Step) int {
 	inFlight := 0
 	for _, other := range s.steps {
 		if other.ID == step.ID || other.Class != step.Class {
@@ -1298,7 +1299,7 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 		// its triage panel is the exception: it waits on voters, and holding
 		// its slot for the whole deliberation would starve the class.
 		switch other.Status {
-		case db.StepClaimed, db.StepRunning, db.StepGated:
+		case store.StepClaimed, store.StepRunning, store.StepGated:
 			if !s.suspendedOnOwnPanel(other) {
 				inFlight++
 			}
@@ -1315,7 +1316,7 @@ func (s *Scheduler) classInFlight(step *db.Step) int {
 // suspendedOnOwnPanel reports whether a step is suspended on the triage panel
 // its own `on_fail` names. A step whose spec cannot be resolved, or that names
 // no panel, is not suspended.
-func (s *Scheduler) suspendedOnOwnPanel(step *db.Step) bool {
+func (s *Scheduler) suspendedOnOwnPanel(step *store.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return false
@@ -1337,7 +1338,7 @@ func (s *Scheduler) suspendedOnOwnPanel(step *db.Step) bool {
 // grepping the corpus. The counts come from the same snapshot the predicate
 // used, so the message cannot cite different arithmetic from the refusal it
 // explains.
-func (s *Scheduler) HeadroomDetail(step *db.Step) string {
+func (s *Scheduler) HeadroomDetail(step *store.Step) string {
 	limit := s.limits[step.Class]
 	held := s.unacknowledgedReapsInClass(step.Class, step.ID)
 	claimed := s.classInFlight(step) - held
@@ -1348,7 +1349,7 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 	}
 	detail += fmt.Sprintf(" against max %d", limit.Max)
 	if _, overridden := s.capOverrides[step.Class]; overridden {
-		detail += fmt.Sprintf(", set by config %s%s", db.KeyClassMaxPrefix, step.Class)
+		detail += fmt.Sprintf(", set by config %s%s", store.KeyClassMaxPrefix, step.Class)
 	} else if source := s.limitSources[step.Class]; source != "" {
 		detail += fmt.Sprintf(", set by [limits] in %s", source)
 	}
@@ -1386,12 +1387,12 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 // runs the engine is actually scheduling. Deliberately NOT implemented by
 // extending leases on resume: that would need a writer on the paused path, and
 // the reap is already lazy, so there is nothing to fix at resume time.
-func (s *Scheduler) Expired(step *db.Step) bool {
+func (s *Scheduler) Expired(step *store.Step) bool {
 	if s.run == nil || s.run.Status != model.RunActive {
 		return false
 	}
 
-	if step.Status != db.StepClaimed && step.Status != db.StepRunning {
+	if step.Status != store.StepClaimed && step.Status != store.StepRunning {
 		return false
 	}
 
@@ -1418,7 +1419,7 @@ func (s *Scheduler) Expired(step *db.Step) bool {
 // guard, which has no workflow definitions in hand and so cannot build a
 // Scheduler. A grace window or clock-source change belongs here, where every
 // surface that speaks about a lapsed lease reads it.
-func leaseLapsed(step *db.Step, nowMS int64) bool {
+func leaseLapsed(step *store.Step, nowMS int64) bool {
 	lease := step.Lease()
 	return lease.Held() && !lease.Live(nowMS)
 }
@@ -1433,7 +1434,7 @@ func leaseLapsed(step *db.Step, nowMS int64) bool {
 // created in the same millisecond are common (one expansion writes them all),
 // and without the id they would order nondeterministically, which would make
 // the topology goldens flap.
-func (s *Scheduler) SortSteps(steps []*db.Step) {
+func (s *Scheduler) SortSteps(steps []*store.Step) {
 	sort.SliceStable(steps, func(i, j int) bool {
 		pi, pj := s.priorityOf(steps[i]), s.priorityOf(steps[j])
 		if pi != pj {
@@ -1457,7 +1458,7 @@ func (s *Scheduler) SortSteps(steps []*db.Step) {
 // and the two error directions are not symmetric (see workflow.Step.HoldsTree).
 // Materialized steps, which the engine mints rather than the definition
 // declaring, land here too and are correctly treated as holders.
-func (s *Scheduler) holdsTree(step *db.Step) bool {
+func (s *Scheduler) holdsTree(step *store.Step) bool {
 	def := s.defs[step.WorkflowID]
 	if def == nil {
 		return true
@@ -1534,7 +1535,7 @@ func stepHoldsTree(spec *workflow.Step) bool {
 // scanning every status of `later`'s run, offer membership included.
 //
 // The evicted dependents are offered again once the predecessor stops
-// blocking — usually because it records, but `db.StepTerminal` also lets a
+// blocking — usually because it records, but `store.StepTerminal` also lets a
 // body sitting at `waiting-human` (a persisted NON-terminal status, alongside
 // claimed/running/gated) hold the offer open-endedly, until an operator acts
 // on it. That hold has no dedicated `ReadySteps` field or `ReadyCondition` of
@@ -1548,7 +1549,7 @@ func stepHoldsTree(spec *workflow.Step) bool {
 // and an evicted dependent frees a slot that may admit a row an earlier pass
 // rationed out. Each iteration either returns or grows the evicted set, so the
 // bound is the set's length.
-func (s *Scheduler) ClaimablePrefix(sorted []*db.Step) []*db.Step {
+func (s *Scheduler) ClaimablePrefix(sorted []*store.Step) []*store.Step {
 	if len(sorted) == 0 {
 		return sorted
 	}
@@ -1679,7 +1680,7 @@ func (s *Scheduler) BudgetHoldReason() string {
 func (s *Scheduler) UnroutedHoldReason() string {
 	var withheld []string
 	for _, step := range s.steps {
-		if step.Status != db.StepPending {
+		if step.Status != store.StepPending {
 			continue
 		}
 		if ok, cond := s.Ready(step); !ok && cond == CondUnrouted {
@@ -1709,8 +1710,8 @@ func (s *Scheduler) UnroutedHoldReason() string {
 // claimablePass is one greedy admission scan — ClaimablePrefix's original
 // body, with the fixed-point's evictions excluded up front so a row evicted
 // for a missing predecessor neither occupies a slot nor grants a scope.
-func (s *Scheduler) claimablePass(sorted []*db.Step, evicted map[int]bool) []*db.Step {
-	out := make([]*db.Step, 0, len(sorted))
+func (s *Scheduler) claimablePass(sorted []*store.Step, evicted map[int]bool) []*store.Step {
+	out := make([]*store.Step, 0, len(sorted))
 	// Scopes already granted to a winner, by issue: two steps of ONE issue
 	// share a scope by construction and must still coexist (the same exemption
 	// scopeConflict makes), so admission is tracked per issue rather than per
@@ -1760,7 +1761,7 @@ func (s *Scheduler) claimablePass(sorted []*db.Step, evicted map[int]bool) []*db
 //
 // An unbounded class rations nothing, by the same reading writeClassOf makes:
 // a class the author left unbounded is one declared safe to parallelize.
-func (s *Scheduler) offerHeadroom(step *db.Step, admitted map[string]int) bool {
+func (s *Scheduler) offerHeadroom(step *store.Step, admitted map[string]int) bool {
 	limit, ok := s.limits[step.Class]
 	if !ok || limit.Max <= 0 {
 		return true
@@ -1775,7 +1776,7 @@ func (s *Scheduler) offerHeadroom(step *db.Step, admitted map[string]int) bool {
 // for a row the budget check went on to reject. grantScope, below, is the
 // only writer, and claimablePass calls it only once every constraint —
 // including budget — has passed.
-func (s *Scheduler) scopeAdmits(step *db.Step, granted map[int][]string) bool {
+func (s *Scheduler) scopeAdmits(step *store.Step, granted map[int][]string) bool {
 	scope := s.foreignScope(step.IssueID)
 	if len(scope) == 0 || !s.holdsTree(step) {
 		// S1: a scope-less issue never excludes and is never excluded — and
@@ -1804,7 +1805,7 @@ func (s *Scheduler) scopeAdmits(step *db.Step, granted map[int][]string) bool {
 // issue (scopeAdmits' own `granted[step.IssueID]` check short-circuits every
 // later sibling), so re-recording the same scope is harmless but never
 // happens.
-func (s *Scheduler) grantScope(step *db.Step, granted map[int][]string) {
+func (s *Scheduler) grantScope(step *store.Step, granted map[int][]string) {
 	scope := s.foreignScope(step.IssueID)
 	if len(scope) == 0 || !s.holdsTree(step) {
 		return
@@ -1827,7 +1828,7 @@ func (s *Scheduler) grantScope(step *db.Step, granted map[int][]string) {
 // accumulation lives HERE, in the offer, and nowhere near `budgetSnapshot` or
 // `admits` — those stay the one stateless answer R7 and the claim's own
 // enforcement both read, per TestBudgetR7AndClaimAgree.
-func (s *Scheduler) offerBudget(step *db.Step, admittedCost float64) bool {
+func (s *Scheduler) offerBudget(step *store.Step, admittedCost float64) bool {
 	if s.budget.unlimited() {
 		return true
 	}
@@ -1837,7 +1838,7 @@ func (s *Scheduler) offerBudget(step *db.Step, admittedCost float64) bool {
 	return s.budget.spend()+admittedCost+reservableCost(step) <= s.budget.cap
 }
 
-func (s *Scheduler) priorityOf(step *db.Step) int {
+func (s *Scheduler) priorityOf(step *store.Step) int {
 	if f, ok := s.issues[step.IssueID]; ok {
 		return planner.PriorityRank(f.priority)
 	}

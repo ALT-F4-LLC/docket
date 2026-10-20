@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // THE WRITE-REAP ACKNOWLEDGMENT. The scheduling rule it implements:
@@ -107,17 +107,18 @@ func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]stri
 // DKT-2450) and why — which is how a reader distinguishes them, the same
 // data.reason discipline that separates a budget pause from an operator's.
 func reapOneTx(
-	tx *sql.Tx, sched *Scheduler, runID int, step *db.Step, data string, nowMS int64,
+	tx *sql.Tx, sched *Scheduler, runID int, step *store.Step, data string, nowMS int64,
 ) error {
+	st := store.TxOn(tx)
 	{
-		if err := db.ReapStepTx(tx, step.ID, nowMS); err != nil {
+		if err := st.ReapStepTx(step.ID, nowMS); err != nil {
 			return err
 		}
 		// The outcome, counted where it is decided (DKT-490): this claim ended
 		// in a reap, not a failure — expiry and the forced path alike — and the
 		// row's breakdown says so, so a consumer needing "how many attempts
 		// failed" never has to reconstruct it from the (prunable) event feed.
-		if err := db.MarkStepClaimReapedTx(tx, step.ID, nowMS); err != nil {
+		if err := st.MarkStepClaimReapedTx(step.ID, nowMS); err != nil {
 			return err
 		}
 		if err := recordEvent(tx, eventRecord{
@@ -135,7 +136,7 @@ func reapOneTx(
 			}
 			// Created UNACKNOWLEDGED. Nothing here sets `acked_at_ms`; the
 			// hold is live from this instant until somebody names this seq.
-			if err := db.InsertReapAckTx(tx, db.ReapAck{
+			if err := st.InsertReapAckTx(store.ReapAck{
 				RunID: runID, StepID: step.ID, Class: step.Class, ReapedSeq: seq,
 			}, nowMS); err != nil {
 				return err
@@ -151,7 +152,7 @@ func reapOneTx(
 			// already applies to the step row two lines below: the snapshot is
 			// updated to match what this transaction has done, so one call sees
 			// its own consequences.
-			sched.holdReap(db.ReapAck{
+			sched.holdReap(store.ReapAck{
 				RunID: runID, StepID: step.ID, Class: step.Class,
 				ReapedSeq: seq, Instance: step.Instance,
 			})
@@ -163,11 +164,11 @@ func reapOneTx(
 		// renders (DKT-1279): `next` offers the reaped step in the SAME answer
 		// that performed the reap, and that row must say "reaped" without a
 		// second read of the row this transaction just wrote.
-		step.Status = db.StepPending
+		step.Status = store.StepPending
 		step.Owner, step.TokenHash, step.ExpiresMS = "", "", 0
 		step.StartedMS = nil
 		step.ReapedClaims++
-		step.LastClaimEnd = db.ClaimEndReaped
+		step.LastClaimEnd = store.ClaimEndReaped
 		// The same reflection for the pre-gate hold: the holds were probed
 		// while this step was claimed, so it was no candidate; the readiness
 		// pass that follows must see its lock.
@@ -234,8 +235,8 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 		return err
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -246,7 +247,7 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 	if err := authorizeConductor(conn, step.RunID, opts.Token, "step reap"); err != nil {
 		return err
 	}
-	if step.Status != db.StepClaimed && step.Status != db.StepRunning {
+	if step.Status != store.StepClaimed && step.Status != store.StepRunning {
 		return conflictErr(
 			"step %s is %s; only a claimed or running step holds a lease to reap",
 			step.Instance, step.Status)
@@ -297,7 +298,7 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 	// that went unresponsive under its own load — a judgment the expiry path
 	// keeps charging for, unchanged — while the forced path carries an explicit
 	// assertion (`data.forced`, `--reason`) that no executor ever got to work.
-	if err := db.ExemptStepAttemptFromBudgetTx(tx, step.ID, nowMS); err != nil {
+	if err := store.TxOn(tx).ExemptStepAttemptFromBudgetTx(step.ID, nowMS); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -321,18 +322,19 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 //     and the run scope is half of that: an ack naming another run's reap is a
 //     forgery in exactly the way naming a non-reap is.
 func ackReapsTx(tx *sql.Tx, runID int, seqs []int64, ackedBy string, nowMS int64) error {
+	st := store.TxOn(tx)
 	for _, seq := range seqs {
-		result, err := db.AckReapTx(tx, runID, seq, ackedBy, nowMS)
+		result, err := st.AckReapTx(runID, seq, ackedBy, nowMS)
 		if err != nil {
 			return err
 		}
 		switch result {
-		case db.AckNoSuchReap:
+		case store.AckNoSuchReap:
 			return validationErr(
 				"--ack-reap %d names no unacknowledged reap of %s; an acknowledgment "+
 					"must name the `seq` of a `lease-reaped` event for this run",
 				seq, model.FormatRunID(runID))
-		case db.AckAlreadyDone:
+		case store.AckAlreadyDone:
 			// Idempotent. Nothing to write and nothing to report — the row
 			// already says what this call would have made it say.
 			continue
@@ -377,8 +379,8 @@ func ackReapsTx(tx *sql.Tx, runID int, seqs []int64, ackedBy string, nowMS int64
 // The dormant path is one indexed lookup on `idx_reap_acks_open`, a PARTIAL
 // index on `acked_at_ms IS NULL`, returning no row and short-circuiting before
 // any class arithmetic.
-func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []db.ReapAck, error) {
-	open, err := db.UnacknowledgedReapsTx(tx, runID)
+func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []store.ReapAck, error) {
+	open, err := store.TxOn(tx).UnacknowledgedReapsTx(runID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -402,7 +404,7 @@ func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []db.ReapAck, error) {
 // world, and a re-query mid-pass could answer two steps against two different
 // holds. What this transaction wrote is knowable without asking the database
 // again, so it is applied directly.
-func (s *Scheduler) holdReap(ack db.ReapAck) {
+func (s *Scheduler) holdReap(ack store.ReapAck) {
 	if s.reapHold == nil {
 		s.reapHold = make(map[string]int, 1)
 	}
@@ -463,7 +465,7 @@ func (s *Scheduler) unacknowledgedReapsInClass(class string, stepID int) int {
 // clears them. The rows come from the same snapshot the predicate used, so the
 // message cannot name a different set of reaps from the one that caused the
 // denial.
-func (s *Scheduler) UnacknowledgedReaps() []db.ReapAck { return s.openReaps }
+func (s *Scheduler) UnacknowledgedReaps() []store.ReapAck { return s.openReaps }
 
 // ReapHoldReason renders the hold's guidance: each seq, and the exact flag to pass.
 //
@@ -477,7 +479,7 @@ func (s *Scheduler) UnacknowledgedReaps() []db.ReapAck { return s.openReaps }
 // makes the mechanism complete without group 3. The text names both because the
 // hold is what it is regardless of which verb clears it, and a message that
 // omitted the other entry point would go stale the moment group 3 lands.
-func ReapHoldReason(reaps []db.ReapAck) string {
+func ReapHoldReason(reaps []store.ReapAck) string {
 	if len(reaps) == 0 {
 		return ""
 	}
@@ -504,8 +506,8 @@ func ReapHoldReason(reaps []db.ReapAck) string {
 // and the wave is over. A forced reap keeps its hold (somebody asserted the
 // holder was gone, and that assertion is what a panel reviews), and so does a
 // claim admitted under any other dispatch.
-func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *db.Dispatch, nowMS int64) error {
-	reaps, err := db.UnacknowledgedReapsTx(tx, runID)
+func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *store.Dispatch, nowMS int64) error {
+	reaps, err := store.TxOn(tx).UnacknowledgedReapsTx(runID)
 	if err != nil {
 		return err
 	}
@@ -541,5 +543,5 @@ func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *db.Dispatch, nowMS int6
 	if len(seqs) == 0 {
 		return nil
 	}
-	return ackReapsTx(tx, runID, seqs, db.AckByDispatchClose, nowMS)
+	return ackReapsTx(tx, runID, seqs, store.AckByDispatchClose, nowMS)
 }
