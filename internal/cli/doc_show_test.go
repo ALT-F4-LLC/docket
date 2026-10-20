@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // TestRunDocShowRevision_ErrorMapping pins runDocShowRevision's three-way
@@ -16,10 +17,11 @@ import (
 func TestRunDocShowRevision_ErrorMapping(t *testing.T) {
 	conn := newTestDB(t)
 	docID := createDoc(t, conn, "doc", "note", "draft")
+	st := store.StoreOn(conn)
 
 	t.Run("negative revision is VALIDATION_ERROR", func(t *testing.T) {
 		w, _ := bufWriter(false)
-		err := runDocShowRevision(conn, w, "DOC-1", docID, -1)
+		err := runDocShowRevision(st, w, "DOC-1", docID, -1)
 		if err == nil {
 			t.Fatal("runDocShowRevision(rev=-1) error = nil, want VALIDATION_ERROR")
 		}
@@ -31,7 +33,7 @@ func TestRunDocShowRevision_ErrorMapping(t *testing.T) {
 
 	t.Run("missing revision is NOT_FOUND", func(t *testing.T) {
 		w, _ := bufWriter(false)
-		err := runDocShowRevision(conn, w, "DOC-1", docID, 999)
+		err := runDocShowRevision(st, w, "DOC-1", docID, 999)
 		if err == nil {
 			t.Fatal("runDocShowRevision(rev=999) error = nil, want NOT_FOUND")
 		}
@@ -46,7 +48,7 @@ func TestRunDocShowRevision_ErrorMapping(t *testing.T) {
 
 	t.Run("missing doc is NOT_FOUND via the same dispatch", func(t *testing.T) {
 		w, _ := bufWriter(false)
-		err := runDocShowRevision(conn, w, "DOC-999", 999999, 0)
+		err := runDocShowRevision(st, w, "DOC-999", 999999, 0)
 		if err == nil {
 			t.Fatal("runDocShowRevision(missing doc) error = nil, want NOT_FOUND")
 		}

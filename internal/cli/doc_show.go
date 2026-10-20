@@ -1,16 +1,15 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -84,7 +83,7 @@ var docShowCmd = &cobra.Command{
 }
 
 func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	id, err := model.ParseDocID(args[0])
 	if err != nil {
@@ -93,10 +92,10 @@ func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	if cmd.Flags().Changed("rev") {
 		rev, _ := cmd.Flags().GetInt("rev")
-		return runDocShowRevision(conn, w, args[0], id, rev)
+		return runDocShowRevision(st, w, args[0], id, rev)
 	}
 
-	doc, err := db.GetDoc(conn, id)
+	doc, err := st.GetDoc(id)
 	if err != nil {
 		if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
 			return e
@@ -104,23 +103,23 @@ func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
 	}
 
-	revisions, err := db.ListDocRevisions(conn, id)
+	revisions, err := st.ListDocRevisions(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching revisions: %w", err), output.ErrGeneral)
 	}
 
-	comments, err := db.ListDocComments(conn, id)
+	comments, err := st.ListDocComments(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
 	}
 
-	linkedIssuesByDoc, err := db.HydrateLinkedIssues(conn, []int{id})
+	linkedIssuesByDoc, err := st.HydrateLinkedIssues([]int{id})
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
 	}
 	linkedIssues := linkedIssuesByDoc[id]
 
-	linkedProposals, err := db.GetDocProposals(conn, id)
+	linkedProposals, err := st.GetDocProposals(id)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
 	}
@@ -142,10 +141,10 @@ func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 	return nil
 }
 
-func runDocShowRevision(conn *sql.DB, w *output.Writer, idArg string, id, rev int) error {
-	revision, err := db.GetDocRevision(conn, id, rev)
+func runDocShowRevision(st store.Store, w *output.Writer, idArg string, id, rev int) error {
+	revision, err := st.GetDocRevision(id, rev)
 	if err != nil {
-		if errors.Is(err, db.ErrValidation) {
+		if errors.Is(err, store.ErrValidation) {
 			return cmdErr(err, output.ErrValidation)
 		}
 		if e := notFound(err, fmt.Sprintf("doc %s revision %d", idArg, rev)); e != nil {
