@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -59,7 +59,7 @@ var docCreateCmd = &cobra.Command{
 	Short: "Create a new document",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
+		st := store.StoreOn(getDB(cmd))
 
 		title, _ := cmd.Flags().GetString("title")
 		body, _ := cmd.Flags().GetString("description")
@@ -127,15 +127,15 @@ var docCreateCmd = &cobra.Command{
 			return err
 		}
 
-		id, err := db.CreateDocIdempotent(conn, &doc, idempotencyKey)
-		if errors.Is(err, db.ErrConflict) {
+		id, err := st.CreateDocIdempotent(&doc, idempotencyKey)
+		if errors.Is(err, store.ErrConflict) {
 			return cmdErr(err, output.ErrConflict)
 		}
 		if err != nil {
 			return cmdErr(fmt.Errorf("creating doc: %w", err), output.ErrGeneral)
 		}
 
-		created, err := db.GetDoc(conn, id)
+		created, err := st.GetDoc(id)
 		if err != nil {
 			return cmdErr(fmt.Errorf("fetching created doc: %w", err), output.ErrGeneral)
 		}

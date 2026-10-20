@@ -7,10 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -72,13 +72,13 @@ func runConfig(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return nil
 	}
 
-	conn, err := db.Open(cfg.DBPath)
+	st, err := store.OpenSQLite(cfg.DBPath)
 	if err != nil {
 		return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
 	}
-	defer conn.Close()
+	defer st.Close()
 
-	schemaVersion, err := db.SchemaVersion(conn)
+	schemaVersion, err := st.SchemaVersion()
 	if err != nil {
 		return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 	}
