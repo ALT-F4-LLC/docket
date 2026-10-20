@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket run fact add` (DKT-2759): the conductor's channel for coordination
@@ -70,7 +70,8 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 		return nil, validationErr("--reason is required: a fact with no reason " +
 			"tells a retro that something happened but not why")
 	}
-	if _, err := db.GetRun(conn, opts.RunID); err != nil {
+	st := store.StoreOn(conn)
+	if _, err := st.GetRun(opts.RunID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(opts.RunID))
 	}
 
@@ -84,7 +85,7 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 			return nil, validationErr("--kind %s needs --proposal PROPOSAL-N and --voter NAME",
 				opts.Kind)
 		}
-		if _, err := db.GetProposal(conn, opts.ProposalID); err != nil {
+		if _, err := st.GetProposal(opts.ProposalID); err != nil {
 			return nil, notFoundErr(err, "proposal %s not found",
 				model.FormatProposalID(opts.ProposalID))
 		}
@@ -108,8 +109,8 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 			return nil, validationErr("--cause must be %s or %s, got %q",
 				DeferralBudget, DeferralChain, opts.Cause)
 		}
-		step, err := db.GetStep(conn, opts.StepID)
-		if errors.Is(err, db.ErrStepNotFound) {
+		step, err := st.GetStep(opts.StepID)
+		if errors.Is(err, store.ErrStepNotFound) {
 			return nil, notFoundErr(err, "step %s not found", model.FormatStepID(opts.StepID))
 		}
 		if err != nil {
@@ -195,7 +196,7 @@ func conductorChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
 		                ORDER BY closed_at_ms DESC, id DESC LIMIT 1)), 0)
 		  ORDER BY seq LIMIT 1`,
 		runID, stepID, EventStepDeferred, DeferralChain,
-		runID, EventDispatchClosed, runID, db.DispatchClosed).Scan(&seq, &data)
+		runID, EventDispatchClosed, runID, store.DispatchClosed).Scan(&seq, &data)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}

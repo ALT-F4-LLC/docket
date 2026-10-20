@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The operator lifecycle verbs — `run pause`, `run resume`, `run abandon` —
@@ -105,9 +105,10 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		return nil, nil, fmt.Errorf("moving run %s: %w", model.FormatRunID(runID), err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -156,7 +157,7 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		}
 	}
 
-	if err := db.SetRunStatusTx(tx, runID, to, reason, nowMS); err != nil {
+	if err := st.SetRunStatusTx(runID, to, reason, nowMS); err != nil {
 		return nil, nil, err
 	}
 
@@ -173,7 +174,7 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 	if to == model.RunWaitingHuman {
 		origin = model.RunPauseOriginOperator
 	}
-	if err := db.SetRunPauseOriginTx(tx, runID, origin); err != nil {
+	if err := st.SetRunPauseOriginTx(runID, origin); err != nil {
 		return nil, nil, err
 	}
 
@@ -200,7 +201,7 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		return nil, nil, err
 	}
 
-	updated, err := db.GetRunTx(tx, runID)
+	updated, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -294,9 +295,10 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		return nil, fmt.Errorf("abandoning an issue: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -319,7 +321,7 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		return nil, fmt.Errorf("checking run membership: %w", err)
 	}
 	if inRun == 0 {
-		return nil, notFoundErr(db.ErrNotFound, "issue %s is not part of run %s",
+		return nil, notFoundErr(store.ErrNotFound, "issue %s is not part of run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 
@@ -328,7 +330,7 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
 		  ORDER BY id`,
 		runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted)
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted)
 	if err != nil {
 		return nil, fmt.Errorf("collecting the issue's remaining steps: %w", err)
 	}
@@ -354,8 +356,8 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		    SET status = ?, updated_at_ms = ?, recorded_at_ms = ?,
 		        row_version = row_version + 1
 		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)`,
-		db.StepFailedRouted, nowMS, nowMS, runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
+		store.StepFailedRouted, nowMS, nowMS, runID, issueID,
+		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 	); err != nil {
 		return nil, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
 	}
@@ -383,7 +385,7 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 	// The same resolution the routing records, for the same reason: the two
 	// paths are one fact about the issue, so they must not leave the tracker
 	// saying different things about it (DKT-245).
-	if err := db.SetIssueResolutionTx(tx, issueID, db.IssueResolutionAbandoned); err != nil {
+	if err := st.SetIssueResolutionTx(issueID, store.IssueResolutionAbandoned); err != nil {
 		return nil, err
 	}
 
@@ -427,7 +429,7 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		return nil, err
 	}
 
-	updated, err := db.GetRunTx(tx, runID)
+	updated, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, err
 	}
