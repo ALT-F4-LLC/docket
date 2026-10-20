@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -63,7 +63,7 @@ readable by explicit @version and keeps serving the runs that pinned it. See
 }
 
 func runSchemaList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	name, _ := cmd.Flags().GetString("name")
 	limit, _ := cmd.Flags().GetInt("limit")
@@ -72,7 +72,7 @@ func runSchemaList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 
-	schemas, total, err := db.ListSchemas(conn, db.SchemaListOptions{
+	schemas, total, err := st.ListSchemas(store.SchemaListOptions{
 		ProjectID:         getProjectID(cmd),
 		Name:              name,
 		Limit:             limit,

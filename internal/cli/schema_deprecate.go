@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -99,7 +99,7 @@ func runSchemaDeprecate(cmd *cobra.Command, args []string, w *output.Writer) err
 	}
 
 	if restore {
-		s, err := db.RestoreSchema(conn, getProjectID(cmd), name, version)
+		s, err := store.StoreOn(conn).RestoreSchema(getProjectID(cmd), name, version)
 		if err != nil {
 			return schemaErr(describeSchemaDeprecateFailure(err, args[0]))
 		}
@@ -136,7 +136,7 @@ func deprecateSchemaIn(conn *sql.DB, projectID int, name string, version int) (*
 				"otherwise be refused",
 			errSchemaInUse, name, version, strings.Join(referencing, ", "))
 	}
-	return db.DeprecateSchema(conn, projectID, name, version, model.NowMS())
+	return store.StoreOn(conn).DeprecateSchema(projectID, name, version, model.NowMS())
 }
 
 // describeSchemaDeprecateFailure gives a fanned-out refusal the SAME sentence
@@ -144,9 +144,9 @@ func deprecateSchemaIn(conn *sql.DB, projectID int, name string, version int) (*
 // classifier and the report both match on them.
 func describeSchemaDeprecateFailure(err error, ref string) error {
 	switch {
-	case errors.Is(err, db.ErrSchemaAlreadyDeprecated):
+	case errors.Is(err, store.ErrSchemaAlreadyDeprecated):
 		return fmt.Errorf("%s is already deprecated: %w", ref, err)
-	case errors.Is(err, db.ErrSchemaBuiltin):
+	case errors.Is(err, store.ErrSchemaBuiltin):
 		return fmt.Errorf("%s ships with docket and is visible to every project; "+
 			"it cannot be retired: %w", ref, err)
 	}
@@ -169,6 +169,7 @@ func deprecateSchemaAcrossProjects(
 	report := &registryFanoutReport{
 		Operation: operation, Subject: ref, Scope: fanoutScope(cmd),
 	}
+	st := store.StoreOn(conn)
 
 	for _, target := range targets {
 		var (
@@ -177,7 +178,7 @@ func deprecateSchemaAcrossProjects(
 			outcome string
 		)
 		if restore {
-			before, lookupErr := db.GetSchema(conn, target.ID, name, version)
+			before, lookupErr := st.GetSchema(target.ID, name, version)
 			if lookupErr != nil {
 				report.Results = append(report.Results, registryFailureResult(
 					target, describeSchemaDeprecateFailure(lookupErr, ref), schemaErr))
@@ -187,7 +188,7 @@ func deprecateSchemaAcrossProjects(
 			if before.Deprecated() {
 				outcome = outcomeRestored
 			}
-			s, err = db.RestoreSchema(conn, target.ID, name, version)
+			s, err = st.RestoreSchema(target.ID, name, version)
 		} else {
 			outcome = outcomeDeprecated
 			s, err = deprecateSchemaIn(conn, target.ID, name, version)
