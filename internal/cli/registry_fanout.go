@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -203,7 +203,7 @@ func resolveRegistryTargets(
 // allRegistryProjects is every project in the store, the --all-projects
 // target set shared by the writing verbs and `workflow lint`.
 func allRegistryProjects(conn *sql.DB) ([]*model.Project, error) {
-	projects, err := db.ListProjects(conn)
+	projects, err := store.StoreOn(conn).ListProjects()
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
 	}
@@ -239,11 +239,11 @@ func registryFailureResult(
 
 	outcome := outcomeError
 	switch {
-	case errors.Is(err, db.ErrWorkflowAlreadyDeprecated),
-		errors.Is(err, db.ErrSchemaAlreadyDeprecated):
+	case errors.Is(err, store.ErrWorkflowAlreadyDeprecated),
+		errors.Is(err, store.ErrSchemaAlreadyDeprecated):
 		// The ONE sentinel workflowErr does not classify, because the
 		// single-project path answers it before reaching that mapper. Retiring
-		// twice is a CONFLICT there (db.ErrWorkflowAlreadyDeprecated's own
+		// twice is a CONFLICT there (store.ErrWorkflowAlreadyDeprecated's own
 		// header: the second caller's "I am taking this out of service" is
 		// wrong), and it has to be a CONFLICT here too — a fan-out that
 		// downgraded it would make the same store answer differently depending

@@ -8,12 +8,12 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -80,7 +80,7 @@ func runReportExecutors(cmd *cobra.Command, w *output.Writer) error {
 	scope := "store"
 	if all, _ := cmd.Flags().GetBool("all-projects"); !all {
 		projectID := getProjectID(cmd)
-		if projectID == db.UnregisteredProjectID {
+		if projectID == store.UnregisteredProjectID {
 			cwd, _ := os.Getwd()
 			return cmdErr(fmt.Errorf(
 				"%s has no docket project binding; run `docket report executors "+
