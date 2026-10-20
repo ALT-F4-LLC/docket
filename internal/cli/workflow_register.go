@@ -7,10 +7,10 @@ import (
 	"io"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -85,8 +85,8 @@ func runWorkflowRegister(cmd *cobra.Command, args []string, w *output.Writer) er
 		return cmdErr(err, output.ErrGeneral)
 	}
 
-	stored, created, err := db.InsertWorkflow(
-		conn, workflowRow(def, src, path, parsed, getProjectID(cmd)), model.NowMS())
+	stored, created, err := store.StoreOn(conn).InsertWorkflow(
+		workflowRow(def, src, path, parsed, getProjectID(cmd)), model.NowMS())
 	if err != nil {
 		return workflowErr(err)
 	}
@@ -142,10 +142,11 @@ func workflowRow(
 func validateWorkflowEnvironment(
 	conn *sql.DB, def *workflow.Definition, projectID int,
 ) error {
-	if err := workflow.ValidateVoteRules(def, voteRuleResolver{conn, projectID}); err != nil {
+	st := store.StoreOn(conn)
+	if err := workflow.ValidateVoteRules(def, voteRuleResolver{st, projectID}); err != nil {
 		return err
 	}
-	return workflow.ValidateSchemas(def, schemaResolver{conn, projectID})
+	return workflow.ValidateSchemas(def, schemaResolver{st, projectID})
 }
 
 // registerWorkflowAcrossProjects is the --project / --all-projects path.
@@ -165,6 +166,7 @@ func registerWorkflowAcrossProjects(
 		return cmdErr(err, output.ErrGeneral)
 	}
 
+	st := store.StoreOn(conn)
 	report := &registryFanoutReport{
 		Operation: "workflow register",
 		Subject:   fmt.Sprintf("%s@%d", def.Pipeline.Name, def.Pipeline.Version),
@@ -178,8 +180,8 @@ func registerWorkflowAcrossProjects(
 			continue
 		}
 
-		stored, created, err := db.InsertWorkflow(
-			conn, workflowRow(def, src, path, parsed, target.ID), model.NowMS())
+		stored, created, err := st.InsertWorkflow(
+			workflowRow(def, src, path, parsed, target.ID), model.NowMS())
 		if err != nil {
 			report.Results = append(report.Results,
 				registryFailureResult(target, err, workflowErr))
@@ -235,15 +237,15 @@ func init() {
 // rules ask about the document's declared fields and their orders, and the
 // registered bytes are the only authority on those.
 type schemaResolver struct {
-	conn *sql.DB
+	st store.Store
 	// projectID scopes resolution (v12): a `payload` reference resolves in
 	// the invoking project's registry, plus builtins.
 	projectID int
 }
 
 func (r schemaResolver) Schema(name string, version int) (*workflow.Registered, error) {
-	row, err := db.GetSchema(r.conn, r.projectID, name, version)
-	if errors.Is(err, db.ErrSchemaNotFound) {
+	row, err := r.st.GetSchema(r.projectID, name, version)
+	if errors.Is(err, store.ErrSchemaNotFound) {
 		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrNotRegistered, name, version)
 	}
 	if err != nil {
@@ -262,20 +264,20 @@ func (r schemaResolver) Schema(name string, version int) (*workflow.Registered, 
 // voteRuleResolver adapts the engine-config registry to V26's resolver, so the
 // validator never holds a database handle.
 type voteRuleResolver struct {
-	conn *sql.DB
+	st store.Store
 	// projectID scopes rule resolution (v12): a project sees its own rules
 	// plus the store-wide ones.
 	projectID int
 }
 
 func (r voteRuleResolver) VoteRuleExists(rule string) (bool, error) {
-	return db.VoteRuleExists(r.conn, r.projectID, rule)
+	return r.st.VoteRuleExists(r.projectID, rule)
 }
 
 func (r voteRuleResolver) RuleSetElsewhere(rule string) (int, string, error) {
-	return db.VoteRuleSetElsewhere(r.conn, r.projectID, rule)
+	return r.st.VoteRuleSetElsewhere(r.projectID, rule)
 }
 
 func (r voteRuleResolver) RegisteredVoteRules() ([]string, error) {
-	return db.RegisteredVoteRules(r.conn, r.projectID)
+	return r.st.RegisteredVoteRules(r.projectID)
 }

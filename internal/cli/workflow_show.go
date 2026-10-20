@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -36,14 +36,14 @@ file is the install path's job.`,
 }
 
 func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	name, version, err := model.ParseWorkflowRef(args[0])
 	if err != nil {
 		return cmdErr(err, output.ErrValidation)
 	}
 
-	wf, err := db.GetWorkflow(conn, getProjectID(cmd), name, version)
+	wf, err := st.GetWorkflow(getProjectID(cmd), name, version)
 	if err != nil {
 		return workflowErr(describeMissingWorkflow(err, args[0]))
 	}
@@ -81,8 +81,8 @@ func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error 
 // describeMissingWorkflow turns the storage sentinel into an operator-facing
 // message naming what was asked for.
 func describeMissingWorkflow(err error, ref string) error {
-	if err == db.ErrWorkflowNotFound {
-		return fmt.Errorf("%w: %s is not registered", db.ErrWorkflowNotFound, ref)
+	if err == store.ErrWorkflowNotFound {
+		return fmt.Errorf("%w: %s is not registered", store.ErrWorkflowNotFound, ref)
 	}
 	return err
 }
