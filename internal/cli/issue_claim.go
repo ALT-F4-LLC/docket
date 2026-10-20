@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -78,7 +79,8 @@ itself.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		st := store.StoreOn(getDB(cmd))
+		conn := getDB(cmd)
+		st := store.StoreOn(conn)
 
 		id, err := issueArg(args[0])
 		if err != nil {
@@ -95,7 +97,7 @@ itself.`,
 
 		class, _ := cmd.Flags().GetString("class")
 
-		ttl, err := resolveTTL(cmd, st, class)
+		ttl, err := resolveTTL(cmd, conn, class)
 		if err != nil {
 			return err
 		}
@@ -146,7 +148,7 @@ itself.`,
 
 // resolveTTL returns the lease TTL: an explicit --ttl wins, else the effective
 // per-class configuration (which falls back to lease.ttl.default).
-func resolveTTL(cmd *cobra.Command, st store.Store, class string) (time.Duration, error) {
+func resolveTTL(cmd *cobra.Command, conn *sql.DB, class string) (time.Duration, error) {
 	if cmd.Flags().Changed("ttl") {
 		ttl, err := cmd.Flags().GetDuration("ttl")
 		if err != nil {
@@ -161,7 +163,7 @@ func resolveTTL(cmd *cobra.Command, st store.Store, class string) (time.Duration
 		return ttl, nil
 	}
 
-	ttl, err := st.LeaseTTL(getProjectID(cmd), class)
+	ttl, err := store.StoreOn(conn).LeaseTTL(getProjectID(cmd), class)
 	if err != nil {
 		return 0, cmdErr(fmt.Errorf("resolving lease TTL: %w", err), output.ErrGeneral)
 	}

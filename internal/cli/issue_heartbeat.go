@@ -8,7 +8,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +52,7 @@ which tells the holder to claim again rather than that it was never trusted.`,
 		}
 
 		class, _ := cmd.Flags().GetString("class")
-		ttl, err := resolveTTL(cmd, store.StoreOn(conn), class)
+		ttl, err := resolveTTL(cmd, conn, class)
 		if err != nil {
 			return err
 		}
