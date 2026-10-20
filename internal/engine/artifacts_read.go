@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The READ surface for what a step produced.
@@ -73,15 +73,16 @@ func ListStepArtifacts(conn *sql.DB, stepID int) ([]StepArtifact, error) {
 	// The step must EXIST, even though having no artifacts is fine. Without
 	// this, a typo'd step reference reports "no artifacts" — an answer that
 	// reads as fact and is actually a missing step.
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	st := store.StoreOn(conn)
+	step, err := st.GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	artifacts, err := db.ListStepArtifacts(conn, stepID)
+	artifacts, err := st.ListStepArtifacts(stepID)
 	if err != nil {
 		return nil, err
 	}
@@ -111,22 +112,15 @@ func ListStepArtifacts(conn *sql.DB, stepID int) ([]StepArtifact, error) {
 // and the run report's index both print — so the reference an operator already
 // has on screen is the one this takes.
 func ReadArtifact(conn *sql.DB, artifactID int) (*StepArtifact, error) {
-	var (
-		a          db.Artifact
-		stepID     sql.NullInt64
-		payload    sql.NullString
-		stub       sql.NullInt64
-		supersedes sql.NullInt64
-	)
-	err := conn.QueryRow(
-		`SELECT id, run_id, step_id, kind, body, payload, sha256, stub, supersedes,
-		        created_at_ms
-		   FROM artifacts WHERE id = ?`, artifactID).Scan(
-		&a.ID, &a.RunID, &stepID, &a.Kind, &a.Body, &payload, &a.SHA256,
-		&stub, &supersedes, &a.CreatedAtMS)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, notFoundErr(sql.ErrNoRows,
-			"artifact ARTIFACT-%d not found", artifactID)
+	snap, err := store.StoreOn(conn).BeginReadSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("reading artifact ARTIFACT-%d: %w", artifactID, err)
+	}
+	defer snap.Rollback()
+
+	a, err := snap.GetArtifactTx(artifactID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, notFoundErr(err, "artifact ARTIFACT-%d not found", artifactID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading artifact ARTIFACT-%d: %w", artifactID, err)
@@ -137,19 +131,19 @@ func ReadArtifact(conn *sql.DB, artifactID int) (*StepArtifact, error) {
 		Kind:         a.Kind,
 		SHA256:       a.SHA256,
 		Bytes:        len(a.Body),
-		PayloadBytes: len(payload.String),
-		Stub:         stub.Int64 != 0,
-		Supersedes:   supersedesRef(supersedes),
+		PayloadBytes: len(a.Payload),
+		Stub:         a.Stub,
+		Supersedes:   artifactRef(a.Supersedes),
 		CreatedAtMS:  a.CreatedAtMS,
 		Body:         a.Body,
-		Payload:      payload.String,
+		Payload:      a.Payload,
 	}
 
 	// The producing step's instance, when there is one. A run-scoped artifact
-	// has a NULL step_id and simply reports no producer, rather than an
-	// invented one.
-	if stepID.Valid {
-		if producer, err := db.GetStep(conn, int(stepID.Int64)); err == nil {
+	// has a NULL step_id, which the store decodes as 0, and simply reports no
+	// producer, rather than an invented one.
+	if a.StepID != 0 {
+		if producer, err := snap.GetStepTx(a.StepID); err == nil {
 			out.Producer = producer.Instance
 		}
 	}
@@ -157,19 +151,10 @@ func ReadArtifact(conn *sql.DB, artifactID int) (*StepArtifact, error) {
 }
 
 // artifactRef renders an optional artifact id as `ARTIFACT-N`, or "" when there
-// is none. The two spellings below take the two shapes the reads produce — a
-// decoded pointer and a raw NULL column — so neither call site has to unpack
-// the absence itself.
+// is none.
 func artifactRef(id *int) string {
 	if id == nil {
 		return ""
 	}
 	return fmt.Sprintf("ARTIFACT-%d", *id)
-}
-
-func supersedesRef(id sql.NullInt64) string {
-	if !id.Valid {
-		return ""
-	}
-	return fmt.Sprintf("ARTIFACT-%d", id.Int64)
 }
