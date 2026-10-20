@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -60,24 +61,25 @@ func (t holdTally) configured() bool {
 
 // loadHoldTally resolves the configuration for a run's project.
 func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
-	projectID, err := db.RunProjectID(conn, runID)
+	st := store.StoreOn(conn)
+	projectID, err := st.RunProjectID(runID)
 	if err != nil {
 		return holdTally{}, err
 	}
-	rule, err := db.GetConfig(conn, projectID, db.KeyVoteHoldRule)
+	rule, err := st.GetConfig(projectID, store.KeyVoteHoldRule)
 	if err != nil {
 		return holdTally{}, err
 	}
-	voters, err := db.GetConfig(conn, projectID, db.KeyVoteHoldVoters)
+	voters, err := st.GetConfig(projectID, store.KeyVoteHoldVoters)
 	if err != nil {
 		return holdTally{}, err
 	}
-	cost, err := db.GetConfig(conn, projectID, db.KeyVoteHoldCost)
+	cost, err := st.GetConfig(projectID, store.KeyVoteHoldCost)
 	if err != nil {
 		return holdTally{}, err
 	}
 	return holdTally{
-		rule: rule.Value, voters: db.SplitNameList(voters.Value),
+		rule: rule.Value, voters: store.SplitNameList(voters.Value),
 		cost: parseHoldCost(cost.Value),
 	}, nil
 }
@@ -86,20 +88,21 @@ func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
 // scheduler's snapshot (see db.GetConfigTx for why a pool read cannot be used
 // there). The project id is already loaded by the caller that has the run.
 func loadHoldTallyTx(tx *sql.Tx, projectID int) (holdTally, error) {
-	rule, err := db.GetConfigTx(tx, projectID, db.KeyVoteHoldRule)
+	stx := store.TxOn(tx)
+	rule, err := stx.GetConfigTx(projectID, store.KeyVoteHoldRule)
 	if err != nil {
 		return holdTally{}, err
 	}
-	voters, err := db.GetConfigTx(tx, projectID, db.KeyVoteHoldVoters)
+	voters, err := stx.GetConfigTx(projectID, store.KeyVoteHoldVoters)
 	if err != nil {
 		return holdTally{}, err
 	}
-	cost, err := db.GetConfigTx(tx, projectID, db.KeyVoteHoldCost)
+	cost, err := stx.GetConfigTx(projectID, store.KeyVoteHoldCost)
 	if err != nil {
 		return holdTally{}, err
 	}
 	return holdTally{
-		rule: rule.Value, voters: db.SplitNameList(voters.Value),
+		rule: rule.Value, voters: store.SplitNameList(voters.Value),
 		cost: parseHoldCost(cost.Value),
 	}, nil
 }
@@ -152,7 +155,7 @@ func (t holdTally) heldStepKind() string {
 //
 // THIS IS THE WHOLE-HOLD IDENTITY, retained for the resolution read. The
 // PER-CLUSTER identity is heldClusterInstance below.
-func heldStepInstance(step *db.Step) string {
+func heldStepInstance(step *store.Step) string {
 	return fmt.Sprintf("%s@%d", workflow.HeldStepName(step.StepName), step.Ordinal)
 }
 
@@ -176,7 +179,7 @@ func heldStepInstance(step *db.Step) string {
 // clusters inside its payload are a different axis, and they are genuinely
 // plural, so they get the notation the codebase already uses for "several of
 // these, distinguished by position".
-func heldClusterInstance(step *db.Step, element int) string {
+func heldClusterInstance(step *store.Step, element int) string {
 	return fmt.Sprintf("%s#%d", heldStepInstance(step), element)
 }
 
@@ -193,7 +196,7 @@ func heldClusterInstance(step *db.Step, element int) string {
 // `tally` is the instance's configured decider (see holdTally). Its zero value
 // mints `human` steps, which is the default and the whole of the prior
 // behavior.
-func enterHeld(tx *sql.Tx, step *db.Step, held []int, tally holdTally, nowMS int64) error {
+func enterHeld(tx *sql.Tx, step *store.Step, held []int, tally holdTally, nowMS int64) error {
 	for _, element := range held {
 		if err := materializeHeldCluster(tx, step, element, tally, nowMS); err != nil {
 			return err
@@ -217,7 +220,7 @@ func enterHeld(tx *sql.Tx, step *db.Step, held []int, tally holdTally, nowMS int
 
 	// The routing step's saga stops HERE. Its status is already `gated` from
 	// stage 1 and stays there.
-	if err := db.AdvanceSagaTx(tx, step.ID, db.SagaRouting, db.SagaHeld, nowMS); err != nil {
+	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, store.SagaRouting, store.SagaHeld, nowMS); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -225,7 +228,7 @@ func enterHeld(tx *sql.Tx, step *db.Step, held []int, tally holdTally, nowMS int
 
 // materializeHeldCluster creates the gate step for one held cluster.
 func materializeHeldCluster(
-	tx *sql.Tx, step *db.Step, element int, tally holdTally, nowMS int64,
+	tx *sql.Tx, step *store.Step, element int, tally holdTally, nowMS int64,
 ) error {
 	instance := heldClusterInstance(step, element)
 
@@ -240,7 +243,7 @@ func materializeHeldCluster(
 		return nil
 	}
 
-	err = db.InsertStepTx(tx, db.StepRow{
+	err = store.TxOn(tx).InsertStepTx(store.StepRow{
 		RunID: step.RunID, IssueID: step.IssueID, WorkflowID: step.WorkflowID,
 		StepName: workflow.HeldStepName(step.StepName),
 		Ordinal:  step.Ordinal,
@@ -252,7 +255,7 @@ func materializeHeldCluster(
 		// `claim` still refuses, `next` still offers it with no executor, and
 		// approve/reject still apply once a failed tally parks it.
 		Kind:   tally.heldStepKind(),
-		Status: db.StepPending,
+		Status: store.StepPending,
 		// DKT-584: a hold minted as a VOTE step carries the configured
 		// `vote.hold.cost` so the panel is visible to the budget floor at
 		// materialization; a `human` hold stays at 0, the prior row exactly.
@@ -302,7 +305,7 @@ func jsonInts(values []int) string {
 // instance that names no cluster, or a payload this build cannot read. A
 // held step must keep rendering in every one of those cases: the packet is
 // how the question reaches its decider at all.
-func heldClusterInput(tx *sql.Tx, sched *Scheduler, step *db.Step) (*ContextInput, error) {
+func heldClusterInput(tx *sql.Tx, sched *Scheduler, step *store.Step) (*ContextInput, error) {
 	link, err := heldClusterLink(tx, sched, step)
 	if err != nil || link == nil {
 		return nil, err
@@ -362,7 +365,7 @@ type HeldClusterLink struct {
 // its decider at all, and a status verb must not fail because a hold's
 // provenance is unreadable.
 func heldClusterLink(
-	tx *sql.Tx, sched *Scheduler, step *db.Step,
+	tx *sql.Tx, sched *Scheduler, step *store.Step,
 ) (*HeldClusterLink, error) {
 	if !step.Materialized {
 		return nil, nil
@@ -379,7 +382,7 @@ func heldClusterLink(
 	}
 
 	// The routing step this hold belongs to, from the scheduler's loaded set.
-	var routing *db.Step
+	var routing *store.Step
 	for _, s := range sched.steps {
 		if s.RunID == step.RunID && s.IssueID == step.IssueID &&
 			s.StepName == routingName && s.Ordinal == step.Ordinal {
@@ -391,13 +394,13 @@ func heldClusterLink(
 		return nil, nil
 	}
 
-	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
+	artifacts, err := store.TxOn(tx).ListRunArtifactsTx(step.RunID)
 	if err != nil {
 		return nil, err
 	}
 	// The newest artifact carries the current payload — each resolution round
 	// re-records it whole, which is the same rule resolveHeldPayload reads by.
-	var latest *db.Artifact
+	var latest *store.Artifact
 	for _, a := range artifacts {
 		if a.StepID != routing.ID {
 			continue
@@ -428,7 +431,7 @@ func heldClusterLink(
 }
 
 // heldStepExists reports whether the materialized step is already there.
-func heldStepExists(tx *sql.Tx, step *db.Step, instance string) (bool, error) {
+func heldStepExists(tx *sql.Tx, step *store.Step, instance string) (bool, error) {
 	var exists bool
 	err := tx.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM steps
@@ -463,7 +466,7 @@ func heldStepExists(tx *sql.Tx, step *db.Step, instance string) (bool, error) {
 // its own status, routing, and note, and resolveHeldPayload marks only the
 // approved clusters — so what routes is one decision while the record stays
 // per-cluster.
-func heldDecision(conn *sql.DB, step *db.Step) (resolved, approved bool, err error) {
+func heldDecision(conn *sql.DB, step *store.Step) (resolved, approved bool, err error) {
 	rows, err := heldClusterRows(conn, step)
 	if err != nil {
 		return false, false, err
@@ -473,10 +476,10 @@ func heldDecision(conn *sql.DB, step *db.Step) (resolved, approved bool, err err
 	allApproved := true
 	for _, r := range rows {
 		found = true
-		if !db.StepTerminal(r.status) {
+		if !store.StepTerminal(r.status) {
 			return false, false, nil
 		}
-		if r.status != db.StepDone || !routingIs(r.routing.String, RoutingPass) {
+		if r.status != store.StepDone || !routingIs(r.routing.String, RoutingPass) {
 			allApproved = false
 		}
 	}
@@ -504,7 +507,7 @@ type heldClusterRow struct {
 // (heldDecision reduces "resolved, and unanimously approved?"; parkedByRejectedHold
 // asks "is a REJECTION what parked this, specifically?") and so keep their own
 // scan loops; only the query and the row shape are shared here.
-func heldClusterRows(conn *sql.DB, step *db.Step) ([]heldClusterRow, error) {
+func heldClusterRows(conn *sql.DB, step *store.Step) ([]heldClusterRow, error) {
 	prefix := heldStepInstance(step)
 	rows, err := conn.Query(
 		`SELECT instance, status, routing FROM steps
@@ -539,7 +542,7 @@ func heldClusterRows(conn *sql.DB, step *db.Step) ([]heldClusterRow, error) {
 // Only approved clusters are marked `operator_resolved` — that is what makes
 // the record per-cluster rather than a blanket stamp over everything that was
 // ever held.
-func heldClusterElements(tx *sql.Tx, step *db.Step) (map[int]bool, error) {
+func heldClusterElements(tx *sql.Tx, step *store.Step) (map[int]bool, error) {
 	prefix := heldStepInstance(step)
 
 	rows, err := tx.Query(
@@ -565,7 +568,7 @@ func heldClusterElements(tx *sql.Tx, step *db.Step) (map[int]bool, error) {
 		if !ok {
 			continue
 		}
-		approved[element] = status == db.StepDone && routingIs(routing.String, RoutingPass)
+		approved[element] = status == store.StepDone && routingIs(routing.String, RoutingPass)
 	}
 	return approved, rows.Err()
 }
@@ -603,8 +606,8 @@ func heldClusterElementOf(instance, prefix string) (int, bool) {
 // Anything less would refuse `retry` on ordinary parks, which would be a
 // worse bug than the one being fixed: it would remove the least destructive
 // resolution from the cases where it genuinely works.
-func parkedByRejectedHold(conn *sql.DB, step *db.Step) (rejected bool, heldInstance string, err error) {
-	if step.Status != db.StepWaitingHuman {
+func parkedByRejectedHold(conn *sql.DB, step *store.Step) (rejected bool, heldInstance string, err error) {
+	if step.Status != store.StepWaitingHuman {
 		return false, "", nil
 	}
 
@@ -621,12 +624,12 @@ func parkedByRejectedHold(conn *sql.DB, step *db.Step) (rejected bool, heldInsta
 	}
 
 	for _, r := range rows {
-		if !db.StepTerminal(r.status) {
+		if !store.StepTerminal(r.status) {
 			// The question is still open — the operator can still answer it,
 			// and `approve` is the verb that does.
 			continue
 		}
-		if r.status != db.StepDone || !routingIs(r.routing.String, RoutingPass) {
+		if r.status != store.StepDone || !routingIs(r.routing.String, RoutingPass) {
 			return true, r.instance, nil
 		}
 	}
@@ -685,7 +688,7 @@ func (r heldResolution) applies(i int) bool {
 // the aggregated field itself with the computed value it replaced in
 // `operator_set_from` — so a boolean is never the whole message.
 func resolveHeldPayload(
-	tx *sql.Tx, routingStep *db.Step, res heldResolution, nowMS int64,
+	tx *sql.Tx, routingStep *store.Step, res heldResolution, nowMS int64,
 ) error {
 	var (
 		priorID int
@@ -797,7 +800,7 @@ func resolveHeldPayload(
 	if operatorResolved > 0 {
 		body += fmt.Sprintf(", %d operator-resolved", operatorResolved)
 	}
-	_, err = db.InsertArtifactTx(tx, db.Artifact{
+	_, err = store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: routingStep.RunID, StepID: routingStep.ID, Kind: kind,
 		Body:       body,
 		Payload:    string(encoded),
@@ -880,7 +883,7 @@ func thresholdMirrorFields(threshold map[string]string, field string) []string {
 }
 
 // routingStepOf returns the step a materialized `<step>-held@k` belongs to.
-func routingStepOf(conn *sql.DB, held *db.Step) (*db.Step, error) {
+func routingStepOf(conn *sql.DB, held *store.Step) (*store.Step, error) {
 	name, ok := workflow.RoutingStepNameOf(held.StepName)
 	if !ok {
 		return nil, validationErr("step %s is not a materialized held step", held.Instance)
@@ -891,14 +894,14 @@ func routingStepOf(conn *sql.DB, held *db.Step) (*db.Step, error) {
 		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?`,
 		held.RunID, held.IssueID, name, held.Ordinal).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, notFoundErr(db.ErrStepNotFound,
+		return nil, notFoundErr(store.ErrStepNotFound,
 			"step %s has no routing step %s@%d to resolve",
 			held.Instance, name, held.Ordinal)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading the routing step for %s: %w", held.Instance, err)
 	}
-	return db.GetStep(conn, id)
+	return store.StoreOn(conn).GetStep(id)
 }
 
 // decideMaterializedStep is M-c's branch, and the only place `approve`/`reject`
@@ -908,7 +911,7 @@ func routingStepOf(conn *sql.DB, held *db.Step) (*db.Step, error) {
 // operator who never claimed it. Both require the run's conductor
 // capability, checked by DecideStepWith before this is reached (DKT-2465).
 func (e *Engine) decideMaterializedStep(
-	conn *sql.DB, held *db.Step, opts DecideOptions,
+	conn *sql.DB, held *store.Step, opts DecideOptions,
 ) error {
 	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
 	routingStep, err := routingStepOf(conn, held)
@@ -944,14 +947,14 @@ func (e *Engine) decideMaterializedStep(
 	// `held` — a double approve, a resumed race — is CONFLICT naming both
 	// steps. The saga advance below is CAS-guarded on the same stage, so the
 	// loser writes nothing even if it gets past this read.
-	if routingStep.SagaStage != db.SagaHeld {
+	if routingStep.SagaStage != store.SagaHeld {
 		return conflictErr(
 			"step %s cannot be decided: its routing step %s is not holding "+
 				"(its saga is at %q). The decision it asked for has already been "+
 				"made, or the loop moved past it",
 			held.Instance, routingStep.Instance, saganame(routingStep.SagaStage))
 	}
-	if db.StepTerminal(held.Status) {
+	if store.StepTerminal(held.Status) {
 		return conflictErr("step %s is already %s", held.Instance, held.Status)
 	}
 
@@ -979,12 +982,13 @@ func (e *Engine) decideMaterializedStep(
 	// nothing is marked. Under the previous whole-hold shape the order did not
 	// matter, because approval was inferred from the caller rather than read
 	// back.
-	if err := db.SetStepRoutingTx(
-		tx, held.ID, routing, note, db.StepDone, "", nowMS); err != nil {
+	stx := store.TxOn(tx)
+	if err := stx.SetStepRoutingTx(
+		held.ID, routing, note, store.StepDone, "", nowMS); err != nil {
 		return err
 	}
-	if err := db.SetStepAuthorityTx(
-		tx, held.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
+	if err := stx.SetStepAuthorityTx(
+		held.ID, opts.Under.Kind, opts.Under.Ref, nowMS,
 	); err != nil {
 		return err
 	}
@@ -1038,7 +1042,7 @@ func (e *Engine) decideMaterializedStep(
 // the AUTHOR'S: docket learns which values exist from the schema the run
 // pinned and holds no opinion about what any of them means.
 func heldValueField(
-	conn *sql.DB, routingStep *db.Step, value string,
+	conn *sql.DB, routingStep *store.Step, value string,
 ) (string, []string, error) {
 	defs, err := StepDefinitions(conn, routingStep.RunID)
 	if err != nil {
@@ -1120,7 +1124,7 @@ func saganame(stage string) string {
 // then refuses loudly at the tally (resolveVoteRule names the missing rule)
 // rather than silently becoming a question with no verb able to answer it.
 func materializedSpec(
-	def *workflow.Definition, step *db.Step, tally holdTally,
+	def *workflow.Definition, step *store.Step, tally holdTally,
 ) *workflow.Step {
 	if spec := workflow.StepByName(def, step.StepName); spec != nil {
 		return spec
@@ -1179,7 +1183,7 @@ func (e *Engine) HeldResolutionStaleTargets(
 	if e == nil || e.HeadFn == nil || e.IsAncestorFn == nil {
 		return nil
 	}
-	held, err := db.GetStep(conn, heldStepID)
+	held, err := store.StoreOn(conn).GetStep(heldStepID)
 	if err != nil || !held.Materialized {
 		return nil
 	}
@@ -1216,7 +1220,7 @@ func readyStaleTargetCandidates(
 	if err != nil {
 		return nil, err
 	}
-	var ready []*db.Step
+	var ready []*store.Step
 	for _, step := range sched.Steps() {
 		if ok, _ := sched.Ready(step); ok {
 			ready = append(ready, step)

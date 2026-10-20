@@ -6,6 +6,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -113,7 +114,7 @@ func GuardStop(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) 
 		AND (EXISTS (SELECT 1 FROM dispatches WHERE dispatches.run_id = runs.id)
 		     OR EXISTS (SELECT 1 FROM steps
 		                 WHERE steps.run_id = runs.id AND steps.status != ?))`
-	args := []any{db.StepPending}
+	args := []any{store.StepPending}
 	if projectID != 0 {
 		query += ` AND project_id = ?`
 		args = append(args, projectID)
@@ -193,12 +194,12 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 	for _, step := range sched.steps {
 		blocked := false
 		switch step.Status {
-		case db.StepClaimed, db.StepRunning:
+		case store.StepClaimed, store.StepRunning:
 			blocked = true
-		case db.StepGated:
+		case store.StepGated:
 			blocked = !gatedOnOpenVotes(sched, step, openVotes) &&
 				!suspendedOnOpenPanel(sched, step, openVotes)
-		case db.StepPending:
+		case store.StepPending:
 			if openVotes[step.ID] {
 				break
 			}
@@ -258,7 +259,7 @@ func openVoteSteps(tx *sql.Tx, sched *Scheduler) (map[int]bool, error) {
 // HUMAN hold blocks, because its materialized human step is ready, and the
 // mixed case
 // blocks with it.
-func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) bool {
+func gatedOnOpenVotes(sched *Scheduler, step *store.Step, openVotes map[int]bool) bool {
 	heldName := workflow.HeldStepName(step.StepName)
 	unresolved := 0
 	for _, s := range sched.steps {
@@ -268,7 +269,7 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 		if s.StepName != heldName || s.Ordinal != step.Ordinal {
 			continue
 		}
-		if db.StepTerminal(s.Status) {
+		if store.StepTerminal(s.Status) {
 			continue
 		}
 		unresolved++
@@ -283,7 +284,7 @@ func gatedOnOpenVotes(sched *Scheduler, step *db.Step, openVotes map[int]bool) b
 // panel (suspendedOnPanel) while that panel's proposal is still open. Once the
 // proposal is decided the verdict still has to be applied, which is `next`'s
 // work, so the step blocks again.
-func suspendedOnOpenPanel(sched *Scheduler, step *db.Step, openVotes map[int]bool) bool {
+func suspendedOnOpenPanel(sched *Scheduler, step *store.Step, openVotes map[int]bool) bool {
 	for _, panel := range sched.steps {
 		if !openVotes[panel.ID] || panel.IssueID != step.IssueID ||
 			panel.Ordinal != step.Ordinal {
@@ -353,7 +354,7 @@ func GuardGate(conn *sql.DB, stepName string, runID, projectID int) (*GuardVerdi
 	searched := "any active run"
 	switch {
 	case runID != 0:
-		run, err := db.GetRun(conn, runID)
+		run, err := store.StoreOn(conn).GetRun(runID)
 		if err != nil {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
@@ -393,7 +394,7 @@ func GuardGate(conn *sql.DB, stepName string, runID, projectID int) (*GuardVerdi
 		}
 		found = true
 		state = status
-		if status == db.StepDone && routingIs(routing.String, RoutingPass) {
+		if status == store.StepDone && routingIs(routing.String, RoutingPass) {
 			approved = true
 			break
 		}
