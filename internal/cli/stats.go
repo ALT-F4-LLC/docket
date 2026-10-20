@@ -6,9 +6,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -35,30 +35,30 @@ var statsCmd = &cobra.Command{
 }
 
 func runStats(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	st := store.StoreOn(getDB(cmd))
 
 	projectID := getProjectID(cmd)
-	total, err := db.CountIssues(conn, projectID)
+	total, err := st.CountIssues(projectID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("counting issues: %w", err), output.ErrGeneral)
 	}
 
-	rootCount, err := db.CountRootIssues(conn, projectID)
+	rootCount, err := st.CountRootIssues(projectID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("counting root issues: %w", err), output.ErrGeneral)
 	}
 
-	byStatus, err := db.CountByStatus(conn, projectID)
+	byStatus, err := st.CountByStatus(projectID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("counting by status: %w", err), output.ErrGeneral)
 	}
 
-	byPriority, err := db.CountByPriority(conn, projectID)
+	byPriority, err := st.CountByPriority(projectID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("counting by priority: %w", err), output.ErrGeneral)
 	}
 
-	labels, err := db.ListAllLabels(conn, projectID)
+	labels, err := st.ListAllLabels(projectID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
 	}

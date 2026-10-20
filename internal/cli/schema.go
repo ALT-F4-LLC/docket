@@ -3,9 +3,9 @@ package cli
 import (
 	"errors"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -47,16 +47,16 @@ func schemaErr(err error) error {
 		return cmdErr(err, output.ErrValidation)
 	}
 	switch {
-	case errors.Is(err, db.ErrSchemaConflict),
-		errors.Is(err, db.ErrSchemaAlreadyDeprecated),
+	case errors.Is(err, store.ErrSchemaConflict),
+		errors.Is(err, store.ErrSchemaAlreadyDeprecated),
 		errors.Is(err, errSchemaInUse):
 		// Retiring twice and retiring a version a live workflow still names
 		// are both CONFLICTs: the store's state contradicts the caller's
 		// premise, and the message says which premise.
 		return cmdErr(err, output.ErrConflict)
-	case errors.Is(err, db.ErrSchemaNotFound):
+	case errors.Is(err, store.ErrSchemaNotFound):
 		return cmdErr(err, output.ErrNotFound)
-	case errors.Is(err, db.ErrSchemaBuiltin):
+	case errors.Is(err, store.ErrSchemaBuiltin):
 		return cmdErr(err, output.ErrValidation)
 	default:
 		return cmdErr(err, output.ErrGeneral)
