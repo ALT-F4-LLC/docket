@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // DKT-1079 — the run note: the dispatcher's channel into every packet.
@@ -102,8 +102,8 @@ func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Aut
 				"note to the ruling", len(text), RunNoteMaxBytes)
 	}
 
-	run, err := db.GetRun(conn, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := store.StoreOn(conn).GetRun(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -124,7 +124,7 @@ func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Aut
 		return nil, err
 	}
 
-	id, err := db.InsertRunNoteTx(tx, db.RunNote{
+	id, err := store.TxOn(tx).InsertRunNoteTx(store.RunNote{
 		RunID: runID, Text: text, Authority: under.Kind, CreatedAtMS: nowMS,
 	})
 	if err != nil {
@@ -158,7 +158,7 @@ const RunNoteAuthorityUnknown = "unknown"
 // runNoteFromRow is the one conversion from a stored note to its read shape.
 // A stored authority outside ParseRunNoteAuthority's set reads as unknown
 // rather than verbatim, so no stored value reaches a packet header unchecked.
-func runNoteFromRow(n db.RunNote) RunNote {
+func runNoteFromRow(n store.RunNote) RunNote {
 	authority := n.Authority
 	if _, err := ParseRunNoteAuthority(authority); err != nil {
 		authority = RunNoteAuthorityUnknown
@@ -190,13 +190,14 @@ func ParseRunNoteAuthority(kind string) (Authority, error) {
 
 // ListRunNotes returns a run's notes in the order they render.
 func ListRunNotes(conn *sql.DB, runID int) ([]RunNote, error) {
-	if _, err := db.GetRun(conn, runID); err != nil {
-		if errors.Is(err, db.ErrRunNotFound) {
+	st := store.StoreOn(conn)
+	if _, err := st.GetRun(runID); err != nil {
+		if errors.Is(err, store.ErrRunNotFound) {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
 		return nil, err
 	}
-	rows, err := db.ListRunNotes(conn, runID)
+	rows, err := st.ListRunNotes(runID)
 	if err != nil {
 		return nil, err
 	}
