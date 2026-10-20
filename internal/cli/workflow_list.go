@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -121,7 +121,7 @@ func runWorkflowList(cmd *cobra.Command, args []string, w *output.Writer) error 
 	// narrowing by one must not silently narrow by the other.
 	excludeDeprecated := !deprecated && !orphans
 
-	workflows, total, err := db.ListWorkflows(conn, db.WorkflowListOptions{
+	workflows, total, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{
 		ProjectID:         projectID,
 		Name:              name,
 		Limit:             queryLimit,
