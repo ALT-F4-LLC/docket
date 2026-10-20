@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -114,7 +114,8 @@ const (
 func pinnedWorkflowStaleness(
 	conn *sql.DB, projectID, runID int,
 ) ([]PinnedWorkflowStaleness, error) {
-	pins, err := db.ListPins(conn, runID)
+	st := store.StoreOn(conn)
+	pins, err := st.ListPins(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +129,7 @@ func pinnedWorkflowStaleness(
 	names := make([]string, 0, len(pins))
 	seen := make(map[string]bool, len(pins))
 	for _, p := range pins {
-		if p.Kind != db.PinKindWorkflow {
+		if p.Kind != store.PinKindWorkflow {
 			continue
 		}
 		name, version, err := workflow.ParsePayloadRef(p.Ref)
@@ -151,7 +152,7 @@ func pinnedWorkflowStaleness(
 		return nil, nil
 	}
 
-	registered, err := db.WorkflowVersionsFor(conn, projectID, names)
+	registered, err := st.WorkflowVersionsFor(projectID, names)
 	if err != nil {
 		return nil, err
 	}
@@ -367,8 +368,8 @@ func epochAt(epochs []PinEpoch, seq int64) int {
 // the future with a fact about the past.
 func stepReportsAnEpoch(status string) bool {
 	switch status {
-	case db.StepClaimed, db.StepDone, db.StepWaitingHuman,
-		db.StepSkipped, db.StepSuperseded, db.StepFailedRouted:
+	case store.StepClaimed, store.StepDone, store.StepWaitingHuman,
+		store.StepSkipped, store.StepSuperseded, store.StepFailedRouted:
 		return true
 	}
 	return false

@@ -3,8 +3,8 @@ package engine
 import (
 	"database/sql"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // policyForRun resolves a run's pinned policy.toml, or nil when the run has
@@ -26,7 +26,7 @@ import (
 // is not the same fact as a repo that never had one, and conflating them
 // would route real rows against a policy nobody verified.
 func policyForRun(conn *sql.DB, runID int) (*policyDoc, error) {
-	pins, err := db.ListPins(conn, runID)
+	pins, err := store.StoreOn(conn).ListPins(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,7 @@ func policyForRun(conn *sql.DB, runID int) (*policyDoc, error) {
 // policyFromPins is policyForRun over an already-read pin list: nil when the
 // list pins no policy.toml, the parsed document otherwise, and the read
 // error verbatim when the pinned file cannot be read.
-func policyFromPins(runID int, pins []db.Pin) (*policyDoc, error) {
+func policyFromPins(runID int, pins []store.Pin) (*policyDoc, error) {
 	pinned := packetFilePins(pins)
 	if _, ok := pinned[policyPinRef]; !ok {
 		return nil, nil
@@ -62,7 +62,7 @@ func policyFromPins(runID int, pins []db.Pin) (*policyDoc, error) {
 // loads the run.
 type runPolicy struct {
 	runID  int
-	pins   []db.Pin
+	pins   []store.Pin
 	loaded bool
 	doc    *policyDoc
 	err    error
@@ -99,7 +99,7 @@ func (p *runPolicy) load() (*policyDoc, error) {
 // the whole roster, and returning the seats that happened to resolve would
 // seat a panel nobody chose while hiding which seat the policy has no row for.
 func ResolveSeats(conn *sql.DB, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
-	if _, err := db.GetRun(conn, runID); err != nil {
+	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	policy, err := policyForRun(conn, runID)
@@ -111,7 +111,7 @@ func ResolveSeats(conn *sql.DB, runID int, seats []string, size string, labels [
 	// caller asking this question has nothing to fall back to — an empty
 	// answer would read as "these seats route to nothing".
 	if policy == nil {
-		return nil, notFoundErr(db.ErrNotFound,
+		return nil, notFoundErr(store.ErrNotFound,
 			"run %s has no pinned policy.toml to resolve seats against",
 			model.FormatRunID(runID))
 	}
@@ -120,7 +120,7 @@ func ResolveSeats(conn *sql.DB, runID int, seats []string, size string, labels [
 	for _, seat := range seats {
 		assignment, err := policy.ResolveSeat(seat, size, labels)
 		if err != nil {
-			return nil, notFoundErr(db.ErrNotFound,
+			return nil, notFoundErr(store.ErrNotFound,
 				"resolving seat %q from %s's pinned policy.toml: %v",
 				seat, model.FormatRunID(runID), err)
 		}
