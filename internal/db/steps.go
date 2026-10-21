@@ -112,6 +112,9 @@ const (
 	ParkClassHeldRejected ParkClass = "held-rejected"
 	// ParkClassGapOnly: a completion whose only artifacts were gaps.
 	ParkClassGapOnly ParkClass = "gap-only"
+	// ParkClassPartialWithGap: a completion that recorded a candidate beside a
+	// gap its writer marked `AC-Blocking` (DKT-4279).
+	ParkClassPartialWithGap ParkClass = "partial-with-gap"
 	// ParkClassUnchangedHandBack: a loop round handed back the commit its
 	// previous round recorded, so the review chain would re-read one tree.
 	ParkClassUnchangedHandBack ParkClass = "unchanged-handback"

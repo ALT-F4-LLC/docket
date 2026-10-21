@@ -681,6 +681,10 @@ body is stored verbatim either way — the header is read, never stripped.
   Priority: critical|high|medium|low|none wins over Severity when both appear
   Kind:     bug|feature|task|epic|chore   defaults to task
   Labels:   a, b, c                       comma-separated, at most 16
+  AC-Blocking: true                       the gap stops an acceptance criterion
+                                          from being met; with a non-empty
+                                          emit the step parks partial-with-gap
+                                          and its reviews wait for the operator
 
 Unrecognized keys are skipped WITHOUT ending the block, so a convention line
 like ` + "`Home: THIS repository`" + ` on line two composes with a ` + "`Severity:`" + ` line

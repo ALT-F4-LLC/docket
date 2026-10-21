@@ -603,6 +603,10 @@ type gapAttrs struct {
 	Labels   []string
 	Files    []string
 	Scope    []string
+	// ACBlocking is `AC-Blocking: true` (DKT-4279): the writer declares that
+	// this gap stops one of the issue's acceptance criteria from being met.
+	// It affects the step's routing, not the issue the gap materializes.
+	ACBlocking bool
 }
 
 // gapHeaderLine matches one `Key: value` line of a gap's leading header block.
@@ -678,6 +682,11 @@ func parseGapHeader(gap []byte) gapAttrs {
 			attrs.Files = parseGapList(value, attrs.Files)
 		case "scope":
 			attrs.Scope = parseGapList(value, attrs.Scope)
+		case "ac-blocking":
+			switch strings.ToLower(value) {
+			case "true", "yes":
+				attrs.ACBlocking = true
+			}
 		}
 	}
 
@@ -756,6 +765,35 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 		return false, fmt.Errorf("reading the declared emit: %w", err)
 	}
 	return strings.TrimSpace(body) == "", nil
+}
+
+// acBlockingGap reports whether any gap the step recorded declares
+// `AC-Blocking: true` in its header (DKT-4279).
+//
+// A writer that records a candidate AND a gap saying an acceptance criterion
+// cannot be met has told the pipeline its own product is known to fall short.
+// Reviews of that candidate only rediscover the blocker the writer named, so
+// the completion parks for the operator before any review row is offered. The
+// engine reads only what the gap declares about itself, as parseGapHeader does
+// for priority and kind; it never interprets what the gap says.
+func acBlockingGap(conn *sql.DB, step *db.Step) (bool, error) {
+	rows, err := conn.Query(
+		`SELECT body FROM artifacts WHERE step_id = ? AND kind = ?`,
+		step.ID, GapArtifactKind)
+	if err != nil {
+		return false, fmt.Errorf("reading gap artifacts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return false, fmt.Errorf("reading a gap artifact: %w", err)
+		}
+		if parseGapHeader([]byte(body)).ACBlocking {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // ResumeSaga advances a step's saga from its recorded resume point, to
@@ -1273,11 +1311,17 @@ func (e *Engine) runRoutingStage(
 	// pipeline over an empty change — a full judge fanout independently
 	// verifying "nothing to judge" was the measured cost. `waiting-human`
 	// stops the lineage at its source; `step resolve` is the disposition.
-	gapOnly := false
+	gapOnly, blockingGap := false, false
 	if isExecutorStep(step) {
 		gapOnly, err = gapOnlyCompletion(conn, step, spec)
 		if err != nil {
 			return err
+		}
+		if !gapOnly {
+			blockingGap, err = acBlockingGap(conn, step)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1322,6 +1366,20 @@ func (e *Engine) runRoutingStage(
 		routing = workflow.OnFailWaitingHuman
 		reason = "the step recorded only gap artifacts; operator disposes"
 		class = db.ParkClassGapOnly
+	case blockingGap:
+		// DKT-4279: the step recorded a candidate AND a gap it marked
+		// `AC-Blocking`. Its own record says an acceptance criterion cannot be
+		// met, so the reviews that would follow only rediscover the blocker
+		// (three reviews and a synthesis spent ~4.65M cache-read tokens doing so
+		// on RUN-158). Like the gap-only case above, it is decided before the
+		// gate verdict: a fix loop cannot implement what the writer says the
+		// scope forbids. The operator disposes: accept the candidate for review
+		// anyway, amend the scope and retry, or retire the work.
+		routing = workflow.OnFailWaitingHuman
+		reason = "the step recorded a candidate and a gap it marked AC-Blocking; " +
+			"its own record says an acceptance criterion cannot be met, so no " +
+			"review is offered until the operator disposes"
+		class = db.ParkClassPartialWithGap
 	case len(unmeasured) > 0:
 		// A GATE THAT MEASURED NOTHING PARKS (DKT-254). It is decided before
 		// the fail case because `skipped` is not-pass and would otherwise be
