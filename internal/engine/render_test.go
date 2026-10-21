@@ -608,3 +608,23 @@ func TestRenderStatesTheIssueDiffBase(t *testing.T) {
 		t.Errorf("packet does not state `issue.diff base: %s`:\n%s", record["base"], result.Packet)
 	}
 }
+
+// TestPacketHeaderCarriesTheRound is DKT-4281's acceptance check: the header
+// states the step's loop ordinal, so a contract that tells a worker to name the
+// round reads it instead of parsing the instance. An ordinal-0 step renders
+// `round:  0` and an ordinal-1 step `round:  1`.
+func TestPacketHeaderCarriesTheRound(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	stepID := stepIDByInstance(t, conn, "implement@0")
+
+	for _, round := range []int{0, 1} {
+		execSQL(t, conn, `UPDATE steps SET ordinal = ? WHERE id = ?`, round, stepID)
+		result, err := RenderStep(conn, stepID, "", nowMS)
+		testsupport.Must(t, err, "RenderStep at ordinal %d: %v", round, err)
+		want := "round:  " + itoa(round) + "\n"
+		if !strings.Contains(result.Packet, want) {
+			t.Errorf("the ordinal-%d packet header lacks %q:\n%s", round, want, result.Packet)
+		}
+	}
+}
