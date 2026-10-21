@@ -77,7 +77,7 @@ func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (
 }
 
 // recordedHeadOf is the head recorded for the step's CURRENT worktree.
-func recordedHeadOf(conn *sql.DB, step *db.Step) (recordedHead, bool) {
+func recordedHeadOf(conn rowQuerier, step *db.Step) (recordedHead, bool) {
 	var payload sql.NullString
 	err := conn.QueryRow(
 		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
@@ -143,4 +143,18 @@ func liveHeadMovedReason(rec recordedHead) string {
 func commitInRepo(dir, sha string) bool {
 	return osexec.Command("git", "-c", "core.fsmonitor=false", "-C", dir,
 		"cat-file", "-e", sha+"^{commit}").Run() == nil
+}
+
+// clearRecordedHeadIfAnyTx supersedes a step's recorded head with a cleared
+// record when it has one. A re-claimed step that records without a worktree
+// keeps its earlier work_root, so the first attempt's head would otherwise
+// stand for the second attempt.
+func clearRecordedHeadIfAnyTx(tx *sql.Tx, step *db.Step, nowMS int64) error {
+	if step.WorkRoot == "" {
+		return nil
+	}
+	if _, ok := recordedHeadOf(tx, step); !ok {
+		return nil
+	}
+	return insertRecordedHeadTx(tx, step, recordedHead{}, false, step.WorkRoot, nowMS)
 }

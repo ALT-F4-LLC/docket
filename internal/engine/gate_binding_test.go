@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -216,4 +217,65 @@ func (w *bindingWorld) requireParkedWithoutADiff(t *testing.T) {
 	}
 	testsupport.Must(t, w.e.ResumeStrandedSagas(w.conn, step.RunID, nowMS+10*strandedSagaGraceMS),
 		"the stranded-saga sweep after a refused diff")
+}
+
+// The head check before the diff is not enough: the hand-back head read AFTER
+// the diff is what close integrates, so a live worktree that moves while the
+// diff runs must be refused too.
+func TestALiveRecordRefusesAWorktreeThatMovesWhileTheDiffRuns(t *testing.T) {
+	w := newBindingWorld(t, true)
+	w.e.DiffFn = func(dir, base string, scope []string) (string, error) {
+		body, err := GitDiff(dir, base, scope)
+		writeFile(t, dir, "mine/during.txt", "moved while the diff ran\n")
+		runGit(t, dir, "add", "-A")
+		runGit(t, dir, "commit", "-q", "-m", "during")
+		return body, err
+	}
+	step, err := db.GetStep(w.conn, w.stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	var refusal *diffRefusalError
+	if _, _, err := w.e.computeIssueDiff(w.conn, step, true); !errors.As(err, &refusal) {
+		t.Errorf("computeIssueDiff = %v for a worktree that moved during the diff; want a diff refusal", err)
+	}
+}
+
+// The engine's own checkout must not run the repository's hooks: a post-checkout
+// hook of the shared repository (which an executor's worktree shares) would run
+// in the operator's context on every gated step.
+func TestTheEngineOwnedCheckoutRunsNoRepositoryHook(t *testing.T) {
+	w := newBindingWorld(t, false)
+	common := strings.TrimSpace(gitOutput(t, w.worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hook := filepath.Join(common, "hooks", "post-checkout")
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(hook), 0o755), "mkdir hooks")
+	testsupport.Must(t, os.WriteFile(hook, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755), "write hook")
+
+	step, err := db.GetStep(w.conn, w.stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	tree := reconstructTarget(w.conn, step.RunID, w.recorded)
+	if tree.Dir == "" {
+		t.Fatal("the recorded commit could not be checked out")
+	}
+	defer tree.release()
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the repository's post-checkout hook ran in the engine-owned checkout")
+	}
+}
+
+// A re-claim that records without a worktree must not leave the first attempt's
+// head standing for the second.
+func TestARecordingWithoutAWorktreeClearsAnEarlierRecordedHead(t *testing.T) {
+	w := newBindingWorld(t, false)
+	step, err := db.GetStep(w.conn, w.stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if _, ok := recordedHeadOf(w.conn, step); !ok {
+		t.Fatal("premise: the first recording left no head")
+	}
+	tx, err := w.conn.Begin()
+	testsupport.Must(t, err, "begin")
+	testsupport.Must(t, clearRecordedHeadIfAnyTx(tx, step, nowMS+1), "clear")
+	testsupport.Must(t, tx.Commit(), "commit")
+	if rec, ok := recordedHeadOf(w.conn, step); ok {
+		t.Errorf("the first attempt's head %q still stands", rec.Head)
+	}
 }

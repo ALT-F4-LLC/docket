@@ -507,6 +507,10 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		if err := insertRecordedHeadTx(tx, step, recorded, haveRecorded, opts.WorkDir, opts.NowMS); err != nil {
 			return err
 		}
+	} else if err := clearRecordedHeadIfAnyTx(tx, step, opts.NowMS); err != nil {
+		// A re-claim recorded without a worktree keeps its earlier work_root, so
+		// the first attempt's head must not stand for it.
+		return err
 	}
 
 	// The declared worktree persists WITH the artifact, because the saga
@@ -1519,7 +1523,7 @@ func (e *Engine) runRoutingStage(
 		// operator can act on (restore the object, re-pin the worktree), not a
 		// judgment of the work, so it must not route on `on_fail`.
 		routing = workflow.OnFailWaitingHuman
-		reason = diffRefused + "; operator disposes"
+		reason = fmt.Sprintf("%s (the gates' verdict was %q, so a failing or skipped gate is not cleared by this park); operator disposes", diffRefused, verdict)
 		class = db.ParkClassGateSkipped
 	case len(unmeasured) > 0:
 		// A GATE THAT MEASURED NOTHING PARKS (DKT-254). It is decided before
@@ -1915,8 +1919,10 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool)
 	// live worktree, which may hold a different commit than the one the gates
 	// measured. An operator re-pin passes useRecorded = false: it names a tree
 	// to read NOW.
+	var liveRec *recordedHead
 	if useRecorded && step.WorkRoot != "" {
 		if rec, ok := recordedHeadOf(conn, step); ok && rec.Live {
+			liveRec = &rec
 			// A Live record reads the worktree, but only while it still stands at
 			// the recorded head: a different HEAD is a different commit than the
 			// gates measured.
@@ -1958,6 +1964,17 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool)
 	// DKT-106: record the tree's HEAD beside the diff and, on a loop
 	// re-entry, append this ROUND's delta to the cumulative body.
 	payload = e.appendRoundDelta(conn, step, dir, execRoot, base, liveBase, &body)
+	// The HEAD check above ran BEFORE the diff, and the hand-back head just read
+	// is what close integrates: a live worktree that moved while the diff ran
+	// would hand back a commit the gates never measured. The worktree must still
+	// stand at the recorded head, and a hand-back head the payload names (it
+	// names none for uncommitted work) must be that head.
+	if liveRec != nil && (e.liveHeadMoved(*liveRec, step.WorkRoot) ||
+		(handBackHead(payload) != "" && handBackHead(payload) != liveRec.Head)) {
+		return "", "", &diffRefusalError{fmt.Sprintf(
+			"the diff for %s was not recorded: the worktree moved off the commit %.12s "+
+				"it recorded while the diff was computed", step.Instance, liveRec.Head)}
+	}
 	return body, payload, nil
 }
 
