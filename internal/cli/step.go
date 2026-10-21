@@ -672,6 +672,15 @@ backlog issue related to the step's own — same transaction, so the residue
 cannot evaporate. No workflow declaration is needed; the channel is always
 open.
 
+--comment-file (repeatable) posts an issue comment the step's acceptance
+criterion requires, without the executor running ` + "`docket issue comment add`" + `
+itself, which a worktree-isolated executor cannot. The body is recorded as an
+auxiliary artifact of kind ` + "`issue-comment`" + ` and posted by the engine on the
+step's OWN issue, attributed to the step, in the same transaction as the
+recording. There is no way to name another issue: a recorded artifact is
+executor-authored text. At most 4 comments of 16 KiB each, none empty. A
+step cannot be recorded twice, so a comment cannot post twice.
+
 A GAP FILE MAY RANK THE ISSUE IT FILES. Its first line is the issue title;
 immediately after it, consecutive ` + "`Key: value`" + ` lines are read as a header
 block, ending at the first line that is not one (a blank line included). The
@@ -732,6 +741,17 @@ did: priority none, kind task, no labels.`,
 			gaps = append(gaps, gap)
 		}
 
+		// Comments are read whole before anything runs, for the gaps' reason.
+		var comments [][]byte
+		commentPaths, _ := cmd.Flags().GetStringSlice("comment-file")
+		for _, path := range commentPaths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return cmdErr(fmt.Errorf("reading --comment-file: %w", err), output.ErrNotFound)
+			}
+			comments = append(comments, body)
+		}
+
 		// --worktree names the checkout the WORK happened in, for a conductor
 		// recording on behalf of an executor elsewhere. Normalized to
 		// absolute so a resumed saga in another cwd still resolves it.
@@ -748,7 +768,7 @@ did: priority none, kind task, no labels.`,
 		err = e.CompleteStep(conn, id, engine.CompleteOptions{
 			Token: token, WorkDir: workDir, Artifact: artifact, Payload: payload,
 			Usage: usage, Metadata: metadata,
-			Gaps: gaps, GapIssues: &gapIssues, Pending: &pending,
+			Gaps: gaps, GapIssues: &gapIssues, Comments: comments, Pending: &pending,
 			NowMS: model.NowMS(),
 		})
 		if err != nil {
@@ -1956,6 +1976,11 @@ func init() {
 	stepCompleteCmd.Flags().StringSlice("gap-file", nil,
 		"File holding one out-of-scope problem (repeatable); each records a `gap` "+
 			"artifact beside the declared emit and files a related backlog issue")
+	stepCompleteCmd.Flags().StringSlice("comment-file", nil,
+		"File holding one issue comment the acceptance criterion requires "+
+			"(repeatable, at most 4, 16 KiB each); the engine posts it on the "+
+			"step's own issue, attributed to the step, in the same transaction "+
+			"as the recording")
 	stepCompleteCmd.Flags().String("usage", "", `Opaque usage record: {"unit": n, ...}, recorded in the run's ledger`)
 	stepCompleteCmd.Flags().String("metadata", "", "Opaque metadata JSON")
 	stepCompleteCmd.Flags().String("worktree", "",

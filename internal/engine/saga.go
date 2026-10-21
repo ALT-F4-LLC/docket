@@ -86,6 +86,11 @@ type CompleteOptions struct {
 	// from Gaps — the caller's channel for telling the operator where the
 	// residue landed.
 	GapIssues *[]string
+	// Comments are `--comment-file` bodies (repeatable): issue comments the
+	// step's acceptance criterion requires. Each records an auxiliary artifact
+	// of IssueCommentArtifactKind and posts as a comment on the step's own issue
+	// in the same transaction (DKT-4272).
+	Comments [][]byte
 	// Pending, when non-nil, is set true when the gates and routing were
 	// handed to a detached run instead of running inside this call.
 	Pending *bool
@@ -392,6 +397,12 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		}
 	}
 
+	// Comment artifacts take their own caps and refuse an empty body, for the
+	// same reason a gap does (DKT-4272).
+	if err := validateStepComments(step, opts.Comments); err != nil {
+		return err
+	}
+
 	// Shape validation: a payload must be a JSON array of objects, which is the
 	// shape a threshold aggregates over. For a step that declares NO `payload`
 	// this is the whole of it — no other refusal exists for such a step.
@@ -520,6 +531,22 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		}
 		if opts.GapIssues != nil {
 			*opts.GapIssues = append(*opts.GapIssues, model.FormatID(issueID))
+		}
+	}
+
+	// Issue comments record beside the declared emit and post in the SAME
+	// transaction (DKT-4272), each keyed by its artifact so none posts twice.
+	for _, comment := range opts.Comments {
+		artifactID, err := db.InsertArtifactTx(tx, db.Artifact{
+			RunID: step.RunID, StepID: step.ID, Kind: IssueCommentArtifactKind,
+			Body:   string(comment),
+			SHA256: workflow.SHA256(comment),
+		}, opts.NowMS)
+		if err != nil {
+			return err
+		}
+		if err := postStepCommentTx(tx, step, artifactID, comment); err != nil {
+			return err
 		}
 	}
 
