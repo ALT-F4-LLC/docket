@@ -184,6 +184,16 @@ type Engine struct {
 	// a working tree. A field for DiffFn's reason: the real one shells out to
 	// git, and a test injects a body. nil records an empty body.
 	CommitPatchFn func(execRoot, sha string, scope []string) (string, error)
+	// IntegrationRangeFn establishes, for the verified integration annotation,
+	// whether `tip` (the annotated sha) carries the writer's chain base..head by
+	// patch, and where the integrated range starts (DKT-4269). nil skips the
+	// check and records the commit's own patch, as before it existed. A field
+	// for DiffFn's reason: the real one shells out to git.
+	IntegrationRangeFn func(execRoot, tip, head, base string) IntegratedRange
+	// RangePatchFn renders the combined patch of from..to, scoped like
+	// CommitPatchFn, for the annotation's full-range re-pin. nil falls back to
+	// CommitPatchFn on the tip.
+	RangePatchFn func(execRoot, from, to string, scope []string) (string, error)
 	// beforeCloseCAS runs inside a close's transaction just before the
 	// manifest's CAS. Test-only: it lets a test move the row first and reach
 	// the lost-close-race refusal (DKT-2758), which one transaction on a
@@ -220,6 +230,8 @@ func NewEngine() *Engine {
 		TreeMatchFn:          gitTreeMatchesHead,
 		ObjectExistsFn:       gitCommitResolvable,
 		CommitPatchFn:        GitCommitPatch,
+		IntegrationRangeFn:   gitIntegratedRange,
+		RangePatchFn:         GitRangePatch,
 	}
 }
 
@@ -2714,11 +2726,25 @@ func outOfScopeDiff(dir, base string, outside []string) string {
 // untracked half. A merge commit renders no patch under `diff-tree -p` and
 // records an empty body — the annotation's contract names one ordinary commit.
 func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
-	body, err := commitDiff(execRoot, sha, scope)
+	return gitRevPatch(execRoot, []string{"--root", sha}, scope)
+}
+
+// GitRangePatch renders the combined patch of from..to, tree against tree, the
+// way GitCommitPatch renders one commit: scoped, with the same out-of-scope
+// disclosure. It is RangePatchFn's real implementation (the whole integrated
+// range of a multi-commit writer).
+func GitRangePatch(execRoot, from, to string, scope []string) (string, error) {
+	return gitRevPatch(execRoot, []string{from, to}, scope)
+}
+
+// gitRevPatch is the shared body of GitCommitPatch and GitRangePatch: revs are
+// the `git diff-tree` revision arguments.
+func gitRevPatch(execRoot string, revs, scope []string) (string, error) {
+	body, err := commitDiff(execRoot, revs, scope)
 	if err != nil {
 		return "", err
 	}
-	outside := commitOutOfScopeNames(execRoot, sha, scope)
+	outside := commitOutOfScopeNames(execRoot, revs, scope)
 	if len(outside) == 0 {
 		return body, nil
 	}
@@ -2733,7 +2759,7 @@ func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
 		outOfScopeMarker + " their hunks follow (DKT-86) ===\n" +
 			"# A file the change touched must not hide behind a narrow scope —\n" +
 			"# read them as evidence, not as this issue's own claim.\n")
-	extra, err := commitDiff(execRoot, sha, outside)
+	extra, err := commitDiff(execRoot, revs, outside)
 	if err != nil {
 		extra = ""
 	}
@@ -2747,8 +2773,8 @@ func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
 
 // commitDiff is one pathspec'd `git diff-tree -p` of a commit against its
 // parent. An empty pathspec renders the whole commit, for rawDiff's reason.
-func commitDiff(execRoot, sha string, paths []string) (string, error) {
-	args := gitDirArgs(execRoot, "diff-tree", "-p", "--no-commit-id", "--root", sha, "--")
+func commitDiff(execRoot string, revs, paths []string) (string, error) {
+	args := gitDirArgs(execRoot, append(append([]string{"diff-tree", "-p", "--no-commit-id"}, revs...), "--")...)
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
@@ -2762,17 +2788,16 @@ func commitDiff(execRoot, sha string, paths []string) (string, error) {
 // scope excludes — outOfScopeNames's question asked of a commit rather than a
 // working tree. Failures name nothing: the disclosure is best-effort
 // enrichment of a record, never a reason to refuse one.
-func commitOutOfScopeNames(execRoot, sha string, scope []string) []string {
+func commitOutOfScopeNames(execRoot string, revs, scope []string) []string {
 	if len(scope) == 0 {
 		return nil
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"diff-tree", "--name-only", "--no-commit-id", "-r", "--root", sha)...).Output()
+	names := append([]string{"diff-tree", "--name-only", "--no-commit-id", "-r"}, revs...)
+	out, err := exec.Command("git", gitDirArgs(execRoot, names...)...).Output()
 	if err != nil {
 		return nil
 	}
-	in, err := exec.Command("git", append(gitDirArgs(execRoot,
-		"diff-tree", "--name-only", "--no-commit-id", "-r", "--root", sha, "--"), scope...)...).Output()
+	in, err := exec.Command("git", append(gitDirArgs(execRoot, append(names, "--")...), scope...)...).Output()
 	if err != nil {
 		return nil
 	}

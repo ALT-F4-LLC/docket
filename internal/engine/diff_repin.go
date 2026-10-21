@@ -65,6 +65,9 @@ type IssueDiffRepin struct {
 
 	body, payload string
 	supersededID  int
+	// rangeFrom is the commit an annotation's full-range re-pin starts after
+	// (DKT-4269); "" for a re-pin of one commit.
+	rangeFrom string
 }
 
 // prepareIssueDiffRepin computes the re-pin OUTSIDE any transaction (it is a
