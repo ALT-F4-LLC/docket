@@ -300,6 +300,15 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.IssueID)
 	}
 
+	// The security-routing lint (DKT-4275), same channel: a human-mode dry run
+	// would otherwise print nothing for it. The text is the configured label and
+	// lexicon terms plus issue ids, all validated printable ASCII.
+	for _, warning := range result.RoutingWarnings {
+		w.Warn("%s %s; if it is security-sensitive, add the label with "+
+			"`docket issue edit %s --label LABEL` and re-activate",
+			warning.Issue, warning.Reason, warning.Issue)
+	}
+
 	// DKT-590: a bound workflow whose recorded source could not be verified.
 	// On the warning channel because the refusing case never gets here —
 	// activation returns a CONFLICT for drift under a binding it just made —

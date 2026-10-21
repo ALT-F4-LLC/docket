@@ -472,9 +472,10 @@ var engineConfigSpecs = []ConfigSpec{
 		Key:     KeyRoutingSecurityLabel,
 		Kind:    KindName,
 		Default: "security",
-		Doc: "Label that routes an issue to the security review track. `run " +
-			"activate --dry-run` warns about bound issues that lack it but look " +
-			"security-shaped; empty turns the warning off",
+		Doc: "Label the instance's workflows treat as security; the engine " +
+			"routes nothing on it. `run activate --dry-run` warns about bound " +
+			"issues that lack it but look security-shaped; empty turns the " +
+			"warning off",
 	},
 	{
 		Key:     KeyRoutingSecurityLexicon,
@@ -483,7 +484,9 @@ var engineConfigSpecs = []ConfigSpec{
 		Doc: "Comma-separated terms that make an unlabelled issue look " +
 			"security-shaped in `run activate --dry-run`; `-` and `_` match a " +
 			"space, case is ignored. Empty (the default) leaves only the " +
-			"scope-overlap check",
+			"scope-overlap check, which skips scopes with no literal prefix " +
+			"(`**`, `**/x.go`) and issues with no scope: an empty warning list " +
+			"is not a clearance",
 	},
 	{
 		Key:     KeyVoteHoldCost,
