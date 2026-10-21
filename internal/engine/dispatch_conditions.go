@@ -150,19 +150,31 @@ func conditionsVerdict(conn *sql.DB, runID int, waiver ConditionsWaiver) ([]Unfi
 				"close with --no-conditions REASON",
 			model.FormatRunID(runID), len(unfiled), unfiledConditionsReason(unfiled))
 	}
+	// The waiver's run note is written after the close commits, so a reason the
+	// note would refuse is refused HERE, before anything closes.
+	if text := conditionsWaiverText(unfiled, waiver.Reason); len(text) > RunNoteMaxBytes {
+		return nil, validationErr(
+			"--no-conditions reason makes a %d-byte run note, over the %d-byte cap; "+
+				"shorten the reason", len(text), RunNoteMaxBytes)
+	}
 	return unfiled, nil
+}
+
+// conditionsWaiverText is the run note a waived close leaves.
+func conditionsWaiverText(waived []UnfiledCondition, reason string) string {
+	ids := make([]string, len(waived))
+	for i, c := range waived {
+		ids[i] = c.Proposal
+	}
+	return fmt.Sprintf("dispatch close waived unfiled seat conditions on %s: %s",
+		strings.Join(ids, ", "), reason)
 }
 
 // recordConditionsWaiver writes the run note a waived close leaves. The close
 // event already names the waived votes; the note puts the reason where the
 // next worker reads it.
 func recordConditionsWaiver(conn *sql.DB, runID int, waiver ConditionsWaiver, waived []UnfiledCondition, nowMS int64) error {
-	ids := make([]string, len(waived))
-	for i, c := range waived {
-		ids[i] = c.Proposal
-	}
-	text := fmt.Sprintf("dispatch close waived unfiled seat conditions on %s: %s",
-		strings.Join(ids, ", "), waiver.Reason)
+	text := conditionsWaiverText(waived, waiver.Reason)
 	_, err := AddRunNote(conn, runID, waiver.Token, waiver.By,
 		Authority{Kind: AuthorityConductor}, text, nowMS)
 	return err

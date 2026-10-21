@@ -151,3 +151,24 @@ func TestNoConditionsNeedsTheConductorTokenOnABoundRun(t *testing.T) {
 		t.Error("a refused waiver closed the dispatch")
 	}
 }
+
+// The waiver's run note is written after the close commits, so a reason the
+// note would refuse must be refused before the dispatch closes.
+func TestAnOversizeWaiverReasonRefusesBeforeTheDispatchCloses(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+	sealedPanel(t, conn, runID, model.VerdictApproveWithConcerns)
+
+	waiver := ConditionsWaiver{
+		Reason: strings.Repeat("x", RunNoteMaxBytes), Token: testConductorToken,
+		By: Attribution{Actor: "tester", Cwd: "/tmp"},
+	}
+	_, err := closeWith(conn, runID, IntegrationSkip{Conditions: waiver})
+	if code, ok := CodeOf(err); !ok || code != CodeValidation {
+		t.Fatalf("close = %v; want a VALIDATION refusal", err)
+	}
+	if _, ok := openDispatchID(conn, runID); !ok {
+		t.Error("the refused close closed the dispatch")
+	}
+}
