@@ -678,8 +678,11 @@ itself, which a worktree-isolated executor cannot. The body is recorded as an
 auxiliary artifact of kind ` + "`issue-comment`" + ` and posted by the engine on the
 step's OWN issue, attributed to the step, in the same transaction as the
 recording. There is no way to name another issue: a recorded artifact is
-executor-authored text. At most 4 comments of 16 KiB each, none empty. A
-step cannot be recorded twice, so a comment cannot post twice.
+executor-authored text. At most 4 comments of 16 KiB each, none empty, PER
+RECORDING: a step re-claimed after a retry records again and posts again. The
+comment posts when the step is recorded, before its gates run, so it stands
+even if a gate later fails, as a filed gap does. A recording whose comment
+cannot post (its idempotency key is already taken) is refused whole.
 
 A GAP FILE MAY RANK THE ISSUE IT FILES. Its first line is the issue title;
 immediately after it, consecutive ` + "`Key: value`" + ` lines are read as a header

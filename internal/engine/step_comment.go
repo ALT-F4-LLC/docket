@@ -70,15 +70,24 @@ func stepCommentKey(artifactID int) string {
 }
 
 // postStepCommentTx posts a recorded issue-comment artifact as a comment on the
-// step's issue, attributed to the step. A key already recorded posts nothing.
+// step's issue, attributed to the step. The key names an artifact minted in
+// this same transaction, so a key already recorded is never legitimate: the
+// idempotency scope is shared with `issue comment add --idempotency-key`, and a
+// pre-seeded `step-comment:N` would otherwise suppress the post while the
+// artifact still recorded. It refuses, rolling the recording back, instead.
 func postStepCommentTx(tx *sql.Tx, step *db.Step, artifactID int, body []byte) error {
-	_, _, err := db.CreateCommentIdempotentTx(tx, &model.Comment{
+	_, inserted, err := db.CreateCommentIdempotentTx(tx, &model.Comment{
 		IssueID: step.IssueID,
 		Body:    string(body),
 		Author:  model.FormatStepID(step.ID),
 	}, stepCommentKey(artifactID))
 	if err != nil {
 		return fmt.Errorf("posting the comment %s recorded: %w", step.Instance, err)
+	}
+	if !inserted {
+		return fmt.Errorf("posting the comment %s recorded: idempotency key %q is already "+
+			"recorded, so the comment would not post; refusing the recording",
+			step.Instance, stepCommentKey(artifactID))
 	}
 	return nil
 }

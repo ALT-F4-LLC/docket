@@ -92,8 +92,10 @@ func TestRecordingTheSameArtifactAgainPostsNothing(t *testing.T) {
 	testsupport.Must(t, err, "reading the step")
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "begin")
-	testsupport.Must(t, postStepCommentTx(tx, step, artifactID, []byte("posted once")), "re-post")
-	testsupport.Must(t, tx.Commit(), "commit")
+	if err := postStepCommentTx(tx, step, artifactID, []byte("posted once")); err == nil {
+		t.Error("re-posting the same artifact was accepted; it must refuse, not silently skip")
+	}
+	testsupport.Must(t, tx.Rollback(), "rollback")
 
 	if got := commentsBy(t, conn, issueID, model.FormatStepID(stepID)); len(got) != 1 {
 		t.Fatalf("%d comments after re-posting the same artifact; want 1", len(got))
@@ -125,5 +127,42 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 				Token: token, Artifact: []byte("summary"), NowMS: nowMS,
 			}), "recording after a refused one")
 		})
+	}
+}
+
+// The idempotency scope is shared with `issue comment add --idempotency-key`. A
+// pre-seeded step key must not make the recording succeed without its comment.
+func TestAPreSeededStepCommentKeyRefusesTheRecording(t *testing.T) {
+	conn := mustDB(t)
+	stepID, issueID, token := claimedImplement(t, conn)
+
+	var next int
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COALESCE(MAX(id), 0) + 1 FROM artifacts`).Scan(&next), "next artifact id")
+	// The step's own artifact is minted first, so the comment artifact's id is
+	// a few above the current maximum: squat on all of them.
+	for id := next; id < next+4; id++ {
+		_, err := db.CreateCommentIdempotent(conn, &model.Comment{
+			IssueID: issueID, Body: "squatter", Author: "someone",
+		}, stepCommentKey(id))
+		testsupport.Must(t, err, "seeding the key: %v", err)
+	}
+
+	err := testEngine().CompleteStep(conn, stepID, CompleteOptions{
+		Token: token, Artifact: []byte("summary"), NowMS: nowMS,
+		Comments: [][]byte{[]byte("the real comment")},
+	})
+	if err == nil {
+		t.Fatal("the recording succeeded though its comment could not post")
+	}
+	if got := commentsBy(t, conn, issueID, model.FormatStepID(stepID)); len(got) != 0 {
+		t.Errorf("step comments = %q after a refused recording; want none", got)
+	}
+	var artifacts int
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COUNT(*) FROM artifacts WHERE step_id = ? AND kind = ?`,
+		stepID, IssueCommentArtifactKind).Scan(&artifacts), "counting")
+	if artifacts != 0 {
+		t.Errorf("%d issue-comment artifacts survived a refused recording", artifacts)
 	}
 }
