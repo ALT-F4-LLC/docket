@@ -217,7 +217,7 @@ func RenderStepAs(
 
 	var buf bytes.Buffer
 	data := packetData{
-		Context: bundle,
+		Context: abridgeGeneratedDiffs(bundle, gitattributesGenerated(runExecRoot(conn, step.RunID))),
 		Files:   files,
 		Emits:   workflow.ArtifactKind(spec),
 		// `payload` names a `schema@ver`. Carrying it is not the same as
