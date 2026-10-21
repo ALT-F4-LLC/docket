@@ -115,7 +115,7 @@ func TestARetryAfterAnACBlockingParkIsNotParkedByTheEarlierAttemptsGap(t *testin
 // The retry's own AC-blocking gap still parks it.
 func TestARetryThatRecordsItsOwnACBlockingGapParksAgain(t *testing.T) {
 	conn := mustDB(t)
-	_, stepID := completeWorkWithGap(t, conn,
+	runID, stepID := completeWorkWithGap(t, conn,
 		"first blocker\nAC-Blocking: true\n\nAC1 cannot be met here.")
 
 	testsupport.Must(t, testEngine().ResolveStep(conn, stepID, ResolveRetry, "retry", nowMS+1),
@@ -130,10 +130,27 @@ func TestARetryThatRecordsItsOwnACBlockingGapParksAgain(t *testing.T) {
 		GapIssues: &gapIssues, NowMS: nowMS + 3,
 	}), "second completion: %v", nil)
 
-	var class string
-	testsupport.Must(t, conn.QueryRow(
-		`SELECT park_class FROM steps WHERE id = ?`, stepID).Scan(&class), "reading the step")
-	if class != string(db.ParkClassPartialWithGap) {
-		t.Errorf("park_class=%q; want %q", class, db.ParkClassPartialWithGap)
-	}
+	// park_class survives a resolved park, so it alone proves nothing;
+	// assertParkClass also requires the step to be waiting-human.
+	assertParkClass(t, conn, park{runID, stepID}, db.ParkClassPartialWithGap)
+}
+
+// A step that declares the gap kind as its own emit has no separate candidate
+// to bound the read, so every gap still counts.
+func TestAStepThatEmitsTheGapKindStillParksOnABlockingGap(t *testing.T) {
+	conn := mustDB(t)
+	runID := activateSrc(t, conn,
+		strings.Replace(partialGapSrc, `emits = "out"`, `emits = "gap"`, 1), "gap-emit.toml")
+	stepID := stepIDByInstance(t, conn, "work@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+	var gapIssues []string
+	testsupport.Must(t, testEngine().CompleteStep(conn, stepID, CompleteOptions{
+		Token:     claim.Token,
+		Artifact:  []byte("candidate: AC2 met"),
+		Gaps:      [][]byte{[]byte("blocker\nAC-Blocking: true\n\nAC1 cannot be met here.")},
+		GapIssues: &gapIssues, NowMS: nowMS,
+	}), "complete: %v", nil)
+
+	assertParkClass(t, conn, park{runID, stepID}, db.ParkClassPartialWithGap)
 }

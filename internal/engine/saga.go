@@ -881,11 +881,12 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 // first and its gaps after it, so the gaps that speak for the completion being
 // routed are the ones newer than the latest candidate; an earlier attempt's
 // blocker must not park a retry that recorded none. A step that declares no
-// emit has no candidate to bound the read, and every gap counts.
+// emit, or declares the gap kind itself, has no separate candidate to bound
+// the read, and every gap counts.
 func acBlockingGap(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, error) {
 	query := `SELECT body FROM artifacts WHERE step_id = ? AND kind = ?`
 	args := []any{step.ID, GapArtifactKind}
-	if kind := workflow.ArtifactKind(spec); kind != "" {
+	if kind := workflow.ArtifactKind(spec); kind != "" && kind != GapArtifactKind {
 		query += ` AND id > COALESCE(
 			(SELECT MAX(id) FROM artifacts WHERE step_id = ? AND kind = ?), 0)`
 		args = append(args, step.ID, kind)
