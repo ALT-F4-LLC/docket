@@ -220,7 +220,7 @@ func (e *Engine) AnnotateIntegration(
 			return nil, conflictErr(
 				"%.12s does not carry the writer's patch: no commit on its line is "+
 					"patch-equivalent to %s of the writer's chain (%.12s); integrate the "+
-					"missing commit(s) first, then annotate the commit that carries them",
+					"missing commit(s) first (a hand-resolved pick needs the cherry-pick -x trailer naming the writer commit and no file outside its files), then annotate the commit that carries them",
 				sha, missingCommits(r.Missing), writerHead)
 		}
 		rangeFrom = r.From

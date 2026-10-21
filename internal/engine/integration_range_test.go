@@ -217,3 +217,67 @@ func TestAnnotateRepinsOverTheIntegratedRange(t *testing.T) {
 		}
 	}
 }
+
+// handResolvedPick lands the writer's first commit on the sibling line with its
+// hunk edited (a conflict resolved by hand, so the zero-context patch-id no
+// longer matches), then cherry-picks the second commit unchanged. msg is the
+// resolved commit's message; extra, when set, is a second file the resolution
+// also touches. It returns the tip, the writer head and base.
+func handResolvedPick(t *testing.T, msg func(writerFirst string) string, extra string) (repo, tip, head, base string) {
+	t.Helper()
+	repo, base, head = rangeRepo(t)
+	first := gitRun(t, repo, "rev-parse", head+"~1")
+	gitRun(t, repo, "cherry-pick", "-n", first)
+	writeFile(t, repo, "internal/a.go", "package a\n\n// resolved by hand\n")
+	if extra != "" {
+		writeFile(t, repo, extra, "package extra\n")
+	}
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", msg(first))
+	gitRun(t, repo, "cherry-pick", "-x", head)
+	return repo, gitRun(t, repo, "rev-parse", "HEAD"), head, base
+}
+
+// TestIntegratedRangeAcceptsAHandResolvedPickNamingTheWritersCommit: a pick
+// whose hunk was edited has no patch-equal twin, but its trailer names the
+// writer commit and it touches only that commit's files.
+func TestIntegratedRangeAcceptsAHandResolvedPickNamingTheWritersCommit(t *testing.T) {
+	repo, tip, head, base := handResolvedPick(t, func(first string) string {
+		return "writer one, resolved\n\n(cherry picked from commit " + first + ")\n"
+	}, "")
+	r := gitIntegratedRange(repo, tip, head, base)
+	if !r.Known || !r.Carried {
+		t.Errorf("hand-resolved pick with the trailer = %+v; want carried", r)
+	}
+}
+
+// TestIntegratedRangeRefusesAHandResolvedPickThatProvesNothing: no trailer, a
+// trailer naming another commit, a trailer buried in prose, and a trailer on a
+// commit that also touches a file outside the writer's footprint each leave the
+// writer commit unmatched.
+func TestIntegratedRangeRefusesAHandResolvedPickThatProvesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		msg   func(first string) string
+		extra string
+	}{
+		{"no trailer", func(string) string { return "writer one, resolved" }, ""},
+		{"another commit", func(string) string {
+			return "writer one, resolved\n\n(cherry picked from commit " + strings.Repeat("c", 40) + ")\n"
+		}, ""},
+		{"trailer inside prose", func(first string) string {
+			return "writer one, resolved\n\nsee (cherry picked from commit " + first + ") upstream\n"
+		}, ""},
+		{"a file outside the writer's", func(first string) string {
+			return "writer one, resolved\n\n(cherry picked from commit " + first + ")\n"
+		}, "internal/extra.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, tip, head, base := handResolvedPick(t, tc.msg, tc.extra)
+			r := gitIntegratedRange(repo, tip, head, base)
+			if !r.Known || r.Carried || len(r.Missing) != 1 {
+				t.Errorf("%s = %+v; want known, not carried, one missing", tc.name, r)
+			}
+		})
+	}
+}

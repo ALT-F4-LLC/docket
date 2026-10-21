@@ -31,13 +31,18 @@ const integrationWalkLimit = 1000
 // gitIntegratedRange is IntegrationRangeFn's real implementation: does `tip`
 // carry the writer chain base..head, and where does the integrated range start?
 //
-// Three outcomes, in order:
+// Four outcomes, in order:
 //   - head is an ancestor of tip (a merge or a fast-forward carried the chain
 //     itself): carried, and the range starts at the writer's own base.
 //   - every zero-context patch-id of the chain's commits appears on tip's
 //     first-parent line (a cherry-pick of the range, conflict-resolved or not,
 //     stays patch-equivalent only if no hunk was edited): carried, and the
 //     range starts at the first parent of the earliest such commit.
+//   - a writer commit with no patch-equal twin has a hand-resolved pick: a
+//     commit on that line whose message carries the cherry-pick trailer
+//     naming the writer commit and whose changed files are among the writer
+//     commit's. The trailer is text the committer wrote, so it is a claim, and
+//     the file check is what bounds it (see gitCherryPickTwins): carried.
 //   - the chain's combined diff equals one commit's patch on that line (a
 //     squash): carried, from that commit's parent.
 //
@@ -66,6 +71,7 @@ func gitIntegratedRange(execRoot, tip, head, base string) IntegratedRange {
 	if !ok {
 		return IntegratedRange{}
 	}
+	line = gitCherryPickTwins(execRoot, tip, chain, line)
 	wanted := make(map[string]int, len(chain))
 	for _, c := range chain {
 		wanted[c.id]++
@@ -104,6 +110,120 @@ func gitIntegratedRange(execRoot, tip, head, base string) IntegratedRange {
 		}
 	}
 	return IntegratedRange{Known: true, Missing: missing}
+}
+
+// gitCherryPickTwins gives a hand-resolved pick the patch-id of the writer
+// commit it says it picked. A conflict resolved by editing a hunk changes the
+// zero-context patch-id, so the pick has no patch-equal twin; what remains is
+// the trailer `git cherry-pick -x` writes, "(cherry picked from commit <sha>)".
+//
+// The trailer is text the committing executor wrote, so it proves nothing by
+// itself: any commit can carry it. A twin is therefore accepted only when the
+// commit ALSO changes at least one file and only files the writer commit
+// changed, which bounds a forged trailer to commits inside the writer's own
+// footprint. It still does not prove the hunks match; the residual is that a
+// commit confined to the writer's files, naming the writer's commit, passes.
+//
+// A line commit that is already patch-equal to a writer commit keeps its id, and one
+// writer commit aliases at most one line commit (the newest), so a trailer
+// cannot stand for a commit twice.
+func gitCherryPickTwins(execRoot, tip string, chain, line []patchIDPair) []patchIDPair {
+	have := make(map[string]bool, len(line))
+	for _, c := range line {
+		have[c.id] = true
+	}
+	inChain := make(map[string]bool, len(chain))
+	for _, c := range chain {
+		inChain[c.id] = true
+	}
+	out := append([]patchIDPair(nil), line...)
+	for _, w := range chain {
+		if have[w.id] {
+			continue
+		}
+		trailer := "(cherry picked from commit " + w.commit + ")"
+		found, ok := gitOutputLines(execRoot, "log", "--first-parent", "--no-merges",
+			"-n", strconv.Itoa(integrationWalkLimit), "--fixed-strings", "--grep="+trailer,
+			"--format=%H", tip)
+		if !ok {
+			continue
+		}
+		writerFiles, ok := gitChangedFiles(execRoot, w.commit)
+		if !ok {
+			continue
+		}
+		for _, sha := range found {
+			if !commitHasTrailerLine(execRoot, sha, trailer) || !pathsWithin(execRoot, sha, writerFiles) {
+				continue
+			}
+			for i := range out {
+				if out[i].commit == sha && !inChain[out[i].id] {
+					out[i].id = w.id
+					have[w.id] = true
+					break
+				}
+			}
+			if have[w.id] {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// commitHasTrailerLine reports whether the commit's message holds the trailer
+// as a whole line, not as a substring of prose.
+func commitHasTrailerLine(execRoot, sha, trailer string) bool {
+	body, ok := gitOutputLines(execRoot, "show", "-s", "--format=%B", sha)
+	if !ok {
+		return false
+	}
+	for _, l := range body {
+		if strings.TrimSpace(l) == trailer {
+			return true
+		}
+	}
+	return false
+}
+
+// pathsWithin reports whether the commit changes at least one file and every
+// file it changes is in allowed.
+func pathsWithin(execRoot, sha string, allowed map[string]bool) bool {
+	files, ok := gitChangedFiles(execRoot, sha)
+	if !ok || len(files) == 0 {
+		return false
+	}
+	for f := range files {
+		if !allowed[f] {
+			return false
+		}
+	}
+	return true
+}
+
+// gitChangedFiles lists the files a commit changes against its first parent,
+// without rename detection so a rename counts as both paths.
+func gitChangedFiles(execRoot, sha string) (map[string]bool, bool) {
+	names, ok := gitOutputLines(execRoot, "diff-tree", "--no-commit-id", "--name-only",
+		"-r", "--no-renames", sha)
+	if !ok {
+		return nil, false
+	}
+	files := make(map[string]bool, len(names))
+	for _, n := range names {
+		if n != "" {
+			files[n] = true
+		}
+	}
+	return files, true
+}
+
+func gitOutputLines(execRoot string, args ...string) ([]string, bool) {
+	out, err := exec.Command("git", gitDirArgs(execRoot, args...)...).Output()
+	if err != nil {
+		return nil, false
+	}
+	return strings.Split(strings.TrimRight(string(out), "\n"), "\n"), true
 }
 
 type patchIDPair struct{ id, commit string }

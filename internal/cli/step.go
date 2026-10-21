@@ -1274,7 +1274,12 @@ overwriting the same key. The engine interprets no key inside it.
 write-class step whose landed content diverged from its recorded commit — a
 cherry-pick whose conflict was resolved by hand, an operator-ruled patch on
 top of a gate failure. The engine VERIFIES the sha is an ancestor of the
-shared checkout's HEAD and refuses otherwise; then it re-records the step's
+shared checkout's HEAD and refuses otherwise, and that its line carries every
+commit of the writer's chain: a patch-equal commit, or a commit whose message
+ends with the ` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose
+changed files are all among that commit's (a hand-resolved pick edits a hunk,
+so it is not patch-equal; the trailer is the committer's own claim and the file
+check is what bounds it); then it re-records the step's
 ` + "`issue.diff`" + ` from that commit's own patch (superseding the stale record,
 the way ` + "`step resolve --worktree`" + ` re-pins one), so every downstream
 packet binds to the resolved tree and ` + "`dispatch close`" + ` accepts the step
