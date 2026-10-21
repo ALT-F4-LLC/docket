@@ -25,36 +25,47 @@ const RecordedHeadArtifactKind = "recorded-head"
 type recordedHead struct {
 	// Head is the writer's HEAD in the worktree at record time.
 	Head string `json:"head"`
-	// Base is the worktree's fork point, the DOCKET_GATE_BASE a gate is handed.
+	// Base is the head's fork point from the shared checkout, the
+	// DOCKET_GATE_BASE a gate is handed.
 	Base string `json:"base,omitempty"`
 	// Worktree is the path the head was read from. A head is honored only for
 	// the worktree the step still records, so an operator re-pin to another
 	// checkout is never measured at the stale sha.
 	Worktree string `json:"worktree"`
+	// Live marks a head whose WHOLE work a checkout of it would not reproduce:
+	// the worktree held uncommitted or untracked state, no commit of its own, or
+	// no resolvable fork point. The gates and the diff then read the live
+	// worktree, as they always did, but REFUSE to stand for it once its HEAD is
+	// no longer Head, so a worktree that moves on after the record cannot make
+	// gates that passed one commit name another.
+	Live bool `json:"live,omitempty"`
 }
 
 // captureRecordedHead reads the head of the worktree a step records from. The
 // zero value means there is nothing to record: no head resolves, or the
-// worktree holds no commit of its own (head is its fork point), in which case
-// the writer's work is uncommitted state that only the worktree itself holds.
+// worktree is the shared checkout, whose head legitimately moves as work is
+// integrated.
 func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (recordedHead, bool) {
-	if worktree == "" || e.HeadFn == nil {
+	if worktree == "" || e.HeadFn == nil || worktree == runExecRoot(conn, runID) {
 		return recordedHead{}, false
 	}
 	head := e.HeadFn(worktree)
 	if head == "" {
 		return recordedHead{}, false
 	}
-	// A recorded head stands for the writer's WHOLE work, so it is taken only
-	// when a checkout of it is that work: the worktree is not the shared
-	// checkout, its fork point resolves, the head is a commit of its own, and
-	// nothing is left uncommitted. Otherwise the live worktree stays the tree,
-	// which is the only one that holds the uncommitted part.
-	base := gateBaseSHA(conn, runID, worktree)
-	if base == "" || head == base || !worktreeClean(worktree) {
-		return recordedHead{}, false
+	// The fork point is taken from the head just read, not from a second read of
+	// the worktree's HEAD, so base is always an ancestor of head.
+	base := ""
+	if shared := sharedCheckoutHead(runExecRoot(conn, runID)); shared != "" {
+		base = mergeBase(worktree, head, shared)
 	}
-	return recordedHead{Head: head, Base: base, Worktree: worktree}, true
+	// A checkout of the head stands for the writer's WHOLE work only when the
+	// head is a commit of its own, its fork point resolves, and nothing is left
+	// uncommitted. Otherwise the live worktree stays the tree, which is the only
+	// one that holds the uncommitted part, and the record only pins its head.
+	live := base == "" || head == base || !worktreeClean(worktree) ||
+		!commitInRepo(runExecRoot(conn, runID), head)
+	return recordedHead{Head: head, Base: base, Worktree: worktree, Live: live}, true
 }
 
 // recordedHeadOf is the head recorded for the step's CURRENT worktree.
@@ -73,6 +84,12 @@ func recordedHeadOf(conn *sql.DB, step *db.Step) (recordedHead, bool) {
 		return recordedHead{}, false
 	}
 	return rec, true
+}
+
+// liveHeadMoved reports whether a Live record's worktree no longer stands at
+// the recorded head (or cannot be read at all).
+func (e *Engine) liveHeadMoved(rec recordedHead, worktree string) bool {
+	return e.HeadFn == nil || e.HeadFn(worktree) != rec.Head
 }
 
 // worktreeClean reports whether dir has no tracked change and no untracked
@@ -104,4 +121,18 @@ func insertRecordedHeadTx(
 		SHA256: workflow.SHA256([]byte(rec.Head)),
 	}, nowMS)
 	return err
+}
+
+// liveHeadMovedReason words the skipped row a moved worktree records.
+func liveHeadMovedReason(rec recordedHead) string {
+	return "the worktree no longer stands at the commit " + rec.Head[:min(12, len(rec.Head))] +
+		" this step recorded, so a gate cannot say which commit it measured"
+}
+
+// commitInRepo reports whether the commit is in dir's object database: a
+// worktree of a different repository records a head the run's checkout cannot
+// check out, and its record then pins the head without replacing the tree.
+func commitInRepo(dir, sha string) bool {
+	return osexec.Command("git", "-c", "core.fsmonitor=false", "-C", dir,
+		"cat-file", "-e", sha+"^{commit}").Run() == nil
 }

@@ -109,6 +109,10 @@ func (e *Engine) prepareIssueDiffRepin(
 	// `worktree` field is written from it.
 	pinned := *step
 	pinned.WorkRoot = worktree
+	// The head is captured BEFORE the diff reads the tree, and kept only if the
+	// diff named the same commit: a tree that moved between the two reads
+	// records no head rather than a head the diff did not describe.
+	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, worktree)
 	body, payload, err := e.computeIssueDiff(conn, &pinned, false)
 	if err != nil {
 		return nil, err
@@ -170,7 +174,7 @@ func (e *Engine) prepareIssueDiffRepin(
 	repin := &IssueDiffRepin{
 		Worktree: worktree, ToSHA: to, body: body, payload: payload,
 	}
-	repin.recorded, repin.haveRecorded = e.captureRecordedHead(conn, step.RunID, worktree)
+	repin.recorded, repin.haveRecorded = recorded, haveRecorded && recorded.Head == to
 	if prior != nil {
 		repin.FromSHA = handBackHead(prior.Payload)
 		repin.supersededID = prior.ID

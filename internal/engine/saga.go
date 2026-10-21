@@ -500,13 +500,11 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
-	if haveRecorded {
-		payload, _ := json.Marshal(recorded)
-		if _, err := db.InsertArtifactTx(tx, db.Artifact{
-			RunID: step.RunID, StepID: step.ID, Kind: RecordedHeadArtifactKind,
-			Body: recorded.Head, Payload: string(payload),
-			SHA256: workflow.SHA256([]byte(recorded.Head)),
-		}, opts.NowMS); err != nil {
+	// Always written for a worktree-recorded step, cleared when no head
+	// resolved: a re-claimed step records again under the same step id, and the
+	// first attempt's head must not stand for the second.
+	if opts.WorkDir != "" {
+		if err := insertRecordedHeadTx(tx, step, recorded, haveRecorded, opts.WorkDir, opts.NowMS); err != nil {
 			return err
 		}
 	}
@@ -1120,20 +1118,55 @@ func (e *Engine) runGateStage(
 	// the commit the diff names and close integrates. Whatever the worktree
 	// does after the record cannot make gates that passed one commit stand for
 	// another. The writer's worktree stays a containment root (sc.Worktree).
+	//
+	// Once a record is honored there is NO fallback to the live worktree: a
+	// sha the object database no longer holds records a `skipped` row (the
+	// gate could not measure), never a measurement of whatever the worktree
+	// holds now.
 	sc.Worktree = step.WorkRoot
+	var rows []GateResultRow
+	skipRow := func(why string) []GateResultRow {
+		return []GateResultRow{{Gate: gate.Name, Ordinal: 0, Verdict: VerdictSkipped, Reason: why}}
+	}
+	measured := false
+	liveRec := recordedHead{}
 	if step.WorkRoot != "" {
 		if rec, ok := recordedHeadOf(conn, step); ok {
-			if tree := reconstructTarget(conn, step.RunID, rec.Head); tree.Dir != "" {
-				defer tree.release()
-				sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
-				sc.Base = rec.Base
+			switch {
+			case rec.Live:
+				// The record holds work a checkout would not reproduce, so the
+				// worktree is measured; it must still stand at the recorded head
+				// before AND after the gate, or the gate did not measure the
+				// commit the diff will name.
+				liveRec = rec
+				if e.liveHeadMoved(rec, step.WorkRoot) {
+					rows, measured = skipRow(liveHeadMovedReason(rec)), true
+				}
+			default:
+				tree := reconstructTarget(conn, step.RunID, rec.Head)
+				if tree.Dir == "" {
+					rows, measured = skipRow(fmt.Sprintf(
+						"the commit %.12s this step recorded cannot be checked out, so the "+
+							"gate could not measure it; not measuring the worktree in its place",
+						rec.Head)), true
+				} else {
+					defer tree.release()
+					sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
+					sc.Base = rec.Base
+				}
 			}
 		}
 	}
 
-	rows, err := runGate(e.Gates, spec, sc)
-	if err != nil {
-		return fmt.Errorf("running gate %s on %s: %w", gate.Name, step.Instance, err)
+	if !measured {
+		var err error
+		rows, err = runGate(e.Gates, spec, sc)
+		if err != nil {
+			return fmt.Errorf("running gate %s on %s: %w", gate.Name, step.Instance, err)
+		}
+		if liveRec.Head != "" && e.liveHeadMoved(liveRec, step.WorkRoot) {
+			rows = skipRow(liveHeadMovedReason(liveRec))
+		}
 	}
 
 	// ---- Transaction B: record the result and advance. ---------------------
@@ -1848,14 +1881,28 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool)
 	// checkout of it against the fork point recorded with it: the commit the
 	// gates measured is the commit this diff names and close integrates, and a
 	// worktree that moved on or vanished since the record changes neither. If
-	// the sha cannot be checked out the live worktree is read, as before. An
-	// operator re-pin passes useRecorded = false: it names a tree to read NOW.
+	// the sha cannot be checked out the stage REFUSES rather than read the
+	// live worktree, which may hold a different commit than the one the gates
+	// measured. An operator re-pin passes useRecorded = false: it names a tree
+	// to read NOW.
 	if useRecorded && step.WorkRoot != "" {
-		if rec, ok := recordedHeadOf(conn, step); ok {
-			if tree := reconstructTarget(conn, step.RunID, rec.Head); tree.Dir != "" {
-				defer tree.release()
-				dir, base, liveBase = tree.Dir, rec.Base, false
+		if rec, ok := recordedHeadOf(conn, step); ok && rec.Live {
+			// A Live record reads the worktree, but only while it still stands at
+			// the recorded head: a different HEAD is a different commit than the
+			// gates measured.
+			if e.liveHeadMoved(rec, step.WorkRoot) {
+				return "", "", fmt.Errorf("computing the diff for %s: the worktree no longer "+
+					"stands at the commit %.12s it recorded", step.Instance, rec.Head)
 			}
+		} else if ok {
+			tree := reconstructTarget(conn, step.RunID, rec.Head)
+			if tree.Dir == "" {
+				return "", "", fmt.Errorf("computing the diff for %s: the commit %.12s it "+
+					"recorded cannot be checked out, and the worktree is not read in its place",
+					step.Instance, rec.Head)
+			}
+			defer tree.release()
+			dir, base, liveBase = tree.Dir, rec.Base, false
 		}
 	}
 	body, err = e.DiffFn(dir, base, scope)

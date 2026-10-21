@@ -180,12 +180,12 @@ func TestAWriterThatCommittedNothingStillMeasuresItsWorktree(t *testing.T) {
 		Token: claim.Token, Artifact: []byte("summary"), WorkDir: worktree, NowMS: nowMS,
 	}), "complete")
 
-	var recorded int
-	testsupport.Must(t, conn.QueryRow(
-		`SELECT COUNT(*) FROM artifacts WHERE step_id = ? AND kind = ?`,
-		stepID, RecordedHeadArtifactKind).Scan(&recorded), "counting")
-	if recorded != 0 {
-		t.Errorf("%d recorded-head artifacts for a writer that committed nothing", recorded)
+	// The record only pins the head: it is Live, so no checkout replaces the
+	// worktree that alone holds the uncommitted work.
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if rec, ok := recordedHeadOf(conn, step); !ok || !rec.Live {
+		t.Errorf("recorded head = %+v (ok %v) for a writer that committed nothing; want a Live pin", rec, ok)
 	}
 	if len(captured.seen) == 0 {
 		t.Fatal("no completion gate was dispatched")
@@ -298,12 +298,12 @@ func TestCaptureRecordedHeadRefusesWorkItCannotReproduce(t *testing.T) {
 	e := testEngine()
 	e.HeadFn = sharedCheckoutHead
 
-	if _, ok := e.captureRecordedHead(conn, run.ID, worktree); !ok {
-		t.Fatal("a clean worktree with a commit of its own recorded no head")
+	if rec, ok := e.captureRecordedHead(conn, run.ID, worktree); !ok || rec.Live {
+		t.Fatalf("a clean worktree with a commit of its own recorded %+v (ok %v), want a replaceable head", rec, ok)
 	}
 	writeFile(t, worktree, "mine/untracked.txt", "left over\n")
-	if _, ok := e.captureRecordedHead(conn, run.ID, worktree); ok {
-		t.Error("a head was recorded for a worktree with an untracked file")
+	if rec, ok := e.captureRecordedHead(conn, run.ID, worktree); !ok || !rec.Live {
+		t.Errorf("an untracked file recorded %+v (ok %v), want a Live head that pins the commit without replacing the tree", rec, ok)
 	}
 	if _, ok := e.captureRecordedHead(conn, run.ID, shared); ok {
 		t.Error("a head was recorded for the shared checkout")
