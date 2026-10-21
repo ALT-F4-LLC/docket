@@ -131,6 +131,21 @@ func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
 		t.Errorf("report = %+v; an empty lint must read as checked-nothing", result2.RoutingLint)
 	}
 
+	// A labelled issue whose scope has no literal prefix (`**/auth/**`) cannot be
+	// compared against, so it must not read as a labelled issue the lint checked.
+	conn4 := mustDB(t)
+	registerFixture(t, conn4)
+	wide := createIssue(t, conn4, "Harden auth", "body", "task", []string{"security"})
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn4, wide, `["**/auth/**"]`), "declaring scope")
+	small := createIssue(t, conn4, "Tidy", "typos", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn4, small, `["docs/README.md"]`), "declaring scope")
+	run4 := startRun(t, conn4, wide, small)
+	result4, err := Activate(conn4, run4.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	if result4.RoutingLint == nil || !result4.RoutingLint.CheckedNothing() || result4.RoutingLint.LabelledIssues != 0 {
+		t.Errorf("report = %+v; a labelled issue with an uncomparable scope must read as checked-nothing", result4.RoutingLint)
+	}
+
 	// A real activation never runs the lint, so it carries no report.
 	conn3 := mustDB(t)
 	real, _, _, _, _ := routingRun(t, conn3)

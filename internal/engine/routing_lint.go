@@ -54,8 +54,9 @@ type RoutingLintReport struct {
 	Label string `json:"label"`
 	// LexiconTerms is the number of configured lexicon terms.
 	LexiconTerms int `json:"lexicon_terms"`
-	// LabelledIssues is the number of bound issues carrying the label, the only
-	// issues a scope overlap can be found against.
+	// LabelledIssues is the number of bound issues carrying the label whose
+	// scope the overlap check can compare (a glob with a literal prefix): the
+	// only issues an overlap can be found against.
 	LabelledIssues int `json:"labelled_issues"`
 	// Linted is the number of bound issues without the label that were checked.
 	Linted int `json:"linted"`
@@ -127,7 +128,7 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 
 	report := RoutingLintReport{Label: label.Value, LexiconTerms: len(terms)}
 	for _, issue := range issues {
-		if issue.security {
+		if issue.security && hasLiteralPrefixGlob(issue.scope) {
 			report.LabelledIssues++
 		}
 	}
