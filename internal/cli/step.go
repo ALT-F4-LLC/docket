@@ -462,7 +462,7 @@ dead attempt's usage remains back-fillable against it.`,
 var stepHoldCmd = &cobra.Command{
 	Use:   "hold STEP-N --reason R",
 	Short: "Park one ready step for the operator",
-	Long: `Park one READY step waiting-human (park class ` + "`held`" + `), so the next
+	Long: `Park one PENDING step waiting-human (park class ` + "`held`" + `), so the next
 dispatch stops offering it while the rest of its issue runs on.
 
 A step that declares no max_attempts is re-offered after every failure, and
@@ -470,7 +470,8 @@ before this verb the only way to stop offering it was ` + "`run abandon --issue`
 which ends every step of the issue. A held step resolves like any other park:
 ` + "`step resolve --as retry`" + ` returns it to the pool, ` + "`--as skip`" + ` skips it.
 
-Ready steps only. A claimed step that keeps failing is force-reaped first
+Pending steps only, ready or staged behind an unfinished predecessor (` + "`run hold-issue`" + `
+holds every pending step of one issue at once). A claimed step that keeps failing is force-reaped first
 (` + "`step reap`" + `, which spends no attempt) and then held. --reason is required
 and becomes the step's park reason; the hold is recorded as one step-held event
 carrying the reason, the actor, and the working directory.

@@ -111,6 +111,11 @@ type Manifest struct {
 	// never a row field. The open also records one park-retry-eligible event
 	// per park.
 	RetryEligible []RetryEligible `json:"retry_eligible,omitempty"`
+	// Held lists the run's held steps with the holder's reason (DKT-4273). A
+	// held step is parked, so it is never a row; this says that a withheld row is
+	// held on purpose, ready or staged, so the conductor keeps no exclusion list
+	// of its own. Live-derived like RetryEligible.
+	Held []HeldStep `json:"held,omitempty"`
 }
 
 // StaleTarget names one manifest row whose packet will render from a recorded
@@ -359,6 +364,7 @@ func (e *Engine) OpenDispatch(
 	// After the commit, like the other advisories: a failure to record the event
 	// must not undo an open that already committed. The list is still returned.
 	retryEligible, _ := recordRetryEligible(conn, runID, nowMS)
+	held, _ := HeldSteps(conn, runID)
 
 	limits, limitSources := rowClassLimits(sched, rows)
 	return &Manifest{
@@ -377,6 +383,7 @@ func (e *Engine) OpenDispatch(
 		// what `guard spawn` will hold the next launch on.
 		ReapHold:      ReapHoldReason(sched.UnacknowledgedReaps()),
 		RetryEligible: retryEligible,
+		Held:          held,
 	}, nil
 }
 
