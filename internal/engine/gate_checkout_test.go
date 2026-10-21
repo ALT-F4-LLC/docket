@@ -448,3 +448,31 @@ func TestAWriterThatCommittedNothingAndLeftACleanWorktreeIsBoundToABaseCheckout(
 		}
 	}
 }
+
+// A containment root that cannot be resolved is not skipped on faith: a binary
+// lexically inside it is refused, with the root reached through a symlinked
+// parent too, and a binary elsewhere is not.
+func TestAnUnresolvableContainmentRootStillContainsItsBinary(t *testing.T) {
+	parent := t.TempDir()
+	real, err := filepath.EvalSymlinks(parent)
+	testsupport.Must(t, err, "EvalSymlinks: %v", err)
+	alias := filepath.Join(t.TempDir(), "alias")
+	testsupport.Must(t, os.Symlink(real, alias), "symlink")
+
+	gone := filepath.Join(real, "gone")
+	inside := filepath.Join(gone, "bin", "tool")
+	for name, tc := range map[string]struct {
+		root, path string
+		want       bool
+	}{
+		"plain":              {gone, inside, true},
+		"root through alias": {filepath.Join(alias, "gone"), inside, true},
+		"the root itself":    {gone, gone, true},
+		"a sibling":          {gone, filepath.Join(real, "gone-evil", "tool"), false},
+		"elsewhere":          {gone, filepath.Join(t.TempDir(), "tool"), false},
+	} {
+		if got := rootContainsLexically(tc.root, tc.path); got != tc.want {
+			t.Errorf("%s: rootContainsLexically(%q, %q) = %v, want %v", name, tc.root, tc.path, got, tc.want)
+		}
+	}
+}

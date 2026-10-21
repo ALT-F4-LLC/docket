@@ -230,12 +230,49 @@ func (r *ExecRunner) resolveContained(argv0, entryArgv0 string, sc StepContext) 
 		if extra == "" || extra == primary {
 			continue
 		}
-		if _, err := exec.Resolve(argv0, extra, entryArgv0); err != nil &&
-			!errors.Is(err, exec.ErrEnvironment) {
+		_, err := exec.Resolve(argv0, extra, entryArgv0)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, exec.ErrEnvironment) {
 			return "", err
+		}
+		// The root did not resolve, and the binary and the root are normalized
+		// in separate steps, so a tree that moves between them would let a
+		// binary inside it pass the real check. Compare the paths lexically
+		// (resolving what still exists) before skipping the root.
+		if rootContainsLexically(extra, resolved) {
+			return "", fmt.Errorf("%w: %s resolved to %s, which is inside %s, a tree that did not resolve to check it against",
+				exec.ErrRefused, exec.Render(argv0), exec.Render(resolved), exec.Render(extra))
 		}
 	}
 	return resolved, nil
+}
+
+// rootContainsLexically reports whether path is at or under root by a path
+// comparison that needs no resolvable root: the root is made absolute and
+// cleaned, and its deepest existing ancestor is resolved through symlinks, so
+// a root reached through a symlinked parent still compares equal to the
+// resolved path.
+func rootContainsLexically(root, path string) bool {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return true // an unreadable root is not provably elsewhere
+	}
+	abs = filepath.Clean(abs)
+	if exec.Under(abs, path) {
+		return true
+	}
+	rest := ""
+	for dir := abs; ; dir = filepath.Dir(dir) {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return exec.Under(filepath.Join(real, rest), path)
+		}
+		if filepath.Dir(dir) == dir {
+			return false
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 // runNamedGate runs a gate whose command is the trust entry's own argv.
