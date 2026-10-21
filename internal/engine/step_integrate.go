@@ -107,6 +107,13 @@ func (e *Engine) IntegrateSteps(
 	for _, p := range plans {
 		pick, err := e.CherryPickFn(p.execRoot, p.base, p.head)
 		if err != nil {
+			if pick.Tip != "" && pick.Tip != pick.Before {
+				return done, conflictErr(
+					"%s: the shared branch moved %.12s -> %.12s but the pick was not accepted: %v; "+
+						"nothing was reset — inspect the branch, then run `docket step annotate %s "+
+						"--integrated-sha <sha>` once it carries the work",
+					p.instance, pick.Before, pick.Tip, err, model.FormatStepID(p.id))
+			}
 			return done, conflictErr("%s was not integrated: %v", p.instance, err)
 		}
 		ann, err := e.AnnotateIntegration(conn, p.id, pick.Tip, "", by, token, nowMS)
@@ -173,11 +180,20 @@ func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integrateP
 			"step %s recorded no commit in its issue.diff, so there is nothing to pick", step.Instance)
 	}
 	writerHead, writerBase := writerChain(prior.Payload, head)
+	// An unrecorded base would make the chain the head commit alone, and the
+	// annotation's own check reads it the same way, so a multi-commit writer
+	// would be reported integrated with its earlier commits never picked.
+	if writerBase == "" {
+		return integratePlan{}, validationErr(
+			"step %s recorded no base for its writer chain, so the engine cannot tell which "+
+				"commits are the writer's; integrate it by hand and annotate the result",
+			step.Instance)
+	}
 	// The chain is passed to git as revisions. It comes from a recorded payload,
 	// so it is held to the shape the engine itself records (full commit ids)
 	// before any argument is built from it: a value that began with "-" would
 	// be an option, not a revision.
-	if !fullCommitSHA.MatchString(writerHead) || (writerBase != "" && !fullCommitSHA.MatchString(writerBase)) {
+	if !fullCommitSHA.MatchString(writerHead) || !fullCommitSHA.MatchString(writerBase) {
 		return integratePlan{}, validationErr(
 			"step %s recorded a writer chain that is not full commit ids (head %q, base %q); "+
 				"the engine will not build a git command from it", step.Instance, writerHead, writerBase)

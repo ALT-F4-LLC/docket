@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -404,5 +405,82 @@ func TestIntegrateStepsBuildsNoGitCommandFromAMalformedRecordedChain(t *testing.
 				t.Errorf("head %q was run as a git option", bad)
 			}
 		}
+	}
+}
+
+// TestIntegrateStepsRefusesAChainWithNoRecordedBase: an empty base would read
+// as the head commit alone, so a multi-commit writer would pick only its last
+// commit and be annotated integrated.
+func TestIntegrateStepsRefusesAChainWithNoRecordedBase(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	latest, err := stepLatestIssueDiff(f.conn, f.stepID)
+	testsupport.Must(t, err, "stepLatestIssueDiff: %v", err)
+	_, err = f.conn.Exec(
+		`UPDATE artifacts SET payload = json_remove(json_set(payload, '$.base', ''), '$.writer_head', '$.writer_base') WHERE id = ?`,
+		latest.ID)
+	testsupport.Must(t, err, "clear the recorded base: %v", err)
+	before := f.sharedHead(t)
+	_, err = f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "recorded no base") {
+		t.Fatalf("error = %v, want the no-base refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+}
+
+// TestIntegrateStepsPicksTheRecordedCommitsNotAReplacementForThem: a replace
+// ref swapping another commit in for the writer's head must not change what the
+// engine picks.
+func TestIntegrateStepsPicksTheRecordedCommitsNotAReplacementForThem(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	gitRun(t, f.shared, "checkout", "-q", "-b", "decoy", f.base)
+	writeFile(t, f.shared, "internal/evil.go", "package evil\n")
+	gitRun(t, f.shared, "add", "-A")
+	gitRun(t, f.shared, "commit", "-q", "-m", "decoy")
+	decoy := gitRun(t, f.shared, "rev-parse", "HEAD")
+	gitRun(t, f.shared, "checkout", "-q", "-")
+	gitRun(t, f.shared, "replace", f.head, decoy)
+
+	_, _ = f.integrate(testConductorToken, f.stepID) // the annotation may refuse; the pick must not be the decoy's
+	if _, err := os.Stat(filepath.Join(f.shared, "internal", "evil.go")); err == nil {
+		t.Error("the decoy commit's content was picked in place of the writer's")
+	}
+	for _, file := range []string{"internal/a.go", "internal/b.go"} {
+		if _, err := os.Stat(filepath.Join(f.shared, file)); err != nil {
+			t.Errorf("the writer's %s did not land: %v", file, err)
+		}
+	}
+}
+
+// TestIntegrateStepsNamesTheMovedBranchWhenAPickIsRejectedAfterLanding: a pick
+// that moved HEAD and then failed its own accounting must not be reported as
+// "not integrated".
+func TestIntegrateStepsNamesTheMovedBranchWhenAPickIsRejectedAfterLanding(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	f.e.CherryPickFn = func(string, string, string) (GitPick, error) {
+		return GitPick{Before: strings.Repeat("a", 40), Tip: strings.Repeat("b", 40)}, errors.New("count mismatch")
+	}
+	_, err := f.integrate(testConductorToken, f.stepID)
+	if err == nil || strings.Contains(err.Error(), "was not integrated") ||
+		!strings.Contains(err.Error(), "step annotate") {
+		t.Fatalf("error = %v, want the branch-moved message pointing at `step annotate`", err)
+	}
+}
+
+// TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite: the checkout's
+// state is part of the read-only plan, so a dirty checkout of a later step's run
+// is found before an earlier step's pick lands.
+func TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	writeFile(t, f.shared, "internal/tracked.txt", "edited\n")
+	picks := 0
+	f.e.CherryPickFn = func(string, string, string) (GitPick, error) {
+		picks++
+		return GitPick{}, errors.New("must not be reached")
+	}
+	if _, err := f.integrate(testConductorToken, f.stepID); err == nil {
+		t.Fatal("integrate over a dirty checkout succeeded")
+	}
+	if picks != 0 {
+		t.Errorf("the pick ran %d time(s) before the checkout was checked", picks)
 	}
 }

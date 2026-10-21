@@ -40,7 +40,7 @@ type GitPick struct {
 func integrateGit(execRoot string, args ...string) (string, error) {
 	full := append([]string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-		"-c", "rerere.enabled=false", "-C", execRoot,
+		"-c", "rerere.enabled=false", "--no-replace-objects", "-C", execRoot,
 	}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Env = integrateGitEnv()
@@ -65,7 +65,7 @@ func integrateGitEnv() []string {
 		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=",
 		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
 		"GIT_NAMESPACE=", "GIT_PREFIX=", "GIT_EDITOR=", "GIT_SEQUENCE_EDITOR=",
-		"GIT_TERMINAL_PROMPT=",
+		"GIT_TERMINAL_PROMPT=", "GIT_REPLACE_REF_BASE=", "GIT_GRAFT_FILE=", "GIT_NO_REPLACE_OBJECTS=",
 	}
 	var env []string
 next:
@@ -77,7 +77,7 @@ next:
 		}
 		env = append(env, kv)
 	}
-	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0")
+	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1")
 }
 
 func truncateText(s string, n int) string {
@@ -102,6 +102,9 @@ func chainBase(base, head string) string {
 // one, and the engine chooses no parent), and it is not empty. It returns the
 // chain's commits, oldest first.
 func gitIntegrationChain(execRoot, base, head string) ([]string, error) {
+	if err := gitCheckSharedCheckout(execRoot); err != nil {
+		return nil, err
+	}
 	base = chainBase(base, head)
 	for _, rev := range []string{head, base} {
 		if _, err := integrateGit(execRoot, "cat-file", "-e", rev+"^{commit}"); err != nil {
@@ -182,7 +185,8 @@ func gitCherryPickRange(execRoot, base, head string) (GitPick, error) {
 		_, _ = integrateGit(execRoot, "cherry-pick", "--abort")
 		now, headErr := integrateGit(execRoot, "rev-parse", "--verify", "HEAD")
 		_, inProgress := integrateGit(execRoot, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD")
-		if headErr != nil || now != before || inProgress == nil {
+		dirty, statusErr := integrateGit(execRoot, "status", "--porcelain", "--untracked-files=no")
+		if headErr != nil || now != before || inProgress == nil || statusErr != nil || dirty != "" {
 			return GitPick{}, fmt.Errorf(
 				"the pick failed and the checkout could not be verified as restored (HEAD was %.12s, is %.12s); "+
 					"inspect it with `git status` before anything else: %w", before, now, pickErr)

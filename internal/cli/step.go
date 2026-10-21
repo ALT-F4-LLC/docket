@@ -1363,8 +1363,26 @@ token governs.`,
 	},
 }
 
+// scrubGitEnvForIntegration removes, for the life of this process, the
+// variables that point git away from the shared checkout the run recorded or
+// let replace refs substitute another commit for a recorded one. The engine's
+// pick strips them for itself; the verification probes the annotation runs
+// afterwards inherit this process's environment, so they are cleaned here and
+// read the same repository, and the same objects, the pick wrote.
+func scrubGitEnvForIntegration() {
+	for _, k := range []string{
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+		"GIT_REPLACE_REF_BASE", "GIT_GRAFT_FILE",
+	} {
+		_ = os.Unsetenv(k)
+	}
+	_ = os.Setenv("GIT_NO_REPLACE_OBJECTS", "1")
+}
+
 func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
+	scrubGitEnvForIntegration()
 
 	ids := make([]int, 0, len(args))
 	for _, a := range args {
