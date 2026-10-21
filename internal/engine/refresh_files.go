@@ -158,18 +158,10 @@ func RefreshIssueFilesInRun(
 	case err != nil:
 		return nil, err
 	}
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
-		return nil, conflictErr(
-			"a dispatch is open for %s (%s, expiring at %d); close or abandon "+
-				"it before refreshing — its manifest was offered under the "+
-				"frozen attachment list, and a relay spawning from it would "+
-				"claim rows whose packets no longer carry what the manifest's "+
-				"reader saw",
-			run.Ref(), FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	underDispatch, err := refreshUnderDispatchTx(tx, runID, issueID)
+	if err != nil {
 		return nil, err
 	}
-
 	snapshot.Files = &live
 	refreshed, err := json.Marshal(snapshot)
 	if err != nil {
@@ -179,10 +171,10 @@ func RefreshIssueFilesInRun(
 		return nil, err
 	}
 
-	data, err := rulingData(by, map[string]any{
+	data, err := rulingData(by, withDispatchRows(map[string]any{
 		"issue": model.FormatID(issueID), "reason": reason,
 		"from": frozen, "to": live, "steps": steps,
-	})
+	}, underDispatch))
 	if err != nil {
 		return nil, fmt.Errorf("recording the attachment-list refresh: %w", err)
 	}

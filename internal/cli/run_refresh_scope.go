@@ -48,13 +48,16 @@ It REFUSES rather than proceeding when the change could be straddled:
   - while any of the issue's steps is claimed, running, or gated (an executor
     holds a packet rendered under the frozen scope, or a diff-shaped gate is
     mid-saga over the artifact's paths)
-  - while a dispatch is open (its manifest was offered under the frozen scope)
   - on a run that is planning, done, or abandoned — a planning run snapshots
     the current scope at its next activation by itself, and a terminal run's
     snapshot is history
   - when every step of the issue in this run is terminal — nothing will render
     again, so the widened scope reaches the issue's NEXT run
   - when the live scope already matches the frozen one: widen it first
+
+An open dispatch does not refuse it: the issue's unstarted manifest rows render
+the amended packet at claim, the event names the dispatch and those rows, and
+` + "`dispatch verify`" + ` still passes.
 
 --reason is required. A live run's packets changing what they declare is
 something somebody will ask about later, and a trail that shows the scope

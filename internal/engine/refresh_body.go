@@ -194,17 +194,10 @@ func RefreshIssueBodyInRun(
 	case err != nil:
 		return nil, err
 	}
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
-		return nil, conflictErr(
-			"a dispatch is open for %s (%s, expiring at %d); close or abandon "+
-				"it before refreshing — its manifest was offered under the "+
-				"frozen description, and a relay spawning from it would claim "+
-				"rows whose packets no longer ask what the manifest's reader saw",
-			run.Ref(), FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	underDispatch, err := refreshUnderDispatchTx(tx, runID, issueID)
+	if err != nil {
 		return nil, err
 	}
-
 	from, to := ri.BodySHA256, workflow.SHA256([]byte(live))
 	if err := db.SetRunIssueBodyTx(tx, runID, issueID, live, to); err != nil {
 		return nil, err
@@ -215,11 +208,11 @@ func RefreshIssueBodyInRun(
 	// That field is load-bearing rather than descriptive: a step already handed
 	// out reads its context back from the live column, so the body it was given
 	// survives here or nowhere (recordedIssueBody, context.go).
-	data, err := rulingData(by, map[string]any{
+	data, err := rulingData(by, withDispatchRows(map[string]any{
 		"issue": model.FormatID(issueID), "reason": reason,
 		"from_sha256": from, "to_sha256": to,
 		"from_body": ri.BodySnapshot, "steps": steps,
-	})
+	}, underDispatch))
 	if err != nil {
 		return nil, fmt.Errorf("recording the body refresh: %w", err)
 	}

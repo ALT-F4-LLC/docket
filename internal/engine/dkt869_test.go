@@ -170,29 +170,6 @@ func TestRefreshRefusesAStraddlingStep(t *testing.T) {
 	}
 }
 
-// TestRefreshRefusesAnOpenDispatch: a manifest is a frozen offer, and its relay
-// must see the world before or after the refresh, never both.
-func TestRefreshRefusesAnOpenDispatch(t *testing.T) {
-	conn := mustDB(t)
-	runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
-	widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
-	mustExec(t, conn,
-		`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
-		 VALUES (?, 'open', 0, ?, ?)`, runID, nowMS+60_000, nowMS)
-
-	_, err := refresh(conn, runID, issue)
-	if err == nil {
-		t.Fatal("a refresh under an open dispatch was accepted")
-	}
-	if code, ok := CodeOf(err); !ok || code != CodeConflict {
-		t.Errorf("error code = %v, want CONFLICT: %v", code, err)
-	}
-	if !strings.Contains(err.Error(), "DISPATCH-") {
-		t.Errorf("the refusal does not name the open dispatch:\n%s", err)
-	}
-	assertFrozenScope(t, conn, runID, issue, "internal/a/**")
-}
-
 // TestRefreshRefusesWhereItCouldOnlyRewriteHistory covers the states in which a
 // refresh means nothing: nothing left to render, a run that froze nothing yet,
 // a terminal run, an issue this run does not hold.

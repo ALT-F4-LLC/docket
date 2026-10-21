@@ -30,10 +30,15 @@ unchanged.
 It refuses when the live list already equals the frozen one: attach or detach
 first, then refresh.
 
-It refuses while any of the issue's steps is claimed, running, or gated, or
-while a dispatch is open, when every step of the issue is terminal, on a run
+It refuses while any of the issue's steps is claimed, running, or gated,
+when every step of the issue is terminal, on a run
 that is not active or waiting-human, and on an issue activation has not bound
 or whose snapshot predates the frozen list.
+
+An open dispatch does not refuse it: the issue's unstarted manifest rows render the
+amended packet at claim, the event names the dispatch and those rows, and
+` + "`dispatch verify`" + ` still passes.
+
 
 It rewrites no already-recorded step context: terminal steps keep what they
 recorded, and only the remaining steps render the new list. One

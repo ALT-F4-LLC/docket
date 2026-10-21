@@ -226,7 +226,7 @@ func TestRunRefreshBodyHelpStatesProperties(t *testing.T) {
 	for name, phrase := range map[string]string{
 		"verbatim copy":       "copies the issue's live description verbatim",
 		"equal refusal":       "refuses when the live description already equals the snapshot",
-		"quiescence refusal":  "refuses while any of the issue's steps is claimed, running, or gated, or while a dispatch is open",
+		"quiescence refusal":  "refuses while any of the issue's steps is claimed, running, or gated",
 		"no history rewrites": "rewrites no already-recorded step context",
 		"conductor capability": "Requires the run's conductor capability " +
 			"(see `docket run conduct --help`) via DOCKET_TOKEN or stdin",

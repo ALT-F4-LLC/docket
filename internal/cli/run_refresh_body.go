@@ -30,10 +30,15 @@ are not touched.
 It refuses when the live description already equals the snapshot: amend the
 issue first, then refresh.
 
-It refuses while any of the issue's steps is claimed, running, or gated, or
-while a dispatch is open — a holder of a packet rendered under the frozen
+It refuses while any of the issue's steps is claimed, running, or gated
+— a holder of a packet rendered under the frozen
 description must not record under the amended one. It also refuses on a run
 that is not active or waiting-human, and on an issue activation has not bound.
+
+An open dispatch does not refuse it: the issue's unstarted manifest rows render the
+amended packet at claim, the event names the dispatch and those rows, and
+` + "`dispatch verify`" + ` still passes.
+
 
 It rewrites no already-recorded step context: terminal steps keep the request
 their claim recorded, and only the remaining steps render the new text. One
