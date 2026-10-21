@@ -112,13 +112,14 @@ const hookOffVar = "DOCKET_HOOK_OFF"
 // `includeIf` condition true inside a NEW worktree (`worktree add` runs its
 // hooks in that worktree's context, which the listing cannot see). This is
 // best-effort defence in depth, not a boundary: clean and smudge filters named
-// by the same executor-writable config run on that checkout regardless.
+// by the same executor-writable config run on that checkout regardless, so
+// whoever closes the filter residual closes this one with it.
 func configHookFlags(dir string) []string {
 	args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
 	if dir != "" {
 		args = append(args, "-C", dir)
 	}
-	args = append(args, "config", "--null", "--name-only", "--get-regexp", `^hook\..*\.(command|event)$`)
+	args = append(args, "config", "--null", "--name-only", "--get-regexp", `^hook\.(.*\.)?(command|event)$`)
 	cmd := exec.Command("git", args...)
 	cmd.Env = integrateGitEnv()
 	out, _ := cmd.Output()
@@ -126,8 +127,12 @@ func configHookFlags(dir string) []string {
 	var flags []string
 	for _, key := range strings.Split(string(out), "\x00") {
 		name := strings.TrimPrefix(key, "hook.")
+		// A key with no further dot is the subsection-less `[hook]` table, which git
+		// treats as the hook named "".
 		if i := strings.LastIndex(name, "."); i >= 0 {
 			name = name[:i]
+		} else {
+			name = ""
 		}
 		if key == "" || seen[name] {
 			continue

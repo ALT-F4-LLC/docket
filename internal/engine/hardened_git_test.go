@@ -283,3 +283,41 @@ func TestGitDirOfReadsOnlyTheLeadingGlobalOptions(t *testing.T) {
 		}
 	}
 }
+
+// A hook written without a subsection (`[hook]`) or under an empty one
+// (`[hook ""]`) is the hook git names "". Each shape is listed on its own, since
+// either would otherwise be covered by the other's flag.
+func TestEngineGitRunsNoHookWithAnEmptyName(t *testing.T) {
+	for name, table := range map[string]string{
+		"no subsection":    "[hook]\n",
+		"empty subsection": "[hook \"\"]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			base := seedGitRepo(t, repo, "f.txt", "one")
+			marker := filepath.Join(t.TempDir(), "ran")
+			script := filepath.Join(t.TempDir(), "hook.sh")
+			testsupport.Must(t, os.WriteFile(script,
+				[]byte("#!/bin/sh\necho ran >> "+marker+"\nexit 0\n"), 0o755), "writing the script")
+			cfg, err := os.OpenFile(filepath.Join(repo, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0o644)
+			testsupport.Must(t, err, "opening the config: %v", err)
+			_, err = cfg.WriteString(table + "\tevent = post-checkout\n\tcommand = " + script + "\n")
+			testsupport.Must(t, err, "writing the hook: %v", err)
+			testsupport.Must(t, cfg.Close(), "closing the config")
+
+			gitRun(t, repo, "worktree", "add", "-q", "--detach", filepath.Join(t.TempDir(), "ctl"), base)
+			if _, err := os.Stat(marker); err != nil {
+				t.Skip("this git does not run hook.<name> keys from the repository config")
+			}
+			testsupport.Must(t, os.Remove(marker), "clearing the control marker")
+
+			scratch := filepath.Join(t.TempDir(), "scratch")
+			if out, err := gitCommand("-C", repo, "worktree", "add", "-q", "--detach", scratch, base).CombinedOutput(); err != nil {
+				t.Fatalf("worktree add: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Error("an engine git command ran the hook git names \"\"")
+			}
+		})
+	}
+}
