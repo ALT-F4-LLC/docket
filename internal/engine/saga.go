@@ -470,6 +470,13 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 			"step %s produces no artifact and cannot be completed with one",
 			step.Instance)
 	}
+	// The issue-comment kind is the engine's alone: an emit of that kind would
+	// read as a comment the engine posted, and none was.
+	if kind == IssueCommentArtifactKind {
+		return validationErr(
+			"step %s declares the engine-reserved artifact kind %q",
+			step.Instance, IssueCommentArtifactKind)
+	}
 
 	if _, err := db.InsertArtifactTx(tx, db.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: kind,

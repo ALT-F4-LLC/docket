@@ -130,17 +130,16 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 	}
 }
 
-// The idempotency scope is shared with `issue comment add --idempotency-key`. A
-// pre-seeded step key must not make the recording succeed without its comment.
-func TestAPreSeededStepCommentKeyRefusesTheRecording(t *testing.T) {
+// `issue comment add --idempotency-key` cannot reach the key a step's comment
+// uses: it lives in its own scope, so squatting on the same string suppresses
+// nothing.
+func TestAnIssueCommentKeyCannotSuppressAStepComment(t *testing.T) {
 	conn := mustDB(t)
 	stepID, issueID, token := claimedImplement(t, conn)
 
 	var next int
 	testsupport.Must(t, conn.QueryRow(
 		`SELECT COALESCE(MAX(id), 0) + 1 FROM artifacts`).Scan(&next), "next artifact id")
-	// The step's own artifact is minted first, so the comment artifact's id is
-	// a few above the current maximum: squat on all of them.
 	for id := next; id < next+4; id++ {
 		_, err := db.CreateCommentIdempotent(conn, &model.Comment{
 			IssueID: issueID, Body: "squatter", Author: "someone",
@@ -148,7 +147,33 @@ func TestAPreSeededStepCommentKeyRefusesTheRecording(t *testing.T) {
 		testsupport.Must(t, err, "seeding the key: %v", err)
 	}
 
-	err := testEngine().CompleteStep(conn, stepID, CompleteOptions{
+	testsupport.Must(t, testEngine().CompleteStep(conn, stepID, CompleteOptions{
+		Token: token, Artifact: []byte("summary"), NowMS: nowMS,
+		Comments: [][]byte{[]byte("the real comment")},
+	}), "complete")
+	got := commentsBy(t, conn, issueID, model.FormatStepID(stepID))
+	if len(got) != 1 || got[0] != "the real comment" {
+		t.Fatalf("step comments = %q; want the recorded body, unsuppressed", got)
+	}
+}
+
+// A key already recorded in the step-comment scope still refuses the recording
+// rather than letting it succeed without its comment.
+func TestAKeyAlreadyInTheStepCommentScopeRefusesTheRecording(t *testing.T) {
+	conn := mustDB(t)
+	stepID, issueID, token := claimedImplement(t, conn)
+
+	var next int
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT COALESCE(MAX(id), 0) + 1 FROM artifacts`).Scan(&next), "next artifact id")
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "begin")
+	for id := next; id < next+4; id++ {
+		testsupport.Must(t, db.RecordIdempotencyKeyTx(tx, db.ScopeStepComment, stepCommentKey(id), 1), "seeding")
+	}
+	testsupport.Must(t, tx.Commit(), "commit")
+
+	err = testEngine().CompleteStep(conn, stepID, CompleteOptions{
 		Token: token, Artifact: []byte("summary"), NowMS: nowMS,
 		Comments: [][]byte{[]byte("the real comment")},
 	})

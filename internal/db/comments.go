@@ -29,7 +29,7 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 	}
 	defer tx.Rollback()
 
-	id, _, err := CreateCommentIdempotentTx(tx, comment, idempotencyKey)
+	id, _, err := CreateCommentIdempotentTx(tx, comment, ScopeIssueComment, idempotencyKey)
 	if err != nil {
 		return 0, err
 	}
@@ -43,10 +43,10 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 // transaction, for a writer whose comment must commit or roll back with
 // something else (a step's recorded artifact). It reports whether it inserted:
 // a key already recorded returns that comment's id and false, and inserts
-// nothing. It neither begins nor commits.
-func CreateCommentIdempotentTx(tx *sql.Tx, comment *model.Comment, idempotencyKey string) (int, bool, error) {
+// nothing. The key is recorded in scope. It neither begins nor commits.
+func CreateCommentIdempotentTx(tx *sql.Tx, comment *model.Comment, scope, idempotencyKey string) (int, bool, error) {
 	if idempotencyKey != "" {
-		existingID, hit, err := LookupIdempotencyKeyTx(tx, ScopeIssueComment, idempotencyKey)
+		existingID, hit, err := LookupIdempotencyKeyTx(tx, scope, idempotencyKey)
 		if err != nil {
 			return 0, false, err
 		}
@@ -93,7 +93,7 @@ func CreateCommentIdempotentTx(tx *sql.Tx, comment *model.Comment, idempotencyKe
 	}
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeIssueComment, idempotencyKey, int(id64)); err != nil {
+		if err := RecordIdempotencyKeyTx(tx, scope, idempotencyKey, int(id64)); err != nil {
 			return 0, false, err
 		}
 	}
