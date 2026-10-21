@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -55,11 +57,37 @@ func validateStepComments(step *db.Step, comments [][]byte) error {
 				"comment %d is %d bytes, over the %d-byte cap; cite a recorded "+
 					"artifact instead", i+1, len(body), StepCommentMaxBytes)
 		}
+		if !utf8.Valid(body) {
+			return validationErr("comment %d is not valid UTF-8", i+1)
+		}
+		if r, bad := unsafeCommentRune(string(body)); bad {
+			return validationErr(
+				"comment %d holds the control or formatting character U+%04X, which "+
+					"could rewrite a reader's terminal or pass for a different author; "+
+					"only printable text, newlines and tabs are posted", i+1, r)
+		}
 		if strings.TrimSpace(string(body)) == "" {
 			return validationErr("comment %d is empty; it would post nothing", i+1)
 		}
 	}
 	return nil
+}
+
+// unsafeCommentRune finds the first character a comment may not carry: a
+// control character other than newline and tab (an escape sequence or a bare
+// carriage return rewrites what a terminal shows), and any Unicode format
+// character (bidirectional overrides and zero-width characters reorder or hide
+// text, and a body of only those would pass the empty check).
+func unsafeCommentRune(s string) (rune, bool) {
+	for _, r := range s {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return r, true
+		}
+	}
+	return 0, false
 }
 
 // stepCommentKey is the idempotency key for the comment one recorded artifact

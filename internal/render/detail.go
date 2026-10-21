@@ -634,7 +634,10 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	if len(comments) > 0 {
 		b.WriteString("\nComments\n")
 		for _, c := range comments {
-			fmt.Fprintf(&b, "  %s  %s\n  %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt), c.Body)
+			// Every body line is indented, so a body cannot start a line that
+			// reads as the next comment's header.
+			fmt.Fprintf(&b, "  %s  %s\n  %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt),
+				strings.ReplaceAll(c.Body, "\n", "\n  "))
 		}
 	}
 

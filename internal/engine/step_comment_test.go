@@ -109,6 +109,15 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 		"empty":    {[]byte("  \n")},
 		"too big":  {[]byte(big)},
 		"too many": five,
+		// An escape sequence rewrites a terminal, a bidi override reorders
+		// text, and a body of only zero-width characters would pass the empty
+		// check: none is printable prose.
+		"terminal escape": {[]byte("ok\x1b[2K\rnothing happened")},
+		"carriage return": {[]byte("line\rreplaced")},
+		"bidi override":   {[]byte("approved ‮gnorw")},
+		"zero width only": {[]byte("​​")},
+		"c1 control":      {[]byte("next\u0085line")},
+		"invalid utf-8":   {[]byte("bad \xff byte")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn := mustDB(t)
