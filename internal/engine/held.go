@@ -692,9 +692,14 @@ func resolveHeldPayload(
 		kind    string
 		payload sql.NullString
 	)
+	// The engine records its own artifacts beside the declared emit (a gap, an
+	// issue comment, a recorded head), and an executor can add them; none is the
+	// held payload, and the newest of them is not the artifact to resolve.
 	err := tx.QueryRow(
 		`SELECT id, kind, payload FROM artifacts
-		  WHERE step_id = ? ORDER BY id DESC LIMIT 1`, routingStep.ID,
+		  WHERE step_id = ? AND kind NOT IN (?, ?, ?)
+		  ORDER BY id DESC LIMIT 1`, routingStep.ID,
+		GapArtifactKind, IssueCommentArtifactKind, RecordedHeadArtifactKind,
 	).Scan(&priorID, &kind, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing to resolve. The routing step will route over whatever it has,

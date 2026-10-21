@@ -255,6 +255,47 @@ func TestResumeWhileHeldAdvancesNothing(t *testing.T) {
 	}
 }
 
+// A routing step that also holds an engine-recorded artifact (an issue comment
+// an executor attached, a gap) newer than its declared emit must still have
+// its held payload resolved: the approval reads the declared artifact, not the
+// newest row of any kind.
+func TestApproveResolvesTheHeldPayloadBesideNewerEngineArtifacts(t *testing.T) {
+	for _, kind := range []string{IssueCommentArtifactKind, GapArtifactKind} {
+		t.Run(kind, func(t *testing.T) {
+			conn := mustDB(t)
+			activatedRun(t, conn)
+			e := testEngine()
+			driveToReconcile(t, conn, e, clusteredPayload)
+
+			routing := heldStep(t, conn, "reconcile@0")
+			execSQL(t, conn,
+				`INSERT INTO artifacts (run_id, step_id, kind, body, payload, sha256, created_at_ms)
+				 VALUES (?, ?, ?, 'a note', NULL, 'x', ?)`,
+				routing.RunID, routing.ID, kind, nowMS)
+
+			held := heldStep(t, conn, "reconcile-held@0#0")
+			err := e.DecideStep(conn, held.ID, true, "accepted", nowMS)
+			testsupport.Must(t, err, "approve: %v", err)
+
+			payloads := artifactPayloads(t, conn, routing.ID)
+			if len(payloads) < 2 {
+				t.Fatalf("%d payloads on the routing step; the approval recorded no "+
+					"resolved artifact beside the %s row", len(payloads), kind)
+			}
+			resolved := false
+			for _, element := range payloads[len(payloads)-1] {
+				if got, _ := element[KeyOperatorResolved].(bool); got {
+					resolved = true
+				}
+			}
+			if !resolved {
+				t.Errorf("no element carries operator_resolved: the approval was dropped " +
+					"because a newer %s artifact sat on the routing step", kind)
+			}
+		})
+	}
+}
+
 // TestApproveResolvesAndRoutes is a hold's approve row: routing happens
 // "exactly once, AFTER resolution".
 //
