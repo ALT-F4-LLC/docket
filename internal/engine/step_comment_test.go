@@ -118,6 +118,11 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 		"zero width only": {[]byte("​​")},
 		"c1 control":      {[]byte("next\u0085line")},
 		"invalid utf-8":   {[]byte("bad \xff byte")},
+		"line separator":  {[]byte("a\u2028b")},
+		"hangul filler":   {[]byte("\u3164\u3164")},
+		"private use":     {[]byte("a\ue000b")},
+		"unassigned":      {[]byte("a\u0378b")},
+		"variation sel":   {[]byte("a\ufe0fb")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn := mustDB(t)
@@ -198,5 +203,18 @@ func TestAKeyAlreadyInTheStepCommentScopeRefusesTheRecording(t *testing.T) {
 		stepID, IssueCommentArtifactKind).Scan(&artifacts), "counting")
 	if artifacts != 0 {
 		t.Errorf("%d issue-comment artifacts survived a refused recording", artifacts)
+	}
+}
+
+// The control for the refusals above: ordinary prose in other scripts, accents,
+// emoji, tabs, newlines and non-breaking spaces still posts.
+func TestUnsafeCommentRuneAllowsOrdinaryProse(t *testing.T) {
+	for _, s := range []string{
+		"Approved: the change is safe.\n\n- tab\there",
+		"café naïve résumé", "日本語のコメント", "👍 shipped", "a b", "é",
+	} {
+		if r, bad := unsafeCommentRune(s); bad {
+			t.Errorf("unsafeCommentRune(%q) refused %U", s, r)
+		}
 	}
 }
