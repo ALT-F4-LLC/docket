@@ -122,7 +122,10 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 		"hangul filler":   {[]byte("\u3164\u3164")},
 		"private use":     {[]byte("a\ue000b")},
 		"unassigned":      {[]byte("a\u0378b")},
-		"variation sel":   {[]byte("a\ufe0fb")},
+		"variation sel":   {[]byte("a\ufe00b")},
+		"lone emoji sel":  {[]byte("\ufe0f")},
+		"emoji sel space": {[]byte("a \ufe0f")},
+		"mongolian sel":   {[]byte("a\u180bb")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn := mustDB(t)

@@ -80,10 +80,13 @@ func validateStepComments(step *db.Step, comments [][]byte) error {
 // overrides and zero-width characters, line and paragraph separators, private
 // use and unassigned code points), and the characters that render as blank
 // though they are printable by category (Hangul fillers, the braille blank,
-// the combining grapheme joiner, variation selectors). Ordinary spaces pass.
+// the combining grapheme joiner, variation selectors other than the emoji
+// presentation selector after a visible character). Ordinary spaces pass.
 func unsafeCommentRune(s string) (rune, bool) {
+	prev := rune(-1)
 	for _, r := range s {
 		if r == '\n' || r == '\t' {
+			prev = r
 			continue
 		}
 		if !unicode.IsPrint(r) && !unicode.Is(unicode.Zs, r) {
@@ -92,6 +95,12 @@ func unsafeCommentRune(s string) (rune, bool) {
 		if blankRender(r) {
 			return r, true
 		}
+		// The emoji presentation selector follows a visible character ("⚠️");
+		// alone, or after a space, it draws as nothing.
+		if r == 0xFE0F && (prev == -1 || unicode.IsSpace(prev) || prev == 0xFE0F) {
+			return r, true
+		}
+		prev = r
 	}
 	return 0, false
 }
@@ -102,7 +111,8 @@ func blankRender(r rune) bool {
 	case r == 0x034F, r == 0x115F, r == 0x1160, r == 0x17B4, r == 0x17B5,
 		r == 0x2800, r == 0x3164, r == 0xFFA0:
 		return true
-	case r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF:
+	case r >= 0x180B && r <= 0x180D, r == 0x180F, r == 0x16FE4, r == 0x1D159,
+		r >= 0xFE00 && r <= 0xFE0E, r >= 0xE0100 && r <= 0xE01EF:
 		return true
 	}
 	return false
