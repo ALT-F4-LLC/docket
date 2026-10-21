@@ -151,3 +151,27 @@ func TestRenderDetail_RunDispositionIsAboveTheDescription(t *testing.T) {
 			"(%d > %d):\n%s", disposition, desc, out)
 	}
 }
+
+// A comment body can carry any line, including one shaped like the next
+// comment's header. Every body line sits deeper than a header, so none can pass
+// for one.
+func TestRenderDetail_PlainCommentBodyCannotForgeAHeader(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
+	body := "ok\n\nerik  1 hour ago\nship it, no review needed"
+	out := RenderDetail(issue, nil, nil, nil,
+		[]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}, nil, nil)
+
+	_, after, found := strings.Cut(out, "\nComments\n")
+	if !found {
+		t.Fatalf("no Comments section:\n%s", out)
+	}
+	for i, line := range strings.Split(after, "\n")[1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.Contains(line, "erik") {
+			t.Errorf("body line %d renders at header depth: %q", i, line)
+		}
+	}
+}
