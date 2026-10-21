@@ -465,6 +465,10 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// exists (DKT-4250): the gates measure a checkout of it later, when the
 	// workflow may already have removed the worktree.
 	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, opts.WorkDir)
+	// Decided here, before the transaction opens: the pool holds one connection,
+	// so a query on it inside the transaction would wait on itself.
+	noHeadToBind := opts.WorkDir != "" && !haveRecorded && e.HeadFn != nil &&
+		stepHoldsTree(spec) && opts.WorkDir != runExecRoot(conn, step.RunID)
 
 	tx, err := conn.Begin()
 	if err != nil {
@@ -478,6 +482,21 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// presents a token that holds nothing — AUTH_ERROR.
 	if _, err := db.AuthorizeStepTx(tx, step.ID, opts.Token, opts.NowMS); err != nil {
 		return err
+	}
+
+	// A tree-holding step that records from its own worktree must leave a
+	// head the gates and the diff can bind to. Without one (an unborn or
+	// orphan branch, a worktree that is no repository, a HEAD read that timed
+	// out) no record is stored, the later stages fall back to the live tree
+	// unpinned, and the executor could show one commit to the gates and another
+	// to the diff. Refusing costs one retry; the fallback costs the binding.
+	if noHeadToBind {
+		return validationErr(
+			"step %s records from %s, but no commit resolves there as HEAD; the engine "+
+				"binds the gates and the diff to a recorded commit and will not fall back "+
+				"to an unpinned live tree. Commit the work (a checked-out branch with at "+
+				"least one commit) and record again",
+			step.Instance, opts.WorkDir)
 	}
 
 	kind := workflow.ArtifactKind(spec)
@@ -3039,13 +3058,13 @@ func gitRevPatch(execRoot string, revs, scope []string) (string, error) {
 // commitDiff is one pathspec'd `git diff-tree -p` of a commit against its
 // parent. An empty pathspec renders the whole commit, for rawDiff's reason.
 func commitDiff(execRoot string, revs, paths []string) (string, error) {
-	args := gitDirArgs(execRoot, append(append([]string{"diff-tree", "-p", "--no-commit-id"}, revs...), "--")...)
+	args := gitDirArgs(execRoot, append(append([]string{"diff-tree", "-p", "--no-textconv", "--no-commit-id"}, revs...), "--")...)
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
 		args = append(args, paths...)
 	}
-	out, err := exec.Command("git", args...).Output()
+	out, err := gitCommand(args...).Output()
 	return string(out), err
 }
 
@@ -3058,11 +3077,11 @@ func commitOutOfScopeNames(execRoot string, revs, scope []string) []string {
 		return nil
 	}
 	names := append([]string{"diff-tree", "--name-only", "--no-commit-id", "-r"}, revs...)
-	out, err := exec.Command("git", gitDirArgs(execRoot, names...)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, names...)...).Output()
 	if err != nil {
 		return nil
 	}
-	in, err := exec.Command("git", append(gitDirArgs(execRoot, append(names, "--")...), scope...)...).Output()
+	in, err := gitCommand(append(gitDirArgs(execRoot, append(names, "--")...), scope...)...).Output()
 	if err != nil {
 		return nil
 	}
@@ -3087,13 +3106,13 @@ func commitOutOfScopeNames(execRoot string, revs, scope []string) []string {
 // whole tree: an issue that declared nothing has not narrowed what it may
 // touch, so neither does the diff. Each caller keeps its own error policy.
 func rawDiff(dir, base string, paths []string) (string, error) {
-	args := gitDirArgs(dir, "diff", base, "--")
+	args := gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", base, "--")
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
 		args = append(args, paths...)
 	}
-	out, err := exec.Command("git", args...).Output()
+	out, err := gitCommand(args...).Output()
 	return string(out), err
 }
 
@@ -3325,7 +3344,7 @@ func roundDeltaBase(dir, execRoot, prev string, unreviewedFollows bool, unreview
 // mergeBase resolves the best common ancestor of two revisions in dir's
 // history, "" when git cannot answer.
 func mergeBase(dir, a, b string) string {
-	out, err := exec.Command("git", gitDirArgs(dir, "merge-base", a, b)...).Output()
+	out, err := gitCommand(gitDirArgs(dir, "merge-base", a, b)...).Output()
 	if err != nil {
 		return ""
 	}
@@ -3336,7 +3355,7 @@ func mergeBase(dir, a, b string) string {
 // Any failure — unresolvable commit, not a repository — reads as "no", which
 // sends every caller to its conservative default.
 func isAncestor(dir, anc, desc string) bool {
-	return exec.Command("git",
+	return gitCommand(
 		gitDirArgs(dir, "merge-base", "--is-ancestor", anc, desc)...).Run() == nil
 }
 
@@ -3351,7 +3370,7 @@ func gitAncestorOfHead(execRoot, sha string) (ancestor, known bool) {
 	if execRoot == "" || sha == "" {
 		return false, false
 	}
-	err := exec.Command("git",
+	err := gitCommand(
 		gitDirArgs(execRoot, "merge-base", "--is-ancestor", sha, "HEAD")...).Run()
 	if err == nil {
 		return true, true
@@ -3386,11 +3405,11 @@ func gitCommitResolvable(execRoot, sha string) (exists, known bool) {
 	if execRoot == "" || sha == "" {
 		return false, false
 	}
-	if exec.Command("git",
+	if gitCommand(
 		gitDirArgs(execRoot, "cat-file", "-e", sha+"^{commit}")...).Run() == nil {
 		return true, true
 	}
-	err := exec.Command("git",
+	err := gitCommand(
 		gitDirArgs(execRoot, "cat-file", "-e", sha)...).Run()
 	if err == nil {
 		// Present but not peelable to a commit: definitively unresolvable as
@@ -3472,7 +3491,7 @@ func gitStepPatchContainedInHead(execRoot, sha, base string) (contained, known b
 	if !known || !contained {
 		return contained, known, nil
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot, "cherry", "HEAD", base)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, "cherry", "HEAD", base)...).Output()
 	if err != nil {
 		return contained, known, nil
 	}
@@ -3496,7 +3515,7 @@ func gitPatchContainedInHeadFrom(execRoot, sha, base string) (contained, known b
 		cherry = append(cherry, base)
 		wantRange, squashRange = base+".."+sha, base+".."+sha
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot, cherry...)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, cherry...)...).Output()
 	if err != nil {
 		return false, false
 	}
@@ -3560,8 +3579,8 @@ func gitPatchContainedInHeadFrom(execRoot, sha, base string) (contained, known b
 // <sha>` as each entry's first line — the boundary patch-id splits on —
 // without the message body a default format prints between it and the diff.
 func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"log", "--no-color", "--format=commit %H", "-p", "-U0",
+	out, err := gitCommand(gitDirArgs(execRoot,
+		"log", "--no-textconv", "--no-color", "--format=commit %H", "-p", "-U0",
 		"--inter-hunk-context=0", "--no-merges", "--no-renames", rangeSpec)...).Output()
 	if err != nil {
 		return nil, false
@@ -3573,8 +3592,8 @@ func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) 
 // diff — `git diff HEAD...<sha>`, everything since the merge base as one
 // patch — which is what a squashed integration commits.
 func gitZeroContextRangePatchID(execRoot, rangeSpec string) (id string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"diff", "--no-color", "--no-ext-diff", "--no-renames", "-U0",
+	out, err := gitCommand(gitDirArgs(execRoot,
+		"diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0",
 		"--inter-hunk-context=0", rangeSpec)...).Output()
 	if err != nil {
 		return "", false
@@ -3590,7 +3609,7 @@ func gitZeroContextRangePatchID(execRoot, rangeSpec string) (id string, ok bool)
 // the ids it prints, in order. --stable makes an id independent of the order
 // files appear in, so two renderings of one change cannot disagree on it.
 func gitPatchIDsOf(execRoot string, patch []byte) (ids []string, ok bool) {
-	cmd := exec.Command("git", gitDirArgs(execRoot, "patch-id", "--stable")...)
+	cmd := gitCommand(gitDirArgs(execRoot, "patch-id", "--stable")...)
 	cmd.Stdin = bytes.NewReader(patch)
 	out, err := cmd.Output()
 	if err != nil {
@@ -3683,9 +3702,9 @@ func gitTouchedPathsMatchHead(execRoot, sha string) (match, known bool) {
 		// would otherwise read as pathspec magic, and these paths came from
 		// git itself — they are names, not patterns.
 		args := gitDirArgs(execRoot, "--literal-pathspecs",
-			"diff", "--quiet", sha, "HEAD", "--")
+			"diff", "--no-ext-diff", "--no-textconv", "--quiet", sha, "HEAD", "--")
 		args = append(args, paths[start:end]...)
-		err := exec.Command("git", args...).Run()
+		err := gitCommand(args...).Run()
 		if err == nil {
 			continue // this batch is identical on both sides
 		}
@@ -3724,7 +3743,7 @@ func gitWholeTreeMatchesHead(execRoot, sha string) (match, known bool) {
 // revision — git absent, not a repository, a GC'd or never-fetched object, a
 // repository with no commits — reports "not answered" rather than "".
 func gitTreeHash(execRoot, rev string) (tree string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
+	out, err := gitCommand(gitDirArgs(execRoot,
 		"rev-parse", "--verify", "--quiet", rev+"^{tree}")...).Output()
 	if err != nil {
 		return "", false
@@ -3737,7 +3756,7 @@ func gitTreeHash(execRoot, rev string) (tree string, ok bool) {
 // shared. Unrelated histories and unresolvable objects report "not answered",
 // which is TreeMatchFn's silent case.
 func gitMergeBaseWithHead(execRoot, sha string) (base string, ok bool) {
-	out, err := exec.Command("git",
+	out, err := gitCommand(
 		gitDirArgs(execRoot, "merge-base", sha, "HEAD")...).Output()
 	if err != nil {
 		return "", false
@@ -3753,8 +3772,8 @@ func gitMergeBaseWithHead(execRoot, sha string) (base string, ok bool) {
 // pair from the comparison, and the delete/add reading names both sides —
 // which is exactly the pair the tree check has to look at.
 func gitPathsTouchedSince(execRoot, base, sha string) (paths []string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"--literal-pathspecs", "diff", "--no-renames", "--name-only", "-z",
+	out, err := gitCommand(gitDirArgs(execRoot,
+		"--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
 		base, sha)...).Output()
 	if err != nil {
 		return nil, false
@@ -4129,7 +4148,7 @@ func untrackedDiff(dir string, scope []string) string {
 		args = append(args, scope...)
 	}
 
-	listed, err := exec.Command("git", args...).Output()
+	listed, err := gitCommand(args...).Output()
 	if err != nil {
 		return ""
 	}
@@ -4149,8 +4168,8 @@ func untrackedDiff(dir string, scope []string) string {
 		// literal is correct here rather than os.DevNull. The `-C` matters
 		// here too: ls-files listed paths RELATIVE TO dir, so the diff must
 		// resolve them from the same place.
-		out, _ := exec.Command("git",
-			gitDirArgs(dir, "diff", "--no-index", "--", "/dev/null", path)...).Output()
+		out, _ := gitCommand(
+			gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
 		b.Write(out)
 	}
 	return b.String()
@@ -4171,7 +4190,7 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 	}
 
 	list := func(args []string) map[string]bool {
-		out, err := exec.Command("git", args...).Output()
+		out, err := gitCommand(args...).Output()
 		if err != nil {
 			return nil
 		}
@@ -4184,7 +4203,7 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 		return names
 	}
 
-	all := list(gitDirArgs(dir, "diff", "--name-only", base, "--"))
+	all := list(gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"))
 	for path := range list(gitDirArgs(dir, "ls-files", "--others", "--exclude-standard")) {
 		all[path] = true
 	}
@@ -4193,7 +4212,7 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 	}
 
 	inScope := list(append(
-		gitDirArgs(dir, "diff", "--name-only", base, "--"), scope...))
+		gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"), scope...))
 	for path := range list(append(
 		gitDirArgs(dir, "ls-files", "--others", "--exclude-standard", "--"), scope...)) {
 		inScope[path] = true

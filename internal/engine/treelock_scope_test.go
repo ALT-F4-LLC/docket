@@ -144,6 +144,7 @@ func TestConcurrentClaimsAndRecordsOnWorktreesDoNotSerialize(t *testing.T) {
 		Repo: mustResolve(repoRoot), Tree: true,
 	})
 	e := testEngine()
+	e.HeadFn = nil // the worktree is a plain directory: no head to record or bind
 	e.Gates = runner
 
 	const n = 8
@@ -161,6 +162,7 @@ func TestConcurrentClaimsAndRecordsOnWorktreesDoNotSerialize(t *testing.T) {
 	// their checks are claimable with a worktree to bind. The last eight
 	// writes are claimed now and recorded concurrently below.
 	setup := testEngine()
+	setup.HeadFn = nil // the worktrees are plain directories: no head to record or bind
 	claimIDs := make([]int, n)
 	for i := range n {
 		write := stepIDIn(t, conn, issues[i], "write@0")

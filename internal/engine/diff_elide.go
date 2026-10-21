@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -297,7 +296,7 @@ func gitBlobHasGeneratedHeader(root string) func(string) bool {
 		if blob == "" {
 			return false
 		}
-		cmd := exec.Command("git", "-c", "core.fsmonitor=false", "-C", root,
+		cmd := gitCommand("-c", "core.fsmonitor=false", "-C", root,
 			"cat-file", "blob", blob)
 		out, err := cmd.StdoutPipe()
 		if err != nil || cmd.Start() != nil {

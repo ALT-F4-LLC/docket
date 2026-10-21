@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -120,7 +119,7 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 	// The object must be present BEFORE a worktree is attempted, because a
 	// failed `worktree add` can still leave administrative files behind in
 	// .git/worktrees. `cat-file -e` is the cheap, side-effect-free question.
-	if err := exec.Command("git", gitDirArgs(parent,
+	if err := gitCommand(gitDirArgs(parent,
 		"cat-file", "-e", sha+"^{commit}")...).Run(); err != nil {
 		return scratchTree{}
 	}
@@ -146,7 +145,7 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 	// --detach: no branch is created, so nothing about the repository's branch
 	// namespace changes and two concurrent reconstructions of the same sha do
 	// not collide on a name.
-	if err := exec.Command("git", gitDirArgs(parent,
+	if err := gitCommand(gitDirArgs(parent,
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "worktree", "add", "--detach", dir, sha)...).Run(); err != nil {
 		os.RemoveAll(dir)
 		lock.Close()
@@ -208,7 +207,7 @@ func (s scratchTree) release() {
 // record, in both directions, with the cache root beside it.
 func removeScratchTree(parent, dir string) {
 	if parent != "" {
-		_ = exec.Command("git", gitDirArgs(parent,
+		_ = gitCommand(gitDirArgs(parent,
 			"worktree", "remove", "--force", dir)...).Run()
 	}
 	_ = os.RemoveAll(dir)
@@ -248,7 +247,7 @@ func sweepStalePreGateScratch(execRoot string) []string {
 	if execRoot == "" {
 		return nil
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot,
+	out, err := gitCommand(gitDirArgs(execRoot,
 		"worktree", "list", "--porcelain")...).Output()
 	if err != nil {
 		return nil
@@ -274,7 +273,7 @@ func sweepStalePreGateScratch(execRoot string) []string {
 	if len(swept) > 0 {
 		// An entry whose directory was already gone declines `worktree
 		// remove`; prune reclaims the administrative record git kept for it.
-		_ = exec.Command("git", gitDirArgs(execRoot, "worktree", "prune")...).Run()
+		_ = gitCommand(gitDirArgs(execRoot, "worktree", "prune")...).Run()
 	}
 	return swept
 }

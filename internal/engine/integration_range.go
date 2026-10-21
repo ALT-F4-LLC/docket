@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -60,7 +59,7 @@ func gitIntegratedRange(execRoot, tip, head, base string) IntegratedRange {
 	if !ok {
 		return IntegratedRange{}
 	}
-	if exec.Command("git", gitDirArgs(execRoot, "merge-base", "--is-ancestor", head, tip)...).Run() == nil {
+	if gitCommand(gitDirArgs(execRoot, "merge-base", "--is-ancestor", head, tip)...).Run() == nil {
 		return IntegratedRange{Known: true, Carried: true, From: gitRevParse(execRoot, base)}
 	}
 	if len(chain) == 0 {
@@ -220,7 +219,7 @@ func gitChangedFiles(execRoot, sha string) (map[string]bool, bool) {
 }
 
 func gitOutputLines(execRoot string, args ...string) ([]string, bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot, args...)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, args...)...).Output()
 	if err != nil {
 		return nil, false
 	}
@@ -234,7 +233,7 @@ type patchIDPair struct{ id, commit string }
 func gitPatchIDPairs(execRoot string, logArgs ...string) ([]patchIDPair, bool) {
 	args := append([]string{"log", "--no-color", "--format=commit %H", "-p", "-U0",
 		"--inter-hunk-context=0", "--no-merges", "--no-renames"}, logArgs...)
-	out, err := exec.Command("git", gitDirArgs(execRoot, args...)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, args...)...).Output()
 	if err != nil {
 		return nil, false
 	}
@@ -248,7 +247,7 @@ func gitPatchIDPairs(execRoot string, logArgs ...string) ([]patchIDPair, bool) {
 // gitPatchIDLines feeds patch text through `git patch-id --stable` and returns
 // its "<patch-id> <commit>" lines in order.
 func gitPatchIDLines(execRoot string, patch []byte) ([]patchIDPair, bool) {
-	cmd := exec.Command("git", gitDirArgs(execRoot, "patch-id", "--stable")...)
+	cmd := gitCommand(gitDirArgs(execRoot, "patch-id", "--stable")...)
 	cmd.Stdin = strings.NewReader(string(patch))
 	out, err := cmd.Output()
 	if err != nil {
@@ -265,7 +264,7 @@ func gitPatchIDLines(execRoot string, patch []byte) ([]patchIDPair, bool) {
 }
 
 func gitRevParse(execRoot, rev string) string {
-	out, err := exec.Command("git", gitDirArgs(execRoot, "rev-parse", "--verify", "--quiet", rev)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, "rev-parse", "--verify", "--quiet", rev)...).Output()
 	if err != nil {
 		return ""
 	}

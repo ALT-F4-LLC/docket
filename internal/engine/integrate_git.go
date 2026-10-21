@@ -58,10 +58,42 @@ func integrateGit(execRoot string, args ...string) (string, error) {
 	return out, nil
 }
 
+// gitCommand builds EVERY git command the engine runs against a tree an
+// executor can influence (the shared repository, a scratch checkout of a
+// recorded commit, a writer's live worktree), so none of them is the weaker
+// one:
+//
+//   - replace refs and grafts do not rewrite what a commit holds, because an
+//     executor in a linked worktree writes refs/replace for the whole shared
+//     repository and the gate would otherwise measure a different tree than
+//     the one `step integrate` later picks (it already runs
+//     --no-replace-objects);
+//   - repository hooks, fsmonitor and submodule recursion are off, since each
+//     runs a program the repository's config names, and a linked worktree's
+//     `git config` writes the shared config;
+//   - the environment loses the variables that redirect git or inject config
+//     or an external diff (integrateGitEnv).
+//
+// Diff-producing callers add --no-ext-diff and --no-textconv themselves, as
+// those are options of the subcommand. Clean/smudge filters still run for a
+// command that reads a worktree; that is a residual, not a closed door.
+func gitCommand(args ...string) *exec.Cmd {
+	full := append([]string{
+		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+		"-c", "submodule.recurse=false", "--no-replace-objects",
+	}, args...)
+	cmd := exec.Command("git", full...)
+	cmd.Env = integrateGitEnv()
+	return cmd
+}
+
 // integrateGitEnv is the process environment without the variables that
-// redirect git, plus the settings that keep it from waiting on a person.
+// redirect git, inject configuration or name an external diff, plus the
+// settings that keep it from waiting on a person.
 func integrateGitEnv() []string {
 	drop := []string{
+		"GIT_EXTERNAL_DIFF=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=",
+		"GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_DIFF_OPTS=", "GIT_ASKPASS=",
 		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=",
 		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
 		"GIT_NAMESPACE=", "GIT_PREFIX=", "GIT_EDITOR=", "GIT_SEQUENCE_EDITOR=",

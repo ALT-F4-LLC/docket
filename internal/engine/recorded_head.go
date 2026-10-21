@@ -3,7 +3,6 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
-	osexec "os/exec"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -104,7 +103,7 @@ func (e *Engine) liveHeadMoved(rec recordedHead, worktree string) bool {
 // file. Anything it cannot read counts as not clean.
 func worktreeClean(dir string) bool {
 	// No fsmonitor hook and no index lock: this reads a tree the executor owns.
-	out, err := osexec.Command("git", "-c", "core.fsmonitor=false", "-C", dir,
+	out, err := gitCommand("-c", "core.fsmonitor=false", "-C", dir,
 		"--no-optional-locks", "status", "--porcelain",
 		"--untracked-files=all").Output()
 	return err == nil && len(strings.TrimSpace(string(out))) == 0
@@ -141,7 +140,7 @@ func liveHeadMovedReason(rec recordedHead) string {
 // worktree of a different repository records a head the run's checkout cannot
 // check out, and its record then pins the head without replacing the tree.
 func commitInRepo(dir, sha string) bool {
-	return osexec.Command("git", "-c", "core.fsmonitor=false", "-C", dir,
+	return gitCommand("-c", "core.fsmonitor=false", "-C", dir,
 		"cat-file", "-e", sha+"^{commit}").Run() == nil
 }
 

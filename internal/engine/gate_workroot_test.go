@@ -164,6 +164,7 @@ func TestCompletionGatesCarryTheStepsWorkRoot(t *testing.T) {
 	activatedRun(t, conn)
 
 	e := testEngine()
+	e.HeadFn = nil // the worktree is a plain directory: no head to record or bind
 	captured := &workRootCapture{seen: map[string]string{}}
 	e.Gates = captured
 

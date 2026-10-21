@@ -92,6 +92,7 @@ func TestRenderedPacketElidesGeneratedHunks(t *testing.T) {
 
 	diff := generatedSection("api/x.pb.go", 800*1024) + handWritten
 	e := testEngine()
+	e.HeadFn = nil // the worktree is a plain directory: no head to record or bind
 	e.DiffFn = func(_, _ string, _ []string) (string, error) { return diff, nil }
 	completeStepAt(t, conn, e, issue, "implement@0", t.TempDir())
 
@@ -234,6 +235,7 @@ func TestRenderedPacketElidesARegeneratedFileByItsOldBlob(t *testing.T) {
 	}
 	diff := b.String() + handWritten
 	e := testEngine()
+	e.HeadFn = nil // the worktree is a plain directory: no head to record or bind
 	e.DiffFn = func(_, _ string, _ []string) (string, error) { return diff, nil }
 	completeStepAt(t, conn, e, issue, "implement@0", t.TempDir())
 
