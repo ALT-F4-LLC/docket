@@ -212,6 +212,32 @@ func (r *ExecRunner) root(sc StepContext) string {
 	return r.RepoRoot
 }
 
+// resolveContained resolves argv[0] against the run's root and refuses a binary
+// that lives inside it, as exec.Resolve does, and ALSO refuses one inside the
+// runner's own repository or the tree the gate measures. Taking the run's root
+// moved the boundary off the invoking checkout, and a writer's worktree outside
+// the run's root is a tree the writer controls: a relatively named entry must
+// not start resolving to the executor's own file because of that. Only a
+// refusal about what would run counts from the extra roots. A root that does
+// not resolve cannot contain a resolved binary, so it is skipped.
+func (r *ExecRunner) resolveContained(argv0, entryArgv0 string, sc StepContext) (string, error) {
+	primary := r.root(sc)
+	resolved, err := exec.Resolve(argv0, primary, entryArgv0)
+	if err != nil {
+		return "", err
+	}
+	for _, extra := range []string{r.RepoRoot, sc.WorkRoot} {
+		if extra == "" || extra == primary {
+			continue
+		}
+		if _, err := exec.Resolve(argv0, extra, entryArgv0); err != nil &&
+			!errors.Is(err, exec.ErrEnvironment) {
+			return "", err
+		}
+	}
+	return resolved, nil
+}
+
 // runNamedGate runs a gate whose command is the trust entry's own argv.
 //
 // The candidate argv is nil: for a named gate the ENTRY IS the command, so the
@@ -438,7 +464,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	if len(entry.Argv) > 0 {
 		entryArgv0 = entry.Argv[0]
 	}
-	resolved, err := exec.Resolve(match.Argv[0], r.root(sc), entryArgv0)
+	resolved, err := r.resolveContained(match.Argv[0], entryArgv0, sc)
 	if err != nil {
 		// A refusal means NOTHING RAN, and the process table was never
 		// touched. WHY it refused decides the verdict (DKT-4251). A trust miss
@@ -491,7 +517,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	}
 
 	// DKT-9: the gate runs in the step's worktree when one is known, mirroring
-	// the diff stage's resolution (saga.go). RepoRoot stays the containment
+	// the diff stage's resolution (saga.go). The run's root (resolveContained) stays the containment
 	// boundary for the BINARY above — where a command may live and where it
 	// runs are separate facts — but the tree it measures must be the tree the
 	// step reported, or the recorded evidence describes a HEAD the step never

@@ -483,6 +483,14 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 			step.Instance, IssueCommentArtifactKind)
 	}
 
+	// The recorded-head kind is the engine's alone: a workflow that declared it
+	// would let an executor plant the sha the gates later measure.
+	if kind == RecordedHeadArtifactKind {
+		return validationErr(
+			"step %s declares the engine-reserved artifact kind %q",
+			step.Instance, RecordedHeadArtifactKind)
+	}
+
 	if _, err := db.InsertArtifactTx(tx, db.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: kind,
 		Body:    string(opts.Artifact),
@@ -1106,8 +1114,14 @@ func (e *Engine) runGateStage(
 	// or the sha cannot be checked out, the recorded worktree stays the tree,
 	// as before: measuring a different tree is the defect, so there is no
 	// substitute.
+	// The recorded commit is measured only while it is still the commit that
+	// will be integrated (DKT-4250). The diff stage reads the worktree's live
+	// head AFTER the gates, so a worktree that moved on since the record, by a
+	// new commit or by uncommitted edits, is measured live: gates that passed
+	// commit A must never stand for commit B. A worktree already gone cannot
+	// have moved, and the diff stage has no live tree to read either.
 	if step.WorkRoot != "" {
-		if rec, ok := recordedHeadOf(conn, step); ok {
+		if rec, ok := recordedHeadOf(conn, step); ok && e.recordedHeadStillHolds(rec) {
 			if tree := reconstructTarget(conn, step.RunID, rec.Head); tree.Dir != "" {
 				defer tree.release()
 				sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache

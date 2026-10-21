@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	docketexec "github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
@@ -184,5 +186,123 @@ func TestAWriterThatCommittedNothingStillMeasuresItsWorktree(t *testing.T) {
 		if sc.WorkRoot != worktree {
 			t.Errorf("gate %s measured %q, want the writer's worktree %q", gate, sc.WorkRoot, worktree)
 		}
+	}
+}
+
+// Edits made after the record, or left uncommitted at it, are work a checkout
+// of the recorded sha does not hold: the gates measure the live worktree.
+func TestGatesMeasureTheLiveWorktreeWhenItHoldsMoreThanTheRecordedSha(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, worktree string)
+		after func(t *testing.T, worktree string)
+	}{
+		{"uncommitted at record", func(t *testing.T, wt string) {
+			writeFile(t, wt, "mine/dirty.txt", "not committed\n")
+		}, nil},
+		{"moved on after record", nil, func(t *testing.T, wt string) {
+			writeFile(t, wt, "mine/second.txt", "a second commit\n")
+			runGit(t, wt, "add", "-A")
+			runGit(t, wt, "commit", "-q", "-m", "second")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shared := gitRepo(t)
+			pinned := strings.TrimSpace(gitOutput(t, shared, "rev-parse", "HEAD"))
+			conn := mustDB(t)
+			registerFixture(t, conn)
+			issue := createIssue(t, conn, "live", "body", "task", nil)
+			run, err := db.InsertRunWithContext(conn, 1, "live", 0, nowMS,
+				db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+			testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+			testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue")
+			_, err = activate(conn, run.ID)
+			testsupport.Must(t, err, "activate: %v", err)
+
+			worktree := filepath.Join(t.TempDir(), "wt")
+			runGit(t, shared, "worktree", "add", "-q", worktree)
+			writeFile(t, worktree, "mine/first.txt", "first\n")
+			runGit(t, worktree, "add", "-A")
+			runGit(t, worktree, "commit", "-q", "-m", "first")
+			if tc.setup != nil {
+				tc.setup(t, worktree)
+			}
+
+			e := testEngine()
+			captured := &treeCapture{baseCapture: baseCapture{seen: map[string]StepContext{}}, heads: map[string]string{}}
+			e.Gates = captured
+			withDetachedPreGateLockDir(t)
+			installDetachedSagaLauncher(t, func(int) error { return nil })
+			stepID := stepIDByInstance(t, conn, "implement@0")
+			claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+			testsupport.Must(t, err, "claim: %v", err)
+			var pending bool
+			testsupport.Must(t, e.CompleteStep(conn, stepID, CompleteOptions{
+				Token: claim.Token, Artifact: []byte("summary"), WorkDir: worktree,
+				Pending: &pending, NowMS: nowMS,
+			}), "complete")
+			if pending {
+				if tc.after != nil {
+					tc.after(t, worktree)
+				}
+				_, err := e.RunDetachedSaga(conn, stepID, nowMS)
+				testsupport.Must(t, err, "detached saga: %v", err)
+			}
+			if len(captured.seen) == 0 {
+				t.Fatal("no completion gate was dispatched")
+			}
+			for gate, sc := range captured.seen {
+				if sc.WorkRoot != worktree {
+					t.Errorf("gate %s measured %q, want the live worktree %q", gate, sc.WorkRoot, worktree)
+				}
+			}
+		})
+	}
+}
+
+// Taking the run's root as the containment boundary must not stop a binary
+// inside the tree the gate measures from being refused.
+func TestAnExecutorsOwnFileIsRefusedEvenOutsideTheRunsRoot(t *testing.T) {
+	runRoot, worktree := t.TempDir(), t.TempDir()
+	tool := filepath.Join(worktree, "bin", "tool")
+	writeFile(t, worktree, "bin/tool", "#!/bin/sh\n")
+	testsupport.Must(t, os.Chmod(tool, 0o755), "chmod")
+
+	runner := NewExecRunner(RepoPaths{ExecRoot: runRoot, Identity: runRoot})
+	_, err := runner.resolveContained(tool, "tool", StepContext{PinRoot: runRoot, WorkRoot: worktree})
+	if !errors.Is(err, docketexec.ErrRefused) || errors.Is(err, docketexec.ErrEnvironment) {
+		t.Fatalf("resolving the executor's own file = %v; want a plain refusal", err)
+	}
+}
+
+// captureRecordedHead takes a head only when a checkout of it is the writer's
+// whole work, and never off the shared checkout.
+func TestCaptureRecordedHeadRefusesWorkItCannotReproduce(t *testing.T) {
+	shared := gitRepo(t)
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "capture", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "capture", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: strings.TrimSpace(gitOutput(t, shared, "rev-parse", "HEAD"))})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue")
+
+	worktree := filepath.Join(t.TempDir(), "wt")
+	runGit(t, shared, "worktree", "add", "-q", worktree)
+	writeFile(t, worktree, "mine/a.txt", "a\n")
+	runGit(t, worktree, "add", "-A")
+	runGit(t, worktree, "commit", "-q", "-m", "a")
+	e := testEngine()
+	e.HeadFn = sharedCheckoutHead
+
+	if _, ok := e.captureRecordedHead(conn, run.ID, worktree); !ok {
+		t.Fatal("a clean worktree with a commit of its own recorded no head")
+	}
+	writeFile(t, worktree, "mine/untracked.txt", "left over\n")
+	if _, ok := e.captureRecordedHead(conn, run.ID, worktree); ok {
+		t.Error("a head was recorded for a worktree with an untracked file")
+	}
+	if _, ok := e.captureRecordedHead(conn, run.ID, shared); ok {
+		t.Error("a head was recorded for the shared checkout")
 	}
 }

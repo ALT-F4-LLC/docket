@@ -3,6 +3,9 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
+	osexec "os/exec"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 )
@@ -42,8 +45,13 @@ func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (
 	if head == "" {
 		return recordedHead{}, false
 	}
+	// A recorded head stands for the writer's WHOLE work, so it is taken only
+	// when a checkout of it is that work: the worktree is not the shared
+	// checkout, its fork point resolves, the head is a commit of its own, and
+	// nothing is left uncommitted. Otherwise the live worktree stays the tree,
+	// which is the only one that holds the uncommitted part.
 	base := gateBaseSHA(conn, runID, worktree)
-	if head == base {
+	if base == "" || head == base || !worktreeClean(worktree) {
 		return recordedHead{}, false
 	}
 	return recordedHead{Head: head, Base: base, Worktree: worktree}, true
@@ -65,4 +73,25 @@ func recordedHeadOf(conn *sql.DB, step *db.Step) (recordedHead, bool) {
 		return recordedHead{}, false
 	}
 	return rec, true
+}
+
+// recordedHeadStillHolds reports whether the recorded commit is still what the
+// step's worktree holds. A worktree that no longer exists holds nothing newer,
+// so the record stands.
+func (e *Engine) recordedHeadStillHolds(rec recordedHead) bool {
+	if _, err := os.Stat(rec.Worktree); err != nil {
+		return os.IsNotExist(err)
+	}
+	if e.HeadFn == nil || e.HeadFn(rec.Worktree) != rec.Head {
+		return false
+	}
+	return worktreeClean(rec.Worktree)
+}
+
+// worktreeClean reports whether dir has no tracked change and no untracked
+// file. Anything it cannot read counts as not clean.
+func worktreeClean(dir string) bool {
+	out, err := osexec.Command("git", "-C", dir, "status", "--porcelain",
+		"--untracked-files=all").Output()
+	return err == nil && len(strings.TrimSpace(string(out))) == 0
 }
