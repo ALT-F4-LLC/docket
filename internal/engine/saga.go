@@ -464,11 +464,20 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// The commit the writer left in its worktree, read NOW while the worktree
 	// exists (DKT-4250): the gates measure a checkout of it later, when the
 	// workflow may already have removed the worktree.
-	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, opts.WorkDir)
+	//
+	// A re-claim that records without --worktree keeps its earlier work_root,
+	// and the gates and the diff still measure THAT tree, so it is the tree the
+	// head is read from and refused on: skipping it would let an executor record
+	// once with a worktree, re-claim, orphan the checkout and record again bare.
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir = step.WorkRoot
+	}
+	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, workDir)
 	// Decided here, before the transaction opens: the pool holds one connection,
 	// so a query on it inside the transaction would wait on itself.
-	noHeadToBind := opts.WorkDir != "" && !haveRecorded && e.HeadFn != nil &&
-		stepHoldsTree(spec) && opts.WorkDir != runExecRoot(conn, step.RunID)
+	noHeadToBind := workDir != "" && !haveRecorded && e.HeadFn != nil &&
+		stepHoldsTree(spec) && workDir != runExecRoot(conn, step.RunID)
 
 	tx, err := conn.Begin()
 	if err != nil {
@@ -492,11 +501,11 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// to the diff. Refusing costs one retry; the fallback costs the binding.
 	if noHeadToBind {
 		return validationErr(
-			"step %s records from %s, but no commit resolves there as HEAD; the engine "+
+			"step %s records against %s, but no commit resolves there as HEAD; the engine "+
 				"binds the gates and the diff to a recorded commit and will not fall back "+
 				"to an unpinned live tree. Commit the work (a checked-out branch with at "+
-				"least one commit) and record again",
-			step.Instance, opts.WorkDir)
+				"least one commit), or pass --worktree for the tree the work is in, and record again",
+			step.Instance, workDir)
 	}
 
 	kind := workflow.ArtifactKind(spec)
@@ -533,8 +542,8 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// Always written for a worktree-recorded step, cleared when no head
 	// resolved: a re-claimed step records again under the same step id, and the
 	// first attempt's head must not stand for the second.
-	if opts.WorkDir != "" {
-		if err := insertRecordedHeadTx(tx, step, recorded, haveRecorded, opts.WorkDir, opts.NowMS); err != nil {
+	if opts.WorkDir != "" || haveRecorded {
+		if err := insertRecordedHeadTx(tx, step, recorded, haveRecorded, workDir, opts.NowMS); err != nil {
 			return err
 		}
 	} else if err := clearRecordedHeadIfAnyTx(tx, step, opts.NowMS); err != nil {

@@ -231,7 +231,7 @@ type patchIDPair struct{ id, commit string }
 // gitPatchIDPairs lists (zero-context patch-id, commit) for the non-merge
 // commits `git log` selects with logArgs, newest first.
 func gitPatchIDPairs(execRoot string, logArgs ...string) ([]patchIDPair, bool) {
-	args := append([]string{"log", "--no-color", "--format=commit %H", "-p", "-U0",
+	args := append([]string{"log", "--no-textconv", "--no-color", "--format=commit %H", "-p", "-U0",
 		"--inter-hunk-context=0", "--no-merges", "--no-renames"}, logArgs...)
 	out, err := gitCommand(gitDirArgs(execRoot, args...)...).Output()
 	if err != nil {

@@ -110,3 +110,84 @@ func TestRecordingFromAWorktreeWithNoHeadIsRefused(t *testing.T) {
 		Token: token, Artifact: []byte("summary"), NowMS: nowMS, WorkDir: worktree,
 	}), "recording after committing")
 }
+
+// A re-claimed step that records WITHOUT --worktree keeps its earlier
+// work_root, and the gates and the diff still measure that tree. An executor
+// that orphans it between attempts must be refused, not given an unpinned run.
+func TestARecordWithoutWorktreeIsRefusedWhenTheKeptWorkRootHasNoHead(t *testing.T) {
+	conn := mustDB(t)
+	stepID, _, token := claimedImplement(t, conn)
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	shared := gitRepo(t)
+	setRunExecRoot(t, conn, step.RunID, shared)
+	worktree := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, shared, "worktree", "add", "-q", "--detach", worktree)
+	gitRun(t, worktree, "checkout", "-q", "--orphan", "unborn")
+	_, err = conn.Exec(`UPDATE steps SET work_root = ? WHERE id = ?`, worktree, stepID)
+	testsupport.Must(t, err, "keeping the earlier work_root: %v", err)
+
+	e := testEngine()
+	e.HeadFn = sharedCheckoutHead
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: token, Artifact: []byte("summary"), NowMS: nowMS,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no commit resolves") {
+		t.Fatalf("a bare re-record over an orphaned work_root = %v; want a refusal", err)
+	}
+}
+
+// log -p applies textconv, log/show verify a signature through gpg.program when
+// log.showSignature is set, and the shared config is writable by the executor.
+func TestEngineLogAndShowRunNoTextconvOrSignatureProgram(t *testing.T) {
+	repo := t.TempDir()
+	first := seedGitRepo(t, repo, "f.txt", "one")
+	marker := filepath.Join(t.TempDir(), "ran")
+	script := filepath.Join(t.TempDir(), "prog.sh")
+	testsupport.Must(t, os.WriteFile(script,
+		[]byte("#!/bin/sh\necho ran >> "+marker+"\nexit 0\n"), 0o755), "writing the script")
+
+	gitRun(t, repo, "config", "diff.conv.textconv", script)
+	gitRun(t, repo, "config", "log.showSignature", "true")
+	gitRun(t, repo, "config", "gpg.program", script)
+	writeFile(t, repo, ".gitattributes", "*.txt diff=conv\n")
+	writeFile(t, repo, "f.txt", "two\n")
+	gitRun(t, repo, "add", ".gitattributes", "f.txt")
+	gitRun(t, repo, "commit", "-q", "-m", "second")
+	// A commit carrying a gpgsig header, which log.showSignature verifies.
+	tree := gitRun(t, repo, "rev-parse", "HEAD^{tree}")
+	raw := "tree " + tree + "\nparent " + first + "\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n" +
+		"gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\nsigned\n"
+	rawFile := filepath.Join(t.TempDir(), "commit.txt")
+	testsupport.Must(t, os.WriteFile(rawFile, []byte(raw), 0o644), "writing the commit")
+	signed := gitRun(t, repo, "hash-object", "-t", "commit", "-w", rawFile)
+	gitRun(t, repo, "update-ref", "HEAD", signed)
+
+	if _, ok := gitPatchIDPairs(repo, "-2"); !ok {
+		t.Fatal("gitPatchIDPairs failed")
+	}
+	if _, ok := gitOutputLines(repo, "show", "-s", "--format=%B", signed); !ok {
+		t.Fatal("gitOutputLines show failed")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("an engine log or show ran the textconv or gpg program named by the shared config")
+	}
+}
+
+// The engine's git environment keeps the executor's transport and lazy-fetch
+// settings out, and the record-time HEAD read ignores a redirecting GIT_DIR.
+func TestEngineGitEnvironmentDropsTransportAndRedirects(t *testing.T) {
+	t.Setenv("GIT_SSH_COMMAND", "/bin/false")
+	t.Setenv("GIT_PROXY_COMMAND", "/bin/false")
+	t.Setenv("GIT_NO_LAZY_FETCH", "0")
+	env := strings.Join(integrateGitEnv(), "\n")
+	for _, bad := range []string{"GIT_SSH_COMMAND=", "GIT_PROXY_COMMAND=", "GIT_NO_LAZY_FETCH=0"} {
+		if strings.Contains(env, bad) {
+			t.Errorf("the engine git environment keeps %s", bad)
+		}
+	}
+	if !strings.Contains(env, "GIT_NO_LAZY_FETCH=1") {
+		t.Error("the engine git environment does not turn lazy fetch off")
+	}
+}

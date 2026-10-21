@@ -80,7 +80,8 @@ func integrateGit(execRoot string, args ...string) (string, error) {
 func gitCommand(args ...string) *exec.Cmd {
 	full := append([]string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-		"-c", "submodule.recurse=false", "--no-replace-objects",
+		"-c", "submodule.recurse=false", "-c", "log.showSignature=false",
+		"-c", "gpg.program=false", "-c", "protocol.allow=never", "--no-replace-objects",
 	}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Env = integrateGitEnv()
@@ -97,7 +98,8 @@ func integrateGitEnv() []string {
 		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=",
 		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
 		"GIT_NAMESPACE=", "GIT_PREFIX=", "GIT_EDITOR=", "GIT_SEQUENCE_EDITOR=",
-		"GIT_TERMINAL_PROMPT=", "GIT_REPLACE_REF_BASE=", "GIT_GRAFT_FILE=", "GIT_NO_REPLACE_OBJECTS=",
+		"GIT_TERMINAL_PROMPT=", "GIT_REPLACE_REF_BASE=", "GIT_GRAFT_FILE=", "GIT_NO_REPLACE_OBJECTS=", "GIT_NO_LAZY_FETCH=",
+		"GIT_SSH=", "GIT_SSH_COMMAND=", "GIT_PROXY_COMMAND=", "GIT_PAGER=",
 	}
 	var env []string
 next:
@@ -109,7 +111,7 @@ next:
 		}
 		env = append(env, kv)
 	}
-	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1")
+	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1")
 }
 
 func truncateText(s string, n int) string {
