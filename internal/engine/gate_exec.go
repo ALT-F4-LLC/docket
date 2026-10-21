@@ -440,8 +440,31 @@ func (r *ExecRunner) spawnMatchedRows(
 	}
 	resolved, err := exec.Resolve(match.Argv[0], r.root(sc), entryArgv0)
 	if err != nil {
-		// A refusal means NOTHING RAN: verdict is unmatched and the process
-		// table was never touched.
+		// A refusal means NOTHING RAN, and the process table was never
+		// touched. WHY it refused decides the verdict (DKT-4251). A trust miss
+		// is `unmatched`, which is reserved to the operator. A checkout that
+		// no longer resolves is not a trust fact: the entry matched, and the
+		// containment check could not be made. That row is `skipped`, as the
+		// vanished-worktree row below is: the gate could not measure, the
+		// execution verdict stays fail so routing is unchanged, and the park
+		// is the ordinary unmeasured-gate one a machine can retry.
+		if errors.Is(err, exec.ErrEnvironment) {
+			return GateExecution{
+				Verdict: VerdictFail,
+				Results: []GateResultRow{{
+					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictSkipped,
+					Argv:       match.Argv,
+					Reason:     "environment: " + err.Error(),
+					TrustEntry: entry.Name,
+					StubEntry:  entry.Stub,
+					ArgvSHA256: trust.ArgvSHA256(match.Argv),
+					Prefix:     entry.Prefix,
+				}},
+			}, nil
+		}
+		// Every other refusal is about what would run (a binary inside the
+		// repository, a name resolved against the cwd, a pin that no longer
+		// holds), so it stays `unmatched` and fail-closed.
 		return GateExecution{
 			Verdict: VerdictFail,
 			Results: []GateResultRow{{

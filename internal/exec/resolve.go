@@ -74,7 +74,7 @@ func Resolve(argv0, repoRoot, entryArgv0 string) (string, error) {
 	// sides, so the comparison cannot be defeated by a symlinked checkout.
 	rootAbs, err := NormalizePath(repoRoot)
 	if err != nil {
-		return "", fmt.Errorf("%w: cannot resolve the repo path %s: %v", ErrRefused, Render(repoRoot), err)
+		return "", &environmentRefusal{fmt.Errorf("%w: cannot resolve the repo path %s: %v", ErrRefused, Render(repoRoot), err)}
 	}
 
 	// THE ONE EXCEPTION. The trust entry's own argv[0] is an absolute path
@@ -143,4 +143,27 @@ func Under(root, path string) bool {
 	// file that can execute; treat it as contained anyway, since anything that
 	// produced it is confused and refusing is the closed direction.
 	return true
+}
+
+// ErrEnvironment marks a refusal that says nothing about trust: the repo root
+// the containment check compares against does not resolve, so the check could
+// not be made (DKT-4251). It is never returned alone. Every environment refusal
+// is also an ErrRefused (`errors.Is` finds both), so a caller that only asks
+// "did nothing run" keeps failing closed; a caller that routes on WHY can tell
+// a vanished checkout from a trust miss.
+//
+// It is deliberately narrow. Only the failure to resolve the repo root is an
+// environment fact. A binary found inside the repository, a name resolved
+// against the working directory, a binary not on PATH, and a pin that no
+// longer holds are all about what would run, and stay plain refusals.
+var ErrEnvironment = errors.New("execution environment unavailable")
+
+// environmentRefusal is a refusal that is both ErrRefused and ErrEnvironment.
+// Its message is the wrapped error's, unchanged.
+type environmentRefusal struct{ err error }
+
+func (e *environmentRefusal) Error() string { return e.err.Error() }
+func (e *environmentRefusal) Unwrap() error { return e.err }
+func (e *environmentRefusal) Is(target error) bool {
+	return target == ErrEnvironment
 }
