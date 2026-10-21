@@ -147,7 +147,7 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 	// namespace changes and two concurrent reconstructions of the same sha do
 	// not collide on a name.
 	if err := exec.Command("git", gitDirArgs(parent,
-		"-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", dir, sha)...).Run(); err != nil {
+		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "worktree", "add", "--detach", dir, sha)...).Run(); err != nil {
 		os.RemoveAll(dir)
 		lock.Close()
 		os.Remove(scratchLockPath(dir))
