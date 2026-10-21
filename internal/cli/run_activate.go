@@ -175,6 +175,10 @@ type activateResult struct {
 	// gates carries no key rather than an empty one — the same dormancy-visible
 	// stance Registered takes.
 	GatePreflight []engine.GatePreflight `json:"gate_preflight,omitempty"`
+	// RoutingWarnings is DKT-4275's array, on a dry run only: bound issues
+	// without the security label whose scope overlaps a labelled issue's or
+	// whose text matches the configured lexicon.
+	RoutingWarnings []engine.RoutingWarning `json:"routing_warnings,omitempty"`
 	// HoldPolicy is DKT-266's disclosure: who answers a hold this run mints.
 	// NOT omitempty — `"panel": false` is the answer a reader needs, and an
 	// absent key would make "one operator decides" indistinguishable from a
@@ -353,6 +357,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		SourceWarnings:    result.SourceWarnings,
 		Fences:            result.Fences,
 		GatePreflight:     result.GatePreflight,
+		RoutingWarnings:   result.RoutingWarnings,
 		HoldPolicy:        result.HoldPolicy,
 		Registered:        result.Registered,
 		PinsFromConfig:    result.PinsFromConfig,

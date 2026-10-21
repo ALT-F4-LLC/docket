@@ -201,6 +201,9 @@ type ActivateResult struct {
 	// gates are legitimately absent on some machines, and activation is not the
 	// place to make that a hard stop.
 	GatePreflight []GatePreflight
+	// RoutingWarnings is DKT-4275's dry-run-only array: bound issues without the
+	// security label that look security-shaped. It warns; it routes nothing.
+	RoutingWarnings []RoutingWarning
 	// HoldPolicy is who will answer a hold this run mints (DKT-266) — a panel
 	// when both `vote.hold.*` keys are set, one operator otherwise.
 	//
@@ -450,6 +453,12 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 			return nil, ferr
 		}
 		result.Fences = fences
+
+		routing, rerr := buildRoutingWarningsTx(tx, runID, projectID)
+		if rerr != nil {
+			return nil, rerr
+		}
+		result.RoutingWarnings = routing
 		result.DryRun = true
 
 		// The run is read INSIDE the transaction, before the rollback, rather
