@@ -484,3 +484,19 @@ func TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite(t *testing.T) 
 		t.Errorf("the pick ran %d time(s) before the checkout was checked", picks)
 	}
 }
+
+// TestIntegrateStepsRefusesAGraftedSharedCheckout: --no-replace-objects does
+// not turn off the deprecated info/grafts file, so a checkout that has one is
+// refused rather than measured through rewritten parentage.
+func TestIntegrateStepsRefusesAGraftedSharedCheckout(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	grafts := filepath.Join(f.shared, ".git", "info", "grafts")
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(grafts), 0o755), "mkdir info")
+	testsupport.Must(t, os.WriteFile(grafts, []byte(f.head+" "+f.base+"\n"), 0o644), "write grafts")
+	before := f.sharedHead(t)
+	_, err := f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "grafts") {
+		t.Fatalf("error = %v, want the grafts refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+}

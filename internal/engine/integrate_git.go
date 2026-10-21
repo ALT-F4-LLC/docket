@@ -154,6 +154,17 @@ func gitCheckSharedCheckout(execRoot string) error {
 			return fmt.Errorf("the shared checkout has an operation in progress (%s); finish or abort it first", name)
 		}
 	}
+	// A grafts file rewrites parentage for every read, and --no-replace-objects
+	// does not turn it off (git still honors the deprecated file), so a chain
+	// measured through it is not the chain the repository holds.
+	if p, err := integrateGit(execRoot, "rev-parse", "--git-path", "info/grafts"); err == nil {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(execRoot, p)
+		}
+		if _, statErr := os.Stat(p); statErr == nil {
+			return errors.New("the shared checkout has a grafts file (info/grafts), which rewrites commit parentage; remove it or convert it to replace refs before the engine picks")
+		}
+	}
 	status, err := integrateGit(execRoot, "status", "--porcelain", "--untracked-files=no")
 	if err != nil {
 		return err
@@ -187,7 +198,7 @@ func gitCherryPickRange(execRoot, base, head string) (GitPick, error) {
 		_, inProgress := integrateGit(execRoot, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD")
 		dirty, statusErr := integrateGit(execRoot, "status", "--porcelain", "--untracked-files=no")
 		if headErr != nil || now != before || inProgress == nil || statusErr != nil || dirty != "" {
-			return GitPick{}, fmt.Errorf(
+			return GitPick{Before: before, Tip: now}, fmt.Errorf(
 				"the pick failed and the checkout could not be verified as restored (HEAD was %.12s, is %.12s); "+
 					"inspect it with `git status` before anything else: %w", before, now, pickErr)
 		}
@@ -195,11 +206,11 @@ func gitCherryPickRange(execRoot, base, head string) (GitPick, error) {
 	}
 	tip, err := integrateGit(execRoot, "rev-parse", "--verify", "HEAD")
 	if err != nil {
-		return GitPick{}, err
+		return GitPick{Before: before, Tip: "(unreadable)"}, err
 	}
 	added, err := integrateGit(execRoot, "rev-list", "--reverse", before+".."+tip)
 	if err != nil {
-		return GitPick{}, err
+		return GitPick{Before: before, Tip: tip}, err
 	}
 	var picked []string
 	if added != "" {
