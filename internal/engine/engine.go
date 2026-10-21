@@ -48,6 +48,9 @@ type Error struct {
 	// Err is the underlying cause when there is one, so errors.Is still
 	// reaches a db sentinel through this wrapper.
 	Err error
+	// Holders names the steps that made a claim refusal (DKT-4264). Empty for
+	// every error that is not a scope or headroom refusal.
+	Holders []Holder
 }
 
 func (e *Error) Error() string { return e.Message }
