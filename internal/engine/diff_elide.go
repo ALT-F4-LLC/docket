@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -45,7 +48,9 @@ type ElidedFile struct {
 // elideGeneratedDiff returns the diff with every generated file's section
 // replaced by a stat line, and the files it elided. A diff with no generated
 // file comes back byte-identical.
-func elideGeneratedDiff(body string, attrGenerated func(path string) bool) (string, []ElidedFile) {
+func elideGeneratedDiff(
+	body string, attrGenerated func(path string) bool, oldHeader func(blob string) bool,
+) (string, []ElidedFile) {
 	if !strings.Contains(body, "diff --git ") {
 		return body, nil
 	}
@@ -53,7 +58,9 @@ func elideGeneratedDiff(body string, attrGenerated func(path string) bool) (stri
 	var out strings.Builder
 	var elided []ElidedFile
 	for _, s := range sections {
-		if s.path == "" || !(hasGeneratedHeader(s.text) || (attrGenerated != nil && attrGenerated(s.path))) {
+		if s.path == "" || !(hasGeneratedHeader(s.text) ||
+			(attrGenerated != nil && attrGenerated(s.path)) ||
+			(oldHeader != nil && oldHeader(oldBlob(s.text)))) {
 			out.WriteString(s.text)
 			continue
 		}
@@ -228,13 +235,15 @@ func gitattributesGenerated(root string) func(string) bool {
 // generated-file hunks elided (DKT-4252). The bundle itself is untouched: it
 // also feeds `step context`, which keeps the full diff. A bundle with nothing
 // to elide is returned as is.
-func abridgeGeneratedDiffs(bundle *Context, attrGenerated func(string) bool) *Context {
+func abridgeGeneratedDiffs(
+	bundle *Context, attrGenerated func(string) bool, oldHeader func(string) bool,
+) *Context {
 	var inputs []ContextInput
 	for i, in := range bundle.Inputs {
 		if in.Kind != ArtifactKindIssueDiff {
 			continue
 		}
-		body, elided := elideGeneratedDiff(in.Body, attrGenerated)
+		body, elided := elideGeneratedDiff(in.Body, attrGenerated, oldHeader)
 		if len(elided) == 0 {
 			continue
 		}
@@ -256,4 +265,47 @@ func abridgeGeneratedDiffs(bundle *Context, attrGenerated func(string) bool) *Co
 func startsAtLineOne(rng, sign string) bool {
 	rest, ok := strings.CutPrefix(rng, sign+"1")
 	return ok && (rest == "" || strings.HasPrefix(rest, ","))
+}
+
+// oldBlob is the pre-change blob a modified file's `index OLD..NEW` line names,
+// or "" for a created file (all-zero hash) or a section with no index line.
+func oldBlob(section string) string {
+	for _, line := range strings.Split(section, "\n") {
+		rest, ok := strings.CutPrefix(line, "index ")
+		if !ok {
+			continue
+		}
+		old, _, ok := strings.Cut(rest, "..")
+		if !ok || strings.Trim(old, "0") == "" {
+			return ""
+		}
+		return old
+	}
+	return ""
+}
+
+// gitBlobHasGeneratedHeader reports whether the blob, read from root's object
+// database, STARTS with the generated header. A regenerated file's diff carries
+// the header only when the change touches the file's first lines, so the
+// header is read from the file as it stood before the change: a writer cannot
+// add it there, and an unreadable or unknown blob marks nothing.
+func gitBlobHasGeneratedHeader(root string) func(string) bool {
+	if root == "" {
+		return nil
+	}
+	return func(blob string) bool {
+		if blob == "" {
+			return false
+		}
+		cmd := exec.Command("git", "-c", "core.fsmonitor=false", "-C", root,
+			"cat-file", "blob", blob)
+		out, err := cmd.StdoutPipe()
+		if err != nil || cmd.Start() != nil {
+			return false
+		}
+		line, _ := bufio.NewReaderSize(io.LimitReader(out, 4096), 4096).ReadString('\n')
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return generatedHeader.MatchString(strings.TrimRight(line, "\r\n"))
+	}
 }

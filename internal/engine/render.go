@@ -217,9 +217,10 @@ func RenderStepAs(
 
 	var buf bytes.Buffer
 	data := packetData{
-		Context: abridgeGeneratedDiffs(bundle, gitattributesGenerated(runExecRoot(conn, step.RunID))),
-		Files:   files,
-		Emits:   workflow.ArtifactKind(spec),
+		Context: abridgeGeneratedDiffs(bundle, gitattributesGenerated(runExecRoot(conn, step.RunID)),
+			gitBlobHasGeneratedHeader(runExecRoot(conn, step.RunID))),
+		Files: files,
+		Emits: workflow.ArtifactKind(spec),
 		// `payload` names a `schema@ver`. Carrying it is not the same as
 		// VALIDATING against it: the packet stating the contract is what lets
 		// a worker satisfy it before the engine can check it.
