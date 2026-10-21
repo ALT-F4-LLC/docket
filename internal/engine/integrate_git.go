@@ -92,46 +92,62 @@ func gitCommand(args ...string) *exec.Cmd {
 	return cmd
 }
 
+// hookOffVar is the environment variable the per-hook disable flags read their
+// value from. The hook names come from a config the executor writes, so they
+// are passed as --config-env KEYS (a name may hold spaces, tabs or '=' and
+// cannot be expressed safely as a `-c key=value` argument) with a fixed value.
+const hookOffVar = "DOCKET_HOOK_OFF"
+
 // configHookFlags disables every hook the repository's CONFIG names. Git 2.54
 // reads `hook.<name>.command` and `hook.<name>.event` from the repository
 // config, which an executor writes through `git config`, and
 // core.hooksPath=/dev/null does not stop them. There is no wildcard for
 // `hook.<name>.enabled`, so the names are listed from the same directory the
-// command will run in. A listing that fails yields no flags: older git versions
-// ignore these keys, and a repository git cannot read fails the command itself.
-// The listing and the command are two reads, so a name added between them is
-// not covered; that window is a residual, not a closed door.
+// command will run in, NUL-delimited. A listing that fails yields no flags:
+// older git versions ignore these keys, and a repository git cannot read fails
+// the command itself. The listing and the command are two reads, so a name
+// added between them is not covered; that window is a residual, not a closed
+// door.
 func configHookFlags(dir string) []string {
 	args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
 	if dir != "" {
 		args = append(args, "-C", dir)
 	}
-	args = append(args, "config", "--name-only", "--get-regexp", `^hook\..+\.(command|event)$`)
+	args = append(args, "config", "--null", "--name-only", "--get-regexp", `^hook\..+\.(command|event)$`)
 	cmd := exec.Command("git", args...)
 	cmd.Env = integrateGitEnv()
 	out, _ := cmd.Output()
 	seen := map[string]bool{}
 	var flags []string
-	for _, key := range strings.Fields(string(out)) {
+	for _, key := range strings.Split(string(out), "\x00") {
 		name := strings.TrimPrefix(key, "hook.")
 		if i := strings.LastIndex(name, "."); i > 0 {
 			name = name[:i]
 		}
-		if name == "" || seen[name] {
+		if key == "" || name == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
-		flags = append(flags, "-c", "hook."+name+".enabled=false")
+		flags = append(flags, "--config-env=hook."+name+".enabled="+hookOffVar)
 	}
 	return flags
 }
 
 // gitDirOf returns the directory a git argument list runs in: the value of its
-// first -C, or "" for the process's own directory.
+// -C among the leading global options, or "" for the process's own directory.
+// It stops at the first argument that is not a global option, so a later
+// argument that happens to read "-C" (a pathspec after the subcommand) is not
+// taken for one.
 func gitDirOf(args []string) string {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "-C" {
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "-C" && i+1 < len(args):
 			return args[i+1]
+		case a == "-c" && i+1 < len(args):
+			i++
+		case strings.HasPrefix(a, "-"):
+		default:
+			return ""
 		}
 	}
 	return ""
@@ -160,7 +176,7 @@ next:
 		}
 		env = append(env, kv)
 	}
-	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1")
+	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", hookOffVar+"=false")
 }
 
 func truncateText(s string, n int) string {

@@ -202,6 +202,13 @@ func TestEngineGitRunsNoHookTheConfigNames(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "hook.sh")
 	testsupport.Must(t, os.WriteFile(script,
 		[]byte("#!/bin/sh\necho ran >> "+marker+"\nexit 0\n"), 0o755), "writing the script")
+	// Names an executor can choose: plain, dotted, upper case, and holding a space,
+	// a tab or an equals sign.
+	for i, name := range []string{"x", "a.b", "Up.Case", "sp ace", "tab\tname", "eq=name"} {
+		ev := []string{"post-checkout", "post-index-change", "reference-transaction"}[i%3]
+		gitRun(t, repo, "config", "hook."+name+".event", ev)
+		gitRun(t, repo, "config", "hook."+name+".command", script)
+	}
 	for _, ev := range []string{"post-checkout", "post-index-change", "reference-transaction"} {
 		gitRun(t, repo, "config", "hook.x"+ev+".event", ev)
 		gitRun(t, repo, "config", "hook.x"+ev+".command", script)
@@ -249,6 +256,24 @@ func TestNoRawGitExecOutsideTheHardenedConstructors(t *testing.T) {
 				strings.Contains(line, `Command("git",`) {
 				t.Errorf("%s:%d runs git without the hardened constructor: %s", name, i+1, strings.TrimSpace(line))
 			}
+		}
+	}
+}
+
+func TestGitDirOfReadsOnlyTheLeadingGlobalOptions(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-C", "/r", "diff", "--", "x"}, "/r"},
+		{[]string{"-c", "a=b", "-C", "/r", "status"}, "/r"},
+		{[]string{"--literal-pathspecs", "-C", "/r", "log"}, "/r"},
+		{[]string{"diff", "--", "-C", "/other"}, ""},
+		{[]string{"ls-files", "-C", "/other"}, ""},
+		{nil, ""},
+	} {
+		if got := gitDirOf(c.args); got != c.want {
+			t.Errorf("gitDirOf(%q) = %q, want %q", c.args, got, c.want)
 		}
 	}
 }

@@ -321,7 +321,8 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			w.Warn("the security-routing lint is off (routing.security_label is empty)")
 		case lint.CheckedNothing():
 			w.Warn("the security-routing lint checked nothing: no lexicon terms are "+
-				"configured and no bound issue carries the %s label; judge each "+
+				"configured and no bound issue with a comparable scope carries the %s "+
+				"label; judge each "+
 				"issue's sensitivity yourself", lint.Label)
 		case lint.LabelledIssues == 0 && lint.Unscoped > 0:
 			w.Warn("the security-routing lint compared no scopes: no bound issue carries "+
