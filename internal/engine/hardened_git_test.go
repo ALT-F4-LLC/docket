@@ -176,18 +176,79 @@ func TestEngineLogAndShowRunNoTextconvOrSignatureProgram(t *testing.T) {
 }
 
 // The engine's git environment keeps the executor's transport and lazy-fetch
-// settings out, and the record-time HEAD read ignores a redirecting GIT_DIR.
+// settings out.
 func TestEngineGitEnvironmentDropsTransportAndRedirects(t *testing.T) {
 	t.Setenv("GIT_SSH_COMMAND", "/bin/false")
 	t.Setenv("GIT_PROXY_COMMAND", "/bin/false")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext")
 	t.Setenv("GIT_NO_LAZY_FETCH", "0")
 	env := strings.Join(integrateGitEnv(), "\n")
-	for _, bad := range []string{"GIT_SSH_COMMAND=", "GIT_PROXY_COMMAND=", "GIT_NO_LAZY_FETCH=0"} {
+	for _, bad := range []string{"GIT_SSH_COMMAND=", "GIT_PROXY_COMMAND=", "GIT_ALLOW_PROTOCOL=", "GIT_NO_LAZY_FETCH=0"} {
 		if strings.Contains(env, bad) {
 			t.Errorf("the engine git environment keeps %s", bad)
 		}
 	}
 	if !strings.Contains(env, "GIT_NO_LAZY_FETCH=1") {
 		t.Error("the engine git environment does not turn lazy fetch off")
+	}
+}
+
+// Git reads hook.<name>.command and hook.<name>.event from the repository
+// config, which an executor writes, and core.hooksPath does not stop them.
+func TestEngineGitRunsNoHookTheConfigNames(t *testing.T) {
+	repo := t.TempDir()
+	base := seedGitRepo(t, repo, "f.txt", "one")
+	marker := filepath.Join(t.TempDir(), "ran")
+	script := filepath.Join(t.TempDir(), "hook.sh")
+	testsupport.Must(t, os.WriteFile(script,
+		[]byte("#!/bin/sh\necho ran >> "+marker+"\nexit 0\n"), 0o755), "writing the script")
+	for _, ev := range []string{"post-checkout", "post-index-change", "reference-transaction"} {
+		gitRun(t, repo, "config", "hook.x"+ev+".event", ev)
+		gitRun(t, repo, "config", "hook.x"+ev+".command", script)
+	}
+
+	// Control: plain git fires the config hook here. On a git that predates the
+	// keys the control stays silent and there is nothing to defend against.
+	ctl := filepath.Join(t.TempDir(), "ctl")
+	gitRun(t, repo, "worktree", "add", "-q", "--detach", ctl, base)
+	if _, err := os.Stat(marker); err != nil {
+		t.Skip("this git does not run hook.<name> keys from the repository config")
+	}
+	testsupport.Must(t, os.Remove(marker), "clearing the control marker")
+
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	if out, err := gitCommand("-C", repo, "worktree", "add", "-q", "--detach", scratch, base).CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+	writeFile(t, scratch, "g.txt", "g\n")
+	if _, err := rawDiff(scratch, "HEAD", nil); err != nil {
+		t.Fatalf("rawDiff: %v", err)
+	}
+	if _, err := integrateGit(repo, "status", "--porcelain"); err != nil {
+		t.Fatalf("integrateGit status: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("an engine git command ran a hook named by hook.<name>.command in the repository config")
+	}
+}
+
+// Every git the engine runs against an executor-influenced tree goes through
+// the hardened constructors; a raw exec of git anywhere else bypasses them.
+func TestNoRawGitExecOutsideTheHardenedConstructors(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	testsupport.Must(t, err, "reading the package: %v", err)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "integrate_git.go" {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		testsupport.Must(t, err, "reading %s: %v", name, err)
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.Contains(line, `Command("git"`) || strings.Contains(line, `CommandContext(ctx, "git"`) ||
+				strings.Contains(line, `Command("git",`) {
+				t.Errorf("%s:%d runs git without the hardened constructor: %s", name, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }

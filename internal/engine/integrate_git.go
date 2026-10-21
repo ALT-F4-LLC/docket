@@ -27,7 +27,8 @@ type GitPick struct {
 //   - the environment loses every variable that redirects git away from
 //     execRoot (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and the object-store
 //     overrides), so the checkout the run recorded is the one written;
-//   - repository hooks and the fsmonitor hook are off (core.hooksPath and
+//   - repository hooks, the hooks the config names (hook.<name>.command) and the
+//     fsmonitor hook are off (core.hooksPath, hook.<name>.enabled and
 //     core.fsmonitor), as in the engine-owned gate checkout: a hook is code the
 //     repository's writers control, and the engine does not run it from a verb
 //     the conductor typed;
@@ -42,6 +43,7 @@ func integrateGit(execRoot string, args ...string) (string, error) {
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
 		"-c", "rerere.enabled=false", "--no-replace-objects", "-C", execRoot,
 	}, args...)
+	full = append(configHookFlags(execRoot), full...)
 	cmd := exec.Command("git", full...)
 	cmd.Env = integrateGitEnv()
 	var stdout, stderr bytes.Buffer
@@ -68,7 +70,8 @@ func integrateGit(execRoot string, args ...string) (string, error) {
 //     repository and the gate would otherwise measure a different tree than
 //     the one `step integrate` later picks (it already runs
 //     --no-replace-objects);
-//   - repository hooks, fsmonitor and submodule recursion are off, since each
+//   - repository hooks (core.hooksPath and the hook.<name> keys of the config),
+//     fsmonitor and submodule recursion are off, since each
 //     runs a program the repository's config names, and a linked worktree's
 //     `git config` writes the shared config;
 //   - the environment loses the variables that redirect git or inject config
@@ -83,9 +86,55 @@ func gitCommand(args ...string) *exec.Cmd {
 		"-c", "submodule.recurse=false", "-c", "log.showSignature=false",
 		"-c", "gpg.program=false", "-c", "protocol.allow=never", "--no-replace-objects",
 	}, args...)
+	full = append(configHookFlags(gitDirOf(args)), full...)
 	cmd := exec.Command("git", full...)
 	cmd.Env = integrateGitEnv()
 	return cmd
+}
+
+// configHookFlags disables every hook the repository's CONFIG names. Git 2.54
+// reads `hook.<name>.command` and `hook.<name>.event` from the repository
+// config, which an executor writes through `git config`, and
+// core.hooksPath=/dev/null does not stop them. There is no wildcard for
+// `hook.<name>.enabled`, so the names are listed from the same directory the
+// command will run in. A listing that fails yields no flags: older git versions
+// ignore these keys, and a repository git cannot read fails the command itself.
+// The listing and the command are two reads, so a name added between them is
+// not covered; that window is a residual, not a closed door.
+func configHookFlags(dir string) []string {
+	args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
+	if dir != "" {
+		args = append(args, "-C", dir)
+	}
+	args = append(args, "config", "--name-only", "--get-regexp", `^hook\..+\.(command|event)$`)
+	cmd := exec.Command("git", args...)
+	cmd.Env = integrateGitEnv()
+	out, _ := cmd.Output()
+	seen := map[string]bool{}
+	var flags []string
+	for _, key := range strings.Fields(string(out)) {
+		name := strings.TrimPrefix(key, "hook.")
+		if i := strings.LastIndex(name, "."); i > 0 {
+			name = name[:i]
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		flags = append(flags, "-c", "hook."+name+".enabled=false")
+	}
+	return flags
+}
+
+// gitDirOf returns the directory a git argument list runs in: the value of its
+// first -C, or "" for the process's own directory.
+func gitDirOf(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-C" {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // integrateGitEnv is the process environment without the variables that
@@ -99,7 +148,7 @@ func integrateGitEnv() []string {
 		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
 		"GIT_NAMESPACE=", "GIT_PREFIX=", "GIT_EDITOR=", "GIT_SEQUENCE_EDITOR=",
 		"GIT_TERMINAL_PROMPT=", "GIT_REPLACE_REF_BASE=", "GIT_GRAFT_FILE=", "GIT_NO_REPLACE_OBJECTS=", "GIT_NO_LAZY_FETCH=",
-		"GIT_SSH=", "GIT_SSH_COMMAND=", "GIT_PROXY_COMMAND=", "GIT_PAGER=",
+		"GIT_SSH=", "GIT_SSH_COMMAND=", "GIT_PROXY_COMMAND=", "GIT_PAGER=", "GIT_ALLOW_PROTOCOL=",
 	}
 	var env []string
 next:
