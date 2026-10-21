@@ -402,3 +402,49 @@ func TestTheWritersWorktreeStaysAContainmentRootUnderAScratchCheckout(t *testing
 		t.Fatalf("resolving a file inside the writer's worktree = %v; want a refusal", err)
 	}
 }
+
+// A writer that committed nothing AND left its worktree clean has no work to
+// lose: a checkout of the base is that worktree, so the gates measure a checkout
+// of the recorded sha (the engine's), not the writer's worktree, and the record
+// is not Live.
+func TestAWriterThatCommittedNothingAndLeftACleanWorktreeIsBoundToABaseCheckout(t *testing.T) {
+	shared := gitRepo(t)
+	pinned := strings.TrimSpace(gitOutput(t, shared, "rev-parse", "HEAD"))
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "clean", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "clean", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue")
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	worktree := filepath.Join(t.TempDir(), "wt")
+	runGit(t, shared, "worktree", "add", "-q", worktree)
+
+	e := testEngine()
+	captured := &treeCapture{baseCapture: baseCapture{seen: map[string]StepContext{}}, heads: map[string]string{}}
+	e.Gates = captured
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+	testsupport.Must(t, e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("summary"), WorkDir: worktree, NowMS: nowMS,
+	}), "complete")
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	rec, ok := recordedHeadOf(conn, step)
+	if !ok || rec.Live || rec.Head != pinned {
+		t.Errorf("recorded head = %+v (ok %v); want the base %s, not Live", rec, ok, pinned)
+	}
+	if len(captured.seen) == 0 {
+		t.Fatal("no completion gate was dispatched")
+	}
+	for gate, sc := range captured.seen {
+		if sc.WorkRoot == worktree {
+			t.Errorf("gate %s measured the writer's worktree; want an engine-owned checkout", gate)
+		}
+	}
+}

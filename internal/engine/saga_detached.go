@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -164,6 +165,7 @@ func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error
 	}
 	rows.Close()
 
+	var failed []error
 	for _, id := range ids {
 		path := detachedSagaLockPath(id)
 		if path == "" {
@@ -179,8 +181,10 @@ func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error
 		err = e.resumeSaga(conn, id, nowMS)
 		releaseDetachedPreGateLock(lock, path)
 		if err != nil {
-			return err
+			// One step's failure must not starve the others of their resume:
+			// keep sweeping and report every failure together.
+			failed = append(failed, fmt.Errorf("resuming STEP-%d's saga: %w", id, err))
 		}
 	}
-	return nil
+	return errors.Join(failed...)
 }

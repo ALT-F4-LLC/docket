@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -90,9 +91,7 @@ func TestALiveRecordRefusesAWorktreeThatMovedOn(t *testing.T) {
 	runGit(t, w.worktree, "commit", "-q", "-m", "second")
 
 	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
-	if err == nil {
-		t.Error("the saga routed a step whose worktree moved off the recorded commit")
-	}
+	testsupport.Must(t, err, "detached saga: %v", err)
 	if len(w.captured.seen) != 0 {
 		t.Errorf("%d gate(s) ran against a worktree that moved off the recorded commit", len(w.captured.seen))
 	}
@@ -108,9 +107,11 @@ func TestALiveRecordRefusesAWorktreeThatMovedOn(t *testing.T) {
 
 	step, err := db.GetStep(w.conn, w.stepID)
 	testsupport.Must(t, err, "GetStep: %v", err)
-	if _, _, err := w.e.computeIssueDiff(w.conn, step, true); err == nil {
-		t.Error("the diff stage read a worktree that moved off the recorded commit")
+	var refusal *diffRefusalError
+	if _, _, err := w.e.computeIssueDiff(w.conn, step, true); !errors.As(err, &refusal) {
+		t.Errorf("the diff stage = %v for a worktree that moved off the recorded commit; want a diff refusal", err)
 	}
+	w.requireParkedWithoutADiff(t)
 }
 
 // A Live record whose worktree stays put is measured as before.
@@ -140,9 +141,7 @@ func TestAnUnreachableRecordedShaDoesNotFallBackToTheWorktree(t *testing.T) {
 		w.stepID, RecordedHeadArtifactKind)
 
 	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
-	if err == nil {
-		t.Error("the saga routed a step whose recorded commit is unreachable")
-	}
+	testsupport.Must(t, err, "detached saga: %v", err)
 	if len(w.captured.seen) != 0 {
 		t.Errorf("%d gate(s) measured a tree though the recorded commit was unreachable", len(w.captured.seen))
 	}
@@ -153,9 +152,11 @@ func TestAnUnreachableRecordedShaDoesNotFallBackToTheWorktree(t *testing.T) {
 	}
 	step, err := db.GetStep(w.conn, w.stepID)
 	testsupport.Must(t, err, "GetStep: %v", err)
-	if _, _, err := w.e.computeIssueDiff(w.conn, step, true); err == nil {
-		t.Error("the diff stage fell back to the worktree for an unreachable recorded commit")
+	var refusal *diffRefusalError
+	if _, _, err := w.e.computeIssueDiff(w.conn, step, true); !errors.As(err, &refusal) {
+		t.Errorf("the diff stage = %v for an unreachable recorded commit; want a diff refusal", err)
 	}
+	w.requireParkedWithoutADiff(t)
 }
 
 // A step recorded again under the same id (a re-claim) must not keep the first
@@ -177,22 +178,42 @@ func TestARecordingWithNoHeadClearsTheEarlierRecord(t *testing.T) {
 	}
 }
 
-// Content edited at the SAME head after the record is refused too: a Live
-// record binds the worktree's whole content, not only its HEAD.
-func TestALiveRecordRefusesContentEditedAtTheSameHead(t *testing.T) {
+// The residual, pinned so it is stated rather than assumed: a Live record binds
+// the worktree's HEAD only. Uncommitted content edited at the SAME head after
+// the record is still measured live, because binding it would take a gate run
+// in a checkout of a snapshot of that content (and close never verifies
+// uncommitted content either).
+func TestALiveRecordPinsHeadOnlyNotUncommittedContent(t *testing.T) {
 	w := newBindingWorld(t, true)
 	writeFile(t, w.worktree, "mine/untracked.txt", "edited after the record\n")
 
 	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
-	if err == nil {
-		t.Error("the saga routed a step whose worktree content changed after the record")
+	testsupport.Must(t, err, "detached saga: %v", err)
+	if len(w.captured.seen) == 0 {
+		t.Error("no gate measured the live worktree; the residual changed, update the docs")
 	}
-	if len(w.captured.seen) != 0 {
-		t.Errorf("%d gate(s) ran against content the record did not describe", len(w.captured.seen))
+}
+
+// A refused diff PARKS the step for the operator: it neither errors the stage
+// (which would leave the step at the routing stage, unresolvable) nor records a
+// diff, and the run's `next` sweep keeps working.
+func (w *bindingWorld) requireParkedWithoutADiff(t *testing.T) {
+	t.Helper()
+	step, err := db.GetStep(w.conn, w.stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if step.Status != db.StepWaitingHuman {
+		t.Errorf("step status = %q after a refused diff; want %q", step.Status, db.StepWaitingHuman)
 	}
-	step, gerr := db.GetStep(w.conn, w.stepID)
-	testsupport.Must(t, gerr, "GetStep: %v", gerr)
-	if _, _, derr := w.e.computeIssueDiff(w.conn, step, true); derr == nil {
-		t.Error("the diff stage read content the record did not describe")
+	if step.SagaStage != "" {
+		t.Errorf("saga stage = %q after a refused diff; want the saga finished", step.SagaStage)
 	}
+	var diffs int
+	testsupport.Must(t, w.conn.QueryRow(
+		`SELECT COUNT(*) FROM artifacts WHERE step_id = ? AND kind = 'issue.diff'`, w.stepID,
+	).Scan(&diffs), "counting diffs")
+	if diffs != 0 {
+		t.Errorf("%d issue.diff artifact(s) recorded for a refused diff", diffs)
+	}
+	testsupport.Must(t, w.e.ResumeStrandedSagas(w.conn, step.RunID, nowMS+10*strandedSagaGraceMS),
+		"the stranded-saga sweep after a refused diff")
 }

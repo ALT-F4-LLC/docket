@@ -1242,6 +1242,9 @@ func (e *Engine) runRoutingStage(
 		//     `any(diff.empty == false)` false on an `--as retry` and skipped
 		//     review over the change the ledger still held.
 		diffFacts *DiffFacts
+		// diffRefused is the reason the diff stage declined to read the step's
+		// recorded commit; non-empty parks the step (see the call below).
+		diffRefused string
 	)
 	if isExecutorStep(step) && stepHoldsTree(spec) {
 		// Since DKT-75 the diff is recomputed at the completion of every
@@ -1261,10 +1264,20 @@ func (e *Engine) runRoutingStage(
 		// tree either.
 		var err error
 		diffBody, diffPayload, err = e.computeIssueDiff(conn, step, true)
+		// A refusal to read the recorded commit PARKS the step for the operator
+		// instead of failing the stage. An error here leaves the step at the
+		// routing stage, which `docket next` re-runs on every call and which
+		// `step resolve` refuses (it takes a waiting-human step): one refused
+		// diff wedged the whole run. The park below is that disposition.
+		var refusal *diffRefusalError
+		if errors.As(err, &refusal) {
+			diffRefused, err = refusal.Error(), nil
+			diffBody, diffPayload = "", ""
+		}
 		if err != nil {
 			return err
 		}
-		wantsDiff = true
+		wantsDiff = diffRefused == ""
 
 		// An absent round record is `{0, 0, true}` rather than nil, so
 		// `any(diff.empty == false)` is DECIDED false for a step that recorded
@@ -1499,6 +1512,15 @@ func (e *Engine) runRoutingStage(
 			"its own record says an acceptance criterion cannot be met, so no " +
 			"review is offered until the operator disposes"
 		class = db.ParkClassPartialWithGap
+	case diffRefused != "":
+		// The commit the gates measured cannot be read back for the diff, so no
+		// diff is recorded and nothing downstream would review the change. Like
+		// a gate that measured nothing, this is an environment condition an
+		// operator can act on (restore the object, re-pin the worktree), not a
+		// judgment of the work, so it must not route on `on_fail`.
+		routing = workflow.OnFailWaitingHuman
+		reason = diffRefused + "; operator disposes"
+		class = db.ParkClassGateSkipped
 	case len(unmeasured) > 0:
 		// A GATE THAT MEASURED NOTHING PARKS (DKT-254). It is decided before
 		// the fail case because `skipped` is not-pass and would otherwise be
@@ -1839,6 +1861,14 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	return tx.Commit()
 }
 
+// diffRefusalError is computeIssueDiff declining to read a recorded commit: the
+// facts say the diff cannot be bound to what the gates measured. It is a typed
+// error so the routing stage parks the step for an operator rather than leaving
+// the stage failed (see the call in runRoutingStage).
+type diffRefusalError struct{ msg string }
+
+func (e *diffRefusalError) Error() string { return e.msg }
+
 // computeIssueDiff is the diff half of the routing stage: the `issue.diff`
 // body and round-record payload for step's tree as it stands NOW, computed
 // exactly as a completion records it. It runs a git subprocess, so it belongs
@@ -1891,15 +1921,17 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool)
 			// the recorded head: a different HEAD is a different commit than the
 			// gates measured.
 			if e.liveHeadMoved(rec, step.WorkRoot) {
-				return "", "", fmt.Errorf("computing the diff for %s: the worktree no longer "+
-					"stands at the commit %.12s it recorded", step.Instance, rec.Head)
+				return "", "", &diffRefusalError{fmt.Sprintf(
+					"the diff for %s was not recorded: the worktree no longer stands at "+
+						"the commit %.12s it recorded", step.Instance, rec.Head)}
 			}
 		} else if ok {
 			tree := reconstructTarget(conn, step.RunID, rec.Head)
 			if tree.Dir == "" {
-				return "", "", fmt.Errorf("computing the diff for %s: the commit %.12s it "+
-					"recorded cannot be checked out, and the worktree is not read in its place",
-					step.Instance, rec.Head)
+				return "", "", &diffRefusalError{fmt.Sprintf(
+					"the diff for %s was not recorded: the commit %.12s it recorded "+
+						"cannot be checked out, and the worktree is not read in its place",
+					step.Instance, rec.Head)}
 			}
 			defer tree.release()
 			dir, base, liveBase = tree.Dir, rec.Base, false
