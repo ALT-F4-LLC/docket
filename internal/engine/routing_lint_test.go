@@ -146,6 +146,21 @@ func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
 		t.Errorf("report = %+v; a labelled issue with an uncomparable scope must read as checked-nothing", result4.RoutingLint)
 	}
 
+	// A comparable labelled issue, but every linted issue is scoped `**`: no
+	// scope pair was comparable, so without a lexicon nothing was checked.
+	conn5 := mustDB(t)
+	registerFixture(t, conn5)
+	lab := createIssue(t, conn5, "Harden auth", "body", "task", []string{"security"})
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn5, lab, `["src/auth/**"]`), "declaring scope")
+	wideOne := createIssue(t, conn5, "Tidy", "typos", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn5, wideOne, `["**"]`), "declaring scope")
+	run5 := startRun(t, conn5, lab, wideOne)
+	result5, err := Activate(conn5, run5.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	if result5.RoutingLint == nil || !result5.RoutingLint.CheckedNothing() {
+		t.Errorf("report = %+v; no comparable scope pair must read as checked-nothing", result5.RoutingLint)
+	}
+
 	// A real activation never runs the lint, so it carries no report.
 	conn3 := mustDB(t)
 	real, _, _, _, _ := routingRun(t, conn3)

@@ -323,6 +323,10 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			w.Warn("the security-routing lint checked nothing: no lexicon terms are "+
 				"configured and no bound issue carries the %s label; judge each "+
 				"issue's sensitivity yourself", lint.Label)
+		case lint.LabelledIssues == 0 && lint.Unscoped > 0:
+			w.Warn("the security-routing lint compared no scopes: no bound issue carries "+
+				"the %s label with a comparable scope, and %d of %d issue(s) have no "+
+				"glob with a literal prefix; only the lexicon was checked", lint.Label, lint.Unscoped, lint.Linted)
 		case lint.Unscoped > 0:
 			w.Warn("the security-routing lint could not compare the scope of %d of %d "+
 				"issue(s): none of their globs has a literal prefix",

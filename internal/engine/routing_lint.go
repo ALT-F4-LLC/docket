@@ -65,10 +65,12 @@ type RoutingLintReport struct {
 	Unscoped int `json:"unscoped"`
 }
 
-// CheckedNothing reports a lint that had no lexicon and no labelled issue to
-// compare against, or was off: its empty result carries no information.
+// CheckedNothing reports a lint that was off, or had no lexicon and nothing to
+// compare scopes against (no comparable labelled issue, or no linted issue with a
+// comparable scope): its empty result carries no information.
 func (r RoutingLintReport) CheckedNothing() bool {
-	return r.Label == "" || (r.LexiconTerms == 0 && r.LabelledIssues == 0)
+	return r.Label == "" ||
+		(r.LexiconTerms == 0 && (r.LabelledIssues == 0 || r.Unscoped == r.Linted))
 }
 
 // RoutingWarning is one bound issue the lint flagged.
