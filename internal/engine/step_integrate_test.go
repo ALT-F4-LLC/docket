@@ -382,3 +382,27 @@ func TestIntegrateStepsKeepsEarlierStepsWhenALaterOneFails(t *testing.T) {
 		t.Error("the failed pick was left in progress")
 	}
 }
+
+// TestIntegrateStepsBuildsNoGitCommandFromAMalformedRecordedChain: the chain
+// comes from a recorded payload, and a head that is not a full commit id (here
+// one shaped like an option) is refused before git is run.
+func TestIntegrateStepsBuildsNoGitCommandFromAMalformedRecordedChain(t *testing.T) {
+	for _, bad := range []string{"--output=" + filepath.Join(t.TempDir(), "x"), "HEAD", "deadbeef00"} {
+		f := newIntegrateEnv(t, true)
+		latest, err := stepLatestIssueDiff(f.conn, f.stepID)
+		testsupport.Must(t, err, "stepLatestIssueDiff: %v", err)
+		_, err = f.conn.Exec(`UPDATE artifacts SET payload = json_set(payload, '$.head', ?) WHERE id = ?`, bad, latest.ID)
+		testsupport.Must(t, err, "corrupt the recorded head: %v", err)
+		before := f.sharedHead(t)
+		_, err = f.integrate(testConductorToken, f.stepID)
+		if err == nil || !strings.Contains(err.Error(), "not full commit ids") {
+			t.Errorf("head %q: error = %v, want the malformed-chain refusal", bad, err)
+		}
+		f.requireNothingLanded(t, before)
+		if strings.HasPrefix(bad, "--output=") {
+			if _, statErr := os.Stat(strings.TrimPrefix(bad, "--output=")); statErr == nil {
+				t.Errorf("head %q was run as a git option", bad)
+			}
+		}
+	}
+}

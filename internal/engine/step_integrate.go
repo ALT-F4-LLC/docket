@@ -173,6 +173,15 @@ func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integrateP
 			"step %s recorded no commit in its issue.diff, so there is nothing to pick", step.Instance)
 	}
 	writerHead, writerBase := writerChain(prior.Payload, head)
+	// The chain is passed to git as revisions. It comes from a recorded payload,
+	// so it is held to the shape the engine itself records (full commit ids)
+	// before any argument is built from it: a value that began with "-" would
+	// be an option, not a revision.
+	if !fullCommitSHA.MatchString(writerHead) || (writerBase != "" && !fullCommitSHA.MatchString(writerBase)) {
+		return integratePlan{}, validationErr(
+			"step %s recorded a writer chain that is not full commit ids (head %q, base %q); "+
+				"the engine will not build a git command from it", step.Instance, writerHead, writerBase)
+	}
 	execRoot := runExecRoot(conn, step.RunID)
 	chain, err := e.IntegrationChainFn(execRoot, writerBase, writerHead)
 	if err != nil {
