@@ -866,8 +866,8 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 	return strings.TrimSpace(body) == "", nil
 }
 
-// acBlockingGap reports whether any gap the step recorded declares
-// `AC-Blocking: true` in its header (DKT-4279).
+// acBlockingGap reports whether a gap recorded beside the step's latest
+// candidate declares `AC-Blocking: true` in its header (DKT-4279).
 //
 // A writer that records a candidate AND a gap saying an acceptance criterion
 // cannot be met has told the pipeline its own product is known to fall short.
@@ -875,10 +875,22 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 // the completion parks for the operator before any review row is offered. The
 // engine reads only what the gap declares about itself, as parseGapHeader does
 // for priority and kind; it never interprets what the gap says.
-func acBlockingGap(conn *sql.DB, step *db.Step) (bool, error) {
-	rows, err := conn.Query(
-		`SELECT body FROM artifacts WHERE step_id = ? AND kind = ?`,
-		step.ID, GapArtifactKind)
+//
+// A retry re-does the work under the same step id and deletes nothing, so the
+// first attempt's gaps are still there. A completion records its candidate
+// first and its gaps after it, so the gaps that speak for the completion being
+// routed are the ones newer than the latest candidate; an earlier attempt's
+// blocker must not park a retry that recorded none. A step that declares no
+// emit has no candidate to bound the read, and every gap counts.
+func acBlockingGap(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, error) {
+	query := `SELECT body FROM artifacts WHERE step_id = ? AND kind = ?`
+	args := []any{step.ID, GapArtifactKind}
+	if kind := workflow.ArtifactKind(spec); kind != "" {
+		query += ` AND id > COALESCE(
+			(SELECT MAX(id) FROM artifacts WHERE step_id = ? AND kind = ?), 0)`
+		args = append(args, step.ID, kind)
+	}
+	rows, err := conn.Query(query, args...)
 	if err != nil {
 		return false, fmt.Errorf("reading gap artifacts: %w", err)
 	}
@@ -1493,7 +1505,7 @@ func (e *Engine) runRoutingStage(
 			return err
 		}
 		if !gapOnly {
-			blockingGap, err = acBlockingGap(conn, step)
+			blockingGap, err = acBlockingGap(conn, step, spec)
 			if err != nil {
 				return err
 			}

@@ -85,3 +85,55 @@ func TestNonBlockingGapStillCompletesDone(t *testing.T) {
 		})
 	}
 }
+
+// A retry after a partial-with-gap park re-does the work under the same step
+// id, and the first attempt's artifacts stay. Its AC-blocking gap must not
+// park the second attempt: only the gaps recorded beside the latest candidate
+// speak for the completion being routed.
+func TestARetryAfterAnACBlockingParkIsNotParkedByTheEarlierAttemptsGap(t *testing.T) {
+	conn := mustDB(t)
+	_, stepID := completeWorkWithGap(t, conn,
+		"LoadScheduler takes a *sql.Tx\nAC-Blocking: true\n\nAC1 cannot be met here.")
+
+	testsupport.Must(t, testEngine().ResolveStep(conn, stepID, ResolveRetry, "amended the scope", nowMS+1),
+		"resolve --as retry: %v", nil)
+
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS + 2})
+	testsupport.Must(t, err, "re-claim: %v", err)
+	testsupport.Must(t, testEngine().CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("candidate 2: AC1 met"), NowMS: nowMS + 3,
+	}), "second completion: %v", nil)
+
+	var status string
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT status FROM steps WHERE id = ?`, stepID).Scan(&status), "reading the step")
+	if status != db.StepDone {
+		t.Errorf("status=%q; want done after a clean retry", status)
+	}
+}
+
+// The retry's own AC-blocking gap still parks it.
+func TestARetryThatRecordsItsOwnACBlockingGapParksAgain(t *testing.T) {
+	conn := mustDB(t)
+	_, stepID := completeWorkWithGap(t, conn,
+		"first blocker\nAC-Blocking: true\n\nAC1 cannot be met here.")
+
+	testsupport.Must(t, testEngine().ResolveStep(conn, stepID, ResolveRetry, "retry", nowMS+1),
+		"resolve --as retry: %v", nil)
+
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS + 2})
+	testsupport.Must(t, err, "re-claim: %v", err)
+	var gapIssues []string
+	testsupport.Must(t, testEngine().CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("candidate 2"),
+		Gaps:      [][]byte{[]byte("second blocker\nAC-Blocking: true\n\nAC4 cannot be met here.")},
+		GapIssues: &gapIssues, NowMS: nowMS + 3,
+	}), "second completion: %v", nil)
+
+	var class string
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT park_class FROM steps WHERE id = ?`, stepID).Scan(&class), "reading the step")
+	if class != string(db.ParkClassPartialWithGap) {
+		t.Errorf("park_class=%q; want %q", class, db.ParkClassPartialWithGap)
+	}
+}
