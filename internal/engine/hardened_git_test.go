@@ -209,6 +209,12 @@ func TestEngineGitRunsNoHookTheConfigNames(t *testing.T) {
 		gitRun(t, repo, "config", "hook."+name+".event", ev)
 		gitRun(t, repo, "config", "hook."+name+".command", script)
 	}
+	// An empty subsection has no spelling through the CLI; write it to the file.
+	cfg, err := os.OpenFile(filepath.Join(repo, ".git", "config"), os.O_APPEND|os.O_WRONLY, 0o644)
+	testsupport.Must(t, err, "opening the config: %v", err)
+	_, err = cfg.WriteString("[hook \"\"]\n\tevent = post-checkout\n\tcommand = " + script + "\n")
+	testsupport.Must(t, err, "writing the empty-name hook: %v", err)
+	testsupport.Must(t, cfg.Close(), "closing the config")
 	for _, ev := range []string{"post-checkout", "post-index-change", "reference-transaction"} {
 		gitRun(t, repo, "config", "hook.x"+ev+".event", ev)
 		gitRun(t, repo, "config", "hook.x"+ev+".command", script)

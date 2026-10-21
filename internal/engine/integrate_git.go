@@ -79,7 +79,9 @@ func integrateGit(execRoot string, args ...string) (string, error) {
 //
 // Diff-producing callers add --no-ext-diff and --no-textconv themselves, as
 // those are options of the subcommand. Clean/smudge filters still run for a
-// command that reads a worktree; that is a residual, not a closed door.
+// command that reads a worktree, and a config hook that only an includeIf
+// condition inside a new worktree selects still runs on `worktree add`; those
+// are residuals, not closed doors.
 func gitCommand(args ...string) *exec.Cmd {
 	full := append([]string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
@@ -106,14 +108,17 @@ const hookOffVar = "DOCKET_HOOK_OFF"
 // command will run in, NUL-delimited. A listing that fails yields no flags:
 // older git versions ignore these keys, and a repository git cannot read fails
 // the command itself. The listing and the command are two reads, so a name
-// added between them is not covered; that window is a residual, not a closed
-// door.
+// added between them is not covered, and neither is a key that only an
+// `includeIf` condition true inside a NEW worktree (`worktree add` runs its
+// hooks in that worktree's context, which the listing cannot see). This is
+// best-effort defence in depth, not a boundary: clean and smudge filters named
+// by the same executor-writable config run on that checkout regardless.
 func configHookFlags(dir string) []string {
 	args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
 	if dir != "" {
 		args = append(args, "-C", dir)
 	}
-	args = append(args, "config", "--null", "--name-only", "--get-regexp", `^hook\..+\.(command|event)$`)
+	args = append(args, "config", "--null", "--name-only", "--get-regexp", `^hook\..*\.(command|event)$`)
 	cmd := exec.Command("git", args...)
 	cmd.Env = integrateGitEnv()
 	out, _ := cmd.Output()
@@ -121,10 +126,10 @@ func configHookFlags(dir string) []string {
 	var flags []string
 	for _, key := range strings.Split(string(out), "\x00") {
 		name := strings.TrimPrefix(key, "hook.")
-		if i := strings.LastIndex(name, "."); i > 0 {
+		if i := strings.LastIndex(name, "."); i >= 0 {
 			name = name[:i]
 		}
-		if key == "" || name == "" || seen[name] {
+		if key == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
