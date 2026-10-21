@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
 	osexec "os/exec"
 	"strings"
 
@@ -39,11 +40,17 @@ type recordedHead struct {
 	// no longer Head, so a worktree that moves on after the record cannot make
 	// gates that passed one commit name another.
 	Live bool `json:"live,omitempty"`
+	// Tree is, for a Live record, the tree object of the worktree's whole
+	// content (tracked and untracked, ignores honored) at record time. The gates
+	// and the diff compare the live content against it, so uncommitted edits
+	// made after the record are refused the same way a moved HEAD is.
+	Tree string `json:"tree,omitempty"`
 }
 
 // captureRecordedHead reads the head of the worktree a step records from. The
 // zero value means there is nothing to record: no head resolves, or the
-// worktree is the shared checkout, whose head legitimately moves as work is
+// worktree is the shared checkout (a step may record it; it keeps the live-tree
+// behavior, because its head legitimately moves as work is
 // integrated.
 func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (recordedHead, bool) {
 	if worktree == "" || e.HeadFn == nil || worktree == runExecRoot(conn, runID) {
@@ -65,7 +72,13 @@ func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (
 	// one that holds the uncommitted part, and the record only pins its head.
 	live := base == "" || head == base || !worktreeClean(worktree) ||
 		!commitInRepo(runExecRoot(conn, runID), head)
-	return recordedHead{Head: head, Base: base, Worktree: worktree, Live: live}, true
+	rec := recordedHead{Head: head, Base: base, Worktree: worktree, Live: live}
+	if live {
+		if rec.Tree = worktreeTree(worktree); rec.Tree == "" {
+			return recordedHead{}, false
+		}
+	}
+	return rec, true
 }
 
 // recordedHeadOf is the head recorded for the step's CURRENT worktree.
@@ -87,9 +100,44 @@ func recordedHeadOf(conn *sql.DB, step *db.Step) (recordedHead, bool) {
 }
 
 // liveHeadMoved reports whether a Live record's worktree no longer stands at
-// the recorded head (or cannot be read at all).
+// the recorded head with the recorded content (or cannot be read at all).
 func (e *Engine) liveHeadMoved(rec recordedHead, worktree string) bool {
-	return e.HeadFn == nil || e.HeadFn(worktree) != rec.Head
+	if e.HeadFn == nil || e.HeadFn(worktree) != rec.Head {
+		return true
+	}
+	return rec.Tree == "" || worktreeTree(worktree) != rec.Tree
+}
+
+// worktreeTree writes the worktree's whole content (tracked and untracked,
+// ignores honored) as a tree object through a throwaway index and returns its
+// id, or "" when it cannot. The worktree's own index is untouched.
+func worktreeTree(dir string) string {
+	idx, err := os.CreateTemp("", "docket-tree-index-")
+	if err != nil {
+		return ""
+	}
+	name := idx.Name()
+	idx.Close()
+	defer os.Remove(name)
+	os.Remove(name) // git creates the index itself
+
+	run := func(args ...string) (string, bool) {
+		cmd := osexec.Command("git", append([]string{"-c", "core.fsmonitor=false", "-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+name)
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err == nil
+	}
+	if _, ok := run("read-tree", "HEAD"); !ok {
+		return ""
+	}
+	if _, ok := run("add", "-A"); !ok {
+		return ""
+	}
+	tree, ok := run("write-tree")
+	if !ok {
+		return ""
+	}
+	return tree
 }
 
 // worktreeClean reports whether dir has no tracked change and no untracked

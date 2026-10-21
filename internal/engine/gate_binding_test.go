@@ -176,3 +176,23 @@ func TestARecordingWithNoHeadClearsTheEarlierRecord(t *testing.T) {
 		t.Errorf("the first attempt's head %q still stands after a recording with none", rec.Head)
 	}
 }
+
+// Content edited at the SAME head after the record is refused too: a Live
+// record binds the worktree's whole content, not only its HEAD.
+func TestALiveRecordRefusesContentEditedAtTheSameHead(t *testing.T) {
+	w := newBindingWorld(t, true)
+	writeFile(t, w.worktree, "mine/untracked.txt", "edited after the record\n")
+
+	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
+	if err == nil {
+		t.Error("the saga routed a step whose worktree content changed after the record")
+	}
+	if len(w.captured.seen) != 0 {
+		t.Errorf("%d gate(s) ran against content the record did not describe", len(w.captured.seen))
+	}
+	step, gerr := db.GetStep(w.conn, w.stepID)
+	testsupport.Must(t, gerr, "GetStep: %v", gerr)
+	if _, _, derr := w.e.computeIssueDiff(w.conn, step, true); derr == nil {
+		t.Error("the diff stage read content the record did not describe")
+	}
+}
