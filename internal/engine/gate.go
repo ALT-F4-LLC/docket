@@ -125,6 +125,10 @@ type StepContext struct {
 	// named script then runs as unpinned, with a note saying so.
 	PinRoot  string
 	FilePins map[string]string
+	// Worktree is the writer's recorded worktree, kept when WorkRoot is
+	// replaced by an engine-owned checkout (DKT-4250): a binary inside the
+	// writer's own tree is still refused as the executor's file.
+	Worktree string
 }
 
 // GateResult is one gate's outcome, in the `gate result` shape.

@@ -3,11 +3,11 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
-	"os"
 	osexec "os/exec"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // RecordedHeadArtifactKind is the auxiliary kind a worktree-recorded step
@@ -75,23 +75,33 @@ func recordedHeadOf(conn *sql.DB, step *db.Step) (recordedHead, bool) {
 	return rec, true
 }
 
-// recordedHeadStillHolds reports whether the recorded commit is still what the
-// step's worktree holds. A worktree that no longer exists holds nothing newer,
-// so the record stands.
-func (e *Engine) recordedHeadStillHolds(rec recordedHead) bool {
-	if _, err := os.Stat(rec.Worktree); err != nil {
-		return os.IsNotExist(err)
-	}
-	if e.HeadFn == nil || e.HeadFn(rec.Worktree) != rec.Head {
-		return false
-	}
-	return worktreeClean(rec.Worktree)
-}
-
 // worktreeClean reports whether dir has no tracked change and no untracked
 // file. Anything it cannot read counts as not clean.
 func worktreeClean(dir string) bool {
-	out, err := osexec.Command("git", "-C", dir, "status", "--porcelain",
+	// No fsmonitor hook and no index lock: this reads a tree the executor owns.
+	out, err := osexec.Command("git", "-c", "core.fsmonitor=false", "-C", dir,
+		"--no-optional-locks", "status", "--porcelain",
 		"--untracked-files=all").Output()
 	return err == nil && len(strings.TrimSpace(string(out))) == 0
+}
+
+// insertRecordedHeadTx records the commit a step's worktree holds, or, when
+// none reproduces it, a cleared record (an empty head) that supersedes any
+// earlier one: recordedHeadOf reads the newest row and honors only a head.
+func insertRecordedHeadTx(
+	tx *sql.Tx, step *db.Step, rec recordedHead, have bool, worktree string, nowMS int64,
+) error {
+	if !have {
+		rec = recordedHead{Worktree: worktree}
+	}
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	_, err = db.InsertArtifactTx(tx, db.Artifact{
+		RunID: step.RunID, StepID: step.ID, Kind: RecordedHeadArtifactKind,
+		Body: rec.Head, Payload: string(payload),
+		SHA256: workflow.SHA256([]byte(rec.Head)),
+	}, nowMS)
+	return err
 }

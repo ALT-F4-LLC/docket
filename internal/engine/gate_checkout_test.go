@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -119,6 +121,12 @@ func TestCompletionGatesMeasureTheRecordedShaAfterTheWorktreeIsRemoved(t *testin
 		}
 	}
 
+	// The diff stage read the same commit: the artifact the close integrates
+	// names the sha the gates measured, though no worktree was left to read.
+	if got := issueDiffHead(t, conn, stepID); got != workHead {
+		t.Errorf("issue.diff head = %q, want the recorded sha %q", got, workHead)
+	}
+
 	// The engine's checkout is gone once the stage settles.
 	out := gitOutput(t, shared, "worktree", "list", "--porcelain")
 	if strings.Count(out, "worktree ") > 2 {
@@ -200,11 +208,6 @@ func TestGatesMeasureTheLiveWorktreeWhenItHoldsMoreThanTheRecordedSha(t *testing
 		{"uncommitted at record", func(t *testing.T, wt string) {
 			writeFile(t, wt, "mine/dirty.txt", "not committed\n")
 		}, nil},
-		{"moved on after record", nil, func(t *testing.T, wt string) {
-			writeFile(t, wt, "mine/second.txt", "a second commit\n")
-			runGit(t, wt, "add", "-A")
-			runGit(t, wt, "commit", "-q", "-m", "second")
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shared := gitRepo(t)
@@ -304,5 +307,98 @@ func TestCaptureRecordedHeadRefusesWorkItCannotReproduce(t *testing.T) {
 	}
 	if _, ok := e.captureRecordedHead(conn, run.ID, shared); ok {
 		t.Error("a head was recorded for the shared checkout")
+	}
+}
+
+// issueDiffHead is the head the step's recorded issue.diff artifact names.
+func issueDiffHead(t *testing.T, conn *sql.DB, stepID int) string {
+	t.Helper()
+	var payload string
+	testsupport.Must(t, conn.QueryRow(
+		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ? ORDER BY id DESC LIMIT 1`,
+		stepID, ArtifactKindIssueDiff).Scan(&payload), "reading the issue.diff artifact")
+	var rec struct {
+		Head string `json:"head"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(payload), &rec), "decoding the issue.diff payload")
+	return rec.Head
+}
+
+// The record is authoritative for the whole saga. A worktree that commits again
+// after the record changes neither what the gates measure nor what the diff
+// names, so gates that passed one commit never stand for another.
+func TestACommitMadeAfterTheRecordIsNeitherMeasuredNorIntegrated(t *testing.T) {
+	shared := gitRepo(t)
+	pinned := strings.TrimSpace(gitOutput(t, shared, "rev-parse", "HEAD"))
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "moved", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "moved", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue")
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	worktree := filepath.Join(t.TempDir(), "wt")
+	runGit(t, shared, "worktree", "add", "-q", worktree)
+	writeFile(t, worktree, "mine/first.txt", "first\n")
+	runGit(t, worktree, "add", "-A")
+	runGit(t, worktree, "commit", "-q", "-m", "first")
+	recorded := strings.TrimSpace(gitOutput(t, worktree, "rev-parse", "HEAD"))
+
+	e := testEngine()
+	e.DiffFn = GitDiff
+	captured := &treeCapture{baseCapture: baseCapture{seen: map[string]StepContext{}}, heads: map[string]string{}}
+	e.Gates = captured
+	withDetachedPreGateLockDir(t)
+	installDetachedSagaLauncher(t, func(int) error { return nil })
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+	var pending bool
+	testsupport.Must(t, e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("summary"), WorkDir: worktree,
+		Pending: &pending, NowMS: nowMS,
+	}), "complete")
+	if !pending {
+		t.Fatal("premise: the gates were not handed to a detached run")
+	}
+
+	writeFile(t, worktree, "mine/second.txt", "after the record\n")
+	runGit(t, worktree, "add", "-A")
+	runGit(t, worktree, "commit", "-q", "-m", "second")
+	if moved := strings.TrimSpace(gitOutput(t, worktree, "rev-parse", "HEAD")); moved == recorded {
+		t.Fatal("premise: the worktree did not move")
+	}
+
+	_, err = e.RunDetachedSaga(conn, stepID, nowMS)
+	testsupport.Must(t, err, "detached saga: %v", err)
+	if len(captured.heads) == 0 {
+		t.Fatal("no completion gate was dispatched")
+	}
+	for gate, head := range captured.heads {
+		if head != recorded {
+			t.Errorf("gate %s measured %q, want the recorded commit %q", gate, head, recorded)
+		}
+	}
+	if got := issueDiffHead(t, conn, stepID); got != recorded {
+		t.Errorf("issue.diff head = %q, want the recorded commit %q", got, recorded)
+	}
+}
+
+// The writer's recorded worktree stays a containment root when the gate
+// measures an engine-owned checkout instead.
+func TestTheWritersWorktreeStaysAContainmentRootUnderAScratchCheckout(t *testing.T) {
+	runRoot, scratch, worktree := t.TempDir(), t.TempDir(), t.TempDir()
+	tool := filepath.Join(worktree, "bin", "tool")
+	writeFile(t, worktree, "bin/tool", "#!/bin/sh\n")
+	testsupport.Must(t, os.Chmod(tool, 0o755), "chmod")
+
+	runner := NewExecRunner(RepoPaths{ExecRoot: runRoot, Identity: runRoot})
+	_, err := runner.resolveContained(tool, "tool",
+		StepContext{PinRoot: runRoot, WorkRoot: scratch, Worktree: worktree})
+	if !errors.Is(err, docketexec.ErrRefused) {
+		t.Fatalf("resolving a file inside the writer's worktree = %v; want a refusal", err)
 	}
 }

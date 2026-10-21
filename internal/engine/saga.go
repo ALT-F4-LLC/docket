@@ -1114,14 +1114,15 @@ func (e *Engine) runGateStage(
 	// or the sha cannot be checked out, the recorded worktree stays the tree,
 	// as before: measuring a different tree is the defect, so there is no
 	// substitute.
-	// The recorded commit is measured only while it is still the commit that
-	// will be integrated (DKT-4250). The diff stage reads the worktree's live
-	// head AFTER the gates, so a worktree that moved on since the record, by a
-	// new commit or by uncommitted edits, is measured live: gates that passed
-	// commit A must never stand for commit B. A worktree already gone cannot
-	// have moved, and the diff stage has no live tree to read either.
+	//
+	// The recorded commit is authoritative for the whole saga: the diff stage
+	// (computeIssueDiff) reads the same sha, so the commit the gates measure is
+	// the commit the diff names and close integrates. Whatever the worktree
+	// does after the record cannot make gates that passed one commit stand for
+	// another. The writer's worktree stays a containment root (sc.Worktree).
+	sc.Worktree = step.WorkRoot
 	if step.WorkRoot != "" {
-		if rec, ok := recordedHeadOf(conn, step); ok && e.recordedHeadStillHolds(rec) {
+		if rec, ok := recordedHeadOf(conn, step); ok {
 			if tree := reconstructTarget(conn, step.RunID, rec.Head); tree.Dir != "" {
 				defer tree.release()
 				sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
@@ -1226,7 +1227,7 @@ func (e *Engine) runRoutingStage(
 		// sibling. Action/human/vote steps are still excluded: they change no
 		// tree either.
 		var err error
-		diffBody, diffPayload, err = e.computeIssueDiff(conn, step)
+		diffBody, diffPayload, err = e.computeIssueDiff(conn, step, true)
 		if err != nil {
 			return err
 		}
@@ -1826,7 +1827,7 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 //
 // With no DiffFn wired there is nothing to measure: both halves come back
 // empty and the caller records that as the truthful first answer.
-func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload string, err error) {
+func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool) (body, payload string, err error) {
 	scope, err := snapshotScope(conn, step.RunID, step.IssueID)
 	if err != nil {
 		return "", "", err
@@ -1843,6 +1844,20 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	// for the shared checkout, the run's PINNED starting commit — see
 	// runDiffBase's doc for why.
 	base, liveBase := runDiffBase(conn, step.RunID, step.ID, dir, execRoot)
+	// A step that recorded its commit (DKT-4250) is diffed at THAT commit, in a
+	// checkout of it against the fork point recorded with it: the commit the
+	// gates measured is the commit this diff names and close integrates, and a
+	// worktree that moved on or vanished since the record changes neither. If
+	// the sha cannot be checked out the live worktree is read, as before. An
+	// operator re-pin passes useRecorded = false: it names a tree to read NOW.
+	if useRecorded && step.WorkRoot != "" {
+		if rec, ok := recordedHeadOf(conn, step); ok {
+			if tree := reconstructTarget(conn, step.RunID, rec.Head); tree.Dir != "" {
+				defer tree.release()
+				dir, base, liveBase = tree.Dir, rec.Base, false
+			}
+		}
+	}
 	body, err = e.DiffFn(dir, base, scope)
 	if err != nil {
 		return "", "", fmt.Errorf("computing the diff for %s: %w", step.Instance, err)

@@ -350,15 +350,22 @@ func TestRerunGatesWorktreeRepinsAndMeasuresThere(t *testing.T) {
 		t.Errorf("implement@0 = %q after passing gates, want %q", got, db.StepDone)
 	}
 
-	// THE GATES MEASURED THE PATCHED CHECKOUT, every one of them.
+	// THE GATES MEASURED THE PATCHED COMMIT, every one of them (DKT-4250): the
+	// re-pin recorded the commit the new checkout holds, and the gates measure
+	// an engine-owned checkout of it, not the executor's old tree.
 	measured := w.gates.measured()[spawnsBefore:]
 	if len(measured) == 0 {
 		t.Fatal("no gate ran on the rerun")
 	}
 	for _, root := range measured {
-		if root != patched {
-			t.Errorf("a gate measured %q, want the re-pinned checkout %q", root, patched)
+		if root == w.worktree {
+			t.Errorf("a gate measured the superseded checkout %q", root)
 		}
+	}
+	repinned, err := db.GetStep(conn, w.implementID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if rec, ok := recordedHeadOf(conn, repinned); !ok || rec.Head != patch {
+		t.Errorf("recorded head after the re-pin = %+v (ok %v), want %s", rec, ok, patch)
 	}
 	step, err := db.GetStep(conn, w.implementID)
 	testsupport.Must(t, err, "GetStep: %v", err)

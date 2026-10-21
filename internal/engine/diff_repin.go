@@ -68,6 +68,11 @@ type IssueDiffRepin struct {
 	// rangeFrom is the commit an annotation's full-range re-pin starts after
 	// (DKT-4269); "" for a re-pin of one commit.
 	rangeFrom string
+	// recorded is the commit the re-pinned checkout holds, captured like a
+	// record's (DKT-4250); haveRecorded is false when the checkout holds work a
+	// checkout of its head would not reproduce.
+	recorded     recordedHead
+	haveRecorded bool
 }
 
 // prepareIssueDiffRepin computes the re-pin OUTSIDE any transaction (it is a
@@ -104,7 +109,7 @@ func (e *Engine) prepareIssueDiffRepin(
 	// `worktree` field is written from it.
 	pinned := *step
 	pinned.WorkRoot = worktree
-	body, payload, err := e.computeIssueDiff(conn, &pinned)
+	body, payload, err := e.computeIssueDiff(conn, &pinned, false)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +170,7 @@ func (e *Engine) prepareIssueDiffRepin(
 	repin := &IssueDiffRepin{
 		Worktree: worktree, ToSHA: to, body: body, payload: payload,
 	}
+	repin.recorded, repin.haveRecorded = e.captureRecordedHead(conn, step.RunID, worktree)
 	if prior != nil {
 		repin.FromSHA = handBackHead(prior.Payload)
 		repin.supersededID = prior.ID
@@ -193,6 +199,13 @@ func applyIssueDiffRepin(
 			return fmt.Errorf("recording the re-pinned worktree for %s: %w", step.Instance, err)
 		}
 		step.WorkRoot = repin.Worktree
+	}
+	// The named checkout is also what the gates measure from now on, so the
+	// recorded commit is replaced with the one it holds, or cleared when none
+	// reproduces it (DKT-4250). An older record must not outlive the re-pin: a
+	// rerun-gates would otherwise measure the commit the operator just replaced.
+	if err := insertRecordedHeadTx(tx, step, repin.recorded, repin.haveRecorded, repin.Worktree, nowMS); err != nil {
+		return err
 	}
 	if repin.Unchanged {
 		return nil

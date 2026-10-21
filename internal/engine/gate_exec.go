@@ -226,7 +226,7 @@ func (r *ExecRunner) resolveContained(argv0, entryArgv0 string, sc StepContext) 
 	if err != nil {
 		return "", err
 	}
-	for _, extra := range []string{r.RepoRoot, sc.WorkRoot} {
+	for _, extra := range []string{r.RepoRoot, sc.WorkRoot, sc.Worktree} {
 		if extra == "" || extra == primary {
 			continue
 		}
