@@ -204,6 +204,11 @@ type ActivateResult struct {
 	// RoutingWarnings is DKT-4275's dry-run-only array: bound issues without the
 	// security label that look security-shaped. It warns; it routes nothing.
 	RoutingWarnings []RoutingWarning
+	// RoutingLint states what that lint could check, on a dry run only (nil on
+	// a real activation, which never runs it). An empty RoutingWarnings is read
+	// against it: a lint with no lexicon and no labelled issue found nothing
+	// because it had nothing to compare against.
+	RoutingLint *RoutingLintReport
 	// HoldPolicy is who will answer a hold this run mints (DKT-266) — a panel
 	// when both `vote.hold.*` keys are set, one operator otherwise.
 	//
@@ -454,11 +459,12 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 		}
 		result.Fences = fences
 
-		routing, rerr := buildRoutingWarningsTx(tx, runID, projectID)
+		routing, lint, rerr := buildRoutingWarningsTx(tx, runID, projectID)
 		if rerr != nil {
 			return nil, rerr
 		}
 		result.RoutingWarnings = routing
+		result.RoutingLint = &lint
 		result.DryRun = true
 
 		// The run is read INSIDE the transaction, before the rollback, rather

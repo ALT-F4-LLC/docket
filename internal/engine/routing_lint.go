@@ -36,10 +36,45 @@ import (
 // meaning to any word, so the vocabulary belongs to the instance that knows its
 // own security surface. The label name is `routing.security_label`; setting it
 // empty turns the lint off.
+//
+// WHAT THE LINT DOES NOT SEE. An empty list is not a clearance. The overlap
+// check compares the issues' DECLARED scope strings after taking each glob's
+// literal prefix: no path normalization (`./x`, `a/../b`, case), no writer diff,
+// no symlink targets, and only security-labelled issues bound in the same run.
+// The lexicon is a case-folded substring match on the title, scope and body. A
+// scope with no literal prefix (`**`, `{a,b}/**`) is skipped. The report below
+// says how many issues each of those left unchecked, so a reader can tell a
+// clean run from a lint that had nothing to compare against.
+
+// RoutingLintReport states what a dry run's lint was able to check. It is
+// present on every dry run, so "no warnings" is distinguishable from "nothing
+// was checkable".
+type RoutingLintReport struct {
+	// Label is the configured security label; empty means the lint is off.
+	Label string `json:"label"`
+	// LexiconTerms is the number of configured lexicon terms.
+	LexiconTerms int `json:"lexicon_terms"`
+	// LabelledIssues is the number of bound issues carrying the label, the only
+	// issues a scope overlap can be found against.
+	LabelledIssues int `json:"labelled_issues"`
+	// Linted is the number of bound issues without the label that were checked.
+	Linted int `json:"linted"`
+	// Unscoped is the number of linted issues whose scope held no glob with a
+	// literal prefix, so the overlap check could not apply to them.
+	Unscoped int `json:"unscoped"`
+}
+
+// CheckedNothing reports a lint that had no lexicon and no labelled issue to
+// compare against, or was off: its empty result carries no information.
+func (r RoutingLintReport) CheckedNothing() bool {
+	return r.Label == "" || (r.LexiconTerms == 0 && r.LabelledIssues == 0)
+}
 
 // RoutingWarning is one bound issue the lint flagged.
 type RoutingWarning struct {
 	Issue string `json:"issue"`
+	// Label is the security label the issue lacks.
+	Label string `json:"label"`
 	// Overlaps lists the security-labelled issues whose scope this issue's scope
 	// overlaps.
 	Overlaps []string `json:"overlaps,omitempty"`
@@ -51,23 +86,23 @@ type RoutingWarning struct {
 
 // buildRoutingWarningsTx lints the run's bound issues. It reads only the
 // activation snapshots, so it sees the run as the dry run computed it.
-func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning, error) {
+func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning, RoutingLintReport, error) {
 	label, err := db.GetConfigTx(tx, projectID, db.KeyRoutingSecurityLabel)
 	if err != nil {
-		return nil, err
+		return nil, RoutingLintReport{}, err
 	}
 	if label.Value == "" {
-		return nil, nil
+		return nil, RoutingLintReport{}, nil
 	}
 	lexicon, err := db.GetConfigTx(tx, projectID, db.KeyRoutingSecurityLexicon)
 	if err != nil {
-		return nil, err
+		return nil, RoutingLintReport{}, err
 	}
 	terms := db.SplitNameList(lexicon.Value)
 
 	runIssues, err := db.ListRunIssuesTx(tx, runID)
 	if err != nil {
-		return nil, err
+		return nil, RoutingLintReport{}, err
 	}
 	type bound struct {
 		id       int
@@ -81,7 +116,7 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 		var snap issueSnapshotFields
 		if ri.IssueSnapshot != "" {
 			if err := json.Unmarshal([]byte(ri.IssueSnapshot), &snap); err != nil {
-				return nil, fmt.Errorf("reading the snapshot of %s: %w", model.FormatID(ri.IssueID), err)
+				return nil, RoutingLintReport{}, fmt.Errorf("reading the snapshot of %s: %w", model.FormatID(ri.IssueID), err)
 			}
 		}
 		issues = append(issues, bound{
@@ -90,10 +125,21 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 		})
 	}
 
+	report := RoutingLintReport{Label: label.Value, LexiconTerms: len(terms)}
+	for _, issue := range issues {
+		if issue.security {
+			report.LabelledIssues++
+		}
+	}
+
 	var out []RoutingWarning
 	for _, issue := range issues {
 		if issue.security {
 			continue
+		}
+		report.Linted++
+		if !hasLiteralPrefixGlob(issue.scope) {
+			report.Unscoped++
 		}
 		var overlaps, found []string
 		for _, other := range issues {
@@ -118,11 +164,11 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 			reasons = append(reasons, "matches the "+label.Value+" lexicon: "+strings.Join(found, ", "))
 		}
 		out = append(out, RoutingWarning{
-			Issue: model.FormatID(issue.id), Overlaps: overlaps, Terms: found,
+			Issue: model.FormatID(issue.id), Label: label.Value, Overlaps: overlaps, Terms: found,
 			Reason: "no " + label.Value + " label, but " + strings.Join(reasons, "; "),
 		})
 	}
-	return out, nil
+	return out, report, nil
 }
 
 // normalizeLexicon lowercases s and reads `-` and `_` as spaces, so the
@@ -135,6 +181,17 @@ func normalizeLexicon(s string) string {
 		}
 		return r
 	}, strings.ToLower(s))
+}
+
+// hasLiteralPrefixGlob reports whether any glob of scope has a literal prefix,
+// the only kind the overlap check can compare.
+func hasLiteralPrefixGlob(scope []string) bool {
+	for _, g := range scope {
+		if literalPrefix(g) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // scopesOverlap reports whether any glob of a shares paths with any glob of b,

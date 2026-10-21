@@ -486,7 +486,10 @@ var engineConfigSpecs = []ConfigSpec{
 			"space, case is ignored. Empty (the default) leaves only the " +
 			"scope-overlap check, which skips scopes with no literal prefix " +
 			"(`**`, `**/x.go`) and issues with no scope: an empty warning list " +
-			"is not a clearance",
+			"is not a clearance. The overlap check compares declared scope " +
+			"strings only (no path normalization or case folding, no writer " +
+			"diff, no symlinks) against labelled issues in the same run; " +
+			"`routing_lint` in the dry-run JSON says what was checkable",
 	},
 	{
 		Key:     KeyVoteHoldCost,

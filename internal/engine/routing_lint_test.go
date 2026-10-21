@@ -99,3 +99,44 @@ func TestRoutingLintIsOffWithAnEmptyLabelAndWritesNothingOnARealActivation(t *te
 		t.Errorf("a real activation reported routing warnings: %+v", result.RoutingWarnings)
 	}
 }
+
+// An empty warning list is not a clearance: every dry run reports what the
+// lint could check, so a run with no lexicon and no labelled issue reads as
+// "checked nothing" and not as clean.
+func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
+	conn := mustDB(t)
+	run, _, _, _, _ := routingRun(t, conn)
+	result, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	lint := result.RoutingLint
+	if lint == nil {
+		t.Fatal("a dry run carried no lint report")
+	}
+	if lint.Label == "" || lint.LabelledIssues != 1 || lint.Linted != 3 || lint.CheckedNothing() {
+		t.Errorf("report = %+v; want the label, 1 labelled issue and 3 linted ones", *lint)
+	}
+
+	// No lexicon and no labelled issue: the lint had nothing to compare against.
+	conn2 := mustDB(t)
+	registerFixture(t, conn2)
+	tidy := createIssue(t, conn2, "Tidy", "typos", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn2, tidy, `["docs/README.md"]`), "declaring scope")
+	only := startRun(t, conn2, tidy)
+	result2, err := Activate(conn2, only.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	if len(result2.RoutingWarnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", result2.RoutingWarnings)
+	}
+	if result2.RoutingLint == nil || !result2.RoutingLint.CheckedNothing() {
+		t.Errorf("report = %+v; an empty lint must read as checked-nothing", result2.RoutingLint)
+	}
+
+	// A real activation never runs the lint, so it carries no report.
+	conn3 := mustDB(t)
+	real, _, _, _, _ := routingRun(t, conn3)
+	result3, err := Activate(conn3, real.ID, ActivateOptions{NowMS: nowMS})
+	testsupport.Must(t, err, "activate: %v", err)
+	if result3.RoutingLint != nil {
+		t.Errorf("a real activation carried a lint report: %+v", *result3.RoutingLint)
+	}
+}
