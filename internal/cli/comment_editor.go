@@ -24,7 +24,7 @@ import (
 // An editor that saves nothing still returns "", which the caller reports as a
 // cancellation.
 func commentBodyOrEditor(body string, messageSet, jsonMode bool) (string, error) {
-	if body != "" {
+	if strings.TrimSpace(body) != "" {
 		return body, nil
 	}
 	if messageSet {

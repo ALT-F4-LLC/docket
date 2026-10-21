@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,27 +41,31 @@ func devNullStdin(t *testing.T) {
 // `issue comment add X -m ""` with stdin from /dev/null returns a validation
 // error and starts no editor.
 func TestBlankMessageIsAValidationErrorAndSpawnsNoEditor(t *testing.T) {
-	marker := markerEditor(t)
-	devNullStdin(t)
+	for _, message := range []string{"", "   ", "\n\t \n"} {
+		t.Run(fmt.Sprintf("%q", message), func(t *testing.T) {
+			marker := markerEditor(t)
+			devNullStdin(t)
 
-	conn := newTestDB(t)
-	issue := createIssue(t, conn, "commented", model.StatusBacklog, model.PriorityNone)
-	cmd := cmdWithDB(conn)
-	cmd.Flags().StringP("message", "m", "", "")
-	cmd.Flags().String("idempotency-key", "", "")
-	testsupport.Must(t, cmd.ParseFlags([]string{"-m", ""}), "parsing flags")
+			conn := newTestDB(t)
+			issue := createIssue(t, conn, "commented", model.StatusBacklog, model.PriorityNone)
+			cmd := cmdWithDB(conn)
+			cmd.Flags().StringP("message", "m", "", "")
+			cmd.Flags().String("idempotency-key", "", "")
+			testsupport.Must(t, cmd.ParseFlags([]string{"-m", message}), "parsing flags")
 
-	err := commentAddCmd.RunE(cmd, []string{model.FormatID(issue)})
-	if err == nil || !strings.Contains(err.Error(), "message is empty") {
-		t.Fatalf("issue comment add -m \"\" = %v; want a message-is-empty validation error", err)
-	}
-	if _, statErr := os.Stat(marker); statErr == nil {
-		t.Error("the editor was spawned for a blank -m")
-	}
-	comments, err := db.ListComments(conn, issue)
-	testsupport.Must(t, err, "ListComments: %v", err)
-	if len(comments) != 0 {
-		t.Errorf("%d comments recorded after a refusal", len(comments))
+			err := commentAddCmd.RunE(cmd, []string{model.FormatID(issue)})
+			if err == nil || !strings.Contains(err.Error(), "message is empty") {
+				t.Fatalf("issue comment add -m %q = %v; want a message-is-empty validation error", message, err)
+			}
+			if _, statErr := os.Stat(marker); statErr == nil {
+				t.Error("the editor was spawned for a blank -m")
+			}
+			comments, err := db.ListComments(conn, issue)
+			testsupport.Must(t, err, "ListComments: %v", err)
+			if len(comments) != 0 {
+				t.Errorf("%d comments recorded after a refusal", len(comments))
+			}
+		})
 	}
 }
 
