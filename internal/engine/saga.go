@@ -450,6 +450,11 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
+	// The commit the writer left in its worktree, read NOW while the worktree
+	// exists (DKT-4250): the gates measure a checkout of it later, when the
+	// workflow may already have removed the worktree.
+	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, opts.WorkDir)
+
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning the saga: %w", err)
@@ -485,6 +490,17 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		SHA256:  artifactSHA256(opts.Artifact, opts.Payload),
 	}, opts.NowMS); err != nil {
 		return err
+	}
+
+	if haveRecorded {
+		payload, _ := json.Marshal(recorded)
+		if _, err := db.InsertArtifactTx(tx, db.Artifact{
+			RunID: step.RunID, StepID: step.ID, Kind: RecordedHeadArtifactKind,
+			Body: recorded.Head, Payload: string(payload),
+			SHA256: workflow.SHA256([]byte(recorded.Head)),
+		}, opts.NowMS); err != nil {
+			return err
+		}
 	}
 
 	// The declared worktree persists WITH the artifact, because the saga
@@ -1077,6 +1093,27 @@ func (e *Engine) runGateStage(
 		Scope:  scope, WorkRoot: step.WorkRoot,
 		Base:    gateBaseSHA(conn, step.RunID, step.WorkRoot),
 		PinRoot: pinRoot, FilePins: filePins,
+	}
+
+	// THE ENGINE OWNS THE CHECKOUT A COMPLETION GATE MEASURES (DKT-4250). The
+	// writer's worktree is the workflow's, and it is removed once the writer
+	// returns, which can be before a detached saga reaches this stage: gates
+	// then ran against a missing tree and parked correct work. The commit the
+	// writer recorded is still in the object database, so the gate measures a
+	// detached checkout of exactly that sha, and the checkout is removed when
+	// this stage settles. If the step recorded no commit (a writer that
+	// committed nothing, whose work is only the worktree's uncommitted state)
+	// or the sha cannot be checked out, the recorded worktree stays the tree,
+	// as before: measuring a different tree is the defect, so there is no
+	// substitute.
+	if step.WorkRoot != "" {
+		if rec, ok := recordedHeadOf(conn, step); ok {
+			if tree := reconstructTarget(conn, step.RunID, rec.Head); tree.Dir != "" {
+				defer tree.release()
+				sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
+				sc.Base = rec.Base
+			}
+		}
 	}
 
 	rows, err := runGate(e.Gates, spec, sc)

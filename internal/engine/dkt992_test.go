@@ -127,7 +127,7 @@ func TestCompletionGateBaseIsTheWorktreeCreationCommit(t *testing.T) {
 	workHead := strings.TrimSpace(gitOutput(t, worktree, "rev-parse", "HEAD"))
 
 	e := testEngine()
-	captured := &baseCapture{seen: map[string]StepContext{}}
+	captured := &treeCapture{baseCapture: baseCapture{seen: map[string]StepContext{}}, heads: map[string]string{}}
 	e.Gates = captured
 
 	stepID := stepIDByInstance(t, conn, "implement@0")
@@ -148,9 +148,16 @@ func TestCompletionGateBaseIsTheWorktreeCreationCommit(t *testing.T) {
 				"creation commit %q (pinned run commit %q, worktree HEAD %q — "+
 				"neither is the step's base)", gate, sc.Base, fork, pinned, workHead)
 		}
-		if sc.WorkRoot != worktree {
-			t.Errorf("gate %s dispatched with WorkRoot %q, want %q",
-				gate, sc.WorkRoot, worktree)
+		// DKT-4250: the gate measures the engine's own checkout of the commit
+		// the writer recorded, not the writer's worktree, which the workflow
+		// may remove at any moment.
+		if sc.WorkRoot == worktree || sc.WorkRoot == "" {
+			t.Errorf("gate %s dispatched with WorkRoot %q; want an engine-owned "+
+				"checkout, not the writer's worktree", gate, sc.WorkRoot)
+		}
+		if got := captured.heads[gate]; got != workHead {
+			t.Errorf("gate %s measured %q, want the writer's recorded commit %q",
+				gate, got, workHead)
 		}
 	}
 }

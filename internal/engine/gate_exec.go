@@ -188,6 +188,27 @@ func (r *ExecRunner) spawnDir(sc StepContext) string {
 	if sc.WorkRoot != "" {
 		return sc.WorkRoot
 	}
+	return r.root(sc)
+}
+
+// root is the checkout a gate's binary is contained against and, with no
+// worktree in hand, the cwd it runs in (DKT-4250).
+//
+// A saga's gates take the RUN's recorded exec root (StepContext.PinRoot), not
+// the runner's own. The runner's root is the invoking cwd's repository, and a
+// writer records from inside its isolated worktree, so a detached gate run
+// launched there inherited THAT worktree as its root. The workflow removes the
+// worktree once the writer returns, and the gate then refused with a repo path
+// that no longer resolved. The run's exec root was recorded by the operator's
+// activation, outlives every executor worktree, and is not a tree an executor
+// controls, so it is also the safer containment boundary: a binary an
+// executor wrote into its own worktree is not "inside the repository" by the
+// invoker's reckoning but is by the run's. A caller with no run in hand
+// (PinRoot empty) keeps the runner's root exactly as before.
+func (r *ExecRunner) root(sc StepContext) string {
+	if sc.PinRoot != "" {
+		return sc.PinRoot
+	}
 	return r.RepoRoot
 }
 
@@ -395,7 +416,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	// the command is the entry that configures it, so there is no window in
 	// which one entry's permission is applied to another's requirements.
 	env, err := exec.BuildEnv(exec.EnvPolicy{
-		Gate: g.Name, Repo: r.RepoRoot, Network: entry.Network,
+		Gate: g.Name, Repo: r.root(sc), Network: entry.Network,
 		Issue: model.FormatID(sc.IssueID), Scope: sc.Scope,
 		// DKT-1186: the step's own reference, so the gate can ask the engine
 		// for its inputs (`docket step context $DOCKET_STEP`) instead of
@@ -417,7 +438,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	if len(entry.Argv) > 0 {
 		entryArgv0 = entry.Argv[0]
 	}
-	resolved, err := exec.Resolve(match.Argv[0], r.RepoRoot, entryArgv0)
+	resolved, err := exec.Resolve(match.Argv[0], r.root(sc), entryArgv0)
 	if err != nil {
 		// A refusal means NOTHING RAN: verdict is unmatched and the process
 		// table was never touched.
@@ -494,7 +515,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	// 5m bound expired and parked correct work as unmeasured. Two gates on
 	// the SAME isolated worktree are not serialized either; that tree has one
 	// step behind it, and the trade is accepted.
-	if entry.Tree && sharesCheckout(dir, r.RepoRoot) {
+	if entry.Tree && sharesCheckout(dir, r.root(sc)) {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
 			// The serialization the gate requires cannot be provided, so
@@ -538,7 +559,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	)
 	if pinnedSpawn {
 		runPinned := func(s exec.Spec) (exec.Result, error) {
-			return exec.RunPinned(s, entry.Argv0SHA256, r.RepoRoot, entryArgv0)
+			return exec.RunPinned(s, entry.Argv0SHA256, r.root(sc), entryArgv0)
 		}
 		attempts, refusal, err = exec.RunSpawnedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin, runPinned)
 		// A pin refusal from RunPinned spawned nothing, so it records like the
