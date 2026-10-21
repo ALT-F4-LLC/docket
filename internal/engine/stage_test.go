@@ -1229,13 +1229,19 @@ func TestAClaimOfAReReviewRowWaitsForItsRoundsFixBody(t *testing.T) {
 		t.Errorf("refusal = %q; want the after-predecessor condition naming fix@1 (pending)", err)
 	}
 
-	// Gated or claimed, the body is still open.
+	// Claimed, then gated: the body is open either way.
 	fixID := stepIDIn(t, conn, issue, "fix@1")
 	claim, err := ClaimStep(conn, fixID, ClaimOptions{Owner: "worker", NowMS: nowMS})
 	testsupport.Must(t, err, "claim fix@1: %v", err)
 	if _, err := ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS}); err == nil {
 		t.Error("review@1 was claimed while fix@1 was claimed")
 	}
+
+	execSQL(t, conn, `UPDATE steps SET status = 'gated' WHERE id = ?`, fixID)
+	if _, err := ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS}); err == nil {
+		t.Error("review@1 was claimed while fix@1 was gated")
+	}
+	execSQL(t, conn, `UPDATE steps SET status = 'claimed' WHERE id = ?`, fixID)
 
 	// Once the body records, the row claims.
 	testsupport.Must(t, e.CompleteStep(conn, fixID, CompleteOptions{
