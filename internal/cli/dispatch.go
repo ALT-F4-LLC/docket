@@ -123,6 +123,13 @@ func runDispatchOpen(cmd *cobra.Command, w *output.Writer) error {
 		w.Warn("%s", manifest.ReapHold)
 	}
 
+	// Gap-only parks whose prerequisites closed: stderr for a human, and
+	// `retry_eligible` in the envelope for a relay.
+	for _, r := range manifest.RetryEligible {
+		w.Warn("%s on %s is parked gap-only and its prerequisites (%s) are done; "+
+			"it can be retried", r.Step, r.Issue, strings.Join(r.DependsOn, ", "))
+	}
+
 	var message string
 	if !w.JSONMode {
 		message = renderManifest(manifest)

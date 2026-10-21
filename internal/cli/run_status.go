@@ -50,6 +50,9 @@ type runStatusResult struct {
 	// coverage from this block rather than from a hand diff of the issue list
 	// against the step list. Absent when every bound issue holds a step.
 	Unexpanded []engine.UnexpandedIssue `json:"unexpanded,omitempty"`
+	// RetryEligible lists gap-only parks whose depends_on prerequisites are all
+	// done (DKT-4257), the same list `dispatch open` carries. Absent when none.
+	RetryEligible []engine.RetryEligible `json:"retry_eligible,omitempty"`
 }
 
 // pinJSON is the `pins` wire element: `{path, sha256}` for a file pin, and the
@@ -73,6 +76,7 @@ func (r runStatusResult) VersionedPayload() any {
 		PinDrift       []engine.PinVerdict      `json:"pin_drift,omitempty"`
 		ActivationHead *engine.ActivationHead   `json:"activation_head,omitempty"`
 		Unexpanded     []engine.UnexpandedIssue `json:"unexpanded,omitempty"`
+		RetryEligible  []engine.RetryEligible   `json:"retry_eligible,omitempty"`
 	}{
 		Run:            model.VersionedRun{Run: *r.Run},
 		Issues:         r.Issues,
@@ -81,6 +85,7 @@ func (r runStatusResult) VersionedPayload() any {
 		PinDrift:       r.PinDrift,
 		ActivationHead: r.ActivationHead,
 		Unexpanded:     r.Unexpanded,
+		RetryEligible:  r.RetryEligible,
 	}
 }
 
@@ -192,9 +197,15 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 		return runErr(err)
 	}
 
+	retryEligible, err := engine.RetryEligibleParks(conn, runID)
+	if err != nil {
+		return runErr(err)
+	}
+
 	result := runStatusResult{
 		Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head,
-		Unexpanded: unexpanded,
+		Unexpanded:    unexpanded,
+		RetryEligible: retryEligible,
 	}
 	for _, p := range pins {
 		result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
@@ -284,6 +295,13 @@ func renderRunStatus(r runStatusResult) string {
 			if u.BlockedByTruncated {
 				b.WriteString("    (more chains not shown)\n")
 			}
+		}
+	}
+
+	if len(r.RetryEligible) > 0 {
+		b.WriteString("Retry-eligible parks (gap-only, prerequisites done):\n")
+		for _, re := range r.RetryEligible {
+			fmt.Fprintf(&b, "  %s  %s  after %s\n", re.Step, re.Issue, strings.Join(re.DependsOn, ", "))
 		}
 	}
 

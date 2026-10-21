@@ -622,6 +622,10 @@ var eventActors = map[string]Actor{
 	// derives, because `dispatch close` ran — an operator verb either way.
 	EventVoteReseated: ActorHuman,
 	EventStepDeferred: ActorHuman,
+
+	// The retry-eligible signal (DKT-4257): the scheduler noticing that a parked
+	// step's prerequisites closed, which no operator verb causes.
+	EventParkRetryEligible: ActorNext,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,

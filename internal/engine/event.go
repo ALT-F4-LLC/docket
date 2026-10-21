@@ -403,6 +403,14 @@ const (
 	// the conductor keeps filing every chain deferral.
 	EventVoteReseated = "vote-reseated"
 	EventStepDeferred = "step-deferred"
+
+	// EventParkRetryEligible (DKT-4257) records that a step parked gap-only has
+	// every depends_on prerequisite of its issue done, so the park is a retry
+	// candidate for the advisor-first path. `dispatch open` writes it, once per
+	// park (data.row_version names the park it was written for), because a
+	// conductor that lost its parks to a context reset otherwise holds them
+	// until an operator asks.
+	EventParkRetryEligible = "park-retry-eligible"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -450,6 +458,7 @@ var eventKinds = map[string]bool{
 	EventStepReminted:         true,
 	EventVoteReseated:         true,
 	EventStepDeferred:         true,
+	EventParkRetryEligible:    true,
 }
 
 // recordEvent writes one event in the caller's transaction.

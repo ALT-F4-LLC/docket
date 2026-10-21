@@ -104,6 +104,13 @@ type Manifest struct {
 	// BEFORE it composes that launch, so the panel or the acknowledgment can
 	// come first. Empty whenever nothing is held.
 	ReapHold string `json:"reap_hold,omitempty"`
+	// RetryEligible lists the gap-only parks whose issue's depends_on
+	// prerequisites are all done (DKT-4257), so the conductor settles them
+	// advisor-first in this loop pass instead of waiting for an operator to ask.
+	// Beside the wire shape for StaleTargets' reason: it is a live-derived fact,
+	// never a row field. The open also records one park-retry-eligible event
+	// per park.
+	RetryEligible []RetryEligible `json:"retry_eligible,omitempty"`
 }
 
 // StaleTarget names one manifest row whose packet will render from a recorded
@@ -349,6 +356,10 @@ func (e *Engine) OpenDispatch(
 		return nil, fmt.Errorf("opening a dispatch: %w", err)
 	}
 
+	// After the commit, like the other advisories: a failure to record the event
+	// must not undo an open that already committed. The list is still returned.
+	retryEligible, _ := recordRetryEligible(conn, runID, nowMS)
+
 	limits, limitSources := rowClassLimits(sched, rows)
 	return &Manifest{
 		Dispatch: FormatDispatchID(dispatchID), Run: model.FormatRunID(runID),
@@ -364,7 +375,8 @@ func (e *Engine) OpenDispatch(
 		// The snapshot's open reaps include the ones this open just performed
 		// (reapOneTx reflects each into the hold), so the text names exactly
 		// what `guard spawn` will hold the next launch on.
-		ReapHold: ReapHoldReason(sched.UnacknowledgedReaps()),
+		ReapHold:      ReapHoldReason(sched.UnacknowledgedReaps()),
+		RetryEligible: retryEligible,
 	}, nil
 }
 
