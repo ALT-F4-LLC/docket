@@ -199,6 +199,15 @@ type Engine struct {
 	// CommitPatchFn, for the annotation's full-range re-pin. nil falls back to
 	// CommitPatchFn on the tip.
 	RangePatchFn func(execRoot, from, to string, scope []string) (string, error)
+	// IntegrationChainFn answers, read-only, whether a writer's base..head is a
+	// chain `step integrate` will pick, and lists its commits oldest first
+	// (DKT-4268). nil refuses the verb.
+	IntegrationChainFn func(execRoot, base, head string) ([]string, error)
+	// CherryPickFn is the engine's only git WRITE: it cherry-picks base..head
+	// onto the shared checkout with -x, all or nothing (integrate_git.go). nil
+	// refuses the verb, so an engine built without it, every test engine
+	// included, can never write the shared branch.
+	CherryPickFn func(execRoot, base, head string) (GitPick, error)
 	// beforeCloseCAS runs inside a close's transaction just before the
 	// manifest's CAS. Test-only: it lets a test move the row first and reach
 	// the lost-close-race refusal (DKT-2758), which one transaction on a
@@ -237,6 +246,8 @@ func NewEngine() *Engine {
 		CommitPatchFn:        GitCommitPatch,
 		IntegrationRangeFn:   gitIntegratedRange,
 		RangePatchFn:         GitRangePatch,
+		IntegrationChainFn:   gitIntegrationChain,
+		CherryPickFn:         gitCherryPickRange,
 	}
 }
 

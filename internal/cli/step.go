@@ -1329,6 +1329,71 @@ func runStepAnnotate(cmd *cobra.Command, args []string, w *output.Writer) error 
 	return emitResolvedState(w, conn, id, "Annotated", nil, ann.Repin)
 }
 
+var stepIntegrateCmd = &cobra.Command{
+	Use:   "integrate STEP-N...",
+	Short: "Cherry-pick finished write-class steps onto the shared branch and annotate them",
+	Long: `Integrate finished write-class steps: for each STEP-N, in the order named,
+cherry-pick the step's recorded writer chain onto the shared checkout's branch
+with ` + "`git cherry-pick -x`" + ` and annotate the step with the resulting HEAD,
+the sequence a conductor otherwise types by hand. It is the one engine verb that
+WRITES git.
+
+Before anything is written, every named step must pass its read-only checks: it
+is done, it is an executor step that holds the tree, its recorded commits exist
+in the shared checkout with no merge commit among them, it is not already
+annotated as integrated, and the shared HEAD does not already carry it. The
+shared checkout must be on a branch with no change to a tracked file and no
+operation in progress. A step that fails any check refuses the whole verb with
+nothing written.
+
+A pick that does not apply is aborted, the checkout is verified to stand where
+it started, and the verb exits nonzero without annotating. The engine never
+resets, amends or discards: if the pick lands but the annotation is refused, the
+error names the sha to give ` + "`step annotate --integrated-sha`" + `. A later step
+that fails leaves the earlier steps integrated and annotated, and they are
+reported. Repository hooks do not run from the pick; filters, merge drivers
+and commit signing follow your git configuration.
+
+On a run bound to a conductor capability the verb requires that token via
+DOCKET_TOKEN or stdin (never argv); every named step must belong to a run that
+token governs.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runStepIntegrate(cmd, args, getWriter(cmd))
+	},
+}
+
+func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error {
+	conn := getDB(cmd)
+
+	ids := make([]int, 0, len(args))
+	for _, a := range args {
+		id, err := stepArg(a)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+	token := stepConductorToken(conn, ids[0], os.Stdin)
+	done, err := engine.NewEngine().IntegrateSteps(conn, ids, by, token, model.NowMS())
+	if err != nil {
+		for _, d := range done {
+			w.Warn("%s integrated at %.12s (%d commit(s)) before the failure", d.Step, d.IntegratedSHA, len(d.Picked))
+		}
+		return stepErr(err, stepLabel(ids[0]))
+	}
+	var parts []string
+	for _, d := range done {
+		parts = append(parts, fmt.Sprintf("%s -> %.12s (%d commit(s))", d.Step, d.IntegratedSHA, len(d.Picked)))
+	}
+	w.Success(done, "Integrated "+strings.Join(parts, "; "))
+	return nil
+}
+
 // stepDetailPayload is `step show`'s shape for a step that has something to
 // say beyond its row: a materialized held step's cluster linkage (DKT-239),
 // and the resolved target ref of a step that consumes `issue.diff` (DKT-1056).
@@ -2064,7 +2129,7 @@ func init() {
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
 		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd, stepHoldCmd,
-		stepAnnotateCmd, stepPreGateCmd, stepResumeCmd,
+		stepAnnotateCmd, stepIntegrateCmd, stepPreGateCmd, stepResumeCmd,
 		stepShowCmd, stepListCmd, stepContextCmd, stepRenderCmd,
 		stepArtifactsCmd, stepArtifactCmd,
 	} {

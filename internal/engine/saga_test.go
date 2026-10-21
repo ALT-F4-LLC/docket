@@ -65,6 +65,9 @@ func testEngine() *Engine {
 	// shas no repository holds. Tests that exercise the check inject their own.
 	e.IntegrationRangeFn = nil
 	e.RangePatchFn = nil
+	// The integration verb is the engine's one git write; a test opts in.
+	e.IntegrationChainFn = nil
+	e.CherryPickFn = nil
 	e.DiffFn = func(_, _ string, scope []string) (string, error) {
 		diff := "diff for scope " + jsonString(scope)
 		if fixtureRound > 0 {
