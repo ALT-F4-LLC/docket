@@ -554,6 +554,20 @@ func claimStepWithGates(
 			"step %s is not ready to claim: %s", fresh.Instance, cond)
 	}
 
+	// ---- A round's re-review waits for its fix body (DKT-4249). -------------
+	//
+	// The offer already withholds a re-review row behind an open loop body
+	// (blockingLoopBodyAbsent), but a claim that names the row directly never
+	// passed through the offer, and `after` does not order the round's review
+	// behind its fix. A review, verify-ac or vote claimed while fix@N was still
+	// open judged the tree BEFORE the fix and parked a false loop-stalled. The
+	// claim asks the same predicate the offer does, so the two cannot disagree.
+	if sched.blockingLoopBodyAbsent(fresh, nil) {
+		return nil, conflictErr(
+			"step %s is not ready to claim: %s (%s is still open)",
+			fresh.Instance, CondPredecessors, sched.loopHolds[fresh.Instance])
+	}
+
 	// ---- The ESCALATED claim's own budget check (DKT-867). ------------------
 	//
 	// Readiness above admitted the DECLARED cost; a dispatcher that declared a
