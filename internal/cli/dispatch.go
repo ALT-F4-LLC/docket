@@ -535,7 +535,14 @@ that record, so on a run bound to a conductor capability the override
 requires the run's token, via DOCKET_TOKEN or stdin (with --backfill-from -,
 DOCKET_TOKEN only, since stdin carries the usage rows). A missing token
 refuses VALIDATION_ERROR and a wrong one AUTH_ERROR, before anything is
-written. A close without the override needs no token.`,
+written. A close without the override needs no token.
+
+A vote sealed during the dispatch with an approve-with-concerns cast must have
+a linked issue labelled tribunal (file the condition with
+` + "`docket issue create -l tribunal`" + ` and ` + "`docket vote link`" + `), or the close
+refuses CONFLICT naming each vote and its seats. --no-conditions REASON waives
+the check: the votes and REASON ride on the close event and REASON is recorded
+as a run note. It takes the same conductor token as --skip-integration-check.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchClose(cmd, getWriter(cmd))
 	},
@@ -553,15 +560,25 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 	skip := engine.IntegrationSkip{}
 	skip.Reason, _ = cmd.Flags().GetString("skip-integration-check")
 
-	// Only the override reads the conductor token, so a plain close never
+	skip.Conditions.Reason, _ = cmd.Flags().GetString("no-conditions")
+	if skip.Conditions.Reason != "" {
+		by, err := rulingBy()
+		if err != nil {
+			return err
+		}
+		skip.Conditions.By = by
+	}
+
+	// Only an override reads the conductor token, so a plain close never
 	// touches stdin. `--backfill-from -` carries the usage rows on stdin, so
 	// there the token comes from DOCKET_TOKEN alone.
-	if skip.Reason != "" {
+	if skip.Reason != "" || skip.Conditions.Reason != "" {
 		stdin := cmd.InOrStdin()
 		if from == "-" {
 			stdin = strings.NewReader("")
 		}
 		skip.Token = conductorToken(conn, runID, stdin)
+		skip.Conditions.Token = skip.Token
 	}
 
 	// DKT-580: with `--backfill-from` this verb is the whole wave-close
@@ -1134,6 +1151,10 @@ func init() {
 		"Close without verifying every write-class step's commit reached the "+
 			"shared branch, recording this reason; on a bound run it requires "+
 			"the run's conductor token via DOCKET_TOKEN or stdin")
+	dispatchCloseCmd.Flags().String("no-conditions", "",
+		"Close despite sealed votes whose approve-with-concerns conditions have "+
+			"no linked tribunal issue, recording this reason as a run note; on a "+
+			"bound run it requires the run's conductor token via DOCKET_TOKEN or stdin")
 
 	// DKT-580's one-verb wave close. `--source` and `--on-duplicate` are the
 	// SAME flags `backfill-usage` declares, with the same defaults, because

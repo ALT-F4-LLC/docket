@@ -1944,14 +1944,21 @@ type CloseOutcome struct {
 	// ("skipped"). It is never nil — a close that reached this far always
 	// ran one of the two.
 	Integration *IntegrationCheck `json:"integration,omitempty"`
+	// ConditionsWaived lists the sealed votes whose unfiled approve-with-concerns
+	// conditions `--no-conditions` closed over (DKT-4263).
+	ConditionsWaived []UnfiledCondition `json:"conditions_waived,omitempty"`
 }
 
 // IntegrationSkip is `dispatch close --skip-integration-check`. The zero value
 // runs the integration check. A non-empty Reason skips it, and Token is the
 // run's conductor capability that authorizes the skip on a bound run.
 type IntegrationSkip struct {
-	Reason string
-	Token  string
+	// Conditions is `--no-conditions`, the waiver for unfiled seat conditions
+	// (DKT-4263). It rides here because both are close-time overrides that the
+	// same conductor token authorizes.
+	Conditions ConditionsWaiver
+	Reason     string
+	Token      string
 }
 
 // skipIntegrationVerb names the override in a conductor refusal.
@@ -2001,6 +2008,11 @@ func (e *Engine) CloseDispatch(
 	if code, ok := CodeOf(err); ok && code == CodeConflict {
 		if recErr := recordCloseRefused(conn, runID, openID, err.Error(), nowMS); recErr != nil {
 			return nil, recErr
+		}
+	}
+	if err == nil && outcome != nil && len(outcome.ConditionsWaived) > 0 {
+		if noteErr := recordConditionsWaiver(conn, runID, skip.Conditions, outcome.ConditionsWaived, nowMS); noteErr != nil {
+			return outcome, fmt.Errorf("the dispatch closed, but recording the waiver's run note failed: %w", noteErr)
 		}
 	}
 	return outcome, err
@@ -2056,6 +2068,14 @@ func (e *Engine) closeDispatch(
 			"%s cannot close: %d write-class step commit(s) are not integrated "+
 				"into the shared branch: %s",
 			model.FormatRunID(runID), len(unintegrated), UnintegratedReason(unintegrated))
+	}
+
+	// DKT-4263: a sealed vote's approve-with-concerns conditions must be filed
+	// as tribunal issues, or waived with a reason. Ruled on before the close
+	// transaction, like the integration verdict above.
+	waived, err := conditionsVerdict(conn, runID, skip.Conditions)
+	if err != nil {
+		return nil, err
 	}
 
 	tx, err := conn.Begin()
@@ -2191,7 +2211,7 @@ func (e *Engine) closeDispatch(
 		e.beforeCloseCAS(tx, open.ID)
 	}
 	moved, err := closeDispatchTx(tx, open.ID, runID, db.DispatchClosed, reason,
-		EventDispatchClosed, map[string]any{"accepted": instances, "integration": integration},
+		EventDispatchClosed, closedEventData(instances, integration, skip.Conditions.Reason, waived),
 		"recording the close", nowMS)
 	if err != nil {
 		return nil, err
@@ -2212,8 +2232,20 @@ func (e *Engine) closeDispatch(
 	return &CloseOutcome{
 		Dispatch: FormatDispatchID(open.ID), Run: model.FormatRunID(runID),
 		Status: db.DispatchClosed, Reason: reason, Accepted: instances,
-		Integration: integration,
+		Integration: integration, ConditionsWaived: waived,
 	}, nil
+}
+
+// closedEventData is the `dispatch-closed` event's data. A close that waived
+// unfiled seat conditions names the votes and the reason in the record
+// (DKT-4263); every other close carries the two keys it always did.
+func closedEventData(instances []string, integration *IntegrationCheck, waiverReason string, waived []UnfiledCondition) map[string]any {
+	data := map[string]any{"accepted": instances, "integration": integration}
+	if len(waived) > 0 {
+		data["conditions_waived"] = waived
+		data["conditions_waiver_reason"] = waiverReason
+	}
+	return data
 }
 
 // settleAcceptedTx makes `--accept-missing-usage` MEAN something to the verb
