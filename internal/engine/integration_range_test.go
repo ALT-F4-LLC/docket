@@ -281,3 +281,53 @@ func TestIntegratedRangeRefusesAHandResolvedPickThatProvesNothing(t *testing.T) 
 		})
 	}
 }
+
+// A conflict resolved with `checkout --ours` keeps git's own -x trailer but
+// drops a file of the writer's work: not carried.
+func TestIntegratedRangeRefusesAPickThatDroppedAFileOfTheWriterCommit(t *testing.T) {
+	repo, base, _ := rangeRepo(t)
+	// Make the writer's second commit touch two files.
+	gitRun(t, repo, "checkout", "-q", "writer")
+	writeFile(t, repo, "internal/b2.go", "package b2\n")
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "--amend", "--no-edit")
+	head := gitRun(t, repo, "rev-parse", "HEAD")
+	gitRun(t, repo, "checkout", "-q", "-")
+
+	gitRun(t, repo, "cherry-pick", "-x", head+"~1")
+	gitRun(t, repo, "cherry-pick", "-n", head)
+	gitRun(t, repo, "rm", "-q", "-f", "--cached", "internal/b2.go")
+	gitRun(t, repo, "commit", "-q", "-m", "writer two, minus a file\n\n(cherry picked from commit "+head+")")
+	tip := gitRun(t, repo, "rev-parse", "HEAD")
+	if r := gitIntegratedRange(repo, tip, head, base); !r.Known || r.Carried {
+		t.Errorf("pick that dropped a file = %+v; want known, not carried", r)
+	}
+}
+
+// An empty commit naming the writer commit changes no file and proves nothing.
+func TestIntegratedRangeRefusesAnEmptyCommitNamingTheWriterCommit(t *testing.T) {
+	repo, base, head := rangeRepo(t)
+	first := gitRun(t, repo, "rev-parse", head+"~1")
+	gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "claims it\n\n(cherry picked from commit "+first+")")
+	gitRun(t, repo, "cherry-pick", "-x", head)
+	tip := gitRun(t, repo, "rev-parse", "HEAD")
+	if r := gitIntegratedRange(repo, tip, head, base); !r.Known || r.Carried {
+		t.Errorf("empty commit with the trailer = %+v; want known, not carried", r)
+	}
+}
+
+// One line commit names both writer commits in a trailer; it can stand for at
+// most one of them, so the chain is still not carried.
+func TestIntegratedRangeLetsOneCommitStandForOnlyOneWriterCommit(t *testing.T) {
+	repo, base, head := rangeRepo(t)
+	first := gitRun(t, repo, "rev-parse", head+"~1")
+	gitRun(t, repo, "cherry-pick", "-n", first)
+	writeFile(t, repo, "internal/a.go", "package a\n\n// resolved by hand\n")
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "one commit, two claims\n\n(cherry picked from commit "+first+")\n(cherry picked from commit "+head+")")
+	tip := gitRun(t, repo, "rev-parse", "HEAD")
+	r := gitIntegratedRange(repo, tip, head, base)
+	if !r.Known || r.Carried || len(r.Missing) != 1 {
+		t.Errorf("one commit naming both = %+v; want known, not carried, one missing", r)
+	}
+}

@@ -1276,8 +1276,8 @@ cherry-pick whose conflict was resolved by hand, an operator-ruled patch on
 top of a gate failure. The engine VERIFIES the sha is an ancestor of the
 shared checkout's HEAD and refuses otherwise, and that its line carries every
 commit of the writer's chain: a patch-equal commit, or a commit whose message
-ends with the ` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose
-changed files are all among that commit's (a hand-resolved pick edits a hunk,
+carries, as a line, the ` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose
+changed files are exactly that commit's (a hand-resolved pick edits a hunk,
 so it is not patch-equal; the trailer is the committer's own claim and the file
 check is what bounds it); then it re-records the step's
 ` + "`issue.diff`" + ` from that commit's own patch (superseding the stale record,

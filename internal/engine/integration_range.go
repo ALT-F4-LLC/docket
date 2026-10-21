@@ -40,7 +40,7 @@ const integrationWalkLimit = 1000
 //     range starts at the first parent of the earliest such commit.
 //   - a writer commit with no patch-equal twin has a hand-resolved pick: a
 //     commit on that line whose message carries the cherry-pick trailer
-//     naming the writer commit and whose changed files are among the writer
+//     naming the writer commit and whose changed files are EXACTLY the writer
 //     commit's. The trailer is text the committer wrote, so it is a claim, and
 //     the file check is what bounds it (see gitCherryPickTwins): carried.
 //   - the chain's combined diff equals one commit's patch on that line (a
@@ -119,10 +119,11 @@ func gitIntegratedRange(execRoot, tip, head, base string) IntegratedRange {
 //
 // The trailer is text the committing executor wrote, so it proves nothing by
 // itself: any commit can carry it. A twin is therefore accepted only when the
-// commit ALSO changes at least one file and only files the writer commit
-// changed, which bounds a forged trailer to commits inside the writer's own
-// footprint. It still does not prove the hunks match; the residual is that a
-// commit confined to the writer's files, naming the writer's commit, passes.
+// commit ALSO changes exactly the files the writer commit changed (a pick that
+// dropped a conflicted file, `checkout --ours`, would carry the trailer yet lose
+// that work), which bounds a forged trailer. It still does not prove the hunks
+// match; the residual is that a
+// commit changing exactly the writer's files, naming the writer's commit, passes.
 //
 // A line commit that is already patch-equal to a writer commit keeps its id, and one
 // writer commit aliases at most one line commit (the newest), so a trailer
@@ -153,7 +154,7 @@ func gitCherryPickTwins(execRoot, tip string, chain, line []patchIDPair) []patch
 			continue
 		}
 		for _, sha := range found {
-			if !commitHasTrailerLine(execRoot, sha, trailer) || !pathsWithin(execRoot, sha, writerFiles) {
+			if !commitHasTrailerLine(execRoot, sha, trailer) || !sameFiles(execRoot, sha, writerFiles) {
 				continue
 			}
 			for i := range out {
@@ -186,15 +187,15 @@ func commitHasTrailerLine(execRoot, sha, trailer string) bool {
 	return false
 }
 
-// pathsWithin reports whether the commit changes at least one file and every
-// file it changes is in allowed.
-func pathsWithin(execRoot, sha string, allowed map[string]bool) bool {
+// sameFiles reports whether the commit changes at least one file and exactly
+// the files in want.
+func sameFiles(execRoot, sha string, want map[string]bool) bool {
 	files, ok := gitChangedFiles(execRoot, sha)
-	if !ok || len(files) == 0 {
+	if !ok || len(files) == 0 || len(files) != len(want) {
 		return false
 	}
 	for f := range files {
-		if !allowed[f] {
+		if !want[f] {
 			return false
 		}
 	}
