@@ -289,7 +289,7 @@ func TestApproveResolvesTheHeldPayloadBesideNewerEngineArtifacts(t *testing.T) {
 				}
 			}
 			if !resolved {
-				t.Errorf("no element carries operator_resolved: the approval was dropped " +
+				t.Errorf("no element carries operator_resolved: the approval was dropped "+
 					"because a newer %s artifact sat on the routing step", kind)
 			}
 		})
