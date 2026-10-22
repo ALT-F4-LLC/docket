@@ -31,7 +31,6 @@ func TestGitHeadIgnoresARedirectingGitDir(t *testing.T) {
 	other, otherSHA := mk()
 	if wantSHA == otherSHA {
 		run(other, "commit", "-q", "--allow-empty", "-m", "d")
-		otherSHA = run(other, "rev-parse", "HEAD")
 	}
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 	if _, got := GitHead(want); got != wantSHA {

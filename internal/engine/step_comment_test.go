@@ -114,8 +114,8 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 		// check: none is printable prose.
 		"terminal escape": {[]byte("ok\x1b[2K\rnothing happened")},
 		"carriage return": {[]byte("line\rreplaced")},
-		"bidi override":   {[]byte("approved ‮gnorw")},
-		"zero width only": {[]byte("​​")},
+		"bidi override":   {[]byte("approved \u202egnorw")},
+		"zero width only": {[]byte("\u200b\u200b")},
 		"c1 control":      {[]byte("next\u0085line")},
 		"invalid utf-8":   {[]byte("bad \xff byte")},
 		"line separator":  {[]byte("a\u2028b")},
