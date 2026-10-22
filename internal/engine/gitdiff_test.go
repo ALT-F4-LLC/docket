@@ -485,7 +485,7 @@ func TestGitCommitPatchShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T)
 // tracked, untracked and committed halves, and a small file beside it stays whole.
 func TestGitDiffCapsAFileSectionAndNamesItsBlobs(t *testing.T) {
 	dir := gitRepo(t)
-	big := strings.Repeat("0123456789abcdef\n", perFileDiffCap/8)
+	big := strings.Repeat("0123456789abcdef\x00\n", perFileDiffCap/8)
 	writeFile(t, dir, "internal/big.dat", "old\n")
 	git := func(args ...string) string {
 		t.Helper()
@@ -536,7 +536,7 @@ func TestCapFileDiffsLeavesASmallDiffByteIdentical(t *testing.T) {
 func TestCappedFileStillCountsItsLinesAndNamesFullBlobs(t *testing.T) {
 	dir := gitRepo(t)
 	writeFile(t, dir, "internal/seed.txt", "x\n")
-	big := strings.Repeat("0123456789abcdef\n", perFileDiffCap/8)
+	big := strings.Repeat("0123456789abcdef\x00\n", perFileDiffCap/8)
 	writeFile(t, dir, "internal/fresh.dat", big)
 	diff := inRepo(t, dir, nil)
 	if !strings.Contains(diff, "per-file cap") {
@@ -580,5 +580,17 @@ func TestRecordedDiffsNameFullBlobIDsOnEveryProducer(t *testing.T) {
 	testsupport.Must(t, err, "GitCommitPatch: %v", err)
 	if n := len(full.FindAllString(patch, -1)); n != 2 {
 		t.Errorf("want full blob ids in the commit patch, got %d:\n%s", n, patch)
+	}
+}
+
+// Only a binary section is capped: a text file's oversize diff stays whole, so
+// a writer cannot hide an edit by padding the file past the cap.
+func TestGitDiffKeepsAnOversizeTextSectionWhole(t *testing.T) {
+	dir := gitRepo(t)
+	text := strings.Repeat("a line of ordinary text\n", perFileDiffCap/8) + "the one real edit\n"
+	writeFile(t, dir, "internal/long.txt", text)
+	diff := inRepo(t, dir, nil)
+	if strings.Contains(diff, "per-file cap") || !strings.Contains(diff, "the one real edit") {
+		t.Errorf("an oversize text section was capped (%d bytes)", len(diff))
 	}
 }

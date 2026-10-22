@@ -16,8 +16,9 @@ import (
 // A review step's packet inlines its `issue.diff` input whole. A change that
 // regenerated protobuf output put 845 KB of generated hunks into one packet, and
 // the claim script refused it against the Workflow script cap, so the review
-// chain never ran. The RENDER replaces each
-// generated file's hunks with one stat line carrying the blob hash, so the
+// chain never ran. The recorded artifact stays whole (a binary section past
+// perFileDiffCap aside); the RENDER replaces each generated file's hunks with
+// one stat line carrying the blob hash, so the
 // reviewer sees that the file changed, by how much, and which bytes, and reads
 // the hand-written hunks in full.
 //
@@ -83,7 +84,7 @@ func elideGeneratedDiff(
 		if f.Blob != "" {
 			fmt.Fprintf(&out, ", blob %s", f.Blob)
 		}
-		out.WriteString("\n# the blob above names the bytes; hunks past the per-file cap are not recorded\n")
+		out.WriteString("\n# the full diff is the recorded issue.diff artifact\n")
 		// A line starting `#` is never diff content (hunk lines start with a
 		// space, `+`, `-` or `\`), so it is a trailer the diff builder appended
 		// after the last in-scope file: the out-of-scope disclosure and round
@@ -309,13 +310,16 @@ func gitBlobHasGeneratedHeader(root string) func(string) bool {
 	}
 }
 
-// perFileDiffCap bounds one file's section of a recorded diff. The producers
-// read every file as text (--text, so an attribute cannot hide content), which
-// would otherwise record a genuine binary byte for byte; a section over the cap
-// keeps its header, whose index line names the blob ids, and drops the hunks.
+// perFileDiffCap bounds one binary file's section of a recorded diff. The
+// producers read every file as text (--text, so an attribute cannot hide
+// content), which would otherwise record a genuine binary byte for byte. A
+// section over the cap that holds a NUL byte (git's own test for binary) keeps
+// its header, whose index line names the full blob ids, and drops the hunks. A
+// text section is never capped: an oversize text diff stays whole, and a packet
+// too large to load is refused rather than shown with a file missing.
 const perFileDiffCap = 64 << 10
 
-// capFileDiffs replaces each file section over perFileDiffCap with its header
+// capFileDiffs replaces each binary file section over perFileDiffCap with its header
 // and a marker. A diff with no such section comes back byte-identical.
 func capFileDiffs(body string) string {
 	if len(body) <= perFileDiffCap {
@@ -323,7 +327,7 @@ func capFileDiffs(body string) string {
 	}
 	var out strings.Builder
 	for _, s := range splitDiffSections(body) {
-		if len(s.text) <= perFileDiffCap {
+		if len(s.text) <= perFileDiffCap || !strings.Contains(s.text, "\x00") {
 			out.WriteString(s.text)
 			continue
 		}
