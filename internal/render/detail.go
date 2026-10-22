@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -441,6 +442,10 @@ func renderComments(comments []*model.Comment) string {
 		if err != nil {
 			body = c.Body
 		}
+		// RenderMarkdown trims the margin off the first line, and with colors
+		// off it returns the body as written, so a line can sit at the
+		// header's column: put every line under the header's indent.
+		body = indentBody(collapseWideSpace(body))
 
 		commentHeader := fmt.Sprintf("%s  %s",
 			styles.author.Render(c.AuthorOrAnonymous()),
@@ -635,9 +640,12 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 		b.WriteString("\nComments\n")
 		for _, c := range comments {
 			// Every body line is indented deeper than the header, so no body line
-			// can read as the next comment's header (author, then age).
+			// can read as the next comment's header (author, then age). A run of
+			// spaces long enough to push the rest of a line onto a wrapped row
+			// is collapsed first, so a wrap cannot land text at the header's
+			// column under a row that looks blank.
 			fmt.Fprintf(&b, "  %s  %s\n    %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt),
-				strings.ReplaceAll(c.Body, "\n", "\n    "))
+				strings.ReplaceAll(collapseWideSpace(c.Body), "\n", "\n    "))
 		}
 	}
 
@@ -660,4 +668,26 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	}
 
 	return b.String()
+}
+
+// wideSpace matches a run of horizontal space wide enough to fill a terminal
+// row; a comment body that pads a line with one can wrap the rest of it to
+// column 0 of the next row.
+var wideSpace = regexp.MustCompile(`[\t\p{Zs}]{16,}`)
+
+// collapseWideSpace replaces each run of 16 or more horizontal spaces with one.
+func collapseWideSpace(s string) string {
+	return wideSpace.ReplaceAllString(s, " ")
+}
+
+// indentBody gives every line of a comment body at least a two-space indent,
+// deeper than the comment header, so no line reads as the next header.
+func indentBody(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "  ") {
+			lines[i] = "  " + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }

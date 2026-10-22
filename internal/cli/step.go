@@ -735,7 +735,7 @@ did: priority none, kind task, no labels.`,
 		// Gaps are read whole before anything runs, so a bad path refuses
 		// without spending the completion.
 		var gaps [][]byte
-		gapPaths, _ := cmd.Flags().GetStringSlice("gap-file")
+		gapPaths, _ := cmd.Flags().GetStringArray("gap-file")
 		for _, path := range gapPaths {
 			gap, err := os.ReadFile(path)
 			if err != nil {
@@ -746,7 +746,7 @@ did: priority none, kind task, no labels.`,
 
 		// Comments are read whole before anything runs, for the gaps' reason.
 		var comments [][]byte
-		commentPaths, _ := cmd.Flags().GetStringSlice("comment-file")
+		commentPaths, _ := cmd.Flags().GetStringArray("comment-file")
 		for _, path := range commentPaths {
 			body, err := os.ReadFile(path)
 			if err != nil {
@@ -2068,10 +2068,10 @@ func init() {
 
 	stepCompleteCmd.Flags().String("artifact-file", "", "File holding the artifact body (required)")
 	stepCompleteCmd.Flags().String("payload-file", "", "File holding the JSON payload")
-	stepCompleteCmd.Flags().StringSlice("gap-file", nil,
+	stepCompleteCmd.Flags().StringArray("gap-file", nil,
 		"File holding one out-of-scope problem (repeatable); each records a `gap` "+
 			"artifact beside the declared emit and files a related backlog issue")
-	stepCompleteCmd.Flags().StringSlice("comment-file", nil,
+	stepCompleteCmd.Flags().StringArray("comment-file", nil,
 		"File holding one issue comment the acceptance criterion requires "+
 			"(repeatable, at most 4, 16 KiB each); the engine posts it on the "+
 			"step's own issue, attributed to the step, in the same transaction "+

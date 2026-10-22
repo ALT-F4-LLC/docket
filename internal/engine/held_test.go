@@ -1180,3 +1180,33 @@ func TestResolutionArtifactSupersedesTheOriginal(t *testing.T) {
 			"rollup counting work cannot skip what it cannot see", revisions)
 	}
 }
+
+// The held cluster a step view shows reads the routing step's declared
+// payload, not a newer engine-recorded row beside it.
+func TestHeldClusterSurvivesNewerEngineArtifacts(t *testing.T) {
+	for _, kind := range []string{IssueCommentArtifactKind, GapArtifactKind, RecordedHeadArtifactKind} {
+		t.Run(kind, func(t *testing.T) {
+			conn := mustDB(t)
+			activatedRun(t, conn)
+			e := testEngine()
+			driveToReconcile(t, conn, e, clusteredPayload)
+			held := heldStep(t, conn, "reconcile-held@0#0")
+			before, err := LoadStepView(conn, held.ID, nowMS)
+			testsupport.Must(t, err, "LoadStepView: %v", err)
+			if before.HeldCluster == nil {
+				t.Fatal("the held step shows no cluster before any engine artifact exists")
+			}
+
+			routing := heldStep(t, conn, "reconcile@0")
+			execSQL(t, conn,
+				`INSERT INTO artifacts (run_id, step_id, kind, body, payload, sha256, created_at_ms)
+				 VALUES (?, ?, ?, 'a note', NULL, 'x', ?)`,
+				routing.RunID, routing.ID, kind, nowMS)
+			after, err := LoadStepView(conn, held.ID, nowMS)
+			testsupport.Must(t, err, "LoadStepView: %v", err)
+			if after.HeldCluster == nil {
+				t.Errorf("a newer %s row on the routing step hid the held cluster", kind)
+			}
+		})
+	}
+}

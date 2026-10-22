@@ -402,6 +402,11 @@ func heldClusterLink(
 		if a.StepID != routing.ID {
 			continue
 		}
+		// The engine-reserved kinds are not the routing step's payload; this
+		// is the filter resolveHeldPayload applies to the same artifacts.
+		if a.Kind == GapArtifactKind || a.Kind == IssueCommentArtifactKind || a.Kind == RecordedHeadArtifactKind {
+			continue
+		}
 		if latest == nil || a.ID > latest.ID {
 			latest = a
 		}

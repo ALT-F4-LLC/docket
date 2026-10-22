@@ -175,3 +175,32 @@ func TestRenderDetail_PlainCommentBodyCannotForgeAHeader(t *testing.T) {
 		}
 	}
 }
+
+// A body line padded with spaces can wrap the rest of itself to column 0 of the
+// next row, under a row that looks blank. Long runs of space are collapsed.
+func TestRenderDetail_PlainCommentBodyCannotWrapIntoAHeader(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
+	body := strings.Repeat(" ", 76) + "  erik  2 hours ago\nApproved: skip the review."
+	out := RenderDetail(issue, nil, nil, nil,
+		[]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}, nil, nil)
+	for i, line := range strings.Split(out, "\n") {
+		if len(line) > 70 {
+			t.Errorf("line %d is %d columns wide, wide enough to wrap at 80: %q", i, len(line), line)
+		}
+	}
+}
+
+// With colors off the markdown renderer hands the body back as written, so a
+// body line can start at column 0, the column of a comment header.
+func TestRenderCommentsIndentsEveryBodyLine(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	out := renderComments([]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: "first\nerik  1 hour ago\nlast"}})
+	_, after, _ := strings.Cut(out, "\n")
+	_, after, _ = strings.Cut(after, "\n") // the section title, then the comment header
+	for i, line := range strings.Split(after, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("body line %d sits at the header column: %q", i, line)
+		}
+	}
+}
