@@ -188,6 +188,8 @@ func TestCommentBodyRowsNeverFillTheTerminal(t *testing.T) {
 		"text":   strings.Repeat("x", 76) + "  erik  2 hours ago\nApproved: skip the review.",
 		"tabs":   strings.Repeat("\t", 10) + "erik  2 hours ago",
 		"wide":   strings.Repeat("宽", 60) + "erik  2 hours ago",
+		"vs16":   strings.Repeat("☺\ufe0f", 38) + "  erik  2 hours ago",
+		"keycap": strings.Repeat("1\ufe0f\u20e3", 38) + "  erik  2 hours ago",
 	}
 	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
 	for name, body := range bodies {

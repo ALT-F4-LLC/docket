@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/tree"
+	"github.com/rivo/uniseg"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -696,14 +697,16 @@ func wrapBody(s string, width int) string {
 	for _, line := range strings.Split(strings.ReplaceAll(s, "\t", "    "), "\n") {
 		var row strings.Builder
 		cols := 0
-		for _, r := range line {
-			w := lipgloss.Width(string(r))
+		for g := uniseg.NewGraphemes(line); g.Next(); {
+			// A cluster is never split, and it counts as wide as either measure
+			// says, so an emoji with a presentation selector is not under-counted.
+			w := max(g.Width(), lipgloss.Width(g.Str()))
 			if cols+w > width {
 				out = append(out, row.String())
 				row.Reset()
 				cols = 0
 			}
-			row.WriteRune(r)
+			row.WriteString(g.Str())
 			cols += w
 		}
 		out = append(out, row.String())
