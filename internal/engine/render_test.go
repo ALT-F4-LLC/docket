@@ -611,20 +611,23 @@ func TestRenderStatesTheIssueDiffBase(t *testing.T) {
 
 // TestPacketHeaderCarriesTheRound is DKT-4281's acceptance check: the header
 // states the step's loop ordinal, so a contract that tells a worker to name the
-// round reads it instead of parsing the instance. An ordinal-0 step renders
-// `round:  0` and an ordinal-1 step `round:  1`.
+// round reads it instead of parsing the instance. A first-round step renders
+// `round: 0`, and the second-round instances the loop really creates render
+// `round: 1`. The fixture's loop body is fix and its after_loop chain is
+// review; no drain-highs step loops in this repository's fixtures.
 func TestPacketHeaderCarriesTheRound(t *testing.T) {
 	conn := mustDB(t)
-	activatedRun(t, conn)
-	stepID := stepIDByInstance(t, conn, "implement@0")
+	_, _ = activatedRun(t, conn)
+	e := testEngine()
+	driveToVerify(t, conn, e, 0)
+	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
 
-	for _, round := range []int{0, 1} {
-		execSQL(t, conn, `UPDATE steps SET ordinal = ? WHERE id = ?`, round, stepID)
-		result, err := RenderStep(conn, stepID, "", nowMS)
-		testsupport.Must(t, err, "RenderStep at ordinal %d: %v", round, err)
-		want := "round:  " + itoa(round) + "\n"
+	for instance, round := range map[string]int{"implement@0": 0, "fix@1": 1, "review@1#0": 1} {
+		result, err := RenderStep(conn, stepIDByInstance(t, conn, instance), "", nowMS)
+		testsupport.Must(t, err, "RenderStep %s: %v", instance, err)
+		want := "\nround: " + itoa(round) + "\n"
 		if !strings.Contains(result.Packet, want) {
-			t.Errorf("the ordinal-%d packet header lacks %q:\n%s", round, want, result.Packet)
+			t.Errorf("the %s packet header lacks %q:\n%s", instance, want, result.Packet)
 		}
 	}
 }
