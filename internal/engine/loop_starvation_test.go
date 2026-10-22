@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -526,5 +527,31 @@ func assertSupersededHaveSuccessors(t *testing.T, conn *sql.DB, issueID, ordinal
 	}
 	if found == 0 {
 		t.Fatal("nothing was superseded; the invariant was not exercised")
+	}
+}
+
+// DKT-4249: verify-ac sits in the loop closure beside the round's judges, so a
+// claim of verify-ac@1 by name waits for fix@1 too. The reviewer step is forced
+// done, as RUN-158 had it, so the refusal comes from the open fix body and not
+// from the ordinary predecessor rule.
+func TestAClaimOfVerifyACWaitsForItsRoundsFixBody(t *testing.T) {
+	conn := mustDB(t)
+	_, issue := startedStarvationRun(t, conn)
+	e := testEngine()
+
+	enterLoopAt(t, conn, e, 0)
+	execSQL(t, conn, `UPDATE steps SET status = 'done' WHERE id = ?`, stepIDIn(t, conn, issue, "assess@1"))
+
+	verifyID := stepIDIn(t, conn, issue, "verify-ac@1")
+	fixID := stepIDIn(t, conn, issue, "fix@1")
+	for _, status := range []string{"pending", "gated"} {
+		execSQL(t, conn, `UPDATE steps SET status = ? WHERE id = ?`, status, fixID)
+		_, err := ClaimStep(conn, verifyID, ClaimOptions{Owner: "judge", NowMS: nowMS})
+		if err == nil {
+			t.Fatalf("verify-ac@1 was claimed while fix@1 was %s", status)
+		}
+		if !strings.Contains(err.Error(), "fix@1 ("+status+") is still open") {
+			t.Errorf("fix@1 %s: refusal = %q; want it to name the open fix body", status, err)
+		}
 	}
 }
