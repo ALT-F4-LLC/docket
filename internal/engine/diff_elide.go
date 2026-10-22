@@ -345,7 +345,7 @@ func capFileDiffs(body string) string {
 			continue
 		}
 		hunks := s.text[len(header):]
-		if !strings.Contains(hunks[:min(len(hunks), binaryProbeBytes)], "\x00") {
+		if !looksBinary(hunks) {
 			out.WriteString(s.text)
 			continue
 		}
@@ -373,4 +373,28 @@ func countHunkLines(hunks string) (adds, dels int) {
 		}
 	}
 	return adds, dels
+}
+
+// looksBinary reports whether git would call the file binary, from the hunk
+// text alone: a NUL in the first binaryProbeBytes of the file. That is only
+// readable from the diff when the first hunk starts at the top of both sides
+// (`-1`/`-0` and `+1`/`+0`); then a line's offset in its file is no larger than
+// its offset in the hunk, so a NUL found in the first hunk's window lies inside
+// git's. A change that starts lower, or a NUL only in a later hunk, is not
+// proof, and the section stays whole.
+func looksBinary(hunks string) bool {
+	hunks = strings.TrimPrefix(hunks, "\n")
+	first, _, _ := strings.Cut(hunks, "\n@@")
+	header, _, _ := strings.Cut(first, "\n")
+	fields := strings.Fields(header)
+	if len(fields) < 3 || fields[0] != "@@" {
+		return false
+	}
+	top := func(rng, sign string) bool {
+		return startsAtLineOne(rng, sign) || strings.HasPrefix(rng, sign+"0")
+	}
+	if !top(fields[1], "-") || !top(fields[2], "+") {
+		return false
+	}
+	return strings.Contains(first[:min(len(first), binaryProbeBytes)], "\x00")
 }

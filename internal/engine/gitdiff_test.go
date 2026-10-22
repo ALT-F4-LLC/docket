@@ -607,3 +607,47 @@ func TestGitDiffKeepsATextFileWithALateNulWhole(t *testing.T) {
 		t.Errorf("a text file git shows whole was capped (%d bytes)", len(diff))
 	}
 }
+
+// The binary probe must not read a NUL git never reached: a change that starts
+// below the top of a file, or a NUL only in a later hunk, leaves the section whole.
+func TestGitDiffKeepsATextFileWholeWhenTheNulIsBeyondGitsWindow(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+	}
+	head := "#!/bin/sh\n" + strings.Repeat("echo ordinary line of a script\n", 400)
+	writeFile(t, dir, "internal/deep.sh", head)
+	writeFile(t, dir, "internal/two.sh", head)
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	tail := "# \x00\necho the-hidden-edit\n" + strings.Repeat("filler filler filler\n", perFileDiffCap/8)
+	writeFile(t, dir, "internal/deep.sh", head+tail)
+	writeFile(t, dir, "internal/two.sh", "#!/bin/bash\n"+strings.TrimPrefix(head, "#!/bin/sh\n")+tail)
+	diff := inRepo(t, dir, nil)
+	if strings.Contains(diff, "per-file cap") || strings.Count(diff, "the-hidden-edit") != 2 {
+		t.Errorf("a text file git shows whole was capped (%d bytes)", len(diff))
+	}
+}
+
+// A modified binary whose change starts at the top is still capped.
+func TestGitDiffCapsAModifiedBinaryChangedFromItsTop(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+	}
+	writeFile(t, dir, "internal/b.bin", "\x00old\n")
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/b.bin", strings.Repeat("\x00binary data line\n", perFileDiffCap/8))
+	if diff := inRepo(t, dir, nil); !strings.Contains(diff, "per-file cap") {
+		t.Errorf("a modified binary was recorded whole (%d bytes)", len(diff))
+	}
+}
