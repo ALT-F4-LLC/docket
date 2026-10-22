@@ -2,7 +2,6 @@ package render
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -442,10 +441,13 @@ func renderComments(comments []*model.Comment) string {
 		if err != nil {
 			body = c.Body
 		}
-		// RenderMarkdown trims the margin off the first line, and with colors
-		// off it returns the body as written, so a line can sit at the
-		// header's column: put every line under the header's indent.
-		body = indentBody(collapseWideSpace(body))
+		// With colors off (or a markdown failure) the body comes back as
+		// written: wrap it so the terminal does not, and indent every row under
+		// the header. The colored output is wrapped by glamour.
+		if err != nil || !ColorsEnabled() {
+			body = wrapBody(body, commentBodyWidth+2)
+		}
+		body = indentBody(body)
 
 		commentHeader := fmt.Sprintf("%s  %s",
 			styles.author.Render(c.AuthorOrAnonymous()),
@@ -640,12 +642,11 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 		b.WriteString("\nComments\n")
 		for _, c := range comments {
 			// Every body line is indented deeper than the header, so no body line
-			// can read as the next comment's header (author, then age). A run of
-			// spaces long enough to push the rest of a line onto a wrapped row
-			// is collapsed first, so a wrap cannot land text at the header's
-			// column under a row that looks blank.
+			// can read as the next comment's header (author, then age), and
+			// every row is wrapped here, so the terminal never wraps one back to
+			// the header's column.
 			fmt.Fprintf(&b, "  %s  %s\n    %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt),
-				strings.ReplaceAll(collapseWideSpace(c.Body), "\n", "\n    "))
+				strings.ReplaceAll(wrapBody(c.Body, commentBodyWidth), "\n", "\n    "))
 		}
 	}
 
@@ -670,16 +671,6 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	return b.String()
 }
 
-// wideSpace matches a run of horizontal space wide enough to fill a terminal
-// row; a comment body that pads a line with one can wrap the rest of it to
-// column 0 of the next row.
-var wideSpace = regexp.MustCompile(`[\t\p{Zs}]{16,}`)
-
-// collapseWideSpace replaces each run of 16 or more horizontal spaces with one.
-func collapseWideSpace(s string) string {
-	return wideSpace.ReplaceAllString(s, " ")
-}
-
 // indentBody gives every line of a comment body at least a two-space indent,
 // deeper than the comment header, so no line reads as the next header.
 func indentBody(s string) string {
@@ -690,4 +681,32 @@ func indentBody(s string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// commentBodyWidth is the widest a body row may be before the reader's
+// terminal wraps it; a wrap puts the rest of a row at column 0, where a header
+// sits, so the passthrough paths wrap each row themselves, under the indent.
+const commentBodyWidth = 76
+
+// wrapBody expands tabs and breaks every row of s into rows no wider than
+// width display columns, so the terminal never wraps one. It is for text shown
+// as written (no color, or a markdown failure); glamour wraps its own output.
+func wrapBody(s string, width int) string {
+	var out []string
+	for _, line := range strings.Split(strings.ReplaceAll(s, "\t", "    "), "\n") {
+		var row strings.Builder
+		cols := 0
+		for _, r := range line {
+			w := lipgloss.Width(string(r))
+			if cols+w > width {
+				out = append(out, row.String())
+				row.Reset()
+				cols = 0
+			}
+			row.WriteRune(r)
+			cols += w
+		}
+		out = append(out, row.String())
+	}
+	return strings.Join(out, "\n")
 }

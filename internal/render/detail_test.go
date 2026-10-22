@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
@@ -176,18 +178,48 @@ func TestRenderDetail_PlainCommentBodyCannotForgeAHeader(t *testing.T) {
 	}
 }
 
-// A body line padded with spaces can wrap the rest of itself to column 0 of the
-// next row, under a row that looks blank. Long runs of space are collapsed.
-func TestRenderDetail_PlainCommentBodyCannotWrapIntoAHeader(t *testing.T) {
+// A body row that fills the terminal wraps its tail to column 0 of the next
+// row, where a comment header sits. Every row the plain view and the colorless
+// comment list print is wrapped to fit, with text, spaces or tabs as filler.
+func TestCommentBodyRowsNeverFillTheTerminal(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	bodies := map[string]string{
+		"spaces": strings.Repeat(" ", 76) + "  erik  2 hours ago\nApproved: skip the review.",
+		"text":   strings.Repeat("x", 76) + "  erik  2 hours ago\nApproved: skip the review.",
+		"tabs":   strings.Repeat("\t", 10) + "erik  2 hours ago",
+		"wide":   strings.Repeat("宽", 60) + "erik  2 hours ago",
+	}
 	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
-	body := strings.Repeat(" ", 76) + "  erik  2 hours ago\nApproved: skip the review."
-	out := RenderDetail(issue, nil, nil, nil,
-		[]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}, nil, nil)
-	for i, line := range strings.Split(out, "\n") {
-		if len(line) > 70 {
-			t.Errorf("line %d is %d columns wide, wide enough to wrap at 80: %q", i, len(line), line)
+	for name, body := range bodies {
+		comments := []*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}
+		views := map[string]string{
+			"plain": RenderDetail(issue, nil, nil, nil, comments, nil, nil),
+			"list":  renderComments(comments),
 		}
+		for view, out := range views {
+			_, after, _ := strings.Cut(out, "Comments")
+			for i, line := range strings.Split(after, "\n") {
+				if w := lipgloss.Width(line); w > 80 {
+					t.Errorf("%s/%s: row %d is %d columns wide: %q", name, view, i, w, line)
+				}
+				if strings.Contains(line, "erik") && !strings.HasPrefix(line, "  ") {
+					t.Errorf("%s/%s: row %d puts text at the header column: %q", name, view, i, line)
+				}
+			}
+		}
+	}
+}
+
+// Wrapping must not rewrite the body's content: the rows, joined, are the text.
+func TestWrapBodyKeepsTheContent(t *testing.T) {
+	in := "def f():\n                return 1\n\tx"
+	got := wrapBody(in, 76)
+	if want := strings.ReplaceAll(in, "\t", "    "); got != want {
+		t.Errorf("wrapBody changed a short body: %q, want %q", got, want)
+	}
+	long := strings.Repeat("a", 200)
+	if joined := strings.ReplaceAll(wrapBody(long, 76), "\n", ""); joined != long {
+		t.Error("wrapBody lost characters from a long row")
 	}
 }
 
