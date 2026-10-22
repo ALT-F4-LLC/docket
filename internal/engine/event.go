@@ -405,7 +405,7 @@ const (
 	EventStepDeferred = "step-deferred"
 
 	// EventParkRetryEligible (DKT-4257) records that a step parked gap-only has
-	// every depends_on prerequisite of its issue done, so the park is a retry
+	// every depends_on or blocks prerequisite of its issue done, one of them linked or changed after the park, so the park is a retry
 	// candidate for the advisor-first path. `dispatch open` writes it, once per
 	// park (data.row_version names the park it was written for), because a
 	// conductor that lost its parks to a context reset otherwise holds them

@@ -11,8 +11,9 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 )
 
-// RetryEligible is a step parked gap-only whose issue's depends_on
-// prerequisites are all done (DKT-4257). The park waited on a gap another
+// RetryEligible is a step parked gap-only whose issue's depends_on or blocks
+// prerequisites are all done, at least one of them linked or changed after the
+// park (DKT-4257). The park waited on a gap another
 // issue was filed to close; once those issues are done the park is a retry
 // candidate, settled advisor-first, instead of sitting until an operator or a
 // conductor with a long memory asks about it.

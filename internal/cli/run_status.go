@@ -50,7 +50,7 @@ type runStatusResult struct {
 	// coverage from this block rather than from a hand diff of the issue list
 	// against the step list. Absent when every bound issue holds a step.
 	Unexpanded []engine.UnexpandedIssue `json:"unexpanded,omitempty"`
-	// RetryEligible lists gap-only parks whose depends_on prerequisites are all
+	// RetryEligible lists gap-only parks whose depends_on or blocks prerequisites are all
 	// done (DKT-4257), the same list `dispatch open` carries. Absent when none.
 	RetryEligible []engine.RetryEligible `json:"retry_eligible,omitempty"`
 }

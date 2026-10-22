@@ -183,3 +183,68 @@ func TestRetryEligibleNeedsADependsOnEdge(t *testing.T) {
 		t.Errorf("a park with no depends_on edge was listed: %+v", got)
 	}
 }
+
+// stampHalves dates the edge and the prerequisite's last change independently,
+// relative to the park, so each half of the moved-after-park rule is pinned on
+// its own.
+func stampHalves(t *testing.T, conn *sql.DB, issueID, prereqID int, edge, updated time.Duration) {
+	t.Helper()
+	at := func(d time.Duration) string { return time.UnixMilli(nowMS).Add(d).UTC().Format(time.RFC3339) }
+	execSQL(t, conn, `UPDATE issue_relations SET created_at = ? WHERE source_issue_id = ? AND target_issue_id = ?`,
+		at(edge), issueID, prereqID)
+	execSQL(t, conn, `UPDATE issues SET updated_at = ? WHERE id = ?`, at(updated), prereqID)
+}
+
+// Either half of the rule is enough: a prerequisite closed after the park
+// (edge older), or a done prerequisite linked after the park (closed earlier).
+func TestRetryEligibleCountsEitherHalfOfTheMovedAfterParkRule(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		edge, updated time.Duration
+		want          int
+	}{
+		{"closed after the park, edge older", -time.Minute, time.Minute, 1},
+		{"linked after the park, closed earlier", time.Minute, -time.Minute, 1},
+		{"both before the park", -time.Minute, -time.Minute, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			runID, issueID, prereqID, _ := retryFixture(t, conn)
+			execSQL(t, conn, `UPDATE issues SET status = ? WHERE id = ?`, string(model.StatusDone), prereqID)
+			stampHalves(t, conn, issueID, prereqID, tc.edge, tc.updated)
+			got, err := RetryEligibleParks(conn, runID)
+			testsupport.Must(t, err, "RetryEligibleParks: %v", err)
+			if len(got) != tc.want {
+				t.Errorf("listed %d parks, want %d: %+v", len(got), tc.want, got)
+			}
+		})
+	}
+}
+
+// A prerequisite written as `X blocks issue` counts; `issue blocks X` does not.
+func TestRetryEligibleReadsTheBlocksDirection(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		prereqBlocks bool
+		want         int
+	}{{"prerequisite blocks the issue", true, 1}, {"issue blocks the other", false, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			runID, issueID, prereqID, _ := retryFixture(t, conn)
+			execSQL(t, conn, `DELETE FROM issue_relations`)
+			rel := &model.Relation{SourceIssueID: issueID, TargetIssueID: prereqID, RelationType: model.RelationBlocks}
+			if tc.prereqBlocks {
+				rel.SourceIssueID, rel.TargetIssueID = prereqID, issueID
+			}
+			_, err := db.CreateRelation(conn, rel)
+			testsupport.Must(t, err, "CreateRelation: %v", err)
+			execSQL(t, conn, `UPDATE issues SET status = ? WHERE id = ?`, string(model.StatusDone), prereqID)
+			stampPrerequisite(t, conn, issueID, prereqID, time.Minute)
+			got, err := RetryEligibleParks(conn, runID)
+			testsupport.Must(t, err, "RetryEligibleParks: %v", err)
+			if len(got) != tc.want {
+				t.Errorf("listed %d parks, want %d: %+v", len(got), tc.want, got)
+			}
+		})
+	}
+}

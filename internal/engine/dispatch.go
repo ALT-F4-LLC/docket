@@ -104,8 +104,8 @@ type Manifest struct {
 	// BEFORE it composes that launch, so the panel or the acknowledgment can
 	// come first. Empty whenever nothing is held.
 	ReapHold string `json:"reap_hold,omitempty"`
-	// RetryEligible lists the gap-only parks whose issue's depends_on
-	// prerequisites are all done (DKT-4257), so the conductor settles them
+	// RetryEligible lists the gap-only parks whose issue's depends_on or blocks
+	// prerequisites are all done and one moved after the park (DKT-4257), so the conductor settles them
 	// advisor-first in this loop pass instead of waiting for an operator to ask.
 	// Beside the wire shape for StaleTargets' reason: it is a live-derived fact,
 	// never a row field. The open also records one park-retry-eligible event
