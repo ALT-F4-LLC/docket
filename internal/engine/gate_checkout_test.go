@@ -476,3 +476,45 @@ func TestAnUnresolvableContainmentRootStillContainsItsBinary(t *testing.T) {
 		}
 	}
 }
+
+// A root that is a symlink to nowhere may point at the binary, so it contains
+// it for this check.
+func TestADanglingSymlinkRootStillContainsItsBinary(t *testing.T) {
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "EvalSymlinks: %v", err)
+	link := filepath.Join(real, "wt")
+	testsupport.Must(t, os.Symlink(filepath.Join(real, "nowhere"), link), "symlink")
+	if !rootContainsLexically(link, filepath.Join(real, "other", "bin", "tool")) {
+		t.Error("a dangling symlink root was treated as provably elsewhere")
+	}
+}
+
+// Each extra root is compared with the path that will spawn, never with a
+// fresh lookup of the command name.
+func TestExtraRootRefusalChecksTheResolvedPath(t *testing.T) {
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	testsupport.Must(t, err, "EvalSymlinks: %v", err)
+	root := filepath.Join(real, "wt")
+	testsupport.Must(t, os.MkdirAll(filepath.Join(root, "bin"), 0o755), "mkdir")
+	inside := filepath.Join(root, "bin", "tool")
+	testsupport.Must(t, os.WriteFile(inside, []byte("#!/bin/sh\n"), 0o755), "write")
+	elsewhere := filepath.Join(real, "usr-tool")
+	testsupport.Must(t, os.WriteFile(elsewhere, []byte("#!/bin/sh\n"), 0o755), "write")
+	gone := filepath.Join(real, "gone")
+
+	for name, tc := range map[string]struct {
+		entry, resolved, extra string
+		refused                bool
+	}{
+		"inside a resolvable root":    {"tool", inside, root, true},
+		"outside a resolvable root":   {"tool", elsewhere, root, false},
+		"absolute entry is trusted":   {inside, inside, root, false},
+		"inside an unresolvable root": {"tool", filepath.Join(gone, "bin", "tool"), gone, true},
+		"outside an unresolvable one": {"tool", elsewhere, gone, false},
+	} {
+		err := extraRootRefusal("tool", tc.entry, tc.resolved, tc.extra)
+		if refused := errors.Is(err, docketexec.ErrRefused); refused != tc.refused {
+			t.Errorf("%s: err = %v, refused = %v, want %v", name, err, refused, tc.refused)
+		}
+	}
+}

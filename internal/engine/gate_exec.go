@@ -217,9 +217,11 @@ func (r *ExecRunner) root(sc StepContext) string {
 // runner's own repository or the tree the gate measures. Taking the run's root
 // moved the boundary off the invoking checkout, and a writer's worktree outside
 // the run's root is a tree the writer controls: a relatively named entry must
-// not start resolving to the executor's own file because of that. Only a
-// refusal about what would run counts from the extra roots. A root that does
-// not resolve cannot contain a resolved binary, so it is skipped.
+// not start resolving to the executor's own file because of that. Each extra
+// root is checked against the path the primary resolution returned, the one
+// that will spawn: resolving the command again per root would look the name up
+// afresh, and a PATH entry the executor can retarget could then pass one
+// lookup outside a root and the other somewhere else.
 func (r *ExecRunner) resolveContained(argv0, entryArgv0 string, sc StepContext) (string, error) {
 	primary := r.root(sc)
 	resolved, err := exec.Resolve(argv0, primary, entryArgv0)
@@ -230,23 +232,38 @@ func (r *ExecRunner) resolveContained(argv0, entryArgv0 string, sc StepContext) 
 		if extra == "" || extra == primary {
 			continue
 		}
-		_, err := exec.Resolve(argv0, extra, entryArgv0)
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, exec.ErrEnvironment) {
+		if err := extraRootRefusal(argv0, entryArgv0, resolved, extra); err != nil {
 			return "", err
-		}
-		// The root did not resolve, and the binary and the root are normalized
-		// in separate steps, so a tree that moves between them would let a
-		// binary inside it pass the real check. Compare the paths lexically
-		// (resolving what still exists) before skipping the root.
-		if rootContainsLexically(extra, resolved) {
-			return "", fmt.Errorf("%w: %s resolved to %s, which is inside %s, a tree that did not resolve to check it against",
-				exec.ErrRefused, exec.Render(argv0), exec.Render(resolved), exec.Render(extra))
 		}
 	}
 	return resolved, nil
+}
+
+// extraRootRefusal refuses a resolved binary that lives at or under extra. The
+// trust entry's own absolute argv[0] that normalizes to the resolved path is
+// the one exception, as in exec.Resolve. A root that does not resolve is
+// compared lexically instead of skipped, because the binary and the root are
+// normalized in separate steps and a tree that moves between them would let a
+// binary inside it pass.
+func extraRootRefusal(argv0, entryArgv0, resolved, extra string) error {
+	if filepath.IsAbs(entryArgv0) {
+		if entryAbs, err := exec.NormalizePath(entryArgv0); err == nil && entryAbs == resolved {
+			return nil
+		}
+	}
+	extraAbs, err := exec.NormalizePath(extra)
+	if err == nil {
+		if exec.Under(extraAbs, resolved) {
+			return fmt.Errorf("%w: %s resolved to %s, which is inside %s; trust the absolute path explicitly if this is intended",
+				exec.ErrRefused, exec.Render(argv0), exec.Render(resolved), exec.Render(extra))
+		}
+		return nil
+	}
+	if rootContainsLexically(extra, resolved) {
+		return fmt.Errorf("%w: %s resolved to %s, which is inside %s, a tree that did not resolve to check it against",
+			exec.ErrRefused, exec.Render(argv0), exec.Render(resolved), exec.Render(extra))
+	}
+	return nil
 }
 
 // rootContainsLexically reports whether path is at or under root by a path
@@ -262,6 +279,11 @@ func rootContainsLexically(root, path string) bool {
 	abs = filepath.Clean(abs)
 	if exec.Under(abs, path) {
 		return true
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		if _, err := filepath.EvalSymlinks(abs); err != nil {
+			return true // a root that is a link to nowhere may point at path
+		}
 	}
 	rest := ""
 	for dir := abs; ; dir = filepath.Dir(dir) {
