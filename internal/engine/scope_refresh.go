@@ -47,7 +47,7 @@ import (
 //     refused (below).
 //  2. NO STEP STRADDLES IT. It refuses while any of the issue's steps is
 //     `claimed`, `running`, or `gated` (DKT-4267: an open dispatch no longer
-//     refuses it; the issue's unstarted manifest rows render the amended packet) — the
+//     refuses it; the issue's manifest rows with nothing in flight render the amended packet) — the
 //     repin quiescence rule (repin.go), applied to the other frozen premise. A
 //     step that already holds a packet rendered under the old scope must not
 //     record its diff under the new one.

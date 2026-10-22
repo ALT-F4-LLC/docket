@@ -24,9 +24,11 @@ import (
 // point of the ruling. Verify compares scheduling fields, never packet content,
 // and ignores the scope the offer read, so a body or files refresh still
 // verifies. A widened scope does not always: it feeds the scope-conflict
-// readiness rule, so a holder outside the manifest that overlaps it makes the
-// row a verify mismatch until the holder records. The refresh event names the dispatch and the rows it re-rendered, so
-// the record shows which offered rows now claim an amended packet.
+// readiness rule, so while another issue's claimed or running step overlaps it
+// (offered in this manifest or not) all of the issue's rows are a verify
+// mismatch until that step records. The refresh event names the dispatch and
+// the rows it re-rendered, so the record shows which offered rows now claim an
+// amended packet.
 
 // refreshUnderDispatchTx describes the open dispatch's rows of one issue for a
 // refresh event: the dispatch id and the instances re-rendered. It returns nil

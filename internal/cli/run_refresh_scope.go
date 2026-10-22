@@ -57,9 +57,9 @@ It REFUSES rather than proceeding when the change could be straddled:
 
 An open dispatch does not refuse it: the issue's manifest rows (none in flight)
 render the amended packet at claim, and the event names the dispatch and those
-rows. A widened scope can also change which rows are ready: when another
-issue's holder outside the manifest overlaps it, ` + "`dispatch verify`" + ` reports a
-mismatch on the issue's row until that holder records.
+rows. A widened scope can also change which rows are ready: while another
+issue's claimed or running step overlaps it, offered in this manifest or not,
+` + "`dispatch verify`" + ` reports all of the issue's rows as missing until that step records.
 
 --reason is required. A live run's packets changing what they declare is
 something somebody will ask about later, and a trail that shows the scope

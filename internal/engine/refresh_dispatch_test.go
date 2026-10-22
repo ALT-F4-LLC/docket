@@ -69,7 +69,9 @@ func assertRefreshEventNamesRow(t *testing.T, conn *sql.DB, runID int, dispatch,
 
 // A parked (waiting-human) step is refreshable by design: the issue the
 // ruling is about is exactly the one a refresh unblocks. Under an open
-// dispatch its row is named and the dispatch still verifies.
+// dispatch its row is named. Verify skips a parked row (it is off the
+// scheduler), so the verify check below holds by construction; it guards only
+// against the refresh disturbing the dispatch's other bookkeeping.
 func TestRefreshScopeUnderAnOpenDispatchForAWaitingHumanStep(t *testing.T) {
 	conn := mustDB(t)
 	runID, issue, stepID := scopedIssueInRun(t, conn, `["internal/a/**"]`)
