@@ -3087,7 +3087,7 @@ func commitDiff(execRoot string, revs, paths []string) (string, error) {
 		args = append(args, paths...)
 	}
 	out, err := gitCommand(args...).Output()
-	return string(out), err
+	return capFileDiffs(string(out)), err
 }
 
 // commitOutOfScopeNames lists the paths a commit touched that its issue's
@@ -3135,7 +3135,7 @@ func rawDiff(dir, base string, paths []string) (string, error) {
 		args = append(args, paths...)
 	}
 	out, err := gitCommand(args...).Output()
-	return string(out), err
+	return capFileDiffs(string(out)), err
 }
 
 // runExecRoot resolves the checkout `sharedCheckoutHead` should read HEAD
@@ -4192,7 +4192,7 @@ func untrackedDiff(dir string, scope []string) string {
 		// resolve them from the same place.
 		out, _ := gitCommand(
 			gitDirArgs(dir, "diff", "--text", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
-		b.Write(out)
+		b.WriteString(capFileDiffs(string(out)))
 	}
 	return b.String()
 }

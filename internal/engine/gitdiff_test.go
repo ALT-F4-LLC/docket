@@ -478,3 +478,53 @@ func TestGitCommitPatchShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T)
 		t.Errorf("the commit patch hides an attribute-marked file:\n%s", patch)
 	}
 }
+
+// Reading every file as text must not record a genuine binary byte for byte:
+// a section over the per-file cap keeps its header and drops the hunks, in the
+// tracked, untracked and committed halves, and a small file beside it stays whole.
+func TestGitDiffCapsAFileSectionAndNamesItsBlobs(t *testing.T) {
+	dir := gitRepo(t)
+	big := strings.Repeat("0123456789abcdef\n", perFileDiffCap/8)
+	writeFile(t, dir, "internal/big.dat", "old\n")
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+		return strings.TrimSpace(string(out))
+	}
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/big.dat", big)
+	writeFile(t, dir, "internal/small.txt", "small and whole\n")
+	writeFile(t, dir, "internal/fresh.dat", big)
+
+	diff := inRepo(t, dir, nil)
+	if len(diff) > 3*perFileDiffCap/4 {
+		t.Errorf("the diff is %d bytes; a section over the cap was kept:\n%.300s", len(diff), diff)
+	}
+	for _, want := range []string{"small and whole", "per-file cap", "index "} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("the diff omits %q", want)
+		}
+	}
+	if strings.Count(diff, "per-file cap") != 2 {
+		t.Errorf("want both the tracked and the untracked file capped:\n%.600s", diff)
+	}
+
+	git("add", "-A")
+	git("commit", "-qm", "big")
+	patch, err := GitCommitPatch(dir, git("rev-parse", "HEAD"), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if len(patch) > 3*perFileDiffCap/4 || !strings.Contains(patch, "per-file cap") {
+		t.Errorf("the commit patch was not capped (%d bytes)", len(patch))
+	}
+}
+
+func TestCapFileDiffsLeavesASmallDiffByteIdentical(t *testing.T) {
+	in := "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+	if got := capFileDiffs(in); got != in {
+		t.Errorf("capFileDiffs changed a small diff: %q", got)
+	}
+}

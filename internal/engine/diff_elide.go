@@ -308,3 +308,34 @@ func gitBlobHasGeneratedHeader(root string) func(string) bool {
 		return generatedHeader.MatchString(strings.TrimRight(line, "\r\n"))
 	}
 }
+
+// perFileDiffCap bounds one file's section of a recorded diff. The producers
+// read every file as text (--text, so an attribute cannot hide content), which
+// would otherwise record a genuine binary byte for byte; a section over the cap
+// keeps its header, whose index line names the blob ids, and drops the hunks.
+const perFileDiffCap = 64 << 10
+
+// capFileDiffs replaces each file section over perFileDiffCap with its header
+// and a marker. A diff with no such section comes back byte-identical.
+func capFileDiffs(body string) string {
+	if len(body) <= perFileDiffCap {
+		return body
+	}
+	var out strings.Builder
+	for _, s := range splitDiffSections(body) {
+		if len(s.text) <= perFileDiffCap {
+			out.WriteString(s.text)
+			continue
+		}
+		// The header ends at the first hunk; a section with none (a mode or
+		// rename header cannot be this long) keeps its first bytes instead.
+		header, _, hasHunks := strings.Cut(s.text, "\n@@")
+		if !hasHunks || len(header) > perFileDiffCap {
+			header = s.text[:perFileDiffCap]
+		}
+		out.WriteString(header)
+		fmt.Fprintf(&out, "\n# === %d bytes of hunks for %s elided at the %d-byte per-file cap; "+
+			"the index line above names the blobs ===\n", len(s.text)-len(header), s.path, perFileDiffCap)
+	}
+	return out.String()
+}
