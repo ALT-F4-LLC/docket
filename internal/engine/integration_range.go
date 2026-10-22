@@ -66,11 +66,11 @@ func gitIntegratedRange(execRoot, tip, head, base string) IntegratedRange {
 		return IntegratedRange{} // no patch content to match
 	}
 
-	line, ok := gitPatchIDPairs(execRoot, "--first-parent", "-n", strconv.Itoa(integrationWalkLimit), tip)
+	line, ok := gitPatchIDPairs(execRoot, "--first-parent", "-n", strconv.Itoa(integrationWalkLimit), tip, "^"+base)
 	if !ok {
 		return IntegratedRange{}
 	}
-	line = gitCherryPickTwins(execRoot, tip, chain, line)
+	line = gitCherryPickTwins(execRoot, tip, base, chain, line)
 	wanted := make(map[string]int, len(chain))
 	for _, c := range chain {
 		wanted[c.id]++
@@ -127,7 +127,7 @@ func gitIntegratedRange(execRoot, tip, head, base string) IntegratedRange {
 // A line commit that is already patch-equal to a writer commit keeps its id, and one
 // writer commit aliases at most one line commit (the newest), so a trailer
 // cannot stand for a commit twice.
-func gitCherryPickTwins(execRoot, tip string, chain, line []patchIDPair) []patchIDPair {
+func gitCherryPickTwins(execRoot, tip, base string, chain, line []patchIDPair) []patchIDPair {
 	have := make(map[string]bool, len(line))
 	for _, c := range line {
 		have[c.id] = true
@@ -144,7 +144,7 @@ func gitCherryPickTwins(execRoot, tip string, chain, line []patchIDPair) []patch
 		trailer := "(cherry picked from commit " + w.commit + ")"
 		found, ok := gitOutputLines(execRoot, "log", "--first-parent", "--no-merges",
 			"-n", strconv.Itoa(integrationWalkLimit), "--fixed-strings", "--grep="+trailer,
-			"--format=%H", tip)
+			"--format=%H", tip, "^"+base)
 		if !ok {
 			continue
 		}

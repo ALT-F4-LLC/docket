@@ -40,8 +40,9 @@ import (
 // operator names the commit the shared branch now carries for this step; the
 // engine establishes that it IS reachable from the shared checkout's HEAD
 // (IsAncestorFn — the same probe the close and the advisory ask), and only
-// then re-records the step's `issue.diff` from that commit's own patch
-// (CommitPatchFn), superseding the stale record exactly as the `--worktree`
+// then re-records the step's `issue.diff` over the integrated range
+// (IntegrationRangeFn, RangePatchFn; CommitPatchFn when no range is known),
+// superseding the stale record exactly as the `--worktree`
 // re-pin does (diff_repin.go) — so the packets bind to the resolved tree from
 // then on with no resolver change, and the close finds a recorded head that is
 // an ancestor and accepts it, marking the verdict `resolved` for the audit
@@ -95,7 +96,7 @@ const ResolutionIntegratedSHA = "integrated-sha"
 
 // AnnotateIntegration records a verified integration for a finished write-class
 // step: the sha's ancestry against the shared checkout's HEAD is established
-// first, then the step's `issue.diff` is re-recorded from that commit's patch
+// first, then the step's `issue.diff` is re-recorded over the integrated range
 // and `integrated_sha` (plus any further metadata) is merged onto the step's
 // record — all of it in one transaction after the git questions are answered.
 //
@@ -220,7 +221,7 @@ func (e *Engine) AnnotateIntegration(
 			return nil, conflictErr(
 				"%.12s does not carry the writer's patch: no commit on its line is "+
 					"patch-equivalent to %s of the writer's chain (%.12s); integrate the "+
-					"missing commit(s) first (a hand-resolved pick needs the cherry-pick -x trailer naming the writer commit and no file outside its files), then annotate the commit that carries them",
+					"missing commit(s) first (a hand-resolved pick needs the cherry-pick -x trailer naming the writer commit and exactly that commit's files), then annotate the commit that carries them",
 				sha, missingCommits(r.Missing), writerHead)
 		}
 		rangeFrom = r.From

@@ -331,3 +331,32 @@ func TestIntegratedRangeLetsOneCommitStandForOnlyOneWriterCommit(t *testing.T) {
 		t.Errorf("one commit naming both = %+v; want known, not carried, one missing", r)
 	}
 }
+
+// TestIntegratedRangeIgnoresAPatchTwinFromBeforeTheWritersBase: trunk added a
+// change and reverted it, and the writer forked afterwards and made the same
+// change again. The earlier addition is patch-equal to the writer's commit but
+// is history the writer started from, so a sha that carries only that history
+// does not carry the writer's work.
+func TestIntegratedRangeIgnoresAPatchTwinFromBeforeTheWritersBase(t *testing.T) {
+	repo := gitRepo(t)
+	writeFile(t, repo, "internal/x.go", "package x\n")
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "trunk adds x")
+	gitRun(t, repo, "revert", "--no-edit", "HEAD")
+	base := gitRun(t, repo, "rev-parse", "HEAD")
+
+	gitRun(t, repo, "checkout", "-q", "-b", "writer")
+	writeFile(t, repo, "internal/x.go", "package x\n")
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "writer adds x again")
+	head := gitRun(t, repo, "rev-parse", "HEAD")
+	gitRun(t, repo, "checkout", "-q", "-")
+	writeFile(t, repo, "internal/sibling.go", "package sibling\n")
+	gitRun(t, repo, "add", "-A")
+	gitRun(t, repo, "commit", "-q", "-m", "sibling")
+	prePick := gitRun(t, repo, "rev-parse", "HEAD")
+
+	if r := gitIntegratedRange(repo, prePick, head, base); !r.Known || r.Carried || len(r.Missing) != 1 {
+		t.Errorf("a sha holding only a pre-base twin = %+v; want known, not carried, one missing", r)
+	}
+}

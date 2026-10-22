@@ -1279,14 +1279,18 @@ commit of the writer's chain: a patch-equal commit, or a commit whose message
 carries, as a line, the ` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose
 changed files are exactly that commit's (a hand-resolved pick edits a hunk,
 so it is not patch-equal; the trailer is the committer's own claim and the file
-check is what bounds it); then it re-records the step's
-` + "`issue.diff`" + ` from that commit's own patch (superseding the stale record,
-the way ` + "`step resolve --worktree`" + ` re-pins one), so every downstream
+check is what bounds it; only commits after the writer's base count); then it
+re-records the step's ` + "`issue.diff`" + ` over the whole integrated range, from the
+first parent of the earliest commit that carries the chain to the sha
+(superseding the stale record, the way ` + "`step resolve --worktree`" + ` re-pins one;
+a sha later than the pick also sweeps in the commits between), so every downstream
 packet binds to the resolved tree and ` + "`dispatch close`" + ` accepts the step
 with a ` + "`resolved`" + ` verdict instead of needing --skip-integration-check.
 It also sets ` + "`integrated_sha`" + ` in the step's metadata. The sha must be
-the full 40-hex id of ONE ordinary commit whose patch is the step's landed
-work; a merge commit records an empty diff. Both flags may be given together.
+the full 40-hex id of the commit that carries the step's landed work: the last
+commit of a pick, a squash, or a merge (a merge records the diff from the
+writer's base, so it can include a sibling's files). Both flags may be given
+together.
 On a run bound to a conductor capability, --integrated-sha requires that
 token via DOCKET_TOKEN or stdin (never argv); --metadata alone does not.
 
