@@ -3080,7 +3080,7 @@ func gitRevPatch(execRoot string, revs, scope []string) (string, error) {
 // commitDiff is one pathspec'd `git diff-tree -p` of a commit against its
 // parent. An empty pathspec renders the whole commit, for rawDiff's reason.
 func commitDiff(execRoot string, revs, paths []string) (string, error) {
-	args := gitDirArgs(execRoot, append(append([]string{"diff-tree", "-p", "--no-textconv", "--no-commit-id"}, revs...), "--")...)
+	args := gitDirArgs(execRoot, append(append([]string{"diff-tree", "-p", "--text", "--no-textconv", "--no-commit-id"}, revs...), "--")...)
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
@@ -3128,7 +3128,7 @@ func commitOutOfScopeNames(execRoot string, revs, scope []string) []string {
 // whole tree: an issue that declared nothing has not narrowed what it may
 // touch, so neither does the diff. Each caller keeps its own error policy.
 func rawDiff(dir, base string, paths []string) (string, error) {
-	args := gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", base, "--")
+	args := gitDirArgs(dir, "diff", "--text", "--no-ext-diff", "--no-textconv", base, "--")
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
@@ -4191,7 +4191,7 @@ func untrackedDiff(dir string, scope []string) string {
 		// here too: ls-files listed paths RELATIVE TO dir, so the diff must
 		// resolve them from the same place.
 		out, _ := gitCommand(
-			gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
+			gitDirArgs(dir, "diff", "--text", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
 		b.Write(out)
 	}
 	return b.String()

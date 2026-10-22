@@ -426,3 +426,29 @@ func TestGitDiffBaseAndScopeCombined(t *testing.T) {
 			"in the based+scoped case (DKT-86)\n%s", diff)
 	}
 }
+
+// An attribute the writer commits (`-diff`, or `binary`) must not turn the
+// recorded diff into "Binary files differ": the review reads the content.
+func TestGitDiffShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T) {
+	dir := gitRepo(t)
+	writeFile(t, dir, ".gitattributes", "*.dat -diff\n*.bin binary\n")
+	writeFile(t, dir, "internal/a.dat", "old line\n")
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "attrs"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+	}
+	writeFile(t, dir, "internal/a.dat", "new line the reviewer must see\n")
+	writeFile(t, dir, "internal/fresh.bin", "untracked content the reviewer must see\n")
+
+	diff := inRepo(t, dir, nil)
+	for _, want := range []string{"new line the reviewer must see", "untracked content the reviewer must see"} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("the diff omits %q:\n%s", want, diff)
+		}
+	}
+	if strings.Contains(diff, "Binary files") {
+		t.Errorf("the diff reports a binary file the attributes only marked:\n%s", diff)
+	}
+}
