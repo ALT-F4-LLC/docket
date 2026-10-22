@@ -540,3 +540,21 @@ func TestIntegrateStepsRefusesALiveRecordedHead(t *testing.T) {
 	}
 	f.requireNothingLanded(t, before)
 }
+
+// TestIntegrateStepsRefusesAStepWithNoRecordedHead: a re-pin whose tree moved
+// records no head, and nothing then says the worktree held no uncommitted work.
+func TestIntegrateStepsRefusesAStepWithNoRecordedHead(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	res, err := f.conn.Exec(`DELETE FROM artifacts WHERE step_id = ? AND kind = ?`,
+		f.stepID, RecordedHeadArtifactKind)
+	testsupport.Must(t, err, "clear the recorded head: %v", err)
+	if n, _ := res.RowsAffected(); n == 0 {
+		t.Fatal("the fixture recorded no head to clear")
+	}
+	before := f.sharedHead(t)
+	_, err = f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "no recorded head") {
+		t.Fatalf("error = %v, want the no-recorded-head refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+}

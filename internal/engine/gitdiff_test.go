@@ -452,3 +452,29 @@ func TestGitDiffShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T) {
 		t.Errorf("the diff reports a binary file the attributes only marked:\n%s", diff)
 	}
 }
+
+// The annotation's re-pin body reads a commit through diff-tree, which honors
+// the same attributes, so it must show an attribute-marked file's content too.
+func TestGitCommitPatchShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T) {
+	dir := gitRepo(t)
+	writeFile(t, dir, ".gitattributes", "*.dat -diff\n")
+	writeFile(t, dir, "internal/a.dat", "old line\n")
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+		return strings.TrimSpace(string(out))
+	}
+	git("add", "-A")
+	git("commit", "-qm", "attrs")
+	writeFile(t, dir, "internal/a.dat", "new line the reviewer must see\n")
+	git("add", "-A")
+	git("commit", "-qm", "change")
+	patch, err := GitCommitPatch(dir, git("rev-parse", "HEAD"), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if !strings.Contains(patch, "new line the reviewer must see") || strings.Contains(patch, "Binary files") {
+		t.Errorf("the commit patch hides an attribute-marked file:\n%s", patch)
+	}
+}

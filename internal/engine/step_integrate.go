@@ -180,11 +180,13 @@ func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integrateP
 			"step %s recorded no commit in its issue.diff, so there is nothing to pick", step.Instance)
 	}
 	// A Live record means the worktree held work the head commit does not
-	// carry (uncommitted changes, or no base to measure from), so the gates and
-	// the diff judged bytes a pick of the chain would not reproduce.
-	if rec, ok := recordedHeadOf(conn, step); ok && rec.Live {
+	// carry (uncommitted changes, or no base to measure from), and a missing one
+	// (a re-pin whose tree moved records none) leaves nothing to say it did not,
+	// so the gates and the diff judged bytes a pick of the chain may not
+	// reproduce.
+	if rec, ok := recordedHeadOf(conn, step); !ok || rec.Live {
 		return integratePlan{}, conflictErr(
-			"step %s recorded a live worktree, whose work its head commit does not carry, so the "+
+			"step %s has no recorded head, or recorded a live worktree whose work its head commit does not carry, so the "+
 				"engine will not pick the commits as the work that was measured; integrate it "+
 				"by hand and annotate the result", step.Instance)
 	}
