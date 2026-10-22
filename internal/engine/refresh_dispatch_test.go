@@ -2,10 +2,13 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -39,12 +42,45 @@ func TestRefreshScopeUnderAnOpenDispatchVerifies(t *testing.T) {
 	}
 	assertFrozenScope(t, conn, runID, issue, "internal/a/**", "internal/b/**")
 
-	data := runEventData(t, conn, runID, EventIssueScopeRefreshed)
-	for _, want := range []string{manifest.Dispatch, "rerendered_rows", "flaky@0"} {
-		if !strings.Contains(data, want) {
-			t.Errorf("refresh event %s lacks %q", data, want)
-		}
+	assertRefreshEventNamesRow(t, conn, runID, manifest.Dispatch, "flaky@0")
+
+	verify, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+	testsupport.Must(t, err, "VerifyDispatch: %v", err)
+	if mismatch != nil || !verify.Verified {
+		t.Errorf("the open dispatch no longer verifies after the refresh: %+v %+v", verify, mismatch)
 	}
+}
+
+// assertRefreshEventNamesRow reads the scope-refresh event and requires its
+// dispatch and its rerendered_rows list, not any other field, to name the row.
+func assertRefreshEventNamesRow(t *testing.T, conn *sql.DB, runID int, dispatch, instance string) {
+	t.Helper()
+	var event struct {
+		Dispatch       string   `json:"dispatch"`
+		RerenderedRows []string `json:"rerendered_rows"`
+	}
+	data := runEventData(t, conn, runID, EventIssueScopeRefreshed)
+	testsupport.Must(t, json.Unmarshal([]byte(data), &event), "decoding the refresh event %s", data)
+	if event.Dispatch != dispatch || !slices.Contains(event.RerenderedRows, instance) {
+		t.Errorf("refresh event %s: dispatch %q and rerendered_rows %v; want %q naming %q",
+			data, event.Dispatch, event.RerenderedRows, dispatch, instance)
+	}
+}
+
+// A parked (waiting-human) step is refreshable by design: the issue the
+// ruling is about is exactly the one a refresh unblocks. Under an open
+// dispatch its row is named and the dispatch still verifies.
+func TestRefreshScopeUnderAnOpenDispatchForAWaitingHumanStep(t *testing.T) {
+	conn := mustDB(t)
+	runID, issue, stepID := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+	manifest := openDispatch(t, conn, runID, 0, nowMS)
+	execSQL(t, conn, `UPDATE steps SET status = ? WHERE id = ?`, db.StepWaitingHuman, stepID)
+	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`, string(model.RunWaitingHuman), runID)
+	widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
+
+	_, err := refresh(conn, runID, issue)
+	testsupport.Must(t, err, "refresh of a parked issue under an open dispatch: %v", err)
+	assertRefreshEventNamesRow(t, conn, runID, manifest.Dispatch, "flaky@0")
 
 	verify, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
 	testsupport.Must(t, err, "VerifyDispatch: %v", err)

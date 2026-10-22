@@ -35,7 +35,7 @@ It refuses while any of the issue's steps is claimed, running, or gated
 description must not record under the amended one. It also refuses on a run
 that is not active or waiting-human, and on an issue activation has not bound.
 
-An open dispatch does not refuse it: the issue's unstarted manifest rows render the
+An open dispatch does not refuse it: the issue's manifest rows (none in flight) render the
 amended packet at claim, the event names the dispatch and those rows, and
 ` + "`dispatch verify`" + ` still passes.
 

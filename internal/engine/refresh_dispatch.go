@@ -19,10 +19,13 @@ import (
 // The open dispatch is no reason to hold the refresh when the issue it targets
 // has nothing in flight. refreshableSteps already refuses while a step of THE
 // ISSUE is claimed, running, or gated, so what remains in the manifest for it is
-// rows no one has started: they will render, at claim, the amended packet, which
-// is the point of the ruling. Verify compares scheduling fields, never packet
-// content, and already looks past the scope the offer read, so those rows still
-// verify. The refresh event names the dispatch and the rows it re-rendered, so
+// rows with nothing in flight (pending, waiting-human, or already finished):
+// those still pending will render, at claim, the amended packet, which is the
+// point of the ruling. Verify compares scheduling fields, never packet content,
+// and ignores the scope the offer read, so a body or files refresh still
+// verifies. A widened scope does not always: it feeds the scope-conflict
+// readiness rule, so a holder outside the manifest that overlaps it makes the
+// row a verify mismatch until the holder records. The refresh event names the dispatch and the rows it re-rendered, so
 // the record shows which offered rows now claim an amended packet.
 
 // refreshUnderDispatchTx describes the open dispatch's rows of one issue for a

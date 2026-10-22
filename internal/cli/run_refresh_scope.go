@@ -55,9 +55,11 @@ It REFUSES rather than proceeding when the change could be straddled:
     again, so the widened scope reaches the issue's NEXT run
   - when the live scope already matches the frozen one: widen it first
 
-An open dispatch does not refuse it: the issue's unstarted manifest rows render
-the amended packet at claim, the event names the dispatch and those rows, and
-` + "`dispatch verify`" + ` still passes.
+An open dispatch does not refuse it: the issue's manifest rows (none in flight)
+render the amended packet at claim, and the event names the dispatch and those
+rows. A widened scope can also change which rows are ready: when another
+issue's holder outside the manifest overlaps it, ` + "`dispatch verify`" + ` reports a
+mismatch on the issue's row until that holder records.
 
 --reason is required. A live run's packets changing what they declare is
 something somebody will ask about later, and a trail that shows the scope
