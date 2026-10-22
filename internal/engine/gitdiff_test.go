@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -526,5 +527,26 @@ func TestCapFileDiffsLeavesASmallDiffByteIdentical(t *testing.T) {
 	in := "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
 	if got := capFileDiffs(in); got != in {
 		t.Errorf("capFileDiffs changed a small diff: %q", got)
+	}
+}
+
+// The cap drops a file's hunks from the recorded body, so the diff facts a
+// routing threshold reads must come from the marker: a padded file cannot
+// measure as small, and its blob ids are full-length.
+func TestCappedFileStillCountsItsLinesAndNamesFullBlobs(t *testing.T) {
+	dir := gitRepo(t)
+	writeFile(t, dir, "internal/seed.txt", "x\n")
+	big := strings.Repeat("0123456789abcdef\n", perFileDiffCap/8)
+	writeFile(t, dir, "internal/fresh.dat", big)
+	diff := inRepo(t, dir, nil)
+	if !strings.Contains(diff, "per-file cap") {
+		t.Fatalf("the fixture was not capped:\n%.300s", diff)
+	}
+	want := strings.Count(big, "\n")
+	if got := measureDiff(diff).Lines; got < want {
+		t.Errorf("measureDiff counts %d lines for a capped file of %d", got, want)
+	}
+	if !regexp.MustCompile(`(?m)^index 0{40}\.\.[0-9a-f]{40}`).MatchString(diff) {
+		t.Errorf("the capped header has no full-length blob ids:\n%.300s", diff)
 	}
 }

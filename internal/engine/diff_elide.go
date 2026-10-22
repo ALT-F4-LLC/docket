@@ -16,7 +16,7 @@ import (
 // A review step's packet inlines its `issue.diff` input whole. A change that
 // regenerated protobuf output put 845 KB of generated hunks into one packet, and
 // the claim script refused it against the Workflow script cap, so the review
-// chain never ran. The recorded artifact stays whole; the RENDER replaces each
+// chain never ran. The RENDER replaces each
 // generated file's hunks with one stat line carrying the blob hash, so the
 // reviewer sees that the file changed, by how much, and which bytes, and reads
 // the hand-written hunks in full.
@@ -83,7 +83,7 @@ func elideGeneratedDiff(
 		if f.Blob != "" {
 			fmt.Fprintf(&out, ", blob %s", f.Blob)
 		}
-		out.WriteString("\n# the full diff is the recorded issue.diff artifact\n")
+		out.WriteString("\n# the blob above names the bytes; hunks past the per-file cap are not recorded\n")
 		// A line starting `#` is never diff content (hunk lines start with a
 		// space, `+`, `-` or `\`), so it is a trailer the diff builder appended
 		// after the last in-scope file: the out-of-scope disclosure and round
@@ -334,8 +334,27 @@ func capFileDiffs(body string) string {
 			header = s.text[:perFileDiffCap]
 		}
 		out.WriteString(header)
-		fmt.Fprintf(&out, "\n# === %d bytes of hunks for %s elided at the %d-byte per-file cap; "+
-			"the index line above names the blobs ===\n", len(s.text)-len(header), s.path, perFileDiffCap)
+		adds, dels := countHunkLines(s.text[len(header):])
+		fmt.Fprintf(&out, "\n# === capped: +%d -%d, %d bytes of hunks for %s elided at the %d-byte per-file cap; "+
+			"the index line above names the blobs ===\n", adds, dels, len(s.text)-len(header), s.path, perFileDiffCap)
 	}
 	return out.String()
+}
+
+// cappedMarker matches the line capFileDiffs leaves for a capped section; it
+// carries the added and removed line counts so the diff facts survive the cap.
+// A line starting `#` is never diff content, so a file cannot forge one.
+var cappedMarker = regexp.MustCompile(`^# === capped: \+(\d+) -(\d+), `)
+
+// countHunkLines counts the added and removed lines in a section's hunks.
+func countHunkLines(hunks string) (adds, dels int) {
+	for _, line := range strings.Split(hunks, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+"):
+			adds++
+		case strings.HasPrefix(line, "-"):
+			dels++
+		}
+	}
+	return adds, dels
 }
