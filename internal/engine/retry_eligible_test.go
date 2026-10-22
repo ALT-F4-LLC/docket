@@ -79,6 +79,41 @@ func TestRetryEligibleIgnoresAPrerequisiteMetBeforeThePark(t *testing.T) {
 	}
 }
 
+// A prerequisite that closed before the park and was only edited after it (a
+// comment, a label) did not change for the park: its close decides, not its
+// updated_at.
+func TestRetryEligibleIgnoresAnEditAfterAnEarlierClose(t *testing.T) {
+	conn := mustDB(t)
+	runID, issueID, prereqID, _ := retryFixture(t, conn)
+	stampPrerequisite(t, conn, issueID, prereqID, -time.Minute)
+	execSQL(t, conn, `UPDATE issues SET status = ?, updated_at = ? WHERE id = ?`, string(model.StatusDone),
+		time.UnixMilli(nowMS).Add(time.Minute).UTC().Format(time.RFC3339), prereqID)
+	testsupport.Must(t, db.RecordActivity(conn, prereqID, "status", "backlog", "done", "t"), "RecordActivity")
+	execSQL(t, conn, `UPDATE activity_log SET created_at = ? WHERE issue_id = ? AND field_changed = 'status'`,
+		time.UnixMilli(nowMS).Add(-time.Minute).UTC().Format(time.RFC3339), prereqID)
+
+	got, err := RetryEligibleParks(conn, runID)
+	testsupport.Must(t, err, "RetryEligibleParks: %v", err)
+	if len(got) != 0 {
+		t.Errorf("a prerequisite closed before the park was listed for a later edit: %+v", got)
+	}
+}
+
+// A close in the park's own second is after it: issue times are whole seconds.
+func TestRetryEligibleCountsACloseInTheParksSecond(t *testing.T) {
+	conn := mustDB(t)
+	runID, issueID, prereqID, _ := retryFixture(t, conn)
+	stampPrerequisite(t, conn, issueID, prereqID, -time.Minute)
+	execSQL(t, conn, `UPDATE issues SET status = ?, updated_at = ? WHERE id = ?`, string(model.StatusDone),
+		time.UnixMilli(nowMS).UTC().Truncate(time.Second).Format(time.RFC3339), prereqID)
+
+	got, err := RetryEligibleParks(conn, runID)
+	testsupport.Must(t, err, "RetryEligibleParks: %v", err)
+	if len(got) != 1 {
+		t.Errorf("a close in the park's own second was not listed: %+v", got)
+	}
+}
+
 // TestDispatchOpenListsRetryEligibleParkAndRecordsOneEvent is the acceptance
 // check: park a step gap-only, add a depends_on edge to issue X, close X; then
 // a park-retry-eligible event exists and dispatch open lists the step under

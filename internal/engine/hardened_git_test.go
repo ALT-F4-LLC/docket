@@ -332,3 +332,17 @@ func TestEngineGitEnvironmentDropsGitConfig(t *testing.T) {
 		}
 	}
 }
+
+// A refusal names a partial clone, since engine git never fetches the objects
+// such a clone lacks; a full clone adds nothing.
+func TestPartialCloneNoteNamesAPartialClone(t *testing.T) {
+	repo := t.TempDir()
+	gitRun(t, repo, "init", "-q")
+	if note := partialCloneNote(repo); note != "" {
+		t.Errorf("a full clone got a note: %q", note)
+	}
+	gitRun(t, repo, "config", "extensions.partialClone", "origin")
+	if note := partialCloneNote(repo); !strings.Contains(note, "partial clone") {
+		t.Errorf("a partial clone got no note: %q", note)
+	}
+}

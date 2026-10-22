@@ -1389,10 +1389,17 @@ func (s *Scheduler) ScopeHolders(step *db.Step) []Holder {
 	return holdersOf(s.scopeConflicts(step))
 }
 
+// HolderUnacknowledgedReap is the status a Holder carries for a lapsed writer
+// whose reap nobody has acknowledged: it holds a slot until the ack, whatever
+// the step's own status says.
+const HolderUnacknowledgedReap = "unacknowledged-reap"
+
 // ClassHolders names the steps occupying this step's class headroom: the
 // claimed, running, and gated steps classInFlight counts, so a CondHeadroom
 // refusal says which launches still hold the slots (DKT-4264). A gated holder
-// is the usual answer — its worker finished and its gates still run.
+// is the usual answer — its worker finished and its gates still run. The
+// unacknowledged reaps classInFlight also counts follow, as their reaped steps,
+// so a refusal with no live holder still names what to wait on.
 func (s *Scheduler) ClassHolders(step *db.Step) []Holder {
 	var held []*db.Step
 	for _, other := range s.steps {
@@ -1406,7 +1413,17 @@ func (s *Scheduler) ClassHolders(step *db.Step) []Holder {
 			}
 		}
 	}
-	return holdersOf(held)
+	holders := holdersOf(held)
+	if s.reapHold != nil {
+		for _, ack := range s.openReaps {
+			if ack.Class == step.Class && ack.StepID != step.ID {
+				holders = append(holders, Holder{
+					Step: model.FormatStepID(ack.StepID), Status: HolderUnacknowledgedReap,
+				})
+			}
+		}
+	}
+	return holders
 }
 
 // maxRefusalHolders bounds the holders a refusal's message lists. The event

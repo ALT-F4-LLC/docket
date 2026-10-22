@@ -81,11 +81,13 @@ func validateStepComments(step *db.Step, comments [][]byte) error {
 // use and unassigned code points), and the characters that render as blank
 // though they are printable by category (Hangul fillers, the braille blank,
 // the combining grapheme joiner, variation selectors other than the emoji
-// presentation selector after a visible character). Ordinary spaces pass.
+// presentation selector after a visible character). Ordinary spaces pass, and
+// so does a carriage return that ends a CRLF line, which moves the cursor
+// nowhere the newline after it does not.
 func unsafeCommentRune(s string) (rune, bool) {
 	prev := rune(-1)
-	for _, r := range s {
-		if r == '\n' || r == '\t' {
+	for i, r := range s {
+		if r == '\n' || r == '\t' || (r == '\r' && strings.HasPrefix(s[i+1:], "\n")) {
 			prev = r
 			continue
 		}

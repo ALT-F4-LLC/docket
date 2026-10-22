@@ -210,7 +210,7 @@ func TestAKeyAlreadyInTheStepCommentScopeRefusesTheRecording(t *testing.T) {
 }
 
 // The control for the refusals above: ordinary prose in other scripts, accents,
-// emoji, tabs, newlines and non-breaking spaces still posts.
+// emoji, tabs, newlines (CRLF included) and non-breaking spaces still posts.
 func TestUnsafeCommentRuneAllowsOrdinaryProse(t *testing.T) {
 	for _, s := range []string{
 		"Approved: the change is safe.\n\n- tab\there",

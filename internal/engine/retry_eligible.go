@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -70,11 +71,18 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading prerequisite issues: %w", err)
 	}
+	// When each prerequisite became done. Its updated_at moves on any later
+	// edit (a comment, a label), which is not the prerequisite changing; it is
+	// the fallback only for an issue whose close the log never saw.
+	doneAt, err := db.StatusReachedAt(conn, ids, string(model.StatusDone))
+	if err != nil {
+		return nil, fmt.Errorf("reading when prerequisites closed: %w", err)
+	}
 
 	// When each blocking edge was added, so a prerequisite that was already met
 	// before the park does not signal it.
 	type edge struct{ issue, blocker int }
-	edgeAddedMS := make(map[edge]int64)
+	edgeAdded := make(map[edge]time.Time)
 	for _, rel := range relations {
 		e := edge{rel.SourceIssueID, rel.TargetIssueID}
 		switch rel.RelationType {
@@ -84,8 +92,8 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 		default:
 			continue
 		}
-		if ms := rel.CreatedAt.UnixMilli(); ms > edgeAddedMS[e] {
-			edgeAddedMS[e] = ms
+		if rel.CreatedAt.After(edgeAdded[e]) {
+			edgeAdded[e] = rel.CreatedAt
 		}
 	}
 
@@ -108,10 +116,14 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 				allDone = false
 				break
 			}
-			// The edge was added, or the prerequisite last changed (it closed),
-			// after the park. Both clocks are wall clocks; the park's is the
-			// step row's last write.
-			if edgeAddedMS[edge{s.IssueID, d}] > s.UpdatedAtMS || i.UpdatedAt.UnixMilli() > s.UpdatedAtMS {
+			// The edge was added, or the prerequisite closed, after the park.
+			// Both clocks are wall clocks; the park's is the step row's last
+			// write.
+			closed, ok := doneAt[d]
+			if !ok {
+				closed = i.UpdatedAt
+			}
+			if notBeforePark(edgeAdded[edge{s.IssueID, d}], s.UpdatedAtMS) || notBeforePark(closed, s.UpdatedAtMS) {
 				movedAfterPark = true
 			}
 			refs = append(refs, model.FormatID(d))
@@ -127,6 +139,14 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 		})
 	}
 	return out, nil
+}
+
+// notBeforePark reports whether a stored instant is not before the park. Issue
+// and relation times are kept to the second while the park is in
+// milliseconds, so an instant in the park's own second counts as after it: a
+// close a few hundred milliseconds after the park must not read as before it.
+func notBeforePark(at time.Time, parkMS int64) bool {
+	return !at.IsZero() && at.Unix() >= parkMS/1000
 }
 
 // recordRetryEligible writes one park-retry-eligible event per eligible park

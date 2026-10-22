@@ -28,7 +28,7 @@ import (
 //   - nothing is written until EVERY named step has passed its read-only
 //     checks (done, an executor step that holds the tree, a recorded commit
 //     chain the checkout holds with no merge commit, not already annotated, not
-//     already carried by HEAD);
+//     already carried by HEAD, no commit shared with another named chain);
 //   - the shared checkout must be on a branch with no tracked change and no
 //     operation in progress, or the verb refuses before touching it;
 //   - a pick that does not apply is aborted and the checkout is verified to
@@ -64,6 +64,7 @@ type integratePlan struct {
 	execRoot string
 	head     string
 	base     string
+	chain    []string
 }
 
 // IntegrateSteps cherry-picks each named step's recorded writer chain onto the
@@ -101,6 +102,24 @@ func (e *Engine) IntegrateSteps(
 			return nil, err
 		}
 		plans = append(plans, p)
+	}
+	// Each plan was checked against HEAD before any pick, so two chains that
+	// share commits (a writer that forked from another's unintegrated branch)
+	// both pass, and the second pick re-applies the first one's commits after
+	// they landed and fails part way through the verb. Refuse before the first
+	// write instead.
+	owner := map[string]string{}
+	for _, p := range plans {
+		for _, c := range p.chain {
+			if other, ok := owner[c]; ok {
+				return nil, conflictErr(
+					"%s and %s share commit %.12s: a writer forked from the other's chain, and "+
+						"the engine picks each chain whole, so it would land that commit twice; "+
+						"integrate them by hand and annotate each step with the commit that carries it",
+					other, p.instance, c)
+			}
+			owner[c] = p.instance
+		}
 	}
 
 	done := make([]StepIntegration, 0, len(plans))
@@ -224,6 +243,6 @@ func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integrateP
 	}
 	return integratePlan{
 		id: id, instance: fmt.Sprintf("%s (%s)", model.FormatStepID(id), step.Instance),
-		execRoot: execRoot, head: writerHead, base: writerBase,
+		execRoot: execRoot, head: writerHead, base: writerBase, chain: chain,
 	}, nil
 }

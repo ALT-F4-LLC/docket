@@ -4171,7 +4171,9 @@ func untrackedDiff(dir string, scope []string) string {
 		args = append(args, scope...)
 	}
 
-	listed, err := gitCommand(args...).Output()
+	// One hook listing serves every per-file diff below.
+	hooksOff := configHookFlags(dir)
+	listed, err := gitCommandHooksOff(hooksOff, args...).Output()
 	if err != nil {
 		return ""
 	}
@@ -4191,7 +4193,7 @@ func untrackedDiff(dir string, scope []string) string {
 		// literal is correct here rather than os.DevNull. The `-C` matters
 		// here too: ls-files listed paths RELATIVE TO dir, so the diff must
 		// resolve them from the same place.
-		out, _ := gitCommand(
+		out, _ := gitCommandHooksOff(hooksOff,
 			gitDirArgs(dir, "diff", "--full-index", "--text", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
 		b.WriteString(capFileDiffs(string(out)))
 	}

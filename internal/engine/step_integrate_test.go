@@ -43,6 +43,13 @@ func newIntegrateEnv(t *testing.T, complete bool) integrateEnv {
 // writer has landed.
 func newIntegrateEnvWith(t *testing.T, complete, second bool) integrateEnv {
 	t.Helper()
+	return newIntegrateEnvForkedFrom(t, complete, second, "")
+}
+
+// newIntegrateEnvForkedFrom forks the second writer from fork ("" for the
+// first writer's base).
+func newIntegrateEnvForkedFrom(t *testing.T, complete, second bool, fork string) integrateEnv {
+	t.Helper()
 	for k, v := range map[string]string{
 		"GIT_AUTHOR_NAME": "qa", "GIT_AUTHOR_EMAIL": "qa@example.invalid",
 		"GIT_COMMITTER_NAME": "qa", "GIT_COMMITTER_EMAIL": "qa@example.invalid",
@@ -90,7 +97,10 @@ func newIntegrateEnvWith(t *testing.T, complete, second bool) integrateEnv {
 	stepID2 := 0
 	if second {
 		work2 := filepath.Join(t.TempDir(), "wf-implement-two")
-		gitRun(t, shared, "worktree", "add", "-q", "-b", "writer2", work2, base)
+		if fork == "" {
+			fork = base
+		}
+		gitRun(t, shared, "worktree", "add", "-q", "-b", "writer2", work2, fork)
 		writeFile(t, work2, "internal/a.go", "package second\n")
 		gitRun(t, work2, "add", "-A")
 		gitRun(t, work2, "commit", "-q", "-m", "writer two takes a.go")
@@ -497,6 +507,30 @@ func TestIntegrateStepsRefusesAGraftedSharedCheckout(t *testing.T) {
 	_, err := f.integrate(testConductorToken, f.stepID)
 	if err == nil || !strings.Contains(err.Error(), "grafts") {
 		t.Fatalf("error = %v, want the grafts refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+}
+
+// A shallow file truncates parentage as a grafts file does.
+func TestIntegrateStepsRefusesAShallowSharedCheckout(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	testsupport.Must(t, os.WriteFile(filepath.Join(f.shared, ".git", "shallow"), []byte(f.base+"\n"), 0o644), "write shallow")
+	before := f.sharedHead(t)
+	_, err := f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "shallow") {
+		t.Fatalf("error = %v, want the shallow refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+}
+
+// Two named writers whose chains share commits (the second forked from the
+// first's unintegrated branch) are refused before either is picked.
+func TestIntegrateStepsRefusesOverlappingChainsBeforeTheFirstWrite(t *testing.T) {
+	f := newIntegrateEnvForkedFrom(t, true, true, "writer")
+	before := f.sharedHead(t)
+	_, err := f.integrate(testConductorToken, f.stepID, f.stepID2)
+	if err == nil || !strings.Contains(err.Error(), "share commit") {
+		t.Fatalf("error = %v, want the overlapping-chain refusal", err)
 	}
 	f.requireNothingLanded(t, before)
 }

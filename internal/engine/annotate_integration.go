@@ -192,8 +192,8 @@ func (e *Engine) AnnotateIntegration(
 	if !known {
 		return nil, conflictErr(
 			"could not establish whether %.12s is reachable from the shared "+
-				"checkout's HEAD (%s); is it a commit there? Nothing was recorded",
-			sha, execRoot)
+				"checkout's HEAD (%s); is it a commit there? Nothing was recorded%s",
+			sha, execRoot, partialCloneNote(execRoot))
 	}
 	if !ancestor {
 		return nil, conflictErr(
@@ -215,7 +215,7 @@ func (e *Engine) AnnotateIntegration(
 		if !r.Known {
 			return nil, conflictErr(
 				"could not establish whether %.12s carries the writer's patch "+
-					"(%.12s); nothing was recorded", sha, writerHead)
+					"(%.12s); nothing was recorded%s", sha, writerHead, partialCloneNote(execRoot))
 		}
 		if !r.Carried {
 			return nil, conflictErr(

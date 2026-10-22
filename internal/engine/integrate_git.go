@@ -83,12 +83,19 @@ func integrateGit(execRoot string, args ...string) (string, error) {
 // condition inside a new worktree selects still runs on `worktree add`; those
 // are residuals, not closed doors.
 func gitCommand(args ...string) *exec.Cmd {
+	return gitCommandHooksOff(configHookFlags(gitDirOf(args)), args...)
+}
+
+// gitCommandHooksOff is gitCommand with the config-named hooks already listed
+// (configHookFlags), for a caller that runs many commands in one directory in
+// a row: it lists them once instead of spawning a `git config` per command.
+func gitCommandHooksOff(hookFlags []string, args ...string) *exec.Cmd {
 	full := append([]string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
 		"-c", "submodule.recurse=false", "-c", "log.showSignature=false",
 		"-c", "gpg.program=false", "-c", "protocol.allow=never", "--no-replace-objects",
 	}, args...)
-	full = append(configHookFlags(gitDirOf(args)), full...)
+	full = append(append([]string(nil), hookFlags...), full...)
 	cmd := exec.Command("git", full...)
 	cmd.Env = integrateGitEnv()
 	return cmd
@@ -189,6 +196,23 @@ next:
 	return append(env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", hookOffVar+"=false")
 }
 
+// partialCloneNote is the clause a refusal adds when the shared checkout is a
+// partial clone. Engine git never fetches (protocol.allow=never and
+// GIT_NO_LAZY_FETCH=1, because the remote it would fetch from is named by a
+// config the executor writes), so an object the clone never downloaded reads
+// as missing, and the probe that needed it cannot answer. "" for a full clone.
+func partialCloneNote(execRoot string) string {
+	if execRoot == "" {
+		return ""
+	}
+	out, err := gitCommand("-C", execRoot, "config", "--get", "extensions.partialClone").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return ""
+	}
+	return "; the shared checkout is a partial clone, and engine git does not fetch the objects it lacks: " +
+		"fetch them first (`git backfill`, or remove the clone's filter and `git fetch --refetch`), then retry"
+}
+
 func truncateText(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -265,13 +289,22 @@ func gitCheckSharedCheckout(execRoot string) error {
 	}
 	// A grafts file rewrites parentage for every read, and --no-replace-objects
 	// does not turn it off (git still honors the deprecated file), so a chain
-	// measured through it is not the chain the repository holds.
-	if p, err := integrateGit(execRoot, "rev-parse", "--git-path", "info/grafts"); err == nil {
+	// measured through it is not the chain the repository holds. A shallow
+	// file cuts parentage the same way, and an executor in a linked worktree
+	// can write either into the shared repository.
+	for _, f := range []struct{ name, fix string }{
+		{"info/grafts", "remove it or convert it to replace refs"},
+		{"shallow", "deepen the clone (`git fetch --unshallow`) or remove a shallow file nobody fetched"},
+	} {
+		p, err := integrateGit(execRoot, "rev-parse", "--git-path", f.name)
+		if err != nil {
+			return err
+		}
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(execRoot, p)
 		}
 		if _, statErr := os.Stat(p); statErr == nil {
-			return errors.New("the shared checkout has a grafts file (info/grafts), which rewrites commit parentage; remove it or convert it to replace refs before the engine picks")
+			return fmt.Errorf("the shared checkout has a %s file, which rewrites commit parentage; %s before the engine picks", f.name, f.fix)
 		}
 	}
 	status, err := integrateGit(execRoot, "status", "--porcelain", "--untracked-files=no")
@@ -289,11 +322,9 @@ func gitCheckSharedCheckout(execRoot string) error {
 // is verified to stand where it started. It never resets, amends or discards
 // anything.
 func gitCherryPickRange(execRoot, base, head string) (GitPick, error) {
+	// The chain check runs gitCheckSharedCheckout first.
 	chain, err := gitIntegrationChain(execRoot, base, head)
 	if err != nil {
-		return GitPick{}, err
-	}
-	if err := gitCheckSharedCheckout(execRoot); err != nil {
 		return GitPick{}, err
 	}
 	before, err := integrateGit(execRoot, "rev-parse", "--verify", "HEAD")

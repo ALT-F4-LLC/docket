@@ -137,3 +137,28 @@ func TestClaimRefusalWithoutHolderCarriesNone(t *testing.T) {
 		t.Errorf("a predecessor refusal carries holders: %v", events[0])
 	}
 }
+
+// A lapsed writer's unacknowledged reap holds class headroom, so a refusal it
+// causes names the reaped step even when nothing live holds the class.
+func TestClaimRefusalNamesAnUnacknowledgedReap(t *testing.T) {
+	conn := mustDB(t)
+	runID := serializedRun(t, conn)
+	at, _ := reapOneWriter(t, conn, runID)
+	reapedID := stepIDByInstance(t, conn, "one@0")
+	execSQL(t, conn,
+		`UPDATE steps SET status = ?, usage_recorded = 1 WHERE run_id = ? AND instance = ?`,
+		db.StepDone, runID, "one@0")
+
+	_, err := ClaimStep(conn, stepIDByInstance(t, conn, "two@0"),
+		ClaimOptions{Owner: "worker", NowMS: at})
+	if err == nil {
+		t.Fatal("the successor claimed past an unacknowledged reap")
+	}
+	want := []Holder{{Step: model.FormatStepID(reapedID), Status: HolderUnacknowledgedReap}}
+	if got := refusalError(t, err).Holders; !reflect.DeepEqual(got, want) {
+		t.Errorf("refusal holders = %+v; want %+v", got, want)
+	}
+	if !strings.Contains(err.Error(), "held by "+model.FormatStepID(reapedID)+" ("+HolderUnacknowledgedReap+")") {
+		t.Errorf("refusal text does not name the reaped holder: %v", err)
+	}
+}
