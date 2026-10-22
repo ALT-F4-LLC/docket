@@ -83,6 +83,30 @@ func TestDryRunFlagsALexiconMatchOnlyOnceConfigured(t *testing.T) {
 	}
 }
 
+// A lexicon term must still match when a hard wrap, a double space or a
+// zero-width character splits it in the prose.
+func TestLexiconMatchSurvivesWrapsExtraSpacesAndZeroWidthCharacters(t *testing.T) {
+	for name, text := range map[string]string{
+		"single space": "crosses the trust boundary here",
+		"line wrap":    "crosses the trust\nboundary here",
+		"double space": "crosses the trust  boundary here",
+		"tab":          "crosses the trust\tboundary here",
+		"zero width":   "crosses the trust​boundary here",
+		"joined":       "crosses the trust​‍ boundary here",
+		"inside word":  "crosses the tr​ust boundary here",
+		"hyphen":       "crosses the Trust-Boundary here",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !lexiconMatch(text, "trust-boundary") {
+				t.Errorf("term not found in %q", text)
+			}
+		})
+	}
+	if lexiconMatch("crosses the trustboundary here", "trust-boundary") {
+		t.Error("a term matched prose with no separator at all")
+	}
+}
+
 func TestRoutingLintIsOffWithAnEmptyLabelAndWritesNothingOnARealActivation(t *testing.T) {
 	conn := mustDB(t)
 	run, _, _, _, _ := routingRun(t, conn)

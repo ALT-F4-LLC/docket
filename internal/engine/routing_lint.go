@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -150,9 +151,9 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 				overlaps = append(overlaps, model.FormatID(other.id))
 			}
 		}
-		haystack := normalizeLexicon(issue.title + "\n" + strings.Join(issue.scope, "\n") + "\n" + issue.body)
+		haystack := issue.title + "\n" + strings.Join(issue.scope, "\n") + "\n" + issue.body
 		for _, term := range terms {
-			if strings.Contains(haystack, normalizeLexicon(term)) {
+			if lexiconMatch(haystack, term) {
 				found = append(found, term)
 			}
 		}
@@ -174,16 +175,34 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 	return out, report, nil
 }
 
-// normalizeLexicon lowercases s and reads `-` and `_` as spaces, so the
-// space-free lexicon term `trust-boundary` (a config name cannot hold
-// whitespace) finds "trust boundary" in prose.
-func normalizeLexicon(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '-' || r == '_' {
+// lexiconMatch reports whether text holds term. The space-free lexicon term
+// `trust-boundary` (a config name cannot hold whitespace) finds "trust
+// boundary" in prose, including prose a line wrap or a double space splits. A
+// format character such as a zero-width space is read two ways, as nothing
+// and as a space, so it neither hides a split word nor a word break.
+func lexiconMatch(text, term string) bool {
+	for _, formatAsSpace := range []bool{false, true} {
+		if strings.Contains(normalizeLexicon(text, formatAsSpace), normalizeLexicon(term, formatAsSpace)) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeLexicon lowercases s, reads `-`, `_` and any whitespace as one
+// space, and reads each format character as a space or drops it.
+func normalizeLexicon(s string, formatAsSpace bool) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		switch {
+		case r == '-' || r == '_':
 			return ' '
+		case unicode.Is(unicode.Cf, r) && formatAsSpace:
+			return ' '
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		}
 		return r
-	}, strings.ToLower(s))
+	}, strings.ToLower(s))), " ")
 }
 
 // hasLiteralPrefixGlob reports whether any glob of scope has a literal prefix,
