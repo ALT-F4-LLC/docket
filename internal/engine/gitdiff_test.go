@@ -550,3 +550,35 @@ func TestCappedFileStillCountsItsLinesAndNamesFullBlobs(t *testing.T) {
 		t.Errorf("the capped header has no full-length blob ids:\n%.300s", diff)
 	}
 }
+
+// Every producer names full-length blob ids, which repository config
+// (core.abbrev) cannot shorten: tracked, untracked and committed.
+func TestRecordedDiffsNameFullBlobIDsOnEveryProducer(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+		return strings.TrimSpace(string(out))
+	}
+	git("config", "core.abbrev", "4")
+	writeFile(t, dir, "internal/a.txt", "old\n")
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/a.txt", "new\n")
+	writeFile(t, dir, "internal/fresh.txt", "fresh\n")
+	full := regexp.MustCompile(`(?m)^index [0-9a-f]{40}\.\.[0-9a-f]{40}`)
+	diff := inRepo(t, dir, nil)
+	if n := len(full.FindAllString(diff, -1)); n != 2 {
+		t.Errorf("want full blob ids on the tracked and the untracked file, got %d:\n%s", n, diff)
+	}
+	git("add", "-A")
+	git("commit", "-qm", "change")
+	patch, err := GitCommitPatch(dir, git("rev-parse", "HEAD"), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if n := len(full.FindAllString(patch, -1)); n != 2 {
+		t.Errorf("want full blob ids in the commit patch, got %d:\n%s", n, patch)
+	}
+}
