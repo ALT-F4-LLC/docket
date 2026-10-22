@@ -79,8 +79,8 @@ func TestHoldIssueWithholdsReadyAndStagedRowsUntilReleased(t *testing.T) {
 		testsupport.Must(t, err, "release %d: %v", id, err)
 	}
 	m = openDispatch(t, conn, runID, 0, nowMS+2)
-	if got := manifestInstances(m); !got["one@0"] || !got["two@0"] {
-		t.Errorf("rows after release = %v; want one@0 and two@0 back", got)
+	if got := manifestInstances(m); !got["one@0"] || !got["two@0"] || !got["later@0"] {
+		t.Errorf("rows after release = %v; want one@0, two@0 and later@0 back", got)
 	}
 	if len(m.Held) != 0 {
 		t.Errorf("held list after release = %+v; want empty", m.Held)

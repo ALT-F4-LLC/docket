@@ -461,9 +461,9 @@ dead attempt's usage remains back-fillable against it.`,
 
 var stepHoldCmd = &cobra.Command{
 	Use:   "hold STEP-N --reason R",
-	Short: "Park one ready step for the operator",
+	Short: "Park one pending step for the operator",
 	Long: `Park one PENDING step waiting-human (park class ` + "`held`" + `), so the next
-dispatch stops offering it while the rest of its issue runs on.
+dispatch stops offering any row of its issue until every held step is released.
 
 A step that declares no max_attempts is re-offered after every failure, and
 before this verb the only way to stop offering it was ` + "`run abandon --issue`" + `,
