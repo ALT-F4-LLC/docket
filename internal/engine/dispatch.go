@@ -362,7 +362,8 @@ func (e *Engine) OpenDispatch(
 	}
 
 	// After the commit, like the other advisories: a failure to record the event
-	// must not undo an open that already committed. The list is still returned.
+	// must not undo an open that already committed. A failure to write an
+	// event keeps the list; a failure to read it leaves the list empty.
 	retryEligible, _ := recordRetryEligible(conn, runID, nowMS)
 	held, _ := HeldSteps(conn, runID)
 

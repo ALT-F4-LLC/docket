@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -45,7 +46,37 @@ func retryFixture(t *testing.T, conn *sql.DB) (runID, issueID, prereqID, stepID 
 		SourceIssueID: issueID, TargetIssueID: prereqID, RelationType: model.RelationDependsOn,
 	})
 	testsupport.Must(t, err, "CreateRelation: %v", err)
+	stampPrerequisite(t, conn, issueID, prereqID, time.Minute)
 	return runID, issueID, prereqID, stepID
+}
+
+// stampPrerequisite dates the edge and the prerequisite's last change relative
+// to the park, which the engine stamps with the test clock nowMS: a positive
+// offset is after the park, a negative one before it.
+func stampPrerequisite(t *testing.T, conn *sql.DB, issueID, prereqID int, offset time.Duration) {
+	t.Helper()
+	at := time.UnixMilli(nowMS).Add(offset).UTC().Format(time.RFC3339)
+	execSQL(t, conn, `UPDATE issue_relations SET created_at = ? WHERE source_issue_id = ? AND target_issue_id = ?`,
+		at, issueID, prereqID)
+	execSQL(t, conn, `UPDATE issues SET updated_at = ? WHERE id = ?`, at, prereqID)
+}
+
+// A prerequisite that was already met before the park is not what the park
+// waits on, so the park is not signalled as retry-eligible.
+func TestRetryEligibleIgnoresAPrerequisiteMetBeforeThePark(t *testing.T) {
+	conn := mustDB(t)
+	runID, issueID, prereqID, _ := retryFixture(t, conn)
+	stampPrerequisite(t, conn, issueID, prereqID, -time.Minute)
+	execSQL(t, conn, `UPDATE issues SET status = ? WHERE id = ?`, string(model.StatusDone), prereqID)
+
+	got, err := RetryEligibleParks(conn, runID)
+	testsupport.Must(t, err, "RetryEligibleParks: %v", err)
+	if len(got) != 0 {
+		t.Errorf("a park whose prerequisite predates it was listed: %+v", got)
+	}
+	if m := openDispatch(t, conn, runID, 0, nowMS); len(m.RetryEligible) != 0 || len(retryEligibleEvents(t, conn, runID)) != 0 {
+		t.Errorf("dispatch open signalled it: %+v", m.RetryEligible)
+	}
 }
 
 // TestDispatchOpenListsRetryEligibleParkAndRecordsOneEvent is the acceptance

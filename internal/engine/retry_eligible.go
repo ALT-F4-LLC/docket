@@ -28,8 +28,10 @@ type RetryEligible struct {
 }
 
 // RetryEligibleParks lists the run's gap-only parks whose issue has at least
-// one depends_on prerequisite and no prerequisite that is not done, in step
-// order. A pure read: `run status` renders it, and `dispatch open` renders it
+// one blocking prerequisite (depends_on, or the inverse blocks) and no
+// prerequisite that is not done, where at least one prerequisite was added or
+// last changed after the park, in step order. A prerequisite that was already
+// met before the park cannot be what the park waits on. A pure read: `run status` renders it, and `dispatch open` renders it
 // and records the event.
 func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 	steps, err := db.ListRunSteps(conn, runID)
@@ -68,22 +70,52 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 		return nil, fmt.Errorf("reading prerequisite issues: %w", err)
 	}
 
+	// When each blocking edge was added, so a prerequisite that was already met
+	// before the park does not signal it.
+	type edge struct{ issue, blocker int }
+	edgeAddedMS := make(map[edge]int64)
+	for _, rel := range relations {
+		e := edge{rel.SourceIssueID, rel.TargetIssueID}
+		switch rel.RelationType {
+		case model.RelationBlocks:
+			e = edge{rel.TargetIssueID, rel.SourceIssueID}
+		case model.RelationDependsOn:
+		default:
+			continue
+		}
+		if ms := rel.CreatedAt.UnixMilli(); ms > edgeAddedMS[e] {
+			edgeAddedMS[e] = ms
+		}
+	}
+
 	var out []RetryEligible
 	for _, s := range parked {
 		deps := blockers[s.IssueID]
 		if len(deps) == 0 {
 			continue
 		}
-		allDone := true
+		allDone, movedAfterPark := true, false
+		seen := make(map[int]bool, len(deps))
 		refs := make([]string, 0, len(deps))
 		for _, d := range deps {
-			if i, ok := issues[d]; !ok || i.Status != model.StatusDone {
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			i, ok := issues[d]
+			if !ok || i.Status != model.StatusDone {
 				allDone = false
 				break
 			}
+			// The edge was added, or the prerequisite last changed (it closed),
+			// after the park. Both clocks are wall clocks; the park's is the
+			// step row's last write.
+			if edgeAddedMS[edge{s.IssueID, d}] > s.UpdatedAtMS || i.UpdatedAt.UnixMilli() > s.UpdatedAtMS {
+				movedAfterPark = true
+			}
 			refs = append(refs, model.FormatID(d))
 		}
-		if !allDone {
+		if !allDone || !movedAfterPark {
 			continue
 		}
 		sort.Strings(refs)
