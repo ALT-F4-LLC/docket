@@ -520,3 +520,23 @@ func TestIntegrateStepsRefusesAWellFormedShaThatIsNotACommit(t *testing.T) {
 		t.Errorf("the step was annotated integrated at %.12s", got)
 	}
 }
+
+// TestIntegrateStepsRefusesALiveRecordedHead: a record marked live says the
+// worktree held work its head commit does not carry, so a pick of the chain
+// would land commits the gates and the diff never measured.
+func TestIntegrateStepsRefusesALiveRecordedHead(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	res, err := f.conn.Exec(
+		`UPDATE artifacts SET payload = json_set(payload, '$.live', json('true')) WHERE step_id = ? AND kind = ?`,
+		f.stepID, RecordedHeadArtifactKind)
+	testsupport.Must(t, err, "mark the record live: %v", err)
+	if n, _ := res.RowsAffected(); n == 0 {
+		t.Fatal("the fixture recorded no head to mark live")
+	}
+	before := f.sharedHead(t)
+	_, err = f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "recorded a live worktree") {
+		t.Fatalf("error = %v, want the live-record refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+}

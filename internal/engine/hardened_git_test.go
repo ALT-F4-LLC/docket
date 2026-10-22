@@ -321,3 +321,14 @@ func TestEngineGitRunsNoHookWithAnEmptyName(t *testing.T) {
 		})
 	}
 }
+
+// GIT_CONFIG names a config file git is asked to read; the engine's git calls
+// run in an environment the executor controls, so it is dropped.
+func TestEngineGitEnvironmentDropsGitConfig(t *testing.T) {
+	t.Setenv("GIT_CONFIG", filepath.Join(t.TempDir(), "evil"))
+	for _, kv := range integrateGitEnv() {
+		if strings.HasPrefix(kv, "GIT_CONFIG=") {
+			t.Errorf("integrateGitEnv kept %q", kv)
+		}
+	}
+}

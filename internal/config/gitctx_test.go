@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -35,5 +36,16 @@ func TestGitHeadIgnoresARedirectingGitDir(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 	if _, got := GitHead(want); got != wantSHA {
 		t.Errorf("GitHead followed GIT_DIR: got %s, want %s", got, wantSHA)
+	}
+}
+
+// GIT_CONFIG names a config file git is asked to read; this process inherits the
+// executor's environment, so the head lookup drops it.
+func TestGitHeadCmdDropsGitConfig(t *testing.T) {
+	t.Setenv("GIT_CONFIG", filepath.Join(t.TempDir(), "evil"))
+	for _, kv := range gitHeadCmd(context.Background(), t.TempDir(), "status").Env {
+		if strings.HasPrefix(kv, "GIT_CONFIG=") {
+			t.Errorf("gitHeadCmd kept %q", kv)
+		}
 	}
 }

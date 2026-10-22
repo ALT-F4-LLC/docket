@@ -168,7 +168,7 @@ func gitDirOf(args []string) string {
 // settings that keep it from waiting on a person.
 func integrateGitEnv() []string {
 	drop := []string{
-		"GIT_EXTERNAL_DIFF=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=",
+		"GIT_EXTERNAL_DIFF=", "GIT_CONFIG=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=",
 		"GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_DIFF_OPTS=", "GIT_ASKPASS=",
 		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=",
 		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
