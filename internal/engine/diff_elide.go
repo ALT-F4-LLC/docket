@@ -313,34 +313,46 @@ func gitBlobHasGeneratedHeader(root string) func(string) bool {
 // perFileDiffCap bounds one binary file's section of a recorded diff. The
 // producers read every file as text (--text, so an attribute cannot hide
 // content), which would otherwise record a genuine binary byte for byte. A
-// section over the cap that holds a NUL byte (git's own test for binary) keeps
-// its header, whose index line names the full blob ids, and drops the hunks. A
-// text section is never capped: an oversize text diff stays whole, and a packet
+// section over the cap that git would call binary (a NUL byte in its first 8000
+// bytes) keeps its header, whose index line names the full blob ids, and drops
+// the hunks. A text section is never capped: an oversize text diff stays whole, and a packet
 // too large to load is refused rather than shown with a file missing.
 const perFileDiffCap = 64 << 10
 
-// capFileDiffs replaces each binary file section over perFileDiffCap with its header
-// and a marker. A diff with no such section comes back byte-identical.
+// binaryProbeBytes is how far into a file git looks for a NUL byte before it
+// calls the file binary. The probe here reads the same window of the hunk text
+// (a few bytes narrower than the file's, from the line prefixes), so a file git
+// shows as text is never capped.
+const binaryProbeBytes = 8000
+
+// capFileDiffs replaces each binary file section over perFileDiffCap with its
+// header and a marker. A diff with no such section comes back byte-identical.
 func capFileDiffs(body string) string {
 	if len(body) <= perFileDiffCap {
 		return body
 	}
 	var out strings.Builder
 	for _, s := range splitDiffSections(body) {
-		if len(s.text) <= perFileDiffCap || !strings.Contains(s.text, "\x00") {
+		if len(s.text) <= perFileDiffCap {
 			out.WriteString(s.text)
 			continue
 		}
 		// The header ends at the first hunk; a section with none (a mode or
-		// rename header cannot be this long) keeps its first bytes instead.
+		// rename header cannot be this long) is not capped here.
 		header, _, hasHunks := strings.Cut(s.text, "\n@@")
-		if !hasHunks || len(header) > perFileDiffCap {
-			header = s.text[:perFileDiffCap]
+		if !hasHunks {
+			out.WriteString(s.text)
+			continue
+		}
+		hunks := s.text[len(header):]
+		if !strings.Contains(hunks[:min(len(hunks), binaryProbeBytes)], "\x00") {
+			out.WriteString(s.text)
+			continue
 		}
 		out.WriteString(header)
-		adds, dels := countHunkLines(s.text[len(header):])
+		adds, dels := countHunkLines(hunks)
 		fmt.Fprintf(&out, "\n# === capped: +%d -%d, %d bytes of hunks for %s elided at the %d-byte per-file cap; "+
-			"the index line above names the blobs ===\n", adds, dels, len(s.text)-len(header), s.path, perFileDiffCap)
+			"the index line above names the blobs ===\n", adds, dels, len(hunks), s.path, perFileDiffCap)
 	}
 	return out.String()
 }

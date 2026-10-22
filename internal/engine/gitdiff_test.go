@@ -594,3 +594,16 @@ func TestGitDiffKeepsAnOversizeTextSectionWhole(t *testing.T) {
 		t.Errorf("an oversize text section was capped (%d bytes)", len(diff))
 	}
 }
+
+// Git calls a file binary only for a NUL in its first 8000 bytes. A text file
+// whose only NUL lies past that window is shown whole by git, so the cap must
+// not hide it however long it is.
+func TestGitDiffKeepsATextFileWithALateNulWhole(t *testing.T) {
+	dir := gitRepo(t)
+	text := "echo the-hidden-edit\n" + strings.Repeat("a line of ordinary text\n", perFileDiffCap/8) + "# \x00\n"
+	writeFile(t, dir, "internal/late.sh", text)
+	diff := inRepo(t, dir, nil)
+	if strings.Contains(diff, "per-file cap") || !strings.Contains(diff, "the-hidden-edit") {
+		t.Errorf("a text file git shows whole was capped (%d bytes)", len(diff))
+	}
+}
