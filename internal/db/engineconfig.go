@@ -482,8 +482,11 @@ var engineConfigSpecs = []ConfigSpec{
 		Kind:    KindNameList,
 		Default: "",
 		Doc: "Comma-separated terms that make an unlabelled issue look " +
-			"security-shaped in `run activate --dry-run`; `-` and `_` match a " +
-			"space, case is ignored. Empty (the default) leaves only the " +
+			"security-shaped in `run activate --dry-run`; a term is a case-folded " +
+			"substring match in which `-`, `_`, Unicode dashes, any whitespace and " +
+			"zero-width format characters match a space (look-alike letters, " +
+			"combining marks and a missing separator do not); " +
+			"Empty (the default) leaves only the " +
 			"scope-overlap check, which skips scopes with no literal prefix " +
 			"(`**`, `**/x.go`) and issues with no scope: an empty warning list " +
 			"is not a clearance. The overlap check compares declared scope " +

@@ -95,12 +95,19 @@ func TestLexiconMatchSurvivesWrapsExtraSpacesAndZeroWidthCharacters(t *testing.T
 		"joined":       "crosses the trust​‍ boundary here",
 		"inside word":  "crosses the tr​ust boundary here",
 		"hyphen":       "crosses the Trust-Boundary here",
+		"unicode dash": "crosses the trust\u2011boundary here",
+		"en dash":      "crosses the trust\u2013boundary here",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !lexiconMatch(text, "trust-boundary") {
 				t.Errorf("term not found in %q", text)
 			}
 		})
+	}
+	for _, term := range []string{"-", "_", "---", ""} {
+		if lexiconMatch("crosses the trust boundary here", term) {
+			t.Errorf("separator-only term %q matched prose", term)
+		}
 	}
 	if lexiconMatch("crosses the trustboundary here", "trust-boundary") {
 		t.Error("a term matched prose with no separator at all")

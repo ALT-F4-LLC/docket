@@ -42,7 +42,8 @@ import (
 // check compares the issues' DECLARED scope strings after taking each glob's
 // literal prefix: no path normalization (`./x`, `a/../b`, case), no writer diff,
 // no symlink targets, and only security-labelled issues bound in the same run.
-// The lexicon is a case-folded substring match on the title, scope and body. A
+// The lexicon is a case-folded substring match on the title, scope and body in
+// which dashes, whitespace and format characters read as a space. A
 // scope with no literal prefix (`**`, `{a,b}/**`) is skipped. The report below
 // says how many issues each of those left unchecked, so a reader can tell a
 // clean run from a lint that had nothing to compare against.
@@ -151,9 +152,9 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 				overlaps = append(overlaps, model.FormatID(other.id))
 			}
 		}
-		haystack := issue.title + "\n" + strings.Join(issue.scope, "\n") + "\n" + issue.body
+		haystack := newLexiconText(issue.title + "\n" + strings.Join(issue.scope, "\n") + "\n" + issue.body)
 		for _, term := range terms {
-			if lexiconMatch(haystack, term) {
+			if haystack.has(term) {
 				found = append(found, term)
 			}
 		}
@@ -175,26 +176,40 @@ func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning,
 	return out, report, nil
 }
 
-// lexiconMatch reports whether text holds term. The space-free lexicon term
+// lexiconText is a text normalized once in both readings of a format
+// character, so matching many terms against one body does not re-normalize it
+// per term.
+type lexiconText [2]string
+
+func newLexiconText(text string) lexiconText {
+	return lexiconText{normalizeLexicon(text, false), normalizeLexicon(text, true)}
+}
+
+// has reports whether the text holds term. The space-free lexicon term
 // `trust-boundary` (a config name cannot hold whitespace) finds "trust
 // boundary" in prose, including prose a line wrap or a double space splits. A
 // format character such as a zero-width space is read two ways, as nothing
-// and as a space, so it neither hides a split word nor a word break.
-func lexiconMatch(text, term string) bool {
-	for _, formatAsSpace := range []bool{false, true} {
-		if strings.Contains(normalizeLexicon(text, formatAsSpace), normalizeLexicon(term, formatAsSpace)) {
+// and as a space, so it neither hides a split word nor a word break. A term
+// with nothing left after normalizing (only separators) matches nothing.
+func (t lexiconText) has(term string) bool {
+	for i, formatAsSpace := range []bool{false, true} {
+		if n := normalizeLexicon(term, formatAsSpace); n != "" && strings.Contains(t[i], n) {
 			return true
 		}
 	}
 	return false
 }
 
-// normalizeLexicon lowercases s, reads `-`, `_` and any whitespace as one
-// space, and reads each format character as a space or drops it.
+// lexiconMatch reports whether text holds term; see lexiconText.has.
+func lexiconMatch(text, term string) bool { return newLexiconText(text).has(term) }
+
+// normalizeLexicon lowercases s, reads `-`, `_`, every Unicode dash and any
+// whitespace as one space, and reads each format character as a space or drops
+// it.
 func normalizeLexicon(s string, formatAsSpace bool) string {
 	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
 		switch {
-		case r == '-' || r == '_':
+		case r == '_' || unicode.Is(unicode.Pd, r):
 			return ' '
 		case unicode.Is(unicode.Cf, r) && formatAsSpace:
 			return ' '
