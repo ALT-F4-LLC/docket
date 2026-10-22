@@ -500,3 +500,23 @@ func TestIntegrateStepsRefusesAGraftedSharedCheckout(t *testing.T) {
 	}
 	f.requireNothingLanded(t, before)
 }
+
+// TestIntegrateStepsRefusesAWellFormedShaThatIsNotACommit: a recorded head that
+// has the shape of a commit id but names no object is refused, and nothing lands.
+func TestIntegrateStepsRefusesAWellFormedShaThatIsNotACommit(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	latest, err := stepLatestIssueDiff(f.conn, f.stepID)
+	testsupport.Must(t, err, "stepLatestIssueDiff: %v", err)
+	missing := strings.Repeat("ab", 20)
+	_, err = f.conn.Exec(`UPDATE artifacts SET payload = json_set(payload, '$.head', ?) WHERE id = ?`, missing, latest.ID)
+	testsupport.Must(t, err, "corrupt the recorded head: %v", err)
+	before := f.sharedHead(t)
+	_, err = f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "does not resolve as a commit") {
+		t.Fatalf("error = %v, want the does-not-resolve refusal", err)
+	}
+	f.requireNothingLanded(t, before)
+	if got := f.integratedSHA(t); got != "" {
+		t.Errorf("the step was annotated integrated at %.12s", got)
+	}
+}
