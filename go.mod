@@ -8,7 +8,7 @@ require (
 	github.com/ALT-F4-LLC/vorpal/sdk/go v0.0.0-20260915234803-77ac6ad903ae
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/glamour v1.0.0
-	github.com/charmbracelet/huh v1.0.0
+	github.com/charmbracelet/huh/v2 v2.0.3
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/dustin/go-humanize v1.1.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
