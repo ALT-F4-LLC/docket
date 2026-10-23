@@ -152,7 +152,54 @@ func TestNoConditionsNeedsTheConductorTokenOnABoundRun(t *testing.T) {
 	}
 }
 
-// The waiver's run note is written after the close commits, so a reason the
+// A voter name is unvalidated text: one named with a comma is one seat, not
+// two, in the refusal and in the waiver record.
+func TestUnfiledConditionKeepsACommaVoterWhole(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+	id := sealedPanel(t, conn, runID, model.VerdictApproveWithConcerns)
+	execSQL(t, conn, `UPDATE votes SET voter_name = 'Smith, J' WHERE proposal_id = ?`, id)
+
+	open, ok, err := readOpenDispatch(conn, runID)
+	testsupport.Must(t, err, "readOpenDispatch: %v", err)
+	if !ok {
+		t.Fatal("no open dispatch")
+	}
+	found, err := unfiledConditions(conn, runID, open.OpenedSeq)
+	testsupport.Must(t, err, "unfiledConditions: %v", err)
+	if len(found) != 1 || len(found[0].Voters) != 1 || found[0].Voters[0] != "Smith, J" {
+		t.Errorf("unfiled conditions = %+v; want one vote with the one voter \"Smith, J\"", found)
+	}
+}
+
+// A run that rolled up to done under the open dispatch still closes with a
+// waiver: the note rides in the close's transaction, so the close is never
+// reported as failed over a note `run note add` would refuse on a done run.
+func TestNoConditionsClosesADoneRun(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+	openDispatch(t, conn, runID, 0, nowMS)
+	id := sealedPanel(t, conn, runID, model.VerdictApproveWithConcerns)
+	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
+
+	waiver := ConditionsWaiver{Reason: "tracked elsewhere", Token: testConductorToken, By: Attribution{Actor: "tester", Cwd: "/tmp"}}
+	outcome, err := closeWith(conn, runID, IntegrationSkip{Conditions: waiver})
+	testsupport.Must(t, err, "close with --no-conditions on a done run: %v", err)
+	if len(outcome.ConditionsWaived) != 1 || outcome.ConditionsWaived[0].Proposal != model.FormatProposalID(id) {
+		t.Errorf("conditions_waived = %+v; want %s", outcome.ConditionsWaived, model.FormatProposalID(id))
+	}
+	if _, ok := openDispatchID(conn, runID); ok {
+		t.Error("the dispatch is still open after the waived close")
+	}
+	notes, err := db.ListRunNotes(conn, runID)
+	testsupport.Must(t, err, "ListRunNotes: %v", err)
+	if len(notes) != 1 || !strings.Contains(notes[0].Text, waiver.Reason) {
+		t.Errorf("run notes = %+v; want one carrying the reason", notes)
+	}
+}
+
+// The waiver's run note is written in the close's transaction, so a reason the
 // note would refuse must be refused before the dispatch closes.
 func TestAnOversizeWaiverReasonRefusesBeforeTheDispatchCloses(t *testing.T) {
 	conn := mustDB(t)

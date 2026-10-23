@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -363,9 +364,12 @@ func (e *Engine) OpenDispatch(
 
 	// After the commit, like the other advisories: a failure to record the event
 	// must not undo an open that already committed. A failure to write an
-	// event keeps the list; a failure to read it leaves the list empty.
-	retryEligible, _ := recordRetryEligible(conn, runID, nowMS)
-	held, _ := HeldSteps(conn, runID)
+	// event keeps the list; a failure to read it leaves the list empty. Both
+	// lists read the steps the scheduler already loaded: the open changes no
+	// parked row, so the snapshot is the one a fresh read would return.
+	reads := runReadsFromSteps(conn, runID, sched.Steps())
+	retryEligible, _ := recordRetryEligible(conn, reads, nowMS)
+	held, _ := reads.heldSteps()
 
 	limits, limitSources := rowClassLimits(sched, rows)
 	return &Manifest{
@@ -2011,11 +2015,6 @@ func (e *Engine) CloseDispatch(
 			return nil, recErr
 		}
 	}
-	if err == nil && outcome != nil && len(outcome.ConditionsWaived) > 0 {
-		if noteErr := recordConditionsWaiver(conn, runID, skip.Conditions, outcome.ConditionsWaived, nowMS); noteErr != nil {
-			return outcome, fmt.Errorf("the dispatch closed, but recording the waiver's run note failed: %w", noteErr)
-		}
-	}
 	return outcome, err
 }
 
@@ -2225,6 +2224,14 @@ func (e *Engine) closeDispatch(
 	}
 	if err := recordChainDeferralsTx(tx, runID, open, sched.Steps(), nowMS); err != nil {
 		return nil, err
+	}
+	// DKT-4263: the waiver's run note, in the same transaction as the close it
+	// explains, so a close never commits without its reason on record and is
+	// never reported as failed over a note it could not write afterwards.
+	if len(waived) > 0 {
+		if err := recordConditionsWaiverTx(tx, runID, skip.Conditions, waived, nowMS); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2516,16 +2523,31 @@ func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
 		FormatDispatchID(dispatchID), current.Status, current.CloseReason)
 }
 
-// openDispatchID reads the run's open dispatch id, if any, in a rolled-back
-// transaction of its own.
-func openDispatchID(conn *sql.DB, runID int) (int, bool) {
+// readOpenDispatch reads the run's open dispatch in a rolled-back transaction of
+// its own. ok is false when none is open; a failure to read is returned, not
+// read as none open.
+func readOpenDispatch(conn *sql.DB, runID int) (open *db.Dispatch, ok bool, err error) {
 	tx, err := conn.Begin()
 	if err != nil {
-		return 0, false
+		return nil, false, fmt.Errorf("reading the open dispatch: %w", err)
 	}
 	defer tx.Rollback()
-	open, err := db.OpenDispatchTx(tx, runID)
+	open, err = db.OpenDispatchTx(tx, runID)
+	if errors.Is(err, db.ErrNoOpenDispatch) {
+		return nil, false, nil
+	}
 	if err != nil {
+		return nil, false, err
+	}
+	return open, true, nil
+}
+
+// openDispatchID is the open dispatch's id, and false when none is open or
+// the read failed: it only names the dispatch in a refusal's record, and a
+// refusal that cannot name it is still recorded.
+func openDispatchID(conn *sql.DB, runID int) (int, bool) {
+	open, ok, err := readOpenDispatch(conn, runID)
+	if err != nil || !ok {
 		return 0, false
 	}
 	return open.ID, true

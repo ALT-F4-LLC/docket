@@ -192,12 +192,7 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	unexpanded, err := engine.UnexpandedIssues(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	retryEligible, err := engine.RetryEligibleParks(conn, runID)
+	unexpanded, retryEligible, err := engine.RunAdvisories(conn, runID)
 	if err != nil {
 		return runErr(err)
 	}
