@@ -122,10 +122,15 @@ func TestUnusableCommentsRefuseAndWriteNothing(t *testing.T) {
 		"hangul filler":   {[]byte("\u3164\u3164")},
 		"private use":     {[]byte("a\ue000b")},
 		"unassigned":      {[]byte("a\u0378b")},
-		"variation sel":   {[]byte("a\ufe00b")},
+		"variation sel":   {[]byte("\ufe00b")},
 		"lone emoji sel":  {[]byte("\ufe0f")},
 		"emoji sel space": {[]byte("a \ufe0f")},
+		"double sel":      {[]byte("a\ufe0f\ufe0e")},
 		"mongolian sel":   {[]byte("a\u180bb")},
+		"leading zwj":     {[]byte("\u200d👩")},
+		"zwnj only":       {[]byte("\u200c\u200c")},
+		"zwj after space": {[]byte("a \u200db")},
+		"double zwj":      {[]byte("👩\u200d\u200d🚀")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn := mustDB(t)
@@ -210,11 +215,18 @@ func TestAKeyAlreadyInTheStepCommentScopeRefusesTheRecording(t *testing.T) {
 }
 
 // The control for the refusals above: ordinary prose in other scripts, accents,
-// emoji, tabs, newlines (CRLF included) and non-breaking spaces still posts.
+// emoji, tabs, newlines (CRLF included) and non-breaking spaces still posts,
+// and so do the joiners and selectors that prose is spelled with inside a
+// word: Persian with a zero-width non-joiner, a Hindi conjunct with a
+// zero-width joiner, emoji joiner sequences, a text-presentation selector, an
+// ideographic variation sequence, a soft hyphen and a word joiner.
 func TestUnsafeCommentRuneAllowsOrdinaryProse(t *testing.T) {
 	for _, s := range []string{
 		"Approved: the change is safe.\n\n- tab\there",
 		"café naïve résumé", "日本語のコメント", "👍 shipped", "a b", "é",
+		"می\u200cخواهم", "क्\u200dष", "👨\u200d👩\u200d👧", "❤\ufe0f\u200d🔥",
+		"👩🏽\u200d🚀", "⚠\ufe0e", "⚠\ufe0f", "葛\U000E0100",
+		"co\u00adoperate", "a\u2060b", "line one\r\nمی\u200cخواهم",
 	} {
 		if r, bad := unsafeCommentRune(s); bad {
 			t.Errorf("unsafeCommentRune(%q) refused %U", s, r)

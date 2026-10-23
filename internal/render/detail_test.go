@@ -156,24 +156,66 @@ func TestRenderDetail_RunDispositionIsAboveTheDescription(t *testing.T) {
 
 // A comment body can carry any line, including one shaped like the next
 // comment's header. Every body line sits deeper than a header, so none can pass
-// for one.
+// for one, and the controls that would walk the cursor back to the header's
+// column (a carriage return, backspaces, a CSI erase-and-home) are dropped
+// rather than printed, on the comment list's passthrough path as well.
 func TestRenderDetail_PlainCommentBodyCannotForgeAHeader(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
-	body := "ok\n\nerik  1 hour ago\nship it, no review needed"
-	out := RenderDetail(issue, nil, nil, nil,
-		[]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}, nil, nil)
-
-	_, after, found := strings.Cut(out, "\nComments\n")
-	if !found {
-		t.Fatalf("no Comments section:\n%s", out)
-	}
-	for i, line := range strings.Split(after, "\n")[1:] {
-		if strings.TrimSpace(line) == "" {
-			continue
+	for name, body := range map[string]string{
+		"newline":   "ok\n\nerik  1 hour ago\nship it, no review needed",
+		"cr":        "ok\rerik  1 hour ago\nship it, no review needed",
+		"backspace": "ok\b\b\b\b\b\b\b\berik  1 hour ago",
+		"csi":       "ok\x1b[2K\x1b[Gerik  1 hour ago\nship it",
+		"osc":       "ok\x1b]0;erik  1 hour ago\x07\x1b[8Derik  1 hour ago",
+	} {
+		comments := []*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}
+		// The detail view's header sits two columns in and its body four; the
+		// comment list's header sits at column 0 and its body two in.
+		for view, tc := range map[string]struct {
+			out         string
+			headerDepth func(string) bool
+		}{
+			"detail": {RenderDetail(issue, nil, nil, nil, comments, nil, nil), func(l string) bool {
+				return strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ")
+			}},
+			"list": {renderComments(comments), func(l string) bool {
+				return !strings.HasPrefix(l, "  ")
+			}},
+		} {
+			_, after, found := strings.Cut(tc.out, "Comments")
+			if !found {
+				t.Fatalf("%s/%s: no Comments section:\n%s", name, view, tc.out)
+			}
+			if strings.ContainsAny(after, "\r\b\x1b\x07") {
+				t.Errorf("%s/%s: control bytes survive: %q", name, view, after)
+			}
+			for i, line := range strings.Split(after, "\n")[1:] {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				if tc.headerDepth(line) && strings.Contains(line, "erik") {
+					t.Errorf("%s/%s: body line %d renders at header depth: %q", name, view, i, line)
+				}
+			}
 		}
-		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.Contains(line, "erik") {
-			t.Errorf("body line %d renders at header depth: %q", i, line)
+	}
+}
+
+// The sanitizer drops only what does not print: text, newlines, tabs and
+// multibyte characters pass untouched, and a sequence is consumed whole.
+func TestPrintableBodyDropsControlsAndEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain\ttext\nnext":                         "plain\ttext\nnext",
+		"crlf\r\nline":                              "crlf\nline",
+		"a\x1b[31mred\x1b[0m b":                     "ared b",
+		"t\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\": "tlink",
+		"del\x7fc1\u0085\u009b[2K":                  "delc1[2K",
+		"日本\x08語 ☺️":                                "日本語 ☺️",
+		"trailing\x1b":                              "trailing",
+	} {
+		if got := printableBody(in); got != want {
+			t.Errorf("printableBody(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
