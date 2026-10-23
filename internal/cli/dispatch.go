@@ -528,8 +528,14 @@ one at a time.
 BEFORE ANY OF THAT, close verifies every write-class step's own recorded
 commit reached the shared branch — an ancestor of HEAD, or patch-equivalent
 (a cherry-pick minted a new sha for identical content). An unintegrated
-commit refuses CONFLICT naming the step, its sha, and its worktree.
---skip-integration-check REASON overrides it: the check does not run, and
+commit refuses CONFLICT naming the step, its sha, and its worktree. A step
+whose landed commits differ from its recorded one is first annotated with
+` + "`step annotate --integrated-sha`" + `, which accepts a sha only when its line
+carries every writer commit (patch-equal, a ` + "`cherry-pick -x`" + ` commit naming
+the writer commit that changes exactly its files, or a squash of the chain).
+--skip-integration-check REASON is the waiver for every other hand
+resolution, and for a commit with nothing to point at: the check does not
+run for any step of the close, and
 REASON is recorded on the close event. Every later close of the run honors
 that record, so on a run bound to a conductor capability the override
 requires the run's token, via DOCKET_TOKEN or stdin (with --backfill-from -,

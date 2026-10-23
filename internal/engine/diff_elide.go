@@ -2,10 +2,13 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -73,9 +76,15 @@ func elideGeneratedDiff(
 		_, f.Blob = indexBlobs(s.text)
 		// Only lines after the first hunk header are content: a removed line
 		// reading `-- x` renders as `--- x`, and the file header's own `---`
-		// and `+++` lines come before it (DKT-2550).
+		// and `+++` lines come before it (DKT-2550). A section capFileDiffs
+		// already reduced has no hunks; its marker carries their counts.
 		inHeader := true
 		for i, line := range strings.Split(s.text, "\n") {
+			if m := cappedMarker.FindStringSubmatch(line); m != nil {
+				f.Adds, _ = strconv.Atoi(m[1])
+				f.Dels, _ = strconv.Atoi(m[2])
+				break
+			}
 			switch {
 			case i == 0:
 			case strings.HasPrefix(line, "@@ "):
@@ -131,16 +140,117 @@ func splitDiffSections(body string) []diffSection {
 }
 
 func newDiffSection(text string) diffSection {
-	line, _, _ := strings.Cut(text, "\n")
-	rest, ok := strings.CutPrefix(line, "diff --git ")
+	line, body, _ := strings.Cut(text, "\n")
+	names, ok := strings.CutPrefix(line, "diff --git ")
 	if !ok {
 		return diffSection{text: text}
 	}
-	_, b, ok := strings.Cut(rest, " b/")
-	if !ok {
-		return diffSection{text: text}
+	return diffSection{path: diffHeaderPath(names, body), text: text}
+}
+
+// diffHeaderPath recovers the after-side path from the two names of a
+// `diff --git` header, "" when it cannot. The producers pin the plain shape
+// (`a/P b/P`, core.quotePath off), but a name with a control byte, a quote or
+// a backslash is still C-quoted (`"a/P" "b/P"`), a path may itself contain
+// ` b/`, and a diff from elsewhere may carry no prefix (`P P`) or the mnemonic
+// ones (`i/P w/P`). An unquoted pair is split at the space where the two
+// halves name the same path, so ` b/` inside the path cannot cut it short; a
+// rename, whose halves differ, takes the `+++` line, and failing that the
+// first ` b/`.
+func diffHeaderPath(names, body string) string {
+	if strings.HasPrefix(names, `"`) {
+		a, rest, ok := cutQuoted(names)
+		if !ok {
+			return ""
+		}
+		b := strings.TrimPrefix(rest, " ")
+		if strings.HasPrefix(b, `"`) {
+			if b, _, ok = cutQuoted(b); !ok {
+				return ""
+			}
+		}
+		p, _ := stripDiffPrefixes(a, b)
+		return p
 	}
-	return diffSection{path: b, text: text}
+	if i := strings.Index(names, ` "`); i >= 0 {
+		if b, _, ok := cutQuoted(names[i+1:]); ok {
+			p, _ := stripDiffPrefixes(names[:i], b)
+			return p
+		}
+	}
+	for i := 0; i < len(names); i++ {
+		if names[i] != ' ' {
+			continue
+		}
+		if p, same := stripDiffPrefixes(names[:i], names[i+1:]); same {
+			return p
+		}
+	}
+	if p := plusLinePath(body); p != "" {
+		return p
+	}
+	_, b, _ := strings.Cut(names, " b/")
+	return b
+}
+
+// stripDiffPrefixes returns the b side of a header pair without its prefix,
+// and whether the two sides name the same path: `a/P b/P` and a mnemonic pair
+// (`c/`, `i/`, `w/`, `o/`) give P, and bare `P P` gives P.
+func stripDiffPrefixes(a, b string) (string, bool) {
+	if pa, ok := strings.CutPrefix(a, "a/"); ok {
+		if pb, ok := strings.CutPrefix(b, "b/"); ok {
+			return pb, pa == pb
+		}
+	}
+	mnemonic := func(s string) bool {
+		return len(s) > 2 && s[1] == '/' && strings.IndexByte("ciwo", s[0]) >= 0
+	}
+	if mnemonic(a) && mnemonic(b) {
+		return b[2:], a[2:] == b[2:]
+	}
+	return b, a == b
+}
+
+// plusLinePath is the path the file header's `+++` line names, "" when the
+// section has none (a pure rename) or it is /dev/null.
+func plusLinePath(body string) string {
+	header, _, _ := strings.Cut(body, "\n@@")
+	for _, line := range strings.Split(header, "\n") {
+		name, ok := strings.CutPrefix(line, "+++ ")
+		if !ok {
+			continue
+		}
+		name, _, _ = strings.Cut(name, "\t")
+		if strings.HasPrefix(name, `"`) {
+			if name, _, ok = cutQuoted(name); !ok {
+				return ""
+			}
+		}
+		if name == "/dev/null" {
+			return ""
+		}
+		return strings.TrimPrefix(name, "b/")
+	}
+	return ""
+}
+
+// cutQuoted unquotes the C-quoted name at the start of s, as git writes one
+// (`\t`, `\"`, `\\` and `\ooo` octal for any other byte), and returns the
+// text after its closing quote.
+func cutQuoted(s string) (name, rest string, ok bool) {
+	if !strings.HasPrefix(s, `"`) {
+		return "", "", false
+	}
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"':
+			name, err := strconv.Unquote(s[:i+1])
+			return name, s[i+1:], err == nil
+		}
+	}
+	return "", "", false
 }
 
 // generatedBothSides reports whether a file's section shows the generated
@@ -390,7 +500,7 @@ func (r *blobHeaderReader) Has(blob string) bool {
 	if v, ok := r.seen[blob]; ok {
 		return v
 	}
-	v, err := r.read(blob)
+	v, _, err := r.probe(blob, hasGeneratedHeader)
 	if err != nil {
 		r.fail()
 		return false
@@ -399,63 +509,89 @@ func (r *blobHeaderReader) Has(blob string) bool {
 	return v
 }
 
-func (r *blobHeaderReader) read(blob string) (bool, error) {
+// binary reports whether the blob's first binaryProbeBytes hold a NUL, git's
+// own test; known is false when the object database does not hold the blob
+// (the unrecorded worktree side of an unstaged change) or the read failed.
+func (r *blobHeaderReader) binary(blob string) (binary, known bool) {
+	if r.failed || !blobID.MatchString(blob) {
+		return false, false
+	}
+	binary, known, err := r.probe(blob, func(content io.Reader) bool {
+		b, _ := io.ReadAll(io.LimitReader(content, binaryProbeBytes))
+		return bytes.IndexByte(b, 0) >= 0
+	})
+	if err != nil {
+		r.fail()
+		return false, false
+	}
+	return binary, known
+}
+
+// hasGeneratedHeader reads a blob's first lines for the generated header.
+func hasGeneratedHeader(content io.Reader) bool {
+	lines := bufio.NewReader(io.LimitReader(content, 4096))
+	for i := 0; i < generatedHeaderLines; i++ {
+		line, err := lines.ReadString('\n')
+		if generatedHeader.MatchString(strings.TrimRight(line, "\r\n")) {
+			return true
+		}
+		if err != nil {
+			break
+		}
+	}
+	return false
+}
+
+// probe asks the batch process for the blob and hands its content to test,
+// which reads as much of it as it needs; present is false when the object
+// database does not hold the blob, and test is not run.
+func (r *blobHeaderReader) probe(blob string, test func(io.Reader) bool) (found, present bool, err error) {
 	if r.cmd == nil {
-		cmd := gitCommand("-c", "core.fsmonitor=false", "-C", r.root, "cat-file", "--batch")
+		cmd := gitCommand(append([]string{"-c", "core.fsmonitor=false"},
+			gitDirArgs(r.root, "cat-file", "--batch")...)...)
 		in, err := cmd.StdinPipe()
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		out, err := cmd.StdoutPipe()
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		if err := cmd.Start(); err != nil {
-			return false, err
+			return false, false, err
 		}
 		r.cmd, r.in, r.out = cmd, in, bufio.NewReader(out)
 	}
 	if _, err := io.WriteString(r.in, blob+"\n"); err != nil {
-		return false, err
+		return false, false, err
 	}
 	head, err := r.out.ReadString('\n')
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	// `<oid> <type> <size>`, or `<name> missing` / `<name> ambiguous` with no
 	// content after it.
 	fields := strings.Fields(head)
 	if len(fields) != 3 {
-		return false, nil
+		return false, false, nil
 	}
 	size, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	content := io.LimitReader(r.out, size)
-	found := false
 	if fields[1] == "blob" {
-		lines := bufio.NewReader(io.LimitReader(content, 4096))
-		for i := 0; i < generatedHeaderLines; i++ {
-			line, err := lines.ReadString('\n')
-			if generatedHeader.MatchString(strings.TrimRight(line, "\r\n")) {
-				found = true
-				break
-			}
-			if err != nil {
-				break
-			}
-		}
+		found = test(content)
 	}
 	// The rest of the object and its trailing newline, so the next answer
 	// starts at its own header.
 	if _, err := io.Copy(io.Discard, content); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if _, err := r.out.Discard(1); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return found, nil
+	return found, true, nil
 }
 
 func (r *blobHeaderReader) fail() {
@@ -478,24 +614,28 @@ func (r *blobHeaderReader) Close() {
 // perFileDiffCap bounds one binary file's section of a recorded diff. The
 // producers read every file as text (--text, so an attribute cannot hide
 // content), which would otherwise record a genuine binary byte for byte. A
-// section over the cap that git would call binary (a NUL byte in its first 8000
-// bytes) keeps its header, whose index line names the full blob ids, and drops
-// the hunks. A text section is never capped: an oversize text diff stays whole, and a packet
-// too large to load is refused rather than shown with a file missing.
+// section over the cap that git would call binary (a NUL byte in either
+// side's first 8000 bytes) keeps its header, whose index line names the full
+// blob ids, and drops the hunks. A text section is never capped: an oversize
+// text diff stays whole, and a packet too large to load is refused rather
+// than shown with a file missing.
 const perFileDiffCap = 64 << 10
 
 // binaryProbeBytes is how far into a file git looks for a NUL byte before it
-// calls the file binary. The probe here reads the same window of the hunk text
-// (a few bytes narrower than the file's, from the line prefixes), so a file git
-// shows as text is never capped.
+// calls the file binary. The probes here read the same window of each side's
+// bytes, so a file git shows as text is never capped.
 const binaryProbeBytes = 8000
 
 // capFileDiffs replaces each binary file section over perFileDiffCap with its
-// header and a marker. A diff with no such section comes back byte-identical.
-func capFileDiffs(body string) string {
+// header and a marker. dir is the repository the diff was taken in ("" for
+// the process cwd), where each side's bytes are read. A diff with no such
+// section comes back byte-identical.
+func capFileDiffs(dir, body string) string {
 	if len(body) <= perFileDiffCap {
 		return body
 	}
+	blobs := &blobHeaderReader{root: dir, seen: map[string]bool{}}
+	defer blobs.Close()
 	var out strings.Builder
 	for _, s := range splitDiffSections(body) {
 		if len(s.text) <= perFileDiffCap {
@@ -510,7 +650,7 @@ func capFileDiffs(body string) string {
 			continue
 		}
 		hunks := s.text[len(header):]
-		if !looksBinary(hunks) {
+		if !sectionIsBinary(dir, blobs, s.path, header) && !looksBinary(hunks) {
 			out.WriteString(s.text)
 			continue
 		}
@@ -520,6 +660,39 @@ func capFileDiffs(body string) string {
 			"the index line above names the blobs ===\n", adds, dels, len(hunks), s.path, perFileDiffCap)
 	}
 	return out.String()
+}
+
+// sectionIsBinary reports whether git would call either side of a file
+// section binary: a NUL in that side's first binaryProbeBytes. A side is read
+// from the blob its index line names when the object database holds it; the
+// after side of an unstaged change or an untracked file is not recorded, so
+// it is read from the file at the section's path under dir, the bytes git
+// diffed. A side that cannot be read decides nothing.
+func sectionIsBinary(dir string, blobs *blobHeaderReader, path, header string) bool {
+	before, after := indexBlobs(header)
+	if binary, known := blobs.binary(before); known && binary {
+		return true
+	}
+	if after == "" {
+		return false
+	}
+	binary, known := blobs.binary(after)
+	if !known && path != "" {
+		binary = fileHasNul(filepath.Join(dir, filepath.FromSlash(path)))
+	}
+	return binary
+}
+
+// fileHasNul reports whether a file's first binaryProbeBytes hold a NUL; an
+// unreadable file does not.
+func fileHasNul(name string) bool {
+	f, err := os.Open(name)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, binaryProbeBytes))
+	return bytes.IndexByte(b, 0) >= 0
 }
 
 // cappedMarker matches the line capFileDiffs leaves for a capped section; it
@@ -546,7 +719,8 @@ func countHunkLines(hunks string) (adds, dels int) {
 // (`-1`/`-0` and `+1`/`+0`); then a line's offset in its file is no larger than
 // its offset in the hunk, so a NUL found in the first hunk's window lies inside
 // git's. A change that starts lower, or a NUL only in a later hunk, is not
-// proof, and the section stays whole.
+// proof. It is the fallback for a section whose sides sectionIsBinary could
+// not read.
 func looksBinary(hunks string) bool {
 	hunks = strings.TrimPrefix(hunks, "\n")
 	first, _, _ := strings.Cut(hunks, "\n@@")

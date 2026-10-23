@@ -91,17 +91,48 @@ run() {
 # child that runs the gates, routing and the run's lifecycles, and returns at
 # once, so a check made right after it reads the saga mid-flight (`gated`,
 # stage `recorded`). The child is started before the verb returns and lives
-# until that work is done, so its exit is the signal. Bounded by
-# QA_DETACHED_WAIT_S (default 30): a child that never exits leaves the checks
-# that follow to fail on their own.
+# until that work is done, so its exit is the signal.
+#
+# The child is THIS binary re-executed as `step resume STEP-N` (its argv[0] is
+# os.Executable(), an absolute path, no shell: internal/cli/step_resume.go),
+# so the match is anchored on that path, in both its as-given and
+# symlink-resolved spellings. A saga another suite or a personal docket is
+# running never holds this one up, and this one's child is never mistaken
+# for it. Without pgrep there is no signal at all, and the checks that follow
+# would read mid-flight state as a result: that is a loud failure, not a
+# silent pass. Bounded by QA_DETACHED_WAIT_S (default 30): a child that has
+# not exited by then is reported and the wait fails, so a hung saga is never
+# confused with a finished one. Either failure returns 1, which under the
+# suite's `set -e` ends the run at that step rather than letting every later
+# check fail for a reason it cannot name.
 qa_wait_detached() {
-  local i
+  if ! command -v pgrep >/dev/null 2>&1; then
+    printf "FATAL: pgrep is required to wait for the detached saga a step complete launched\n" >&2
+    return 1
+  fi
+  local dir base as_given resolved pattern i
+  dir=$(dirname -- "$DOCKET")
+  base=$(basename -- "$DOCKET")
+  as_given="$(cd "$dir" && pwd)/$base"
+  # Linux reads /proc/self/exe, which resolves every link including the
+  # binary's own; pwd -P covers the directories where readlink -f is absent.
+  resolved=$(readlink -f -- "$DOCKET" 2>/dev/null) || resolved="$(cd "$dir" && pwd -P)/$base"
+  pattern="^($(qa_regex_escape "$as_given")|$(qa_regex_escape "$resolved")) step resume STEP-"
   for ((i = 0; i < ${QA_DETACHED_WAIT_S:-30} * 10; i++)); do
-    if ! pgrep -f -- "step resume STEP-" >/dev/null 2>&1; then
+    if ! pgrep -f -- "$pattern" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
   done
+  printf "qa_wait_detached: the detached step resume child of %s is still running after %ss (QA_DETACHED_WAIT_S)\n" \
+    "$DOCKET" "${QA_DETACHED_WAIT_S:-30}" >&2
+  return 1
+}
+
+# qa_regex_escape prints its argument with every extended-regex metacharacter
+# escaped, so a path is matched as the literal it is.
+qa_regex_escape() {
+  printf '%s' "$1" | sed 's#[][\.*^$+?(){}|]#\\&#g'
 }
 
 # Run with piped stdin.
@@ -118,6 +149,9 @@ run_stdin() {
   CMD_STDOUT=$(cat "$tmpout")
   CMD_STDERR=$(cat "$tmperr")
   rm -f "$tmpout" "$tmperr"
+  if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
+    qa_wait_detached
+  fi
 }
 
 # The conductor capability (DKT-2465): the seven operator verbs — step

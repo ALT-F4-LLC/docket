@@ -45,18 +45,23 @@ type UnfiledCondition struct {
 }
 
 // unfiledConditions lists the unfiled conditions of the votes sealed since the
-// run's open dispatch began, in proposal order. A vote counts when a run issue
-// is linked to it, it is no longer open, and it was last updated at or after
-// the dispatch opened.
+// run's open dispatch began, in proposal order with each vote's seats in name
+// order. A vote counts when a run issue is linked to it, it is no longer open,
+// and it was last updated at or after the dispatch opened.
 func unfiledConditions(conn *sql.DB, runID int, openedSeq int64) ([]UnfiledCondition, error) {
 	var openedMS int64
 	if err := conn.QueryRow(`SELECT at_ms FROM events WHERE seq = ?`, openedSeq).Scan(&openedMS); err != nil {
 		return nil, fmt.Errorf("reading when the dispatch opened: %w", err)
 	}
+	// proposals.updated_at is kept to the second, so a seal stamped earlier in
+	// the second the dispatch opened counts as sealed during it: the window
+	// fails closed.
 	since := time.UnixMilli(openedMS).UTC().Format(time.RFC3339)
 
+	// One row per (vote, seat): a voter name is unvalidated text, so the seats
+	// are assembled here rather than split out of a joined string.
 	rows, err := conn.Query(
-		`SELECT p.id, GROUP_CONCAT(v.voter_name, ', ')
+		`SELECT p.id, v.voter_name
 		   FROM proposals p
 		   JOIN votes v ON v.proposal_id = p.id AND v.verdict = ?
 		  WHERE p.status != ?
@@ -68,8 +73,7 @@ func unfiledConditions(conn *sql.DB, runID int, openedSeq int64) ([]UnfiledCondi
 		                      JOIN issue_labels il ON il.issue_id = pt.issue_id
 		                      JOIN labels l ON l.id = il.label_id
 		                     WHERE pt.proposal_id = p.id AND l.name = ?)
-		  GROUP BY p.id
-		  ORDER BY p.id`,
+		  ORDER BY p.id, v.voter_name`,
 		string(model.VerdictApproveWithConcerns), string(model.ProposalStatusOpen),
 		since, runID, tribunalLabel)
 	if err != nil {
@@ -79,15 +83,18 @@ func unfiledConditions(conn *sql.DB, runID int, openedSeq int64) ([]UnfiledCondi
 	var out []UnfiledCondition
 	for rows.Next() {
 		var (
-			id     int
-			voters string
+			id    int
+			voter string
 		)
-		if err := rows.Scan(&id, &voters); err != nil {
+		if err := rows.Scan(&id, &voter); err != nil {
 			return nil, fmt.Errorf("reading an unfiled seat condition: %w", err)
 		}
-		out = append(out, UnfiledCondition{
-			Proposal: model.FormatProposalID(id), Voters: strings.Split(voters, ", "),
-		})
+		proposal := model.FormatProposalID(id)
+		if n := len(out); n > 0 && out[n-1].Proposal == proposal {
+			out[n-1].Voters = append(out[n-1].Voters, voter)
+			continue
+		}
+		out = append(out, UnfiledCondition{Proposal: proposal, Voters: []string{voter}})
 	}
 	return out, rows.Err()
 }
@@ -102,31 +109,22 @@ func unfiledConditionsReason(found []UnfiledCondition) string {
 	return strings.Join(parts, "; ")
 }
 
-// openDispatchSeq is the open dispatch's OpenedSeq, and false when none is open.
-func openDispatchSeq(conn *sql.DB, runID int) (int64, bool) {
-	tx, err := conn.Begin()
-	if err != nil {
-		return 0, false
-	}
-	defer tx.Rollback()
-	open, err := db.OpenDispatchTx(tx, runID)
-	if err != nil {
-		return 0, false
-	}
-	return open.OpenedSeq, true
-}
-
 // conditionsVerdict rules on the close's seat conditions before anything is
 // written. It returns the conditions a waiver covers: nil when none were
 // unfiled or the check does not apply (no open dispatch to bound the window).
-// An unfiled condition with no waiver refuses CONFLICT; a waiver on a bound run
-// needs the conductor token and a named writer, and is refused before the
-// close writes anything.
+// A failure to read the open dispatch is returned, not read as none open: the
+// check must not pass because it could not look. An unfiled condition with no
+// waiver refuses CONFLICT; a waiver on a bound run needs the conductor token
+// and a named writer, and is refused before the close writes anything.
 func conditionsVerdict(conn *sql.DB, runID int, waiver ConditionsWaiver) ([]UnfiledCondition, error) {
-	seq, ok := openDispatchSeq(conn, runID)
+	open, ok, err := readOpenDispatch(conn, runID)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, nil
 	}
+	seq := open.OpenedSeq
 	if waiver.Reason != "" {
 		if err := waiver.By.require("dispatch close --no-conditions"); err != nil {
 			return nil, validationErr("%v", err)
@@ -150,8 +148,8 @@ func conditionsVerdict(conn *sql.DB, runID int, waiver ConditionsWaiver) ([]Unfi
 				"close with --no-conditions REASON",
 			model.FormatRunID(runID), len(unfiled), unfiledConditionsReason(unfiled))
 	}
-	// The waiver's run note is written after the close commits, so a reason the
-	// note would refuse is refused HERE, before anything closes.
+	// The waiver's run note is written in the close's transaction, so a reason
+	// the note would refuse is refused HERE, before anything closes.
 	if text := conditionsWaiverText(unfiled, waiver.Reason); len(text) > RunNoteMaxBytes {
 		return nil, validationErr(
 			"--no-conditions reason makes a %d-byte run note, over the %d-byte cap; "+
@@ -170,12 +168,27 @@ func conditionsWaiverText(waived []UnfiledCondition, reason string) string {
 		strings.Join(ids, ", "), reason)
 }
 
-// recordConditionsWaiver writes the run note a waived close leaves. The close
-// event already names the waived votes; the note puts the reason where the
-// next worker reads it.
-func recordConditionsWaiver(conn *sql.DB, runID int, waiver ConditionsWaiver, waived []UnfiledCondition, nowMS int64) error {
+// recordConditionsWaiverTx writes the run note a waived close leaves, in the
+// close's own transaction. The close event already names the waived votes;
+// the note puts the reason where the next worker reads it. It does not gate
+// on the run's status as `run note add` does: the run may already have rolled
+// up to done under the open dispatch, and a close that committed must not
+// then be reported as failed. conditionsVerdict already checked the writer,
+// the token, and the note's size.
+func recordConditionsWaiverTx(tx *sql.Tx, runID int, waiver ConditionsWaiver, waived []UnfiledCondition, nowMS int64) error {
 	text := conditionsWaiverText(waived, waiver.Reason)
-	_, err := AddRunNote(conn, runID, waiver.Token, waiver.By,
-		Authority{Kind: AuthorityConductor}, text, nowMS)
-	return err
+	under := Authority{Kind: AuthorityConductor}
+	id, err := db.InsertRunNoteTx(tx, db.RunNote{
+		RunID: runID, Text: text, Authority: under.Kind, CreatedAtMS: nowMS,
+	})
+	if err != nil {
+		return err
+	}
+	data, err := rulingData(waiver.By, under.addTo(map[string]any{"note": id, "text": text}))
+	if err != nil {
+		return fmt.Errorf("recording the waiver's run note: %w", err)
+	}
+	return recordEvent(tx, eventRecord{
+		Kind: EventRunNoteAdded, RunID: runID, Data: data, AtMS: nowMS,
+	})
 }

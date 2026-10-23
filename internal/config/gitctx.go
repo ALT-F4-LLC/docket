@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,20 +85,28 @@ func lookupGit(dir string) (gitContext, bool) {
 // gitHeadCmd builds the git command GitHead runs. The caller of `docket step
 // complete` is the executor, so this process inherits an environment the
 // executor controls: the variables that redirect git (GIT_DIR, GIT_WORK_TREE and
-// the object-store overrides) or inject configuration would change which HEAD a
-// record binds to, and the hooks and fsmonitor a repository's config names would
-// run a program. They are dropped here, as the engine's own git calls do.
+// the object-store overrides) would change which HEAD a record binds to, the
+// ones that name a program (GIT_EXEC_PATH for git's own sub-commands) would run
+// it, and the hooks and fsmonitor a repository's config names would run one
+// too. The redirects and program names are dropped here and the hooks turned
+// off by -c, as the engine's own git calls do. Dropping the GIT_CONFIG*
+// variables removes one place a config could come from, not every one: HOME
+// stays, and the repository config is the executor's to write, so it is the -c
+// overrides and not the scrubbing that keep a config from running a program.
+// The git binary is resolved through PATH once per process (gitBinary).
 func gitHeadCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	full := append([]string{
 		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
 		"--no-replace-objects", "-C", dir,
 	}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd := exec.CommandContext(ctx, gitBinary(), full...)
 	drop := []string{
 		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=",
 		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_NAMESPACE=",
-		"GIT_PREFIX=", "GIT_CONFIG=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=", "GIT_CONFIG_KEY_",
+		"GIT_PREFIX=", "GIT_CONFIG=", "GIT_CONFIG_GLOBAL=", "GIT_CONFIG_SYSTEM=",
+		"GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=", "GIT_CONFIG_KEY_",
 		"GIT_CONFIG_VALUE_", "GIT_REPLACE_REF_BASE=", "GIT_GRAFT_FILE=",
+		"GIT_EXEC_PATH=", "GIT_TEMPLATE_DIR=",
 	}
 next:
 	for _, kv := range os.Environ() {
@@ -110,3 +119,24 @@ next:
 	}
 	return cmd
 }
+
+// gitBinary is the git this package runs, resolved through PATH once per
+// process and then named by absolute path, so a PATH that changes between two
+// commands cannot swap the binary under a sequence that already started. A git
+// that PATH does not hold leaves the bare name, and the command fails as it
+// would have anyway. (The engine has its own copy; this package cannot import
+// it.)
+func gitBinary() string {
+	gitBinaryOnce.Do(func() {
+		gitBinaryPath = "git"
+		if p, err := exec.LookPath("git"); err == nil {
+			gitBinaryPath = p
+		}
+	})
+	return gitBinaryPath
+}
+
+var (
+	gitBinaryOnce sync.Once
+	gitBinaryPath string
+)

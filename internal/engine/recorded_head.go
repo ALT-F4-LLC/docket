@@ -3,6 +3,9 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -51,7 +54,14 @@ type recordedHead struct {
 // behavior, because its head legitimately moves as work is
 // integrated.
 func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (recordedHead, bool) {
-	if worktree == "" || e.HeadFn == nil || worktree == runExecRoot(conn, runID) {
+	return e.captureRecordedHeadIn(runExecRoot(conn, runID), worktree)
+}
+
+// captureRecordedHeadIn is captureRecordedHead with the run's exec root
+// already read: the one caller that reads it anyway passes it through rather
+// than issuing the run-row read again.
+func (e *Engine) captureRecordedHeadIn(execRoot, worktree string) (recordedHead, bool) {
+	if worktree == "" || e.HeadFn == nil || sameDir(worktree, execRoot) {
 		return recordedHead{}, false
 	}
 	head := e.HeadFn(worktree)
@@ -61,7 +71,7 @@ func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (
 	// The fork point is taken from the head just read, not from a second read of
 	// the worktree's HEAD, so base is always an ancestor of head.
 	base := ""
-	if shared := sharedCheckoutHead(runExecRoot(conn, runID)); shared != "" {
+	if shared := sharedCheckoutHead(execRoot); shared != "" {
 		base = mergeBase(worktree, head, shared)
 	}
 	// A checkout of the head stands for the writer's WHOLE work when its fork
@@ -71,26 +81,58 @@ func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (
 	// anything is uncommitted the live worktree stays the tree, the only one
 	// that holds it, and the record only pins its head.
 	live := base == "" || !worktreeClean(worktree) ||
-		!commitInRepo(runExecRoot(conn, runID), head)
+		!commitInRepo(execRoot, head)
 	return recordedHead{Head: head, Base: base, Worktree: worktree, Live: live}, true
 }
 
-// recordedHeadOf is the head recorded for the step's CURRENT worktree.
+// sameDir reports whether two paths name one directory. A --worktree arrives
+// filepath.Abs'd while a run's ExecRoot is canonicalized (symlinks resolved),
+// so the two spellings of the shared checkout are compared only after both
+// are resolved; a path that cannot be resolved compares by its cleaned
+// spelling.
+func sameDir(a, b string) bool {
+	return resolvedDir(a) == resolvedDir(b)
+}
+
+func resolvedDir(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
+// recordedHeadOf is the head recorded for the step's CURRENT worktree. It
+// swallows a read error as "no record", the refusal direction for its
+// callers; a stage that would fall back to the live worktree on "no record"
+// uses recordedHeadOfErr and propagates the error instead.
 func recordedHeadOf(conn rowQuerier, step *db.Step) (recordedHead, bool) {
+	rec, ok, err := recordedHeadOfErr(conn, step)
+	return rec, ok && err == nil
+}
+
+// recordedHeadOfErr is recordedHeadOf with the read error kept apart from the
+// absence of a record: ok is false only when no row exists or the newest row
+// is cleared or names another worktree, and any other failure to read the
+// row is returned, so a caller retries rather than measures a different tree.
+func recordedHeadOfErr(conn rowQuerier, step *db.Step) (recordedHead, bool, error) {
 	var payload sql.NullString
 	err := conn.QueryRow(
 		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
 		  ORDER BY id DESC LIMIT 1`,
 		step.ID, RecordedHeadArtifactKind).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return recordedHead{}, false, nil
+	}
 	if err != nil {
-		return recordedHead{}, false
+		return recordedHead{}, false, fmt.Errorf(
+			"reading the recorded head for %s: %w", step.Instance, err)
 	}
 	var rec recordedHead
 	if json.Unmarshal([]byte(payload.String), &rec) != nil ||
 		rec.Head == "" || rec.Worktree != step.WorkRoot {
-		return recordedHead{}, false
+		return recordedHead{}, false, nil
 	}
-	return rec, true
+	return rec, true, nil
 }
 
 // liveHeadMoved reports whether a Live record's worktree no longer stands at

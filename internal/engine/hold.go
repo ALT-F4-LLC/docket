@@ -38,7 +38,7 @@ type HoldOptions struct {
 // HoldStep parks one pending step `waiting-human` with park class `held`, and
 // records one `step-held` event carrying the reason and the actor.
 func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
-	reason, err := holdReason(opts)
+	reason, err := holdReason(opts, "step hold")
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 // stop. The held steps leave the next dispatch's rows and are listed under the
 // manifest's `held`; each releases through `step resolve --as retry`.
 func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error) {
-	reason, err := holdReason(opts)
+	reason, err := holdReason(opts, "run hold-issue")
 	if err != nil {
 		return nil, err
 	}
@@ -146,13 +146,15 @@ func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error
 	return held, nil
 }
 
-func holdReason(opts HoldOptions) (string, error) {
+// holdReason is the reason a hold records, refused when blank or when the
+// hold is unattributed; verb names the verb in that refusal.
+func holdReason(opts HoldOptions, verb string) (string, error) {
 	reason := strings.TrimSpace(opts.Reason)
 	if reason == "" {
 		return "", validationErr("--reason is required: a held step parks for the " +
 			"operator, who needs to know why")
 	}
-	if err := opts.By.require("step hold"); err != nil {
+	if err := opts.By.require(verb); err != nil {
 		return "", err
 	}
 	return reason, nil
@@ -200,9 +202,13 @@ type HeldStep struct {
 
 // HeldSteps lists the run's held steps in step order. A pure read.
 func HeldSteps(conn *sql.DB, runID int) ([]HeldStep, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+	return (&runReads{conn: conn, runID: runID}).heldSteps()
+}
+
+func (r *runReads) heldSteps() ([]HeldStep, error) {
+	steps, err := r.runSteps()
 	if err != nil {
-		return nil, fmt.Errorf("listing run steps: %w", err)
+		return nil, err
 	}
 	var out []HeldStep
 	for _, s := range steps {

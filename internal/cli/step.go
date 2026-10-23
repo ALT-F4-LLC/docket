@@ -1271,21 +1271,27 @@ annotation verbatim, so what was added survives a later annotation
 overwriting the same key. The engine interprets no key inside it.
 
 --integrated-sha names the commit the SHARED BRANCH now carries for a
-write-class step whose landed content diverged from its recorded commit — a
-cherry-pick whose conflict was resolved by hand, an operator-ruled patch on
-top of a gate failure. The engine VERIFIES the sha is an ancestor of the
-shared checkout's HEAD and refuses otherwise, and that its line carries every
-commit of the writer's chain: a patch-equal commit, or a commit whose message
-carries, as a line, the ` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose
-changed files are exactly that commit's (a hand-resolved pick edits a hunk,
-so it is not patch-equal; the trailer is the committer's own claim and the file
-check is what bounds it; only commits after the writer's base count); then it
-re-records the step's ` + "`issue.diff`" + ` over the whole integrated range, from the
-first parent of the earliest commit that carries the chain to the sha
-(superseding the stale record, the way ` + "`step resolve --worktree`" + ` re-pins one;
-a sha later than the pick also sweeps in the commits between), so every downstream
-packet binds to the resolved tree and ` + "`dispatch close`" + ` accepts the step
-with a ` + "`resolved`" + ` verdict instead of needing --skip-integration-check.
+write-class step whose landed commits differ from its recorded one (a
+cherry-pick minted new shas, a conflicted pick was resolved by hand, the chain
+was squashed). The engine VERIFIES the sha is an ancestor of the shared
+checkout's HEAD and refuses otherwise, and ACCEPTS IT ONLY WHEN ITS LINE
+CARRIES EVERY COMMIT OF THE WRITER'S CHAIN, in one of three forms: a
+patch-equal commit; a commit whose message carries, as a line, the
+` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose changed
+files are exactly that commit's (a hand-resolved pick edits a hunk, so it is
+not patch-equal; the trailer is the committer's own claim and the file check
+is what bounds it; only commits after the writer's base count); or one commit
+whose patch is the whole chain's combined diff (a squash). Any other hand
+resolution — an operator-ruled patch on top of a gate failure, a pick that
+also touched a file the writer did not — is refused, nothing is recorded, and
+the close needs the per-close ` + "`dispatch close --skip-integration-check REASON`" + `
+waiver instead. On acceptance it re-records the step's ` + "`issue.diff`" + ` over
+the whole integrated range, from the first parent of the earliest commit that
+carries the chain to the sha (superseding the stale record, the way
+` + "`step resolve --worktree`" + ` re-pins one; a sha later than the pick also
+sweeps in the commits between), so every downstream packet binds to the
+resolved tree and ` + "`dispatch close`" + ` accepts the step with a ` + "`resolved`" + `
+verdict instead of needing --skip-integration-check.
 It also sets ` + "`integrated_sha`" + ` in the step's metadata. The sha must be
 the full 40-hex id of the commit that carries the step's landed work: the last
 commit of a pick, a squash, or a merge (a merge records the diff from the

@@ -39,13 +39,18 @@ type UnexpandedIssue struct {
 // UnexpandedIssues lists the run's bound issues that hold no step, in issue
 // order. It is a pure read.
 func UnexpandedIssues(conn *sql.DB, runID int) ([]UnexpandedIssue, error) {
+	return (&runReads{conn: conn, runID: runID}).unexpandedIssues()
+}
+
+func (r *runReads) unexpandedIssues() ([]UnexpandedIssue, error) {
+	conn, runID := r.conn, r.runID
 	roster, err := db.ListRunIssues(conn, runID)
 	if err != nil {
 		return nil, fmt.Errorf("listing run issues: %w", err)
 	}
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := r.runSteps()
 	if err != nil {
-		return nil, fmt.Errorf("listing run steps: %w", err)
+		return nil, err
 	}
 	stepped := make(map[int]struct{}, len(roster))
 	for _, s := range steps {
@@ -62,9 +67,9 @@ func UnexpandedIssues(conn *sql.DB, runID int) ([]UnexpandedIssue, error) {
 		return nil, nil
 	}
 
-	relations, err := db.GetAllDirectionalRelations(conn)
+	relations, err := r.directionalRelations()
 	if err != nil {
-		return nil, fmt.Errorf("reading relations: %w", err)
+		return nil, err
 	}
 	_, blockers := planner.BuildAdjacency(relations)
 

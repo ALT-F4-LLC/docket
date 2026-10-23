@@ -151,7 +151,7 @@ func TestDispatchOpenListsRetryEligibleParkAndRecordsOneEvent(t *testing.T) {
 	}
 
 	// Recording again for the same park adds nothing.
-	_, err = recordRetryEligible(conn, runID, nowMS)
+	_, err = recordRetryEligible(conn, &runReads{conn: conn, runID: runID}, nowMS)
 	testsupport.Must(t, err, "recordRetryEligible: %v", err)
 	if n := len(retryEligibleEvents(t, conn, runID)); n != 1 {
 		t.Errorf("a second record wrote %d events total; want 1", n)
@@ -159,7 +159,7 @@ func TestDispatchOpenListsRetryEligibleParkAndRecordsOneEvent(t *testing.T) {
 
 	// A fresh park of the same step (its row version moved) is signalled again.
 	execSQL(t, conn, `UPDATE steps SET row_version = row_version + 1 WHERE id = ?`, stepID)
-	_, err = recordRetryEligible(conn, runID, nowMS)
+	_, err = recordRetryEligible(conn, &runReads{conn: conn, runID: runID}, nowMS)
 	testsupport.Must(t, err, "recordRetryEligible: %v", err)
 	if n := len(retryEligibleEvents(t, conn, runID)); n != 2 {
 		t.Errorf("a re-park wrote %d events total; want 2", n)
