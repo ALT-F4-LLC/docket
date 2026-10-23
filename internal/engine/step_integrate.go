@@ -27,8 +27,9 @@ import (
 //     and it records who ran it and from where;
 //   - nothing is written until EVERY named step has passed its read-only
 //     checks (done, an executor step that holds the tree, a recorded commit
-//     chain the checkout holds with no merge commit, not already annotated, not
-//     already carried by HEAD, no commit shared with another named chain);
+//     chain the checkout holds with no merge commit, not already annotated, a
+//     carriage probe that answered and said HEAD does not already carry it, no
+//     commit shared with another named chain);
 //   - the shared checkout must be on a branch with no tracked change and no
 //     operation in progress, or the verb refuses before touching it;
 //   - a pick that does not apply is aborted and the checkout is verified to
@@ -94,10 +95,13 @@ func (e *Engine) IntegrateSteps(
 	}
 
 	// Every read-only check first, so a bad later argument stops the verb
-	// before the first write.
+	// before the first write. The steps named together are nearly always one
+	// run's, and a run's definitions do not change between two plans, so they
+	// are loaded once per run.
 	plans := make([]integratePlan, 0, len(stepIDs))
+	defsByRun := map[int]map[int]*workflow.Definition{}
 	for _, id := range stepIDs {
-		p, err := e.planIntegration(conn, id, token)
+		p, err := e.planIntegration(conn, id, token, defsByRun)
 		if err != nil {
 			return nil, err
 		}
@@ -152,8 +156,11 @@ func (e *Engine) IntegrateSteps(
 }
 
 // planIntegration is one step's read-only gate: it writes nothing and runs no
-// command that can.
-func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integratePlan, error) {
+// command that can. defsByRun caches each run's StepDefinitions across the
+// plans of one verb.
+func (e *Engine) planIntegration(
+	conn *sql.DB, id int, token string, defsByRun map[int]map[int]*workflow.Definition,
+) (integratePlan, error) {
 	step, err := db.GetStep(conn, id)
 	if errors.Is(err, db.ErrStepNotFound) {
 		return integratePlan{}, notFoundErr(err, "step %s not found", model.FormatStepID(id))
@@ -168,9 +175,13 @@ func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integrateP
 		return integratePlan{}, conflictErr(
 			"step %s is %s; only a done step's work is integrated", step.Instance, step.Status)
 	}
-	defs, err := StepDefinitions(conn, step.RunID)
-	if err != nil {
-		return integratePlan{}, err
+	defs, ok := defsByRun[step.RunID]
+	if !ok {
+		defs, err = StepDefinitions(conn, step.RunID)
+		if err != nil {
+			return integratePlan{}, err
+		}
+		defsByRun[step.RunID] = defs
 	}
 	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
 	if !isExecutorStep(step) || spec == nil || !stepHoldsTree(spec) {
@@ -234,8 +245,18 @@ func (e *Engine) planIntegration(conn *sql.DB, id int, token string) (integrateP
 		return integratePlan{}, conflictErr("step %s cannot be integrated: %v", step.Instance, err)
 	}
 	// A chain the checkout already carries (a merge, or an earlier pick whose
-	// annotation never ran) is annotated, not picked a second time.
-	if r := e.IntegrationRangeFn(execRoot, "HEAD", writerHead, writerBase); r.Known && r.Carried {
+	// annotation never ran) is annotated, not picked a second time. A probe
+	// that cannot answer (a partial clone missing the trunk's blobs) is refused
+	// here, where nothing has been written yet: the annotation the pick ends in
+	// asks the same question and would refuse it after the branch had moved.
+	r := e.IntegrationRangeFn(execRoot, "HEAD", writerHead, writerBase)
+	if !r.Known {
+		return integratePlan{}, conflictErr(
+			"could not establish whether the shared checkout's HEAD carries step %s's "+
+				"writer's patch (%.12s); nothing was picked%s",
+			step.Instance, writerHead, partialCloneNote(execRoot))
+	}
+	if r.Carried {
 		return integratePlan{}, conflictErr(
 			"the shared checkout's HEAD already carries step %s's %d commit(s); annotate it "+
 				"instead: `docket step annotate %s --integrated-sha <the commit that carries it>`",

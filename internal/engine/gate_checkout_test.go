@@ -310,6 +310,48 @@ func TestCaptureRecordedHeadRefusesWorkItCannotReproduce(t *testing.T) {
 	}
 }
 
+// The shared-checkout exemption holds for every spelling of the checkout: a
+// --worktree arrives filepath.Abs'd while the run's ExecRoot is canonicalized,
+// so a symlink to the shared checkout is still the shared checkout, not a
+// separate Live worktree whose record parks the step once the shared branch
+// moves on.
+func TestASymlinkedSpellingOfTheSharedCheckoutIsNotBoundAsAWorktree(t *testing.T) {
+	shared := gitRepo(t)
+	pinned := strings.TrimSpace(gitOutput(t, shared, "rev-parse", "HEAD"))
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "symlinked", "body", "task", nil)
+	run, err := db.InsertRunWithContext(conn, 1, "symlinked", 0, nowMS,
+		db.RunContext{ExecRoot: shared, CommitSHA: pinned})
+	testsupport.Must(t, err, "InsertRunWithContext: %v", err)
+	testsupport.Must(t, db.AddRunIssue(conn, run.ID, issue), "AddRunIssue")
+	_, err = activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+
+	link := filepath.Join(t.TempDir(), "link")
+	testsupport.Must(t, os.Symlink(shared, link), "symlink")
+	// Untracked state is what would make a bound worktree's record Live.
+	writeFile(t, shared, "mine/untracked.txt", "left over\n")
+
+	e := testEngine()
+	e.HeadFn = sharedCheckoutHead
+	if rec, ok := e.captureRecordedHead(conn, run.ID, link); ok {
+		t.Errorf("recorded %+v for a symlinked spelling of the shared checkout; want nothing", rec)
+	}
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+	testsupport.Must(t, e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("summary"), WorkDir: link, NowMS: nowMS,
+	}), "complete")
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if rec, ok := recordedHeadOf(conn, step); ok {
+		t.Errorf("recorded head = %+v for the shared checkout reached through a symlink; want no record", rec)
+	}
+}
+
 // issueDiffHead is the head the step's recorded issue.diff artifact names.
 func issueDiffHead(t *testing.T, conn *sql.DB, stepID int) string {
 	t.Helper()

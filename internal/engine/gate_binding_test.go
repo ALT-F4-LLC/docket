@@ -115,6 +115,33 @@ func TestALiveRecordRefusesAWorktreeThatMovedOn(t *testing.T) {
 	w.requireParkedWithoutADiff(t)
 }
 
+// The gate stages of one resume share a single checkout of the recorded
+// commit rather than materializing it once per gate, and the checkout is
+// released when the resume ends.
+func TestTheGatesOfOneResumeShareOneCheckoutOfTheRecordedCommit(t *testing.T) {
+	w := newBindingWorld(t, false)
+	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
+	testsupport.Must(t, err, "detached saga: %v", err)
+	if len(w.captured.seen) < 2 {
+		t.Fatalf("%d gate(s) ran; the fixture needs at least two to share a checkout", len(w.captured.seen))
+	}
+	dirs := map[string]bool{}
+	for gate, sc := range w.captured.seen {
+		if !strings.HasPrefix(filepath.Base(sc.WorkRoot), scratchPrefix) {
+			t.Errorf("gate %s measured %q, want a scratch checkout of the recorded commit", gate, sc.WorkRoot)
+		}
+		dirs[sc.WorkRoot] = true
+	}
+	if len(dirs) != 1 {
+		t.Errorf("the gates measured %d distinct checkouts %v; want one shared checkout", len(dirs), dirs)
+	}
+	for dir := range dirs {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("the shared checkout %s was not released when the resume ended (stat: %v)", dir, err)
+		}
+	}
+}
+
 // A Live record whose worktree stays put is measured as before.
 func TestALiveRecordStillMeasuresAWorktreeThatStayedPut(t *testing.T) {
 	w := newBindingWorld(t, true)

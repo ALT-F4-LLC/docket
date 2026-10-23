@@ -29,6 +29,64 @@ type RetryEligible struct {
 	rowVersion int
 }
 
+// runReads is one verb's shared reads of a run's steps and of the directional
+// relations. `dispatch open` and `run status` render the retry-eligible, held
+// and unexpanded lists together; each read happens at most once, when a list
+// first needs it, instead of once per list (the relations read scans the
+// whole issue_relations table).
+type runReads struct {
+	conn  *sql.DB
+	runID int
+
+	steps     []*db.Step
+	stepsRead bool
+	relations []model.Relation
+	relsRead  bool
+}
+
+// runReadsFromSteps shares a step list a caller already loaded.
+func runReadsFromSteps(conn *sql.DB, runID int, steps []*db.Step) *runReads {
+	return &runReads{conn: conn, runID: runID, steps: steps, stepsRead: true}
+}
+
+func (r *runReads) runSteps() ([]*db.Step, error) {
+	if !r.stepsRead {
+		steps, err := db.ListRunSteps(r.conn, r.runID)
+		if err != nil {
+			return nil, fmt.Errorf("listing run steps: %w", err)
+		}
+		r.steps, r.stepsRead = steps, true
+	}
+	return r.steps, nil
+}
+
+func (r *runReads) directionalRelations() ([]model.Relation, error) {
+	if !r.relsRead {
+		relations, err := db.GetAllDirectionalRelations(r.conn)
+		if err != nil {
+			return nil, fmt.Errorf("reading relations: %w", err)
+		}
+		r.relations, r.relsRead = relations, true
+	}
+	return r.relations, nil
+}
+
+// RunAdvisories is `run status`'s pair of advisory lists, the unexpanded
+// issues and the retry-eligible parks, read over one step list and one
+// relations scan.
+func RunAdvisories(conn *sql.DB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+	reads := &runReads{conn: conn, runID: runID}
+	unexpanded, err := reads.unexpandedIssues()
+	if err != nil {
+		return nil, nil, err
+	}
+	retryEligible, err := reads.retryEligibleParks()
+	if err != nil {
+		return nil, nil, err
+	}
+	return unexpanded, retryEligible, nil
+}
+
 // RetryEligibleParks lists the run's gap-only parks whose issue has at least
 // one blocking prerequisite (depends_on, or the inverse blocks) and no
 // prerequisite that is not done, where at least one prerequisite was added or
@@ -36,9 +94,14 @@ type RetryEligible struct {
 // met before the park cannot be what the park waits on. A pure read: `run status` renders it, and `dispatch open` renders it
 // and records the event.
 func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+	return (&runReads{conn: conn, runID: runID}).retryEligibleParks()
+}
+
+func (r *runReads) retryEligibleParks() ([]RetryEligible, error) {
+	conn := r.conn
+	steps, err := r.runSteps()
 	if err != nil {
-		return nil, fmt.Errorf("listing run steps: %w", err)
+		return nil, err
 	}
 	var parked []*db.Step
 	for _, s := range steps {
@@ -50,9 +113,9 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 		return nil, nil
 	}
 
-	relations, err := db.GetAllDirectionalRelations(conn)
+	relations, err := r.directionalRelations()
 	if err != nil {
-		return nil, fmt.Errorf("reading relations: %w", err)
+		return nil, err
 	}
 	_, blockers := planner.BuildAdjacency(relations)
 
@@ -117,13 +180,16 @@ func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
 				break
 			}
 			// The edge was added, or the prerequisite closed, after the park.
-			// Both clocks are wall clocks; the park's is the step row's last
-			// write.
+			// Both clocks are wall clocks; the park's is the step's activity
+			// stamp, which the routing write that parked it set and which no
+			// later write touches while the step stays parked. The row's
+			// updated_at_ms would not do: every later row write bumps it.
 			closed, ok := doneAt[d]
 			if !ok {
 				closed = i.UpdatedAt
 			}
-			if notBeforePark(edgeAdded[edge{s.IssueID, d}], s.UpdatedAtMS) || notBeforePark(closed, s.UpdatedAtMS) {
+			parkMS := stepActivityMS(s)
+			if notBeforePark(edgeAdded[edge{s.IssueID, d}], parkMS) || notBeforePark(closed, parkMS) {
 				movedAfterPark = true
 			}
 			refs = append(refs, model.FormatID(d))
@@ -152,71 +218,91 @@ func notBeforePark(at time.Time, parkMS int64) bool {
 // recordRetryEligible writes one park-retry-eligible event per eligible park
 // that has none yet, and returns the list. A park is identified by its step
 // and row_version: a retry that parks the step again moves the version, so the
-// new park is signalled afresh. Each event commits in its own transaction; a
+// new park is signalled afresh. The parks already recorded are read in one
+// query over the run, and the missing events commit in one transaction; a
 // failure to record is returned without hiding the list.
-func recordRetryEligible(conn *sql.DB, runID int, nowMS int64) ([]RetryEligible, error) {
-	eligible, err := RetryEligibleParks(conn, runID)
+func recordRetryEligible(conn *sql.DB, reads *runReads, nowMS int64) ([]RetryEligible, error) {
+	eligible, err := reads.retryEligibleParks()
 	if err != nil || len(eligible) == 0 {
 		return eligible, err
 	}
+	runID := reads.runID
+	seen, err := recordedRetryEligible(conn, runID)
+	if err != nil {
+		return eligible, err
+	}
+	var missing []RetryEligible
 	for _, r := range eligible {
 		stepID, err := model.ParseStepID(r.Step)
 		if err != nil {
 			return eligible, err
 		}
-		if err := recordRetryEligibleOnce(conn, runID, stepID, r, nowMS); err != nil {
+		if !seen[retryEligiblePark{stepID, r.rowVersion}] {
+			missing = append(missing, r)
+		}
+	}
+	if len(missing) == 0 {
+		return eligible, nil
+	}
+
+	tx, err := conn.Begin()
+	if err != nil {
+		return eligible, fmt.Errorf("recording a retry-eligible park: %w", err)
+	}
+	defer tx.Rollback()
+	for _, r := range missing {
+		data, err := json.Marshal(map[string]any{
+			"step": r.Step, "park_class": r.ParkClass,
+			"depends_on": r.DependsOn, "row_version": r.rowVersion,
+		})
+		if err != nil {
+			return eligible, fmt.Errorf("recording a retry-eligible park: %w", err)
+		}
+		if err := recordEvent(tx, eventRecord{
+			Kind: EventParkRetryEligible, RunID: runID, Instance: r.Instance,
+			IssueID: r.issueID, Data: string(data), AtMS: nowMS,
+		}); err != nil {
 			return eligible, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return eligible, fmt.Errorf("recording a retry-eligible park: %w", err)
 	}
 	return eligible, nil
 }
 
-func recordRetryEligibleOnce(
-	conn *sql.DB, runID, stepID int, r RetryEligible, nowMS int64,
-) error {
-	tx, err := conn.Begin()
-	if err != nil {
-		return fmt.Errorf("recording a retry-eligible park: %w", err)
-	}
-	defer tx.Rollback()
+// retryEligiblePark identifies one park: the step and the row version it was
+// parked at.
+type retryEligiblePark struct{ stepID, rowVersion int }
 
-	rows, err := tx.Query(
-		`SELECT data FROM events WHERE run_id = ? AND kind = ? AND step_id = ?`,
-		runID, EventParkRetryEligible, stepID)
+// recordedRetryEligible is the set of parks the run's park-retry-eligible
+// events already name.
+func recordedRetryEligible(conn *sql.DB, runID int) (map[retryEligiblePark]bool, error) {
+	rows, err := conn.Query(
+		`SELECT step_id, data FROM events WHERE run_id = ? AND kind = ?`,
+		runID, EventParkRetryEligible)
 	if err != nil {
-		return fmt.Errorf("reading retry-eligible events: %w", err)
+		return nil, fmt.Errorf("reading retry-eligible events: %w", err)
 	}
-	seen := false
+	defer rows.Close()
+	seen := make(map[retryEligiblePark]bool)
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			rows.Close()
-			return fmt.Errorf("reading a retry-eligible event: %w", err)
+		var (
+			stepID sql.NullInt64
+			raw    string
+		)
+		if err := rows.Scan(&stepID, &raw); err != nil {
+			return nil, fmt.Errorf("reading a retry-eligible event: %w", err)
 		}
 		var data struct {
 			RowVersion int `json:"row_version"`
 		}
-		if json.Unmarshal([]byte(raw), &data) == nil && data.RowVersion == r.rowVersion {
-			seen = true
+		if stepID.Valid && json.Unmarshal([]byte(raw), &data) == nil {
+			seen[retryEligiblePark{int(stepID.Int64), data.RowVersion}] = true
 		}
 	}
-	rows.Close()
-	if seen {
-		return nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading retry-eligible events: %w", err)
 	}
-
-	data, err := json.Marshal(map[string]any{
-		"step": r.Step, "park_class": r.ParkClass,
-		"depends_on": r.DependsOn, "row_version": r.rowVersion,
-	})
-	if err != nil {
-		return fmt.Errorf("recording a retry-eligible park: %w", err)
-	}
-	if err := recordEvent(tx, eventRecord{
-		Kind: EventParkRetryEligible, RunID: runID, Instance: r.Instance,
-		IssueID: r.issueID, Data: string(data), AtMS: nowMS,
-	}); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return seen, nil
 }

@@ -15,11 +15,17 @@ import (
 
 // THE VERIFIED INTEGRATION ANNOTATION — `step annotate STEP-N --integrated-sha SHA`.
 //
-// A write-class step's landed content can diverge from the commit it recorded:
-// a cherry-pick whose conflict the conductor resolved by hand, an operator-ruled
-// patch on top of a gate failure, any post-hoc edit before integration. Two
-// records then go stale at once, and until this verb neither had a sanctioned
-// way back once the step was done:
+// A write-class step's landed commits can differ from the commit it recorded:
+// a cherry-pick mints new shas, a conflicted pick is resolved by hand, a chain
+// is squashed. The annotation accepts an integrated sha only when its line
+// carries EVERY commit of the writer's chain — patch-equal, or a `cherry-pick
+// -x` commit that names the writer commit and changes exactly its files, or a
+// squash of the chain. Any other hand resolution (an operator-ruled patch on
+// top of a gate failure, a pick that also touched a file the writer did not)
+// is not an integration the engine can verify, and needs the per-close
+// `--skip-integration-check REASON` waiver instead. Without this verb, two
+// records went stale at once with no sanctioned way back once the step was
+// done:
 //
 //   - THE CLOSE SIDE. `dispatch close` verifies each write-class step's recorded
 //     commit against the shared branch (dispatch_integration.go) — ancestry,
@@ -52,8 +58,9 @@ import (
 // engine establishes the integration. A sha the shared checkout does not carry
 // is refused outright, never recorded as "the operator said so" — that is what
 // keeps this distinct from free-form metadata, which the close's contract
-// forbids trusting. `--skip-integration-check` stays for a commit with no
-// resolution to point at.
+// forbids trusting. `--skip-integration-check` stays for what the engine cannot
+// verify: a commit with no resolution to point at, or a hand resolution whose
+// line does not carry the writer's chain in one of the three forms above.
 //
 // THE SHA MUST CARRY THE WRITER'S WORK (DKT-4269). Ancestry alone says the sha
 // is on the branch, so the engine also establishes that the sha's line holds a
@@ -83,6 +90,12 @@ type IntegrationAnnotation struct {
 // close keys its prior-acceptance record on `STEP@sha`, and a prefix that
 // resolves today may be ambiguous once the branch grows.
 var fullCommitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// hexCommitID is the looser shape a RECORDED writer chain is held to before
+// it is handed to git as a revision: hex only, so nothing option- or
+// path-shaped gets through, but an abbreviated id an older record carries
+// still reads as the commit it named.
+var hexCommitID = regexp.MustCompile(`^[0-9a-f]{4,40}$`)
 
 // MetadataKeyIntegratedSHA is the step-row key the annotation also writes, so
 // the convention the docket-run skill already followed by hand (`--metadata
@@ -209,6 +222,16 @@ func (e *Engine) AnnotateIntegration(
 	// the whole integrated range, so a multi-commit writer's reviewers see
 	// every file instead of the last commit's.
 	writerHead, writerBase := writerChain(prior.Payload, from)
+	// The chain is passed to git as revisions, so it is held to the shape of a
+	// commit id before any argument is built from it, as `step integrate` holds
+	// it: a value that began with "-" would be an option, not a revision. The
+	// annotation admits an abbreviated id (a record older than the full-id
+	// rule), which the integrate side's pick does not.
+	if !hexCommitID.MatchString(writerHead) || (writerBase != "" && !hexCommitID.MatchString(writerBase)) {
+		return nil, validationErr(
+			"step %s recorded a writer chain that is not commit ids (head %q, base %q); "+
+				"the engine will not build a git command from it", step.Instance, writerHead, writerBase)
+	}
 	rangeFrom := ""
 	if e.IntegrationRangeFn != nil {
 		r := e.IntegrationRangeFn(execRoot, sha, writerHead, writerBase)

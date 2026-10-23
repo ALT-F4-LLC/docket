@@ -495,6 +495,32 @@ func TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite(t *testing.T) 
 	}
 }
 
+// TestIntegrateStepsRefusesAnUnanswerableCarriageProbeBeforeTheFirstWrite: a
+// range probe that cannot say whether HEAD already carries the chain (a
+// partial clone missing the trunk's blobs) stops the verb at its read-only
+// gate, where the annotation the pick ends in would otherwise refuse the same
+// probe after the branch had moved.
+func TestIntegrateStepsRefusesAnUnanswerableCarriageProbeBeforeTheFirstWrite(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	before := f.sharedHead(t)
+	f.e.IntegrationRangeFn = func(string, string, string, string) IntegratedRange {
+		return IntegratedRange{}
+	}
+	picks := 0
+	f.e.CherryPickFn = func(string, string, string) (GitPick, error) {
+		picks++
+		return GitPick{}, errors.New("must not be reached")
+	}
+	_, err := f.integrate(testConductorToken, f.stepID)
+	if err == nil || !strings.Contains(err.Error(), "could not establish") {
+		t.Fatalf("error = %v, want the could-not-establish refusal", err)
+	}
+	if picks != 0 {
+		t.Errorf("the pick ran %d time(s) on an unanswerable probe", picks)
+	}
+	f.requireNothingLanded(t, before)
+}
+
 // TestIntegrateStepsRefusesAGraftedSharedCheckout: --no-replace-objects does
 // not turn off the deprecated info/grafts file, so a checkout that has one is
 // refused rather than measured through rewritten parentage.

@@ -323,3 +323,47 @@ func TestRenderedPacketElidesARegeneratedFileByItsOldBlob(t *testing.T) {
 		t.Error("the hand-written hunks are not intact")
 	}
 }
+
+// The section path is the b side of the `diff --git` header, whatever shape
+// git wrote it in: a path that itself contains ` b/`, a C-quoted path (a
+// non-ASCII or control byte under core.quotePath), a header with no prefixes
+// (diff.noprefix), the mnemonic prefixes, and a rename.
+func TestDiffSectionPathSurvivesEveryHeaderShape(t *testing.T) {
+	cases := map[string]string{
+		"diff --git a/gen/lib b/a.pb.go b/gen/lib b/a.pb.go\n":                                "gen/lib b/a.pb.go",
+		"diff --git \"a/gen/donn\\303\\251es.pb.go\" \"b/gen/donn\\303\\251es.pb.go\"\n":      "gen/données.pb.go",
+		"diff --git a/gen/x.pb.go \"b/gen/tab\\there.pb.go\"\n":                               "gen/tab\there.pb.go",
+		"diff --git gen/a.pb.go gen/a.pb.go\n":                                                "gen/a.pb.go",
+		"diff --git b/x.pb.go b/x.pb.go\n":                                                    "b/x.pb.go",
+		"diff --git i/gen/a.pb.go w/gen/a.pb.go\n":                                            "gen/a.pb.go",
+		"diff --git a/old.pb.go b/new.pb.go\n--- a/old.pb.go\n+++ b/new.pb.go\n@@ -1 +1 @@\n": "new.pb.go",
+		"diff --git old.pb.go new.pb.go\n--- old.pb.go\n+++ new.pb.go\n@@ -1 +1 @@\n":         "new.pb.go",
+		"diff --git a/old.pb.go b/new.pb.go\nsimilarity index 100%\n":                         "new.pb.go",
+		"diff --git \"a/x\n": "",
+	}
+	for header, want := range cases {
+		if got := newDiffSection(header).path; got != want {
+			t.Errorf("%q: path %q, want %q", header, got, want)
+		}
+	}
+	diff := "diff --git a/gen/lib b/a.pb.go b/gen/lib b/a.pb.go\nindex 1111111..2222222 100644\n" +
+		"--- a/gen/lib b/a.pb.go\n+++ b/gen/lib b/a.pb.go\n@@ -1 +1 @@\n-a\n+b\n"
+	if _, elided := elideGeneratedDiff(diff, parseGeneratedAttributes("gen/** linguist-generated\n"), nil); len(elided) != 1 {
+		t.Errorf("a generated path containing ` b/` was not elided: %+v", elided)
+	}
+}
+
+// A section capFileDiffs already reduced to its header and marker has no
+// hunks to count: the stat line takes the marker's counts rather than +0 -0.
+func TestElidingACappedSectionKeepsItsCounts(t *testing.T) {
+	diff := "diff --git a/x.pb.bin b/x.pb.bin\nindex " + strings.Repeat("1", 40) + ".." + strings.Repeat("2", 40) + " 100644\n" +
+		"--- a/x.pb.bin\n+++ b/x.pb.bin\n# === capped: +811 -793, 411283 bytes of hunks for x.pb.bin elided at the 65536-byte per-file cap; " +
+		"the index line above names the blobs ===\n"
+	out, elided := elideGeneratedDiff(diff, parseGeneratedAttributes("*.bin linguist-generated\n"), nil)
+	if len(elided) != 1 || elided[0].Adds != 811 || elided[0].Dels != 793 {
+		t.Fatalf("elided = %+v; want +811 -793 from the capped marker", elided)
+	}
+	if !strings.Contains(out, "x.pb.bin (+811 -793)") {
+		t.Errorf("the stat line does not carry the marker's counts:\n%s", out)
+	}
+}

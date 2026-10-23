@@ -173,7 +173,10 @@ func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error
 		}
 		lock, held, err := holdDetachedPreGateLock(path)
 		if err != nil {
-			return err
+			// A lock that cannot be taken is this step's failure, reported
+			// with the others: the sweep goes on to the next step.
+			failed = append(failed, fmt.Errorf("locking STEP-%d's saga: %w", id, err))
+			continue
 		}
 		if held {
 			continue

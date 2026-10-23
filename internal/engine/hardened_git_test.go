@@ -322,13 +322,20 @@ func TestEngineGitRunsNoHookWithAnEmptyName(t *testing.T) {
 	}
 }
 
-// GIT_CONFIG names a config file git is asked to read; the engine's git calls
-// run in an environment the executor controls, so it is dropped.
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM name config files every git command
+// reads (GIT_CONFIG only `git config` does); the engine's git calls run in an
+// environment the executor controls, so all three are dropped, as are the
+// variables that name git's own sub-command directory and change how a
+// pathspec is read.
 func TestEngineGitEnvironmentDropsGitConfig(t *testing.T) {
-	t.Setenv("GIT_CONFIG", filepath.Join(t.TempDir(), "evil"))
-	for _, kv := range integrateGitEnv() {
-		if strings.HasPrefix(kv, "GIT_CONFIG=") {
-			t.Errorf("integrateGitEnv kept %q", kv)
+	evil := filepath.Join(t.TempDir(), "evil")
+	for _, k := range []string{"GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_LITERAL_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_ATTR_SOURCE"} {
+		t.Setenv(k, evil)
+	}
+	env := strings.Join(integrateGitEnv(), "\n")
+	for _, bad := range []string{"GIT_CONFIG=", "GIT_CONFIG_GLOBAL=", "GIT_CONFIG_SYSTEM=", "GIT_EXEC_PATH=", "GIT_TEMPLATE_DIR=", "GIT_LITERAL_PATHSPECS=", "GIT_ICASE_PATHSPECS=", "GIT_ATTR_SOURCE="} {
+		if strings.Contains(env, bad) {
+			t.Errorf("integrateGitEnv kept %s", bad)
 		}
 	}
 }

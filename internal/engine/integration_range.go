@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 )
@@ -229,7 +230,16 @@ func gitOutputLines(execRoot string, args ...string) ([]string, bool) {
 type patchIDPair struct{ id, commit string }
 
 // gitPatchIDPairs lists (zero-context patch-id, commit) for the non-merge
-// commits `git log` selects with logArgs, newest first.
+// commits `git log` selects with logArgs, newest first. It is also the ONE
+// `git log` the saga's gitZeroContextPatchIDs projects its ids from.
+//
+// The text is an identity, so everything that could make it read differently
+// on the two sides is pinned: textconv off, renames off
+// (gitPathsTouchedSince's reason), colour off, inter-hunk fusing off (a
+// config that fuses close hunks would pull a neighbour's lines back in as
+// context), and --format keeps `commit <sha>` as each entry's first line —
+// the boundary patch-id splits on — without the message body a default
+// format prints between it and the diff.
 func gitPatchIDPairs(execRoot string, logArgs ...string) ([]patchIDPair, bool) {
 	args := append([]string{"log", "--no-textconv", "--no-color", "--format=commit %H", "-p", "-U0",
 		"--inter-hunk-context=0", "--no-merges", "--no-renames"}, logArgs...)
@@ -237,26 +247,25 @@ func gitPatchIDPairs(execRoot string, logArgs ...string) ([]patchIDPair, bool) {
 	if err != nil {
 		return nil, false
 	}
-	ids, ok := gitPatchIDLines(execRoot, out)
-	if !ok {
-		return nil, false
-	}
-	return ids, true
+	return gitPatchIDLines(execRoot, out)
 }
 
 // gitPatchIDLines feeds patch text through `git patch-id --stable` and returns
-// its "<patch-id> <commit>" lines in order.
+// its "<patch-id> <commit>" lines in order. --stable makes an id independent
+// of the order files appear in, so two renderings of one change cannot
+// disagree on it. A patch with no `commit` header (a `git diff`) is reported
+// against the zero sha, and kept: the saga's gitPatchIDsOf wants its id.
 func gitPatchIDLines(execRoot string, patch []byte) ([]patchIDPair, bool) {
 	cmd := gitCommand(gitDirArgs(execRoot, "patch-id", "--stable")...)
-	cmd.Stdin = strings.NewReader(string(patch))
+	cmd.Stdin = bytes.NewReader(patch)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false
 	}
 	var pairs []patchIDPair
 	for _, line := range strings.Split(string(out), "\n") {
-		id, commit, found := strings.Cut(line, " ")
-		if found && id != "" && commit != "" {
+		id, commit, _ := strings.Cut(line, " ")
+		if id != "" {
 			pairs = append(pairs, patchIDPair{id: id, commit: strings.TrimSpace(commit)})
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	humanize "github.com/dustin/go-humanize"
 
@@ -438,9 +439,12 @@ func renderComments(comments []*model.Comment) string {
 
 	var parts []string
 	for _, c := range comments {
-		body, err := RenderMarkdown(c.Body)
+		// Before any rendering: controls in a body are never the renderer's
+		// own, and glamour passes them through.
+		raw := printableBody(c.Body)
+		body, err := RenderMarkdown(raw)
 		if err != nil {
-			body = c.Body
+			body = raw
 		}
 		// With colors off (or a markdown failure) the body comes back as
 		// written: wrap it so the terminal does not, and indent every row under
@@ -647,7 +651,7 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 			// every row is wrapped here, so the terminal never wraps one back to
 			// the header's column.
 			fmt.Fprintf(&b, "  %s  %s\n    %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt),
-				strings.ReplaceAll(wrapBody(c.Body, commentBodyWidth), "\n", "\n    "))
+				strings.ReplaceAll(wrapBody(printableBody(c.Body), commentBodyWidth), "\n", "\n    "))
 		}
 	}
 
@@ -670,6 +674,69 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	}
 
 	return b.String()
+}
+
+// printableBody drops from a comment body every character that moves the
+// cursor or rewrites the screen instead of printing: the C0 controls other
+// than newline and tab (a carriage return or backspace walks back to the
+// header's column), DEL, the C1 controls, and ANSI escape sequences (a CSI
+// `ESC [ ... final`, an OSC `ESC ] ... BEL|ST`, or ESC and the byte after it),
+// which can clear a row or place the cursor anywhere. Nothing stands in for
+// them: the indent and wrap that keep a body line below header depth hold for
+// every comment, whichever verb or import wrote it. Step comments are refused
+// at ingest already; this is the render layer's own guarantee.
+func printableBody(s string) string {
+	if strings.IndexFunc(s, isControlRune) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r != 0x1B {
+			if !isControlRune(r) {
+				b.WriteString(s[i : i+size])
+			}
+			i += size
+			continue
+		}
+		i += size
+		if i >= len(s) {
+			break
+		}
+		switch s[i] {
+		case '[': // CSI: parameter and intermediate bytes, then a final byte.
+			i++
+			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x3F {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+		case ']': // OSC: ends at BEL or ST (ESC \).
+			i++
+			for i < len(s) {
+				if s[i] == 0x07 {
+					i++
+					break
+				}
+				if s[i] == 0x1B && i+1 < len(s) && s[i+1] == '\\' {
+					i += 2
+					break
+				}
+				i++
+			}
+		default: // ESC and the one byte it governs.
+			i++
+		}
+	}
+	return b.String()
+}
+
+// isControlRune reports a C0 control other than newline and tab, DEL, or a
+// C1 control.
+func isControlRune(r rune) bool {
+	return (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7F && r <= 0x9F)
 }
 
 // indentBody gives every line of a comment body at least a two-space indent,

@@ -3,6 +3,8 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,6 +159,42 @@ func TestAnnotateIntegrationValidatesTheSHA(t *testing.T) {
 			!strings.Contains(err.Error(), "full 40-hex") {
 			t.Errorf("sha %q: err = %v, want the full-sha validation", bad, err)
 		}
+	}
+}
+
+// TestAnnotateIntegrationBuildsNoGitCommandFromAMalformedRecordedChain mirrors
+// the integrate side's check: the writer chain comes from a recorded payload,
+// and a base shaped like an option is refused before the range probe builds a
+// git argument from it, so no file lands where the option pointed and nothing
+// is recorded.
+func TestAnnotateIntegrationBuildsNoGitCommandFromAMalformedRecordedChain(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	evilDir := t.TempDir()
+	latest, err := stepLatestIssueDiff(f.conn, f.stepID)
+	testsupport.Must(t, err, "stepLatestIssueDiff: %v", err)
+	_, err = f.conn.Exec(
+		`UPDATE artifacts SET payload = json_remove(json_set(payload, '$.base', ?), '$.writer_head', '$.writer_base') WHERE id = ?`,
+		"--output="+filepath.Join(evilDir, "evil"), latest.ID)
+	testsupport.Must(t, err, "corrupt the recorded base: %v", err)
+
+	// HEAD is an ancestor of itself, so the sha and ancestry checks pass and
+	// the chain check is the one that must refuse.
+	_, err = f.e.AnnotateIntegration(f.conn, f.stepID, f.sharedHead(t), "", testBy, testConductorToken, nowMS+1)
+	if err == nil || !strings.Contains(err.Error(), "will not build a git command") {
+		t.Fatalf("error = %v, want the malformed-chain refusal", err)
+	}
+	entries, readErr := os.ReadDir(evilDir)
+	testsupport.Must(t, readErr, "ReadDir: %v", readErr)
+	if len(entries) != 0 {
+		t.Errorf("the recorded base was run as a git option: %s written", entries[0].Name())
+	}
+	after, err := stepLatestIssueDiff(f.conn, f.stepID)
+	testsupport.Must(t, err, "stepLatestIssueDiff: %v", err)
+	if after.ID != latest.ID {
+		t.Errorf("the refused annotation re-recorded the issue.diff (%d -> %d)", latest.ID, after.ID)
+	}
+	if got := f.integratedSHA(t); got != "" {
+		t.Errorf("the refused annotation wrote integrated_sha %.12s", got)
 	}
 }
 
