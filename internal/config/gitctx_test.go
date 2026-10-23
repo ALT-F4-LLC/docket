@@ -38,13 +38,19 @@ func TestGitHeadIgnoresARedirectingGitDir(t *testing.T) {
 	}
 }
 
-// GIT_CONFIG names a config file git is asked to read; this process inherits the
-// executor's environment, so the head lookup drops it.
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM name config files every git command
+// reads (GIT_CONFIG only `git config` does), and GIT_EXEC_PATH names where git
+// finds its own sub-commands; this process inherits the executor's environment,
+// so the head lookup drops them.
 func TestGitHeadCmdDropsGitConfig(t *testing.T) {
-	t.Setenv("GIT_CONFIG", filepath.Join(t.TempDir(), "evil"))
-	for _, kv := range gitHeadCmd(context.Background(), t.TempDir(), "status").Env {
-		if strings.HasPrefix(kv, "GIT_CONFIG=") {
-			t.Errorf("gitHeadCmd kept %q", kv)
+	evil := filepath.Join(t.TempDir(), "evil")
+	for _, k := range []string{"GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR"} {
+		t.Setenv(k, evil)
+	}
+	env := strings.Join(gitHeadCmd(context.Background(), t.TempDir(), "status").Env, "\n")
+	for _, bad := range []string{"GIT_CONFIG=", "GIT_CONFIG_GLOBAL=", "GIT_CONFIG_SYSTEM=", "GIT_EXEC_PATH=", "GIT_TEMPLATE_DIR="} {
+		if strings.Contains(env, bad) {
+			t.Errorf("gitHeadCmd kept %s", bad)
 		}
 	}
 }
