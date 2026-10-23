@@ -59,6 +59,19 @@ import (
 // bodies, believed they had recorded them, and the residue evaporated.
 const GapArtifactKind = "gap"
 
+// engineReservedArtifactKinds are the kinds no workflow may declare as a
+// step's emit: each is recorded by the engine alone, and a declared one would
+// read as the engine's word (stageZero refuses them).
+var engineReservedArtifactKinds = []string{IssueCommentArtifactKind, RecordedHeadArtifactKind}
+
+// engineOwnedArtifactKinds are the kinds the engine records beside a step's
+// declared emit, none of which is a held cluster's payload. The gap kind is
+// here and NOT in the reserved set on purpose: a step may declare gap as its
+// own emit (acBlockingGap reads by that rule), so it is engine-owned without
+// being refused.
+var engineOwnedArtifactKinds = append(
+	slices.Clone(engineReservedArtifactKinds), GapArtifactKind)
+
 // CompleteOptions are `step complete`'s inputs.
 type CompleteOptions struct {
 	Token string
@@ -474,11 +487,14 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	if workDir == "" {
 		workDir = step.WorkRoot
 	}
-	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, workDir)
+	execRoot := runExecRoot(conn, step.RunID)
+	recorded, haveRecorded := e.captureRecordedHeadIn(execRoot, workDir)
 	// Decided here, before the transaction opens: the pool holds one connection,
-	// so a query on it inside the transaction would wait on itself.
+	// so a query on it inside the transaction would wait on itself. The shared
+	// checkout is exempt under the same comparison the capture applies, so a
+	// symlinked spelling of it is neither bound nor refused.
 	noHeadToBind := workDir != "" && !haveRecorded && e.HeadFn != nil &&
-		stepHoldsTree(spec) && workDir != runExecRoot(conn, step.RunID)
+		stepHoldsTree(spec) && !sameDir(workDir, execRoot)
 
 	tx, err := conn.Begin()
 	if err != nil {
@@ -515,20 +531,14 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 			"step %s produces no artifact and cannot be completed with one",
 			step.Instance)
 	}
-	// The issue-comment kind is the engine's alone: an emit of that kind would
-	// read as a comment the engine posted, and none was.
-	if kind == IssueCommentArtifactKind {
+	// The engine-reserved kinds are the engine's alone: an issue comment of
+	// that kind would read as one the engine posted, and none was; a declared
+	// recorded head would let an executor plant the sha the gates later
+	// measure.
+	if slices.Contains(engineReservedArtifactKinds, kind) {
 		return validationErr(
 			"step %s declares the engine-reserved artifact kind %q",
-			step.Instance, IssueCommentArtifactKind)
-	}
-
-	// The recorded-head kind is the engine's alone: a workflow that declared it
-	// would let an executor plant the sha the gates later measure.
-	if kind == RecordedHeadArtifactKind {
-		return validationErr(
-			"step %s declares the engine-reserved artifact kind %q",
-			step.Instance, RecordedHeadArtifactKind)
+			step.Instance, kind)
 	}
 
 	if _, err := db.InsertArtifactTx(tx, db.Artifact{
@@ -937,6 +947,11 @@ func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 	// advanced records that THIS invocation moved the saga, so the completion
 	// below is one this call produced rather than one it merely observed.
 	advanced := false
+	// The gate stages of this call share one checkout of the recorded commit
+	// (gateTreeCache); it is released when this call returns by any path, and
+	// a process that dies first leaves it to the scratch sweep.
+	trees := &gateTreeCache{}
+	defer trees.release()
 	for range maxStages {
 		step, err := db.GetStep(conn, stepID)
 		if err != nil {
@@ -954,7 +969,7 @@ func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 			return nil // Complete.
 		}
 
-		moved, err := e.advanceOne(conn, step, nowMS)
+		moved, err := e.advanceOneWith(conn, step, nowMS, trees)
 		if err != nil {
 			if errors.Is(err, db.ErrSagaStageMoved) {
 				// Lost the race to a concurrent resumer. Re-read and continue:
@@ -975,6 +990,14 @@ func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 // advanceOne runs exactly one stage. It reports whether it advanced, so the
 // caller's loop terminates on a saga that has nothing left to do.
 func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, error) {
+	return e.advanceOneWith(conn, step, nowMS, nil)
+}
+
+// advanceOneWith is advanceOne with the checkout cache its gate stages share;
+// nil gives every gate stage its own checkout.
+func (e *Engine) advanceOneWith(
+	conn *sql.DB, step *db.Step, nowMS int64, trees *gateTreeCache,
+) (bool, error) {
 	defs, err := StepDefinitions(conn, step.RunID)
 	if err != nil {
 		return false, err
@@ -1029,7 +1052,7 @@ func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, err
 		if interrupted {
 			return true, e.resolveInterruptedGate(conn, step, *gate, next, nowMS)
 		}
-		return true, e.runGateStage(conn, step, *gate, next, nowMS)
+		return true, e.runGateStageWith(conn, step, *gate, next, nowMS, trees)
 	case next == db.SagaRouting:
 		return true, e.enterRouting(conn, step, nowMS)
 	default:
@@ -1096,6 +1119,16 @@ func completionGates(spec *workflow.Step) []workflow.Gate {
 // the runner, then opens a NEW transaction to record the result.
 func (e *Engine) runGateStage(
 	conn *sql.DB, step *db.Step, gate workflow.Gate, stage string, nowMS int64,
+) error {
+	return e.runGateStageWith(conn, step, gate, stage, nowMS, nil)
+}
+
+// runGateStageWith is runGateStage with the checkout cache the gate stages of
+// one resume share; nil gives this stage its own checkout, released when the
+// stage settles.
+func (e *Engine) runGateStageWith(
+	conn *sql.DB, step *db.Step, gate workflow.Gate, stage string, nowMS int64,
+	trees *gateTreeCache,
 ) error {
 	// ---- Transaction A: announce the spawn. --------------------------------
 	//
@@ -1188,7 +1221,13 @@ func (e *Engine) runGateStage(
 	measured := false
 	liveRec := recordedHead{}
 	if step.WorkRoot != "" {
-		if rec, ok := recordedHeadOf(conn, step); ok {
+		// A record that cannot be READ is not a record that is absent: the
+		// stage fails and retries on resume rather than measure the live tree.
+		rec, ok, err := recordedHeadOfErr(conn, step)
+		if err != nil {
+			return err
+		}
+		if ok {
 			switch {
 			case rec.Live:
 				// The record holds work a checkout would not reproduce, so the
@@ -1200,14 +1239,17 @@ func (e *Engine) runGateStage(
 					rows, measured = skipRow(liveHeadMovedReason(rec)), true
 				}
 			default:
-				tree := reconstructTarget(conn, step.RunID, rec.Head)
+				// One checkout serves every gate stage of this resume; the diff
+				// stage takes its own, because a gate may have written into
+				// this one.
+				tree, releaseTree := trees.checkout(conn, step.RunID, rec.Head)
+				defer releaseTree()
 				if tree.Dir == "" {
 					rows, measured = skipRow(fmt.Sprintf(
 						"the commit %.12s this step recorded cannot be checked out, so the "+
 							"gate could not measure it; not measuring the worktree in its place",
 						rec.Head)), true
 				} else {
-					defer tree.release()
 					sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
 					sc.Base = rec.Base
 				}
@@ -1974,7 +2016,13 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool)
 	// to read NOW.
 	var liveRec *recordedHead
 	if useRecorded && step.WorkRoot != "" {
-		if rec, ok := recordedHeadOf(conn, step); ok && rec.Live {
+		// A record that cannot be READ is not an absent one: the stage fails
+		// and retries on resume rather than diff the live tree.
+		rec, ok, err := recordedHeadOfErr(conn, step)
+		if err != nil {
+			return "", "", err
+		}
+		if ok && rec.Live {
 			liveRec = &rec
 			// A Live record reads the worktree, but only while it still stands at
 			// the recorded head: a different HEAD is a different commit than the
@@ -3088,7 +3136,7 @@ func commitDiff(execRoot string, revs, paths []string) (string, error) {
 		args = append(args, paths...)
 	}
 	out, err := gitCommand(args...).Output()
-	return capFileDiffs(string(out)), err
+	return capFileDiffs(execRoot, string(out)), err
 }
 
 // commitOutOfScopeNames lists the paths a commit touched that its issue's
@@ -3136,7 +3184,7 @@ func rawDiff(dir, base string, paths []string) (string, error) {
 		args = append(args, paths...)
 	}
 	out, err := gitCommand(args...).Output()
-	return capFileDiffs(string(out)), err
+	return capFileDiffs(dir, string(out)), err
 }
 
 // runExecRoot resolves the checkout `sharedCheckoutHead` should read HEAD
@@ -3593,22 +3641,23 @@ func gitPatchContainedInHeadFrom(execRoot, sha, base string) (contained, known b
 
 // gitZeroContextPatchIDs lists the zero-context patch-id of every non-merge
 // commit in a range, as `git patch-id --stable` prints them: one id per commit
-// that carries patch content, none for a commit that does not.
-//
-// The text is an identity, so everything that could make it read differently
-// on the two sides is pinned: renames off (gitPathsTouchedSince's reason),
-// colour off, inter-hunk fusing off (a config that fuses close hunks would
-// pull a neighbour's lines back in as context), and --format keeps `commit
-// <sha>` as each entry's first line — the boundary patch-id splits on —
-// without the message body a default format prints between it and the diff.
+// that carries patch content, none for a commit that does not. It is the id
+// column of gitPatchIDPairs, whose `git log` invocation pins the text (see
+// its doc for why each flag is there).
 func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) {
-	out, err := gitCommand(gitDirArgs(execRoot,
-		"log", "--no-textconv", "--no-color", "--format=commit %H", "-p", "-U0",
-		"--inter-hunk-context=0", "--no-merges", "--no-renames", rangeSpec)...).Output()
-	if err != nil {
+	pairs, ok := gitPatchIDPairs(execRoot, rangeSpec)
+	if !ok {
 		return nil, false
 	}
-	return gitPatchIDsOf(execRoot, out)
+	return patchIDsOnly(pairs), true
+}
+
+// patchIDsOnly projects the id column of patch-id pairs, in order.
+func patchIDsOnly(pairs []patchIDPair) (ids []string) {
+	for _, pair := range pairs {
+		ids = append(ids, pair.id)
+	}
+	return ids
 }
 
 // gitZeroContextRangePatchID is the patch-id of the target line's combined
@@ -3629,21 +3678,13 @@ func gitZeroContextRangePatchID(execRoot, rangeSpec string) (id string, ok bool)
 }
 
 // gitPatchIDsOf feeds patch text through `git patch-id --stable` and returns
-// the ids it prints, in order. --stable makes an id independent of the order
-// files appear in, so two renderings of one change cannot disagree on it.
+// the ids it prints, in order: the id column of gitPatchIDLines.
 func gitPatchIDsOf(execRoot string, patch []byte) (ids []string, ok bool) {
-	cmd := gitCommand(gitDirArgs(execRoot, "patch-id", "--stable")...)
-	cmd.Stdin = bytes.NewReader(patch)
-	out, err := cmd.Output()
-	if err != nil {
+	pairs, ok := gitPatchIDLines(execRoot, patch)
+	if !ok {
 		return nil, false
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if id, _, _ := strings.Cut(line, " "); id != "" {
-			ids = append(ids, id)
-		}
-	}
-	return ids, true
+	return patchIDsOnly(pairs), true
 }
 
 // treeMatchBatch caps how many pathspecs ride on one `git diff` argv, so a
@@ -4195,7 +4236,7 @@ func untrackedDiff(dir string, scope []string) string {
 		// resolve them from the same place.
 		out, _ := gitCommandHooksOff(hooksOff,
 			gitDirArgs(dir, "diff", "--full-index", "--text", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
-		b.WriteString(capFileDiffs(string(out)))
+		b.WriteString(capFileDiffs(dir, string(out)))
 	}
 	return b.String()
 }

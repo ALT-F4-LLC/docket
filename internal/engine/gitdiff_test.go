@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -525,7 +526,7 @@ func TestGitDiffCapsAFileSectionAndNamesItsBlobs(t *testing.T) {
 
 func TestCapFileDiffsLeavesASmallDiffByteIdentical(t *testing.T) {
 	in := "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-	if got := capFileDiffs(in); got != in {
+	if got := capFileDiffs("", in); got != in {
 		t.Errorf("capFileDiffs changed a small diff: %q", got)
 	}
 }
@@ -649,5 +650,54 @@ func TestGitDiffCapsAModifiedBinaryChangedFromItsTop(t *testing.T) {
 	writeFile(t, dir, "internal/b.bin", strings.Repeat("\x00binary data line\n", perFileDiffCap/8))
 	if diff := inRepo(t, dir, nil); !strings.Contains(diff, "per-file cap") {
 		t.Errorf("a modified binary was recorded whole (%d bytes)", len(diff))
+	}
+}
+
+// A modified binary whose change starts BELOW its top (a stable header longer
+// than the first few newline-delimited chunks: PDF, sqlite, a re-encoded
+// image) is still capped. Its first hunk starts deep, so the hunk text cannot
+// prove the file binary; the cap reads each side's own first bytes instead,
+// as git does, in the tracked, untracked and committed halves.
+func TestGitDiffCapsAModifiedBinaryChangedBelowItsTop(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, _ := cmd.CombinedOutput()
+		return string(out)
+	}
+	rnd := rand.New(rand.NewSource(4252))
+	old := make([]byte, 200<<10)
+	rnd.Read(old)
+	old[10] = 0 // a NUL inside git's 8000-byte window, whatever the seed yields
+	updated := append([]byte(nil), old...)
+	rnd.Read(updated[1500:])
+	writeFile(t, dir, "internal/blob.bin", string(old))
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/blob.bin", string(updated))
+	writeFile(t, dir, "internal/fresh.bin", string(updated))
+
+	raw := git("diff", "--text", "--full-index", "--", "internal/blob.bin")
+	first := regexp.MustCompile(`(?m)^@@ -(\d+)`).FindStringSubmatch(raw)
+	if first == nil || first[1] == "0" || first[1] == "1" {
+		t.Fatalf("premise: the first hunk should start below the top, got %q", first)
+	}
+
+	diff := inRepo(t, dir, nil)
+	if n := strings.Count(diff, "per-file cap"); n != 2 {
+		t.Errorf("want the modified and the untracked binary capped, got %d (%d bytes):\n%.400s", n, len(diff), diff)
+	}
+	if strings.Contains(diff, string(updated[1500:1600])) {
+		t.Error("the binary's bytes were recorded whole")
+	}
+
+	git("add", "-A")
+	git("commit", "-qm", "binary")
+	patch, err := GitCommitPatch(dir, strings.TrimSpace(git("rev-parse", "HEAD")), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if strings.Count(patch, "per-file cap") != 2 {
+		t.Errorf("the commit patch was not capped (%d bytes)", len(patch))
 	}
 }

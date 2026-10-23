@@ -168,6 +168,45 @@ func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
 	return scratchTree{Dir: dir, Cache: cache, parent: parent, lock: lock}
 }
 
+// gateTreeCache is the one checkout the completion-gate stages of a single
+// saga resume share: each stage asks for the step's recorded sha, and a
+// five-gate step otherwise materializes the same commit five times. It is
+// per-process state for the lifetime of one resumeSaga call, never persisted;
+// the tree it holds carries the scratch flock like any other, so a process
+// that dies with it leaves it to sweepStalePreGateScratch. The diff stage
+// does not share it: a gate may have written build output into the tree, and
+// GitDiff reads untracked files.
+type gateTreeCache struct {
+	runID int
+	sha   string
+	tree  scratchTree
+}
+
+// checkout hands back a checkout of sha, reusing the held one when it is of
+// the same (runID, sha) and replacing it otherwise, with the release the
+// caller owes: a no-op for a cached tree (the cache releases it), the tree's
+// own release when there is no cache.
+func (c *gateTreeCache) checkout(conn *sql.DB, runID int, sha string) (scratchTree, func()) {
+	if c == nil {
+		tree := reconstructTarget(conn, runID, sha)
+		return tree, tree.release
+	}
+	if c.tree.Dir == "" || c.runID != runID || c.sha != sha {
+		c.release()
+		c.runID, c.sha, c.tree = runID, sha, reconstructTarget(conn, runID, sha)
+	}
+	return c.tree, func() {}
+}
+
+// release removes the held checkout, if any.
+func (c *gateTreeCache) release() {
+	if c == nil {
+		return
+	}
+	c.tree.release()
+	c.tree = scratchTree{}
+}
+
 // release removes the scratch tree and its administrative record.
 //
 // BOTH HALVES, and in this order. `os.RemoveAll` alone leaves a stale entry in
