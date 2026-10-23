@@ -1,0 +1,203 @@
+package engine
+
+import (
+	"database/sql"
+	"strings"
+	"testing"
+
+	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+)
+
+// DKT-4275: `run activate --dry-run` lists bound issues that lack the security
+// label yet look security-shaped.
+
+// routingRun binds a security-labelled sibling, a DKT-4053-like issue with an
+// overlapping scope, a lexicon-only issue, and a plainly unrelated one.
+func routingRun(t *testing.T, conn *sql.DB) (run *model.Run, sibling, overlapping, lexical, unrelated int) {
+	t.Helper()
+	registerFixture(t, conn)
+	scoped := func(title, body string, labels []string, scope string) int {
+		id := createIssue(t, conn, title, body, "task", labels)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, id, scope), "declaring scope")
+		return id
+	}
+	sibling = scoped("harden the exec resolver", "path handling", []string{"security"}, `["internal/exec/**"]`)
+	overlapping = scoped("Resolve gates against the exec root", "trust boundary for gate argv", nil, `["internal/exec/resolve.go"]`)
+	lexical = scoped("Rotate the bearer credential", "the DSN carries a bearer token", nil, `["cmd/serve/**"]`)
+	unrelated = scoped("Tidy the README", "fix typos", nil, `["docs/README.md"]`)
+	return startRun(t, conn, sibling, overlapping, lexical, unrelated), sibling, overlapping, lexical, unrelated
+}
+
+func dryRunWarnings(t *testing.T, conn *sql.DB, runID int) map[string]RoutingWarning {
+	t.Helper()
+	result, err := Activate(conn, runID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	out := map[string]RoutingWarning{}
+	for _, w := range result.RoutingWarnings {
+		out[w.Issue] = w
+	}
+	return out
+}
+
+func TestDryRunFlagsAScopeOverlapWithASecurityLabelledIssue(t *testing.T) {
+	conn := mustDB(t)
+	run, sibling, overlapping, lexical, unrelated := routingRun(t, conn)
+
+	got := dryRunWarnings(t, conn, run.ID)
+
+	w, ok := got[model.FormatID(overlapping)]
+	if !ok || len(w.Overlaps) != 1 || w.Overlaps[0] != model.FormatID(sibling) {
+		t.Fatalf("overlapping issue not flagged against its security sibling: %+v", got)
+	}
+	if !strings.Contains(w.Reason, "no security label") {
+		t.Errorf("reason %q does not say the label is missing", w.Reason)
+	}
+	for id, why := range map[int]string{
+		sibling:   "carries the security label",
+		lexical:   "matches no lexicon: none is configured",
+		unrelated: "plainly unrelated",
+	} {
+		if _, flagged := got[model.FormatID(id)]; flagged {
+			t.Errorf("%s was flagged but is %s", model.FormatID(id), why)
+		}
+	}
+}
+
+func TestDryRunFlagsALexiconMatchOnlyOnceConfigured(t *testing.T) {
+	conn := mustDB(t)
+	run, _, overlapping, lexical, unrelated := routingRun(t, conn)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyRoutingSecurityLexicon, "bearer,dsn,trust-boundary"), "setting the lexicon")
+
+	got := dryRunWarnings(t, conn, run.ID)
+
+	if w := got[model.FormatID(lexical)]; len(w.Terms) != 2 || w.Terms[0] != "bearer" || w.Terms[1] != "dsn" {
+		t.Errorf("lexical issue terms = %+v; want bearer and dsn", w)
+	}
+	if w := got[model.FormatID(overlapping)]; len(w.Terms) != 1 || w.Terms[0] != "trust-boundary" {
+		t.Errorf("trust-boundary did not match 'trust boundary' in prose: %+v", w)
+	}
+	if _, flagged := got[model.FormatID(unrelated)]; flagged {
+		t.Error("the plainly unrelated issue was flagged")
+	}
+}
+
+// A lexicon term must still match when a hard wrap, a double space or a
+// zero-width character splits it in the prose.
+func TestLexiconMatchSurvivesWrapsExtraSpacesAndZeroWidthCharacters(t *testing.T) {
+	for name, text := range map[string]string{
+		"single space": "crosses the trust boundary here",
+		"line wrap":    "crosses the trust\nboundary here",
+		"double space": "crosses the trust  boundary here",
+		"tab":          "crosses the trust\tboundary here",
+		"zero width":   "crosses the trust\u200bboundary here",
+		"joined":       "crosses the trust\u200b\u200d boundary here",
+		"inside word":  "crosses the tr\u200bust boundary here",
+		"hyphen":       "crosses the Trust-Boundary here",
+		"unicode dash": "crosses the trust\u2011boundary here",
+		"en dash":      "crosses the trust\u2013boundary here",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !lexiconMatch(text, "trust-boundary") {
+				t.Errorf("term not found in %q", text)
+			}
+		})
+	}
+	for _, term := range []string{"-", "_", "---", ""} {
+		if lexiconMatch("crosses the trust boundary here", term) {
+			t.Errorf("separator-only term %q matched prose", term)
+		}
+	}
+	if lexiconMatch("crosses the trustboundary here", "trust-boundary") {
+		t.Error("a term matched prose with no separator at all")
+	}
+}
+
+func TestRoutingLintIsOffWithAnEmptyLabelAndWritesNothingOnARealActivation(t *testing.T) {
+	conn := mustDB(t)
+	run, _, _, _, _ := routingRun(t, conn)
+	testsupport.Must(t, db.SetConfig(conn, 1, db.KeyRoutingSecurityLabel, ""), "clearing the label")
+	if got := dryRunWarnings(t, conn, run.ID); len(got) != 0 {
+		t.Errorf("lint ran with an empty label: %+v", got)
+	}
+
+	conn2 := mustDB(t)
+	run2, _, _, _, _ := routingRun(t, conn2)
+	result, err := Activate(conn2, run2.ID, ActivateOptions{NowMS: nowMS})
+	testsupport.Must(t, err, "activate: %v", err)
+	if len(result.RoutingWarnings) != 0 {
+		t.Errorf("a real activation reported routing warnings: %+v", result.RoutingWarnings)
+	}
+}
+
+// An empty warning list is not a clearance: every dry run reports what the
+// lint could check, so a run with no lexicon and no labelled issue reads as
+// "checked nothing" and not as clean.
+func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
+	conn := mustDB(t)
+	run, _, _, _, _ := routingRun(t, conn)
+	result, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	lint := result.RoutingLint
+	if lint == nil {
+		t.Fatal("a dry run carried no lint report")
+	}
+	if lint.Label == "" || lint.LabelledIssues != 1 || lint.Linted != 3 || lint.CheckedNothing() {
+		t.Errorf("report = %+v; want the label, 1 labelled issue and 3 linted ones", *lint)
+	}
+
+	// No lexicon and no labelled issue: the lint had nothing to compare against.
+	conn2 := mustDB(t)
+	registerFixture(t, conn2)
+	tidy := createIssue(t, conn2, "Tidy", "typos", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn2, tidy, `["docs/README.md"]`), "declaring scope")
+	only := startRun(t, conn2, tidy)
+	result2, err := Activate(conn2, only.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	if len(result2.RoutingWarnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", result2.RoutingWarnings)
+	}
+	if result2.RoutingLint == nil || !result2.RoutingLint.CheckedNothing() {
+		t.Errorf("report = %+v; an empty lint must read as checked-nothing", result2.RoutingLint)
+	}
+
+	// A labelled issue whose scope has no literal prefix (`**/auth/**`) cannot be
+	// compared against, so it must not read as a labelled issue the lint checked.
+	conn4 := mustDB(t)
+	registerFixture(t, conn4)
+	wide := createIssue(t, conn4, "Harden auth", "body", "task", []string{"security"})
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn4, wide, `["**/auth/**"]`), "declaring scope")
+	small := createIssue(t, conn4, "Tidy", "typos", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn4, small, `["docs/README.md"]`), "declaring scope")
+	run4 := startRun(t, conn4, wide, small)
+	result4, err := Activate(conn4, run4.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	if result4.RoutingLint == nil || !result4.RoutingLint.CheckedNothing() || result4.RoutingLint.LabelledIssues != 0 {
+		t.Errorf("report = %+v; a labelled issue with an uncomparable scope must read as checked-nothing", result4.RoutingLint)
+	}
+
+	// A comparable labelled issue, but every linted issue is scoped `**`: no
+	// scope pair was comparable, so without a lexicon nothing was checked.
+	conn5 := mustDB(t)
+	registerFixture(t, conn5)
+	lab := createIssue(t, conn5, "Harden auth", "body", "task", []string{"security"})
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn5, lab, `["src/auth/**"]`), "declaring scope")
+	wideOne := createIssue(t, conn5, "Tidy", "typos", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn5, wideOne, `["**"]`), "declaring scope")
+	run5 := startRun(t, conn5, lab, wideOne)
+	result5, err := Activate(conn5, run5.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+	testsupport.Must(t, err, "dry-run activate: %v", err)
+	if result5.RoutingLint == nil || !result5.RoutingLint.CheckedNothing() {
+		t.Errorf("report = %+v; no comparable scope pair must read as checked-nothing", result5.RoutingLint)
+	}
+
+	// A real activation never runs the lint, so it carries no report.
+	conn3 := mustDB(t)
+	real, _, _, _, _ := routingRun(t, conn3)
+	result3, err := Activate(conn3, real.ID, ActivateOptions{NowMS: nowMS})
+	testsupport.Must(t, err, "activate: %v", err)
+	if result3.RoutingLint != nil {
+		t.Errorf("a real activation carried a lint report: %+v", *result3.RoutingLint)
+	}
+}

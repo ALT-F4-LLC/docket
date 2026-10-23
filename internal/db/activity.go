@@ -27,6 +27,41 @@ func RecordActivity(ex execer, issueID int, field, oldVal, newVal, changedBy str
 	return nil
 }
 
+// StatusReachedAt returns, for each of the issues, when its status was last
+// set to status, read from the activity log (second precision). An issue the
+// log holds no such change for is absent from the map.
+func StatusReachedAt(db *sql.DB, ids []int, status string) (map[int]time.Time, error) {
+	out := make(map[int]time.Time, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := []any{status}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := db.Query(fmt.Sprintf(
+		`SELECT issue_id, MAX(created_at) FROM activity_log
+		 WHERE field_changed = 'status' AND new_value = ? AND issue_id IN (%s)
+		 GROUP BY issue_id`, makePlaceholders(len(ids))), args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying status changes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var at string
+		if err := rows.Scan(&id, &at); err != nil {
+			return nil, fmt.Errorf("scanning a status change: %w", err)
+		}
+		t, err := time.Parse(time.RFC3339, at)
+		if err != nil {
+			return nil, fmt.Errorf("parsing a status change's created_at: %w", err)
+		}
+		out[id] = t
+	}
+	return out, rows.Err()
+}
+
 // CountActivity returns the total number of activity log entries for an issue,
 // ignoring any limit. Callers pair it with GetActivity to report an honest
 // pre-limit total and flag truncation.

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	osexec "os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -138,7 +137,7 @@ func doctorDisposition(checks []DoctorCheck) (clean, skipped bool) {
 // `head`'s exit code instead of the diff's — silently passing every time.
 func checkDoctorSeat(cwd string) DoctorCheck {
 	const check = "seat"
-	out, err := osexec.Command("git", gitDirArgs(cwd, "rev-parse", "--show-toplevel")...).Output()
+	out, err := gitCommand(gitDirArgs(cwd, "rev-parse", "--show-toplevel")...).Output()
 	if err != nil {
 		return DoctorCheck{Check: check, Verdict: DoctorFail,
 			Detail: fmt.Sprintf("%s is not inside a git repository", cwd)}
@@ -496,7 +495,7 @@ func isScratchShapedPath(path string) bool {
 // claim died is reclaimed by the next dispatch open or close), and doctor is
 // read-only.
 func checkDoctorStragglers(cwd string) DoctorCheck {
-	out, err := osexec.Command("git", gitDirArgs(cwd, "worktree", "list", "--porcelain")...).Output()
+	out, err := gitCommand(gitDirArgs(cwd, "worktree", "list", "--porcelain")...).Output()
 	if err != nil {
 		return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorOK,
 			Detail: "not inside a git repository; nothing to report"}

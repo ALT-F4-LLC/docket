@@ -38,13 +38,39 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 	}
 	defer tx.Rollback()
 
+	id, _, err := CreateCommentIdempotentTx(tx, comment, ScopeIssueComment, idempotencyKey)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing transaction: %w", err)
+	}
+	return id, nil
+}
+
+// CreateCommentIdempotentTx is CreateCommentIdempotent inside the caller's
+// transaction, for a writer whose comment must commit or roll back with
+// something else (a step's recorded artifact). It reports whether it inserted:
+// a key already recorded returns that comment's id and false, and inserts
+// nothing. The key is recorded in scope. It neither begins nor commits.
+func CreateCommentIdempotentTx(tx *sql.Tx, comment *model.Comment, scope, idempotencyKey string) (int, bool, error) {
+	if idempotencyKey != "" {
+		existingID, hit, err := LookupIdempotencyKeyTx(tx, scope, idempotencyKey)
+		if err != nil {
+			return 0, false, err
+		}
+		if hit {
+			return existingID, false, nil
+		}
+	}
+
 	// Verify the issue exists.
 	var exists bool
 	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)", comment.IssueID).Scan(&exists); err != nil {
-		return 0, fmt.Errorf("checking issue existence: %w", err)
+		return 0, false, fmt.Errorf("checking issue existence: %w", err)
 	}
 	if !exists {
-		return 0, ErrNotFound
+		return 0, false, ErrNotFound
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -58,29 +84,29 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 		comment.Author,
 		now,
 	).Scan(&id); err != nil {
-		return 0, fmt.Errorf("inserting comment: %w", err)
+		return 0, false, fmt.Errorf("inserting comment: %w", err)
 	}
 
 	// Touch the issue's updated_at so recently-commented issues surface in sorted lists.
 	if _, err := tx.Exec(`UPDATE issues SET updated_at = ? WHERE id = ?`, now, comment.IssueID); err != nil {
-		return 0, fmt.Errorf("updating issue timestamp: %w", err)
+		return 0, false, fmt.Errorf("updating issue timestamp: %w", err)
 	}
 
 	if err := RecordActivity(tx, comment.IssueID, "comment_added", "", comment.Body, comment.Author); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	if idempotencyKey != "" {
-		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeIssueComment, idempotencyKey, fingerprint, id); err != nil {
-			return 0, err
+		fingerprint, err := commentFingerprint(comment)
+		if err != nil {
+			return 0, false, err
+		}
+		if err := recordIdempotencyKeyFingerprintTx(tx, scope, idempotencyKey, fingerprint, id); err != nil {
+			return 0, false, err
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("committing transaction: %w", err)
-	}
-
-	return id, nil
+	return id, true, nil
 }
 
 // commentFingerprint identifies a comment request by its issue, author and

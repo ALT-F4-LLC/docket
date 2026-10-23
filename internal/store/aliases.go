@@ -131,6 +131,7 @@ const (
 	ParkClassJoinMissed        = db.ParkClassJoinMissed
 	ParkClassTriageUndecided   = db.ParkClassTriageUndecided
 	ParkClassHeld              = db.ParkClassHeld
+	ParkClassPartialWithGap    = db.ParkClassPartialWithGap
 )
 
 const (

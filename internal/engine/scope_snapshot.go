@@ -107,7 +107,7 @@ func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 				"refresh its snapshot — "+
 				"`docket run refresh-scope %s --issue %s --reason \"scope widened\"` "+
 				"(DKT-869; refuses while any of the issue's steps is claimed, "+
-				"running or gated, or while a dispatch is open). If the run's "+
+				"running or gated). If the run's "+
 				"PREMISE changed rather than one declaration, the older "+
 				"disposition still applies: take the issue out of the run — "+
 				"`docket run abandon %s --issue %s --reason \"scope widened\"` "+
@@ -157,7 +157,7 @@ func DescriptionEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 				"reach this run's remaining work, refresh its snapshot — "+
 				"`docket run refresh-body %s --issue %s --reason \"description amended\"` "+
 				"(refuses while any of the issue's steps is claimed, running "+
-				"or gated, or while a dispatch is open)",
+				"or gated)",
 			model.FormatID(issueID), model.FormatRunID(b.runID), b.liveSteps,
 			model.FormatRunID(b.runID), model.FormatID(issueID),
 		))

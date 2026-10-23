@@ -46,11 +46,11 @@ type gitContext struct {
 func GitHead(dir string) (branch, commit string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, "git", "-C", dir,
+	if out, err := gitHeadCmd(ctx, dir,
 		"rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
 		branch = strings.TrimSpace(string(out))
 	}
-	if out, err := exec.CommandContext(ctx, "git", "-C", dir,
+	if out, err := gitHeadCmd(ctx, dir,
 		"rev-parse", "HEAD").Output(); err == nil {
 		commit = strings.TrimSpace(string(out))
 	}
@@ -128,4 +128,34 @@ func isRegisteredCheckout(toplevel, gitDir, commonDir, identity string) bool {
 	}
 	resolved, err := filepath.EvalSymlinks(backLink)
 	return err == nil && resolved == filepath.Join(toplevel, ".git")
+}
+
+// gitHeadCmd builds the git command GitHead runs. The caller of `docket step
+// complete` is the executor, so this process inherits an environment the
+// executor controls: the variables that redirect git (GIT_DIR, GIT_WORK_TREE and
+// the object-store overrides) or inject configuration would change which HEAD a
+// record binds to, and the hooks and fsmonitor a repository's config names would
+// run a program. They are dropped here, as the engine's own git calls do.
+func gitHeadCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	full := append([]string{
+		"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+		"--no-replace-objects", "-C", dir,
+	}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	drop := []string{
+		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=",
+		"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_NAMESPACE=",
+		"GIT_PREFIX=", "GIT_CONFIG=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=", "GIT_CONFIG_KEY_",
+		"GIT_CONFIG_VALUE_", "GIT_REPLACE_REF_BASE=", "GIT_GRAFT_FILE=",
+	}
+next:
+	for _, kv := range os.Environ() {
+		for _, d := range drop {
+			if strings.HasPrefix(kv, d) {
+				continue next
+			}
+		}
+		cmd.Env = append(cmd.Env, kv)
+	}
+	return cmd
 }

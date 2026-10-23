@@ -213,33 +213,6 @@ func TestRefreshBodyRefusesWhileStepsStraddle(t *testing.T) {
 			assertNoBodyRefreshEvent(t, conn, runID)
 		})
 	}
-
-	// The open dispatch is the per-run half of the same rule: a manifest is a
-	// frozen offer, and a relay spawning from it would claim rows whose packets
-	// no longer say what the manifest's reader saw.
-	t.Run("open dispatch", func(t *testing.T) {
-		conn := mustDB(t)
-		runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
-		amend(t, conn, issue, "amended under an open manifest")
-		mustExec(t, conn,
-			`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
-			 VALUES (?, 'open', 0, ?, ?)`, runID, nowMS+60_000, nowMS)
-
-		_, err := refreshBody(conn, runID, issue)
-		if err == nil {
-			t.Fatal("a refresh under an open dispatch was accepted")
-		}
-		if code, ok := CodeOf(err); !ok || code != CodeConflict {
-			t.Errorf("error code = %v, want CONFLICT: %v", code, err)
-		}
-		if !strings.Contains(err.Error(), "DISPATCH-") {
-			t.Errorf("the refusal does not name the open dispatch:\n%s", err)
-		}
-		if got, _ := runIssueBody(t, conn, runID, issue); got != "body" {
-			t.Errorf("body_snapshot = %q; a refused refresh must write nothing", got)
-		}
-		assertNoBodyRefreshEvent(t, conn, runID)
-	})
 }
 
 // TestRefreshBodyRefusesWhereItCouldOnlyRewriteHistory: with every step of the

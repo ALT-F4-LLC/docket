@@ -626,7 +626,7 @@ func TestRepinRoundBaseExcludesOwnHead(t *testing.T) {
 	testsupport.Must(t, err, "GetStep(fix@1): %v", err)
 	pinned := *step
 	pinned.WorkRoot = w1
-	body, payload, err := e.computeIssueDiff(conn, &pinned)
+	body, payload, err := e.computeIssueDiff(conn, &pinned, true)
 	testsupport.Must(t, err, "computeIssueDiff(fix@1): %v", err)
 
 	var record struct {

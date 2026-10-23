@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -424,5 +425,229 @@ func TestGitDiffBaseAndScopeCombined(t *testing.T) {
 	if !strings.Contains(diff[marker:], "+outside") {
 		t.Errorf("the scope-omitted hunk is missing from the marked section "+
 			"in the based+scoped case (DKT-86)\n%s", diff)
+	}
+}
+
+// An attribute the writer commits (`-diff`, or `binary`) must not turn the
+// recorded diff into "Binary files differ": the review reads the content.
+func TestGitDiffShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T) {
+	dir := gitRepo(t)
+	writeFile(t, dir, ".gitattributes", "*.dat -diff\n*.bin binary\n")
+	writeFile(t, dir, "internal/a.dat", "old line\n")
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "attrs"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+	}
+	writeFile(t, dir, "internal/a.dat", "new line the reviewer must see\n")
+	writeFile(t, dir, "internal/fresh.bin", "untracked content the reviewer must see\n")
+
+	diff := inRepo(t, dir, nil)
+	for _, want := range []string{"new line the reviewer must see", "untracked content the reviewer must see"} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("the diff omits %q:\n%s", want, diff)
+		}
+	}
+	if strings.Contains(diff, "Binary files") {
+		t.Errorf("the diff reports a binary file the attributes only marked:\n%s", diff)
+	}
+}
+
+// The annotation's re-pin body reads a commit through diff-tree, which honors
+// the same attributes, so it must show an attribute-marked file's content too.
+func TestGitCommitPatchShowsContentOfAFileMarkedBinaryByAttributes(t *testing.T) {
+	dir := gitRepo(t)
+	writeFile(t, dir, ".gitattributes", "*.dat -diff\n")
+	writeFile(t, dir, "internal/a.dat", "old line\n")
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+		return strings.TrimSpace(string(out))
+	}
+	git("add", "-A")
+	git("commit", "-qm", "attrs")
+	writeFile(t, dir, "internal/a.dat", "new line the reviewer must see\n")
+	git("add", "-A")
+	git("commit", "-qm", "change")
+	patch, err := GitCommitPatch(dir, git("rev-parse", "HEAD"), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if !strings.Contains(patch, "new line the reviewer must see") || strings.Contains(patch, "Binary files") {
+		t.Errorf("the commit patch hides an attribute-marked file:\n%s", patch)
+	}
+}
+
+// Reading every file as text must not record a genuine binary byte for byte:
+// a section over the per-file cap keeps its header and drops the hunks, in the
+// tracked, untracked and committed halves, and a small file beside it stays whole.
+func TestGitDiffCapsAFileSectionAndNamesItsBlobs(t *testing.T) {
+	dir := gitRepo(t)
+	big := strings.Repeat("0123456789abcdef\x00\n", perFileDiffCap/8)
+	writeFile(t, dir, "internal/big.dat", "old\n")
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+		return strings.TrimSpace(string(out))
+	}
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/big.dat", big)
+	writeFile(t, dir, "internal/small.txt", "small and whole\n")
+	writeFile(t, dir, "internal/fresh.dat", big)
+
+	diff := inRepo(t, dir, nil)
+	if len(diff) > 3*perFileDiffCap/4 {
+		t.Errorf("the diff is %d bytes; a section over the cap was kept:\n%.300s", len(diff), diff)
+	}
+	for _, want := range []string{"small and whole", "per-file cap", "index "} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("the diff omits %q", want)
+		}
+	}
+	if strings.Count(diff, "per-file cap") != 2 {
+		t.Errorf("want both the tracked and the untracked file capped:\n%.600s", diff)
+	}
+
+	git("add", "-A")
+	git("commit", "-qm", "big")
+	patch, err := GitCommitPatch(dir, git("rev-parse", "HEAD"), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if len(patch) > 3*perFileDiffCap/4 || !strings.Contains(patch, "per-file cap") {
+		t.Errorf("the commit patch was not capped (%d bytes)", len(patch))
+	}
+}
+
+func TestCapFileDiffsLeavesASmallDiffByteIdentical(t *testing.T) {
+	in := "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+	if got := capFileDiffs(in); got != in {
+		t.Errorf("capFileDiffs changed a small diff: %q", got)
+	}
+}
+
+// The cap drops a file's hunks from the recorded body, so the diff facts a
+// routing threshold reads must come from the marker: a padded file cannot
+// measure as small, and its blob ids are full-length.
+func TestCappedFileStillCountsItsLinesAndNamesFullBlobs(t *testing.T) {
+	dir := gitRepo(t)
+	writeFile(t, dir, "internal/seed.txt", "x\n")
+	big := strings.Repeat("0123456789abcdef\x00\n", perFileDiffCap/8)
+	writeFile(t, dir, "internal/fresh.dat", big)
+	diff := inRepo(t, dir, nil)
+	if !strings.Contains(diff, "per-file cap") {
+		t.Fatalf("the fixture was not capped:\n%.300s", diff)
+	}
+	want := strings.Count(big, "\n")
+	if got := measureDiff(diff).Lines; got < want {
+		t.Errorf("measureDiff counts %d lines for a capped file of %d", got, want)
+	}
+	if !regexp.MustCompile(`(?m)^index 0{40}\.\.[0-9a-f]{40}`).MatchString(diff) {
+		t.Errorf("the capped header has no full-length blob ids:\n%.300s", diff)
+	}
+}
+
+// Every producer names full-length blob ids, which repository config
+// (core.abbrev) cannot shorten: tracked, untracked and committed.
+func TestRecordedDiffsNameFullBlobIDsOnEveryProducer(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+		return strings.TrimSpace(string(out))
+	}
+	git("config", "core.abbrev", "4")
+	writeFile(t, dir, "internal/a.txt", "old\n")
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/a.txt", "new\n")
+	writeFile(t, dir, "internal/fresh.txt", "fresh\n")
+	full := regexp.MustCompile(`(?m)^index [0-9a-f]{40}\.\.[0-9a-f]{40}`)
+	diff := inRepo(t, dir, nil)
+	if n := len(full.FindAllString(diff, -1)); n != 2 {
+		t.Errorf("want full blob ids on the tracked and the untracked file, got %d:\n%s", n, diff)
+	}
+	git("add", "-A")
+	git("commit", "-qm", "change")
+	patch, err := GitCommitPatch(dir, git("rev-parse", "HEAD"), nil)
+	testsupport.Must(t, err, "GitCommitPatch: %v", err)
+	if n := len(full.FindAllString(patch, -1)); n != 2 {
+		t.Errorf("want full blob ids in the commit patch, got %d:\n%s", n, patch)
+	}
+}
+
+// Only a binary section is capped: a text file's oversize diff stays whole, so
+// a writer cannot hide an edit by padding the file past the cap.
+func TestGitDiffKeepsAnOversizeTextSectionWhole(t *testing.T) {
+	dir := gitRepo(t)
+	text := strings.Repeat("a line of ordinary text\n", perFileDiffCap/8) + "the one real edit\n"
+	writeFile(t, dir, "internal/long.txt", text)
+	diff := inRepo(t, dir, nil)
+	if strings.Contains(diff, "per-file cap") || !strings.Contains(diff, "the one real edit") {
+		t.Errorf("an oversize text section was capped (%d bytes)", len(diff))
+	}
+}
+
+// Git calls a file binary only for a NUL in its first 8000 bytes. A text file
+// whose only NUL lies past that window is shown whole by git, so the cap must
+// not hide it however long it is.
+func TestGitDiffKeepsATextFileWithALateNulWhole(t *testing.T) {
+	dir := gitRepo(t)
+	text := "echo the-hidden-edit\n" + strings.Repeat("a line of ordinary text\n", perFileDiffCap/8) + "# \x00\n"
+	writeFile(t, dir, "internal/late.sh", text)
+	diff := inRepo(t, dir, nil)
+	if strings.Contains(diff, "per-file cap") || !strings.Contains(diff, "the-hidden-edit") {
+		t.Errorf("a text file git shows whole was capped (%d bytes)", len(diff))
+	}
+}
+
+// The binary probe must not read a NUL git never reached: a change that starts
+// below the top of a file, or a NUL only in a later hunk, leaves the section whole.
+func TestGitDiffKeepsATextFileWholeWhenTheNulIsBeyondGitsWindow(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+	}
+	head := "#!/bin/sh\n" + strings.Repeat("echo ordinary line of a script\n", 400)
+	writeFile(t, dir, "internal/deep.sh", head)
+	writeFile(t, dir, "internal/two.sh", head)
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	tail := "# \x00\necho the-hidden-edit\n" + strings.Repeat("filler filler filler\n", perFileDiffCap/8)
+	writeFile(t, dir, "internal/deep.sh", head+tail)
+	writeFile(t, dir, "internal/two.sh", "#!/bin/bash\n"+strings.TrimPrefix(head, "#!/bin/sh\n")+tail)
+	diff := inRepo(t, dir, nil)
+	if strings.Contains(diff, "per-file cap") || strings.Count(diff, "the-hidden-edit") != 2 {
+		t.Errorf("a text file git shows whole was capped (%d bytes)", len(diff))
+	}
+}
+
+// A modified binary whose change starts at the top is still capped.
+func TestGitDiffCapsAModifiedBinaryChangedFromItsTop(t *testing.T) {
+	dir := gitRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = dir, gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
+	}
+	writeFile(t, dir, "internal/b.bin", "\x00old\n")
+	git("add", "-A")
+	git("commit", "-qm", "base")
+	writeFile(t, dir, "internal/b.bin", strings.Repeat("\x00binary data line\n", perFileDiffCap/8))
+	if diff := inRepo(t, dir, nil); !strings.Contains(diff, "per-file cap") {
+		t.Errorf("a modified binary was recorded whole (%d bytes)", len(diff))
 	}
 }
