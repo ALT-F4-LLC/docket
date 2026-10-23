@@ -40,8 +40,9 @@ import (
 // operator names the commit the shared branch now carries for this step; the
 // engine establishes that it IS reachable from the shared checkout's HEAD
 // (IsAncestorFn — the same probe the close and the advisory ask), and only
-// then re-records the step's `issue.diff` from that commit's own patch
-// (CommitPatchFn), superseding the stale record exactly as the `--worktree`
+// then re-records the step's `issue.diff` over the integrated range
+// (IntegrationRangeFn, RangePatchFn; CommitPatchFn when no range is known),
+// superseding the stale record exactly as the `--worktree`
 // re-pin does (diff_repin.go) — so the packets bind to the resolved tree from
 // then on with no resolver change, and the close finds a recorded head that is
 // an ancestor and accepts it, marking the verdict `resolved` for the audit
@@ -54,11 +55,16 @@ import (
 // forbids trusting. `--skip-integration-check` stays for a commit with no
 // resolution to point at.
 //
-// THE SHA NAMES ONE COMMIT WHOSE PATCH IS THE STEP'S LANDED WORK. The re-
-// recorded diff is that commit's own patch against its parent (`git diff-tree`),
-// scoped the way every `issue.diff` is: a cherry-pick, resolved or not, is one
-// commit, and that is the shape this exists for. A merge commit shows no patch
-// under `diff-tree -p` and records an empty body; name the cherry-pick instead.
+// THE SHA MUST CARRY THE WRITER'S WORK (DKT-4269). Ancestry alone says the sha
+// is on the branch, so the engine also establishes that the sha's line holds a
+// patch-equivalent of every commit of the writer's chain (IntegrationRangeFn),
+// and refuses, recording nothing, when one is missing. The re-recorded diff is
+// then the combined patch of the integrated range (RangePatchFn), scoped the
+// way every `issue.diff` is, so a writer integrated as a range of picks shows
+// every file and not the last commit's. With no range probe wired, the re-record
+// is the sha's own patch against its parent (`git diff-tree`), the shape a
+// single cherry-pick has. A merge commit shows no patch under `diff-tree -p`
+// and records an empty body in that fallback; name the last pick instead.
 
 // IntegrationAnnotation is what one `--integrated-sha` annotation did.
 type IntegrationAnnotation struct {
@@ -90,7 +96,7 @@ const ResolutionIntegratedSHA = "integrated-sha"
 
 // AnnotateIntegration records a verified integration for a finished write-class
 // step: the sha's ancestry against the shared checkout's HEAD is established
-// first, then the step's `issue.diff` is re-recorded from that commit's patch
+// first, then the step's `issue.diff` is re-recorded over the integrated range
 // and `integrated_sha` (plus any further metadata) is merged onto the step's
 // record — all of it in one transaction after the git questions are answered.
 //
@@ -186,8 +192,8 @@ func (e *Engine) AnnotateIntegration(
 	if !known {
 		return nil, conflictErr(
 			"could not establish whether %.12s is reachable from the shared "+
-				"checkout's HEAD (%s); is it a commit there? Nothing was recorded",
-			sha, execRoot)
+				"checkout's HEAD (%s); is it a commit there? Nothing was recorded%s",
+			sha, execRoot, partialCloneNote(execRoot))
 	}
 	if !ancestor {
 		return nil, conflictErr(
@@ -197,26 +203,61 @@ func (e *Engine) AnnotateIntegration(
 				"branch carries", sha, execRoot)
 	}
 
+	// DKT-4269: ancestry says the sha is on the branch, not that it carries the
+	// writer's work. The engine also establishes that the sha holds a
+	// patch-equivalent of every commit of the writer's chain, and re-pins over
+	// the whole integrated range, so a multi-commit writer's reviewers see
+	// every file instead of the last commit's.
+	writerHead, writerBase := writerChain(prior.Payload, from)
+	rangeFrom := ""
+	if e.IntegrationRangeFn != nil {
+		r := e.IntegrationRangeFn(execRoot, sha, writerHead, writerBase)
+		if !r.Known {
+			return nil, conflictErr(
+				"could not establish whether %.12s carries the writer's patch "+
+					"(%.12s); nothing was recorded%s", sha, writerHead, partialCloneNote(execRoot))
+		}
+		if !r.Carried {
+			return nil, conflictErr(
+				"%.12s does not carry the writer's patch: no commit on its line is "+
+					"patch-equivalent to %s of the writer's chain (%.12s); integrate the "+
+					"missing commit(s) first (a hand-resolved pick needs the cherry-pick -x trailer naming the writer commit and exactly that commit's files), then annotate the commit that carries them",
+				sha, missingCommits(r.Missing), writerHead)
+		}
+		rangeFrom = r.From
+	}
+
 	body := ""
-	if e.CommitPatchFn != nil {
+	if e.CommitPatchFn != nil || (rangeFrom != "" && e.RangePatchFn != nil) {
 		scope, err := snapshotScope(conn, step.RunID, step.IssueID)
 		if err != nil {
 			return nil, err
 		}
-		if body, err = e.CommitPatchFn(execRoot, sha, scope); err != nil {
+		switch {
+		case rangeFrom != "" && e.RangePatchFn != nil:
+			body, err = e.RangePatchFn(execRoot, rangeFrom, sha, scope)
+		default:
+			body, err = e.CommitPatchFn(execRoot, sha, scope)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("computing the patch of %.12s for %s: %w", sha, step.Instance, err)
 		}
 	}
-	payload, err := json.Marshal(map[string]string{
-		"head": sha, "resolved_from": from,
-	})
+	payloadFields := map[string]string{"head": sha, "resolved_from": from}
+	if e.IntegrationRangeFn != nil {
+		payloadFields["writer_head"], payloadFields["writer_base"] = writerHead, writerBase
+		if rangeFrom != "" {
+			payloadFields["range_from"] = rangeFrom
+		}
+	}
+	payload, err := json.Marshal(payloadFields)
 	if err != nil {
 		return nil, fmt.Errorf("recording the integration of %s: %w", step.Instance, err)
 	}
 	repin := &IssueDiffRepin{
 		Worktree: execRoot, FromSHA: from, ToSHA: sha,
 		body: body, payload: string(payload),
-		supersededID: prior.ID,
+		supersededID: prior.ID, rangeFrom: rangeFrom,
 		// DKT-258's rule in the re-pin's terms: the same head at the same body
 		// records nothing new, and the annotation still lands below.
 		Unchanged: from == sha && prior.Body == body,
@@ -311,14 +352,18 @@ func recordIntegrationRepinTx(tx *sql.Tx, step *db.Step, repin *IssueDiffRepin, 
 	repin.Artifact = fmt.Sprintf("ARTIFACT-%d", id)
 	repin.Supersedes = artifactRef(&supersedes)
 
-	data, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"from_sha":   repin.FromSHA,
 		"to_sha":     repin.ToSHA,
 		"worktree":   repin.Worktree,
 		"artifact":   repin.Artifact,
 		"supersedes": repin.Supersedes,
 		"resolution": ResolutionIntegratedSHA,
-	})
+	}
+	if repin.rangeFrom != "" {
+		fields["range_from"] = repin.rangeFrom
+	}
+	data, err := json.Marshal(fields)
 	if err != nil {
 		return fmt.Errorf("recording the re-record of %s: %w", step.Instance, err)
 	}
@@ -327,4 +372,34 @@ func recordIntegrationRepinTx(tx *sql.Tx, step *db.Step, repin *IssueDiffRepin, 
 		Instance: step.Instance, IssueID: step.IssueID,
 		Data: string(data), AtMS: nowMS,
 	})
+}
+
+// writerChain returns the head and base of the writer's own commit chain. A
+// first annotation reads them from the record the writer made (its head is
+// `head`, its base `base`); a later one reads the `writer_head`/`writer_base`
+// the first carried forward, so re-annotating after a correction still judges
+// the writer's chain and not the previous annotation's single commit.
+func writerChain(payload, head string) (writerHead, writerBase string) {
+	var record struct {
+		Base       string `json:"base"`
+		WriterHead string `json:"writer_head"`
+		WriterBase string `json:"writer_base"`
+	}
+	if payload == "" || json.Unmarshal([]byte(payload), &record) != nil {
+		return head, ""
+	}
+	if record.WriterHead != "" {
+		return record.WriterHead, record.WriterBase
+	}
+	return head, record.Base
+}
+
+func missingCommits(missing []string) string {
+	switch len(missing) {
+	case 0:
+		return "a commit"
+	case 1:
+		return missing[0]
+	}
+	return fmt.Sprintf("%s and %d more", missing[0], len(missing)-1)
 }

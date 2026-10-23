@@ -81,6 +81,27 @@ run() {
   CMD_STDOUT=$(cat "$tmpout")
   CMD_STDERR=$(cat "$tmperr")
   rm -f "$tmpout" "$tmperr"
+  if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
+    qa_wait_detached
+  fi
+}
+
+# qa_wait_detached waits for the detached saga a `step complete` launched.
+# Since 5960cea the verb records the artifact, starts a hidden `step resume`
+# child that runs the gates, routing and the run's lifecycles, and returns at
+# once, so a check made right after it reads the saga mid-flight (`gated`,
+# stage `recorded`). The child is started before the verb returns and lives
+# until that work is done, so its exit is the signal. Bounded by
+# QA_DETACHED_WAIT_S (default 30): a child that never exits leaves the checks
+# that follow to fail on their own.
+qa_wait_detached() {
+  local i
+  for ((i = 0; i < ${QA_DETACHED_WAIT_S:-30} * 10; i++)); do
+    if ! pgrep -f -- "step resume STEP-" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
 }
 
 # Run with piped stdin.
@@ -134,6 +155,9 @@ run_env() {
   CMD_STDOUT=$(cat "$tmpout")
   CMD_STDERR=$(cat "$tmperr")
   rm -f "$tmpout" "$tmperr"
+  if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
+    qa_wait_detached
+  fi
 }
 
 # Record a check result. Usage: check SECTION ID PASS|FAIL [details]

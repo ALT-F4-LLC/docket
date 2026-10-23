@@ -208,18 +208,6 @@ func TestRefreshIssueFilesRefuses(t *testing.T) {
 			code:   CodeConflict,
 			wants:  []string{"every step", "terminal", "NEXT run"},
 		},
-		{
-			name: "a dispatch is open",
-			arrange: func(t *testing.T, conn *sql.DB, issue, runID int) {
-				detach(t, conn, issue, "docs/b.md")
-				mustExec(t, conn,
-					`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
-					 VALUES (?, 'open', 0, ?, ?)`, runID, nowMS+60_000, nowMS)
-			},
-			reason: "detached b",
-			code:   CodeConflict,
-			wants:  []string{"DISPATCH-"},
-		},
 	}
 	for _, status := range []string{db.StepClaimed, db.StepRunning, db.StepGated} {
 		cases = append(cases, refusal{

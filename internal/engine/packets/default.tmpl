@@ -8,6 +8,7 @@ target: {{.Step.Executor}}
 {{- if .Issue.Scope}}
 scope:  {{range $i, $g := .Issue.Scope}}{{if $i}}, {{end}}{{$g}}{{end}}
 {{- end}}
+round: {{.Round}}
 attempt: {{.Step.Attempt}}
 {{- if .TargetSHA}}
 target_sha: {{.TargetSHA}}

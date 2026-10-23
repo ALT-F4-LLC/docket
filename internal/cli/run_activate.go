@@ -175,6 +175,15 @@ type activateResult struct {
 	// gates carries no key rather than an empty one — the same dormancy-visible
 	// stance Registered takes.
 	GatePreflight []engine.GatePreflight `json:"gate_preflight,omitempty"`
+	// RoutingWarnings is DKT-4275's array, on a dry run only: bound issues
+	// without the security label whose scope overlaps a labelled issue's or
+	// whose text matches the configured lexicon.
+	RoutingWarnings []engine.RoutingWarning `json:"routing_warnings,omitempty"`
+	// RoutingLint is what that lint could check, present on every dry run (and
+	// absent on a real activation, which never runs it). Read an empty
+	// routing_warnings against it: it is not a clearance when the lint had no
+	// lexicon and no labelled issue to compare against.
+	RoutingLint *engine.RoutingLintReport `json:"routing_lint,omitempty"`
 	// HoldPolicy is DKT-266's disclosure: who answers a hold this run mints.
 	// NOT omitempty — `"panel": false` is the answer a reader needs, and an
 	// absent key would make "one operator decides" indistinguishable from a
@@ -291,9 +300,39 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// ignore the line.
 	for _, warning := range result.BindingWarnings {
 		w.Warn("%s %s; if it belongs to %s, add the label(s) with "+
-			"`docket issue edit %s --label LABEL` and re-activate",
+			"`docket issue label add %s LABEL` and re-activate",
 			warning.IssueID, warning.Reason, warning.DomainWorkflow,
 			warning.IssueID)
+	}
+
+	// The security-routing lint (DKT-4275), same channel: a human-mode dry run
+	// would otherwise print nothing for it. The text is the configured label and
+	// lexicon terms plus issue ids, all validated printable ASCII.
+	for _, warning := range result.RoutingWarnings {
+		w.Warn("%s %s; if it is security-sensitive, add the label with "+
+			"`docket issue label add %s %s` and re-activate",
+			warning.Issue, warning.Reason, warning.Issue, warning.Label)
+	}
+	// An empty list is not a clearance: say so when the lint had nothing to
+	// compare against, and name what it skipped when it did.
+	if lint := result.RoutingLint; lint != nil {
+		switch {
+		case lint.Label == "":
+			w.Warn("the security-routing lint is off (routing.security_label is empty)")
+		case lint.CheckedNothing():
+			w.Warn("the security-routing lint checked nothing: no lexicon terms are "+
+				"configured and no bound issue with a comparable scope carries the %s "+
+				"label; judge each "+
+				"issue's sensitivity yourself", lint.Label)
+		case lint.LabelledIssues == 0 && lint.Unscoped > 0:
+			w.Warn("the security-routing lint compared no scopes: no bound issue carries "+
+				"the %s label with a comparable scope, and %d of %d issue(s) have no "+
+				"glob with a literal prefix; only the lexicon was checked", lint.Label, lint.Unscoped, lint.Linted)
+		case lint.Unscoped > 0:
+			w.Warn("the security-routing lint could not compare the scope of %d of %d "+
+				"issue(s): none of their globs has a literal prefix",
+				lint.Unscoped, lint.Linted)
+		}
 	}
 
 	// DKT-590: a bound workflow whose recorded source could not be verified.
@@ -353,6 +392,8 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 		SourceWarnings:    result.SourceWarnings,
 		Fences:            result.Fences,
 		GatePreflight:     result.GatePreflight,
+		RoutingWarnings:   result.RoutingWarnings,
+		RoutingLint:       result.RoutingLint,
 		HoldPolicy:        result.HoldPolicy,
 		Registered:        result.Registered,
 		PinsFromConfig:    result.PinsFromConfig,

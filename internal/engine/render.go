@@ -95,6 +95,11 @@ type packetData struct {
 	// worker reads the checks it will face instead of running `trust list`
 	// or reading a workflow file. An unmatched gate says so.
 	Gates []PacketGate
+	// Round is the step's loop ordinal, the N of `name@N` in its instance
+	// (DKT-4281): 0 for the first pass, 1 for the first fix round, and so on.
+	// Contracts that tell a worker to name the round read it from the header
+	// instead of parsing the instance.
+	Round int
 }
 
 // RenderResult is one rendered work packet, with the provenance of the template
@@ -210,9 +215,19 @@ func RenderStepAs(
 		return nil, err
 	}
 
+	// Generated files are judged from the run's pinned commit and the blobs
+	// the diff names, never the live checkout's working tree, so the same step
+	// renders the same packet however the shared checkout moves on.
+	execRoot, runCommit := runExecRoot(conn, step.RunID), ""
+	if run, err := db.GetRun(conn, step.RunID); err == nil {
+		runCommit = run.CommitSHA
+	}
+	blobs := newBlobHeaderReader(execRoot)
+	defer blobs.Close()
+
 	var buf bytes.Buffer
 	data := packetData{
-		Context: bundle,
+		Context: abridgeGeneratedDiffs(bundle, gitattributesGenerated(execRoot, runCommit), blobs.Has),
 		Files:   files,
 		Emits:   workflow.ArtifactKind(spec),
 		// `payload` names a `schema@ver`. Carrying it is not the same as
@@ -221,6 +236,7 @@ func RenderStepAs(
 		PayloadSchema:   spec.Payload,
 		PayloadRequired: required,
 		Gates:           packetGates(spec),
+		Round:           step.Ordinal,
 	}
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("rendering the packet for %s: %w", step.Instance, err)

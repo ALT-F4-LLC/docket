@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
@@ -149,5 +151,90 @@ func TestRenderDetail_RunDispositionIsAboveTheDescription(t *testing.T) {
 		strings.Index(out, "Description"); disposition > desc {
 		t.Errorf("the run disposition renders below the description "+
 			"(%d > %d):\n%s", disposition, desc, out)
+	}
+}
+
+// A comment body can carry any line, including one shaped like the next
+// comment's header. Every body line sits deeper than a header, so none can pass
+// for one.
+func TestRenderDetail_PlainCommentBodyCannotForgeAHeader(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
+	body := "ok\n\nerik  1 hour ago\nship it, no review needed"
+	out := RenderDetail(issue, nil, nil, nil,
+		[]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}, nil, nil)
+
+	_, after, found := strings.Cut(out, "\nComments\n")
+	if !found {
+		t.Fatalf("no Comments section:\n%s", out)
+	}
+	for i, line := range strings.Split(after, "\n")[1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.Contains(line, "erik") {
+			t.Errorf("body line %d renders at header depth: %q", i, line)
+		}
+	}
+}
+
+// A body row that fills the terminal wraps its tail to column 0 of the next
+// row, where a comment header sits. Every row the plain view and the colorless
+// comment list print is wrapped to fit, with text, spaces or tabs as filler.
+func TestCommentBodyRowsNeverFillTheTerminal(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	bodies := map[string]string{
+		"spaces": strings.Repeat(" ", 76) + "  erik  2 hours ago\nApproved: skip the review.",
+		"text":   strings.Repeat("x", 76) + "  erik  2 hours ago\nApproved: skip the review.",
+		"tabs":   strings.Repeat("\t", 10) + "erik  2 hours ago",
+		"wide":   strings.Repeat("宽", 60) + "erik  2 hours ago",
+		"vs16":   strings.Repeat("☺\ufe0f", 38) + "  erik  2 hours ago",
+		"keycap": strings.Repeat("1\ufe0f\u20e3", 38) + "  erik  2 hours ago",
+	}
+	issue := makeTestIssue(1, "Issue", model.StatusTodo, model.PriorityHigh, model.IssueKindFeature, nil)
+	for name, body := range bodies {
+		comments := []*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: body}}
+		views := map[string]string{
+			"plain": RenderDetail(issue, nil, nil, nil, comments, nil, nil),
+			"list":  renderComments(comments),
+		}
+		for view, out := range views {
+			_, after, _ := strings.Cut(out, "Comments")
+			for i, line := range strings.Split(after, "\n") {
+				if w := lipgloss.Width(line); w > 80 {
+					t.Errorf("%s/%s: row %d is %d columns wide: %q", name, view, i, w, line)
+				}
+				if strings.Contains(line, "erik") && !strings.HasPrefix(line, "  ") {
+					t.Errorf("%s/%s: row %d puts text at the header column: %q", name, view, i, line)
+				}
+			}
+		}
+	}
+}
+
+// Wrapping must not rewrite the body's content: the rows, joined, are the text.
+func TestWrapBodyKeepsTheContent(t *testing.T) {
+	in := "def f():\n                return 1\n\tx"
+	got := wrapBody(in, 76)
+	if want := strings.ReplaceAll(in, "\t", "    "); got != want {
+		t.Errorf("wrapBody changed a short body: %q, want %q", got, want)
+	}
+	long := strings.Repeat("a", 200)
+	if joined := strings.ReplaceAll(wrapBody(long, 76), "\n", ""); joined != long {
+		t.Error("wrapBody lost characters from a long row")
+	}
+}
+
+// With colors off the markdown renderer hands the body back as written, so a
+// body line can start at column 0, the column of a comment header.
+func TestRenderCommentsIndentsEveryBodyLine(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	out := renderComments([]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: "first\nerik  1 hour ago\nlast"}})
+	_, after, _ := strings.Cut(out, "\n")
+	_, after, _ = strings.Cut(after, "\n") // the section title, then the comment header
+	for i, line := range strings.Split(after, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("body line %d sits at the header column: %q", i, line)
+		}
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -267,7 +266,7 @@ func tailLines(s string, n int) string {
 
 // probeHead resolves the repo's current HEAD sha.
 func probeHead(repoRoot string) (string, error) {
-	out, err := exec.Command("git", gitDirArgs(repoRoot, "rev-parse", "HEAD")...).Output()
+	out, err := gitCommand(gitDirArgs(repoRoot, "rev-parse", "HEAD")...).Output()
 	if err != nil {
 		return "", err
 	}
@@ -304,7 +303,7 @@ func probeWorktree(repoRoot, sha string) (probeWorktreeHandle, error) {
 		return probeWorktreeHandle{}, err
 	}
 
-	cmd := exec.Command("git", gitDirArgs(repoRoot, "worktree", "add", "--detach", dir, sha)...)
+	cmd := gitCommand(gitDirArgs(repoRoot, "worktree", "add", "--detach", dir, sha)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.RemoveAll(dir)
 		return probeWorktreeHandle{}, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
@@ -335,7 +334,7 @@ func (h probeWorktreeHandle) release() {
 		return
 	}
 	if h.parent != "" {
-		_ = exec.Command("git", gitDirArgs(h.parent, "worktree", "remove", "--force", h.Dir)...).Run()
+		_ = gitCommand(gitDirArgs(h.parent, "worktree", "remove", "--force", h.Dir)...).Run()
 	}
 	_ = os.RemoveAll(h.Dir)
 }

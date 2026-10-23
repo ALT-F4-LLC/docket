@@ -188,7 +188,113 @@ func (r *ExecRunner) spawnDir(sc StepContext) string {
 	if sc.WorkRoot != "" {
 		return sc.WorkRoot
 	}
+	return r.root(sc)
+}
+
+// root is the checkout a gate's binary is contained against and, with no
+// worktree in hand, the cwd it runs in (DKT-4250).
+//
+// A saga's gates take the RUN's recorded exec root (StepContext.PinRoot), not
+// the runner's own. The runner's root is the invoking cwd's repository, and a
+// writer records from inside its isolated worktree, so a detached gate run
+// launched there inherited THAT worktree as its root. The workflow removes the
+// worktree once the writer returns, and the gate then refused with a repo path
+// that no longer resolved. The run's exec root was recorded by the operator's
+// activation, outlives every executor worktree, and is not a tree an executor
+// controls, so it is also the safer containment boundary: a binary an
+// executor wrote into its own worktree is not "inside the repository" by the
+// invoker's reckoning but is by the run's. A caller with no run in hand
+// (PinRoot empty) keeps the runner's root exactly as before.
+func (r *ExecRunner) root(sc StepContext) string {
+	if sc.PinRoot != "" {
+		return sc.PinRoot
+	}
 	return r.RepoRoot
+}
+
+// resolveContained resolves argv[0] against the run's root and refuses a binary
+// that lives inside it, as exec.Resolve does, and ALSO refuses one inside the
+// runner's own repository or the tree the gate measures. Taking the run's root
+// moved the boundary off the invoking checkout, and a writer's worktree outside
+// the run's root is a tree the writer controls: a relatively named entry must
+// not start resolving to the executor's own file because of that. Each extra
+// root is checked against the path the primary resolution returned, the one
+// that will spawn: resolving the command again per root would look the name up
+// afresh, and a PATH entry the executor can retarget could then pass one
+// lookup outside a root and the other somewhere else.
+func (r *ExecRunner) resolveContained(argv0, entryArgv0 string, sc StepContext) (string, error) {
+	primary := r.root(sc)
+	resolved, err := exec.Resolve(argv0, primary, entryArgv0)
+	if err != nil {
+		return "", err
+	}
+	for _, extra := range []string{r.RepoRoot, sc.WorkRoot, sc.Worktree} {
+		if extra == "" || extra == primary {
+			continue
+		}
+		if err := extraRootRefusal(argv0, entryArgv0, resolved, extra); err != nil {
+			return "", err
+		}
+	}
+	return resolved, nil
+}
+
+// extraRootRefusal refuses a resolved binary that lives at or under extra. The
+// trust entry's own absolute argv[0] that normalizes to the resolved path is
+// the one exception, as in exec.Resolve. A root that does not resolve is
+// compared lexically instead of skipped, because the binary and the root are
+// normalized in separate steps and a tree that moves between them would let a
+// binary inside it pass.
+func extraRootRefusal(argv0, entryArgv0, resolved, extra string) error {
+	if filepath.IsAbs(entryArgv0) {
+		if entryAbs, err := exec.NormalizePath(entryArgv0); err == nil && entryAbs == resolved {
+			return nil
+		}
+	}
+	extraAbs, err := exec.NormalizePath(extra)
+	if err == nil {
+		if exec.Under(extraAbs, resolved) {
+			return fmt.Errorf("%w: %s resolved to %s, which is inside %s; trust the absolute path explicitly if this is intended",
+				exec.ErrRefused, exec.Render(argv0), exec.Render(resolved), exec.Render(extra))
+		}
+		return nil
+	}
+	if rootContainsLexically(extra, resolved) {
+		return fmt.Errorf("%w: %s resolved to %s, which is inside %s, a tree that did not resolve to check it against",
+			exec.ErrRefused, exec.Render(argv0), exec.Render(resolved), exec.Render(extra))
+	}
+	return nil
+}
+
+// rootContainsLexically reports whether path is at or under root by a path
+// comparison that needs no resolvable root: the root is made absolute and
+// cleaned, and its deepest existing ancestor is resolved through symlinks, so
+// a root reached through a symlinked parent still compares equal to the
+// resolved path.
+func rootContainsLexically(root, path string) bool {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return true // an unreadable root is not provably elsewhere
+	}
+	abs = filepath.Clean(abs)
+	if exec.Under(abs, path) {
+		return true
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		if _, err := filepath.EvalSymlinks(abs); err != nil {
+			return true // a root that is a link to nowhere may point at path
+		}
+	}
+	rest := ""
+	for dir := abs; ; dir = filepath.Dir(dir) {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			return exec.Under(filepath.Join(real, rest), path)
+		}
+		if filepath.Dir(dir) == dir {
+			return false
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 // runNamedGate runs a gate whose command is the trust entry's own argv.
@@ -395,7 +501,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	// the command is the entry that configures it, so there is no window in
 	// which one entry's permission is applied to another's requirements.
 	env, err := exec.BuildEnv(exec.EnvPolicy{
-		Gate: g.Name, Repo: r.RepoRoot, Network: entry.Network,
+		Gate: g.Name, Repo: r.root(sc), Network: entry.Network,
 		Issue: model.FormatID(sc.IssueID), Scope: sc.Scope,
 		// DKT-1186: the step's own reference, so the gate can ask the engine
 		// for its inputs (`docket step context $DOCKET_STEP`) instead of
@@ -417,10 +523,33 @@ func (r *ExecRunner) spawnMatchedRows(
 	if len(entry.Argv) > 0 {
 		entryArgv0 = entry.Argv[0]
 	}
-	resolved, err := exec.Resolve(match.Argv[0], r.RepoRoot, entryArgv0)
+	resolved, err := r.resolveContained(match.Argv[0], entryArgv0, sc)
 	if err != nil {
-		// A refusal means NOTHING RAN: verdict is unmatched and the process
-		// table was never touched.
+		// A refusal means NOTHING RAN, and the process table was never
+		// touched. WHY it refused decides the verdict (DKT-4251). A trust miss
+		// is `unmatched`, which is reserved to the operator. A checkout that
+		// no longer resolves is not a trust fact: the entry matched, and the
+		// containment check could not be made. That row is `skipped`, as the
+		// vanished-worktree row below is: the gate could not measure, the
+		// execution verdict stays fail so routing is unchanged, and the park
+		// is the ordinary unmeasured-gate one a machine can retry.
+		if errors.Is(err, exec.ErrEnvironment) {
+			return GateExecution{
+				Verdict: VerdictFail,
+				Results: []GateResultRow{{
+					Gate: g.Name, Ordinal: firstOrdinal, Verdict: VerdictSkipped,
+					Argv:       match.Argv,
+					Reason:     "environment: " + err.Error(),
+					TrustEntry: entry.Name,
+					StubEntry:  entry.Stub,
+					ArgvSHA256: trust.ArgvSHA256(match.Argv),
+					Prefix:     entry.Prefix,
+				}},
+			}, nil
+		}
+		// Every other refusal is about what would run (a binary inside the
+		// repository, a name resolved against the cwd, a pin that no longer
+		// holds), so it stays `unmatched` and fail-closed.
 		return GateExecution{
 			Verdict: VerdictFail,
 			Results: []GateResultRow{{
@@ -447,7 +576,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	}
 
 	// DKT-9: the gate runs in the step's worktree when one is known, mirroring
-	// the diff stage's resolution (saga.go). RepoRoot stays the containment
+	// the diff stage's resolution (saga.go). The run's root (resolveContained) stays the containment
 	// boundary for the BINARY above — where a command may live and where it
 	// runs are separate facts — but the tree it measures must be the tree the
 	// step reported, or the recorded evidence describes a HEAD the step never
@@ -494,7 +623,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	// 5m bound expired and parked correct work as unmeasured. Two gates on
 	// the SAME isolated worktree are not serialized either; that tree has one
 	// step behind it, and the trade is accepted.
-	if entry.Tree && sharesCheckout(dir, r.RepoRoot) {
+	if entry.Tree && sharesCheckout(dir, r.root(sc)) {
 		lock, lockErr := acquireTreeLock(r.LockPath, timeout)
 		if lockErr != nil {
 			// The serialization the gate requires cannot be provided, so
@@ -538,7 +667,7 @@ func (r *ExecRunner) spawnMatchedRows(
 	)
 	if pinnedSpawn {
 		runPinned := func(s exec.Spec) (exec.Result, error) {
-			return exec.RunPinned(s, entry.Argv0SHA256, r.RepoRoot, entryArgv0)
+			return exec.RunPinned(s, entry.Argv0SHA256, r.root(sc), entryArgv0)
 		}
 		attempts, refusal, err = exec.RunSpawnedAttempts(spec, entry.Flaky, exec.ExitZeroIsPass, recheckPin, runPinned)
 		// A pin refusal from RunPinned spawned nothing, so it records like the

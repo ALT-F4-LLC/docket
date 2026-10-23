@@ -203,6 +203,11 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// integration mints, most of all. Opaque KV merged onto the finished
 		// step's metadata, event-logged.
 		"annotate",
+		// `integrate`: the engine's one git write — cherry-pick a finished
+		// writer's recorded chain onto the shared branch with -x, then annotate
+		// the step with the resulting HEAD, as one operation that stops on a
+		// failed pick instead of the hand sequence that did not.
+		"integrate",
 		// `pregate`: the detached pre-gate run the
 		// engine launches as a re-execution of this binary when a step's
 		// target is first recorded. HIDDEN — it is the engine's argv, not an

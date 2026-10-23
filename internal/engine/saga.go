@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -86,6 +87,11 @@ type CompleteOptions struct {
 	// from Gaps — the caller's channel for telling the operator where the
 	// residue landed.
 	GapIssues *[]string
+	// Comments are `--comment-file` bodies (repeatable): issue comments the
+	// step's acceptance criterion requires. Each records an auxiliary artifact
+	// of IssueCommentArtifactKind and posts as a comment on the step's own issue
+	// in the same transaction (DKT-4272).
+	Comments [][]byte
 	// Pending, when non-nil, is set true when the gates and routing were
 	// handed to a detached run instead of running inside this call.
 	Pending *bool
@@ -184,6 +190,25 @@ type Engine struct {
 	// a working tree. A field for DiffFn's reason: the real one shells out to
 	// git, and a test injects a body. nil records an empty body.
 	CommitPatchFn func(execRoot, sha string, scope []string) (string, error)
+	// IntegrationRangeFn establishes, for the verified integration annotation,
+	// whether `tip` (the annotated sha) carries the writer's chain base..head by
+	// patch, and where the integrated range starts (DKT-4269). nil skips the
+	// check and records the commit's own patch, as before it existed. A field
+	// for DiffFn's reason: the real one shells out to git.
+	IntegrationRangeFn func(execRoot, tip, head, base string) IntegratedRange
+	// RangePatchFn renders the combined patch of from..to, scoped like
+	// CommitPatchFn, for the annotation's full-range re-pin. nil falls back to
+	// CommitPatchFn on the tip.
+	RangePatchFn func(execRoot, from, to string, scope []string) (string, error)
+	// IntegrationChainFn answers, read-only, whether a writer's base..head is a
+	// chain `step integrate` will pick, and lists its commits oldest first
+	// (DKT-4268). nil refuses the verb.
+	IntegrationChainFn func(execRoot, base, head string) ([]string, error)
+	// CherryPickFn is the engine's only git WRITE: it cherry-picks base..head
+	// onto the shared checkout with -x, all or nothing (integrate_git.go). nil
+	// refuses the verb, so an engine built without it, every test engine
+	// included, can never write the shared branch.
+	CherryPickFn func(execRoot, base, head string) (GitPick, error)
 	// beforeCloseCAS runs inside a close's transaction just before the
 	// manifest's CAS. Test-only: it lets a test move the row first and reach
 	// the lost-close-race refusal (DKT-2758), which one transaction on a
@@ -220,6 +245,10 @@ func NewEngine() *Engine {
 		TreeMatchFn:          gitTreeMatchesHead,
 		ObjectExistsFn:       gitCommitResolvable,
 		CommitPatchFn:        GitCommitPatch,
+		IntegrationRangeFn:   gitIntegratedRange,
+		RangePatchFn:         GitRangePatch,
+		IntegrationChainFn:   gitIntegrationChain,
+		CherryPickFn:         gitCherryPickRange,
 	}
 }
 
@@ -380,6 +409,12 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		}
 	}
 
+	// Comment artifacts take their own caps and refuse an empty body, for the
+	// same reason a gap does (DKT-4272).
+	if err := validateStepComments(step, opts.Comments); err != nil {
+		return err
+	}
+
 	// Shape validation: a payload must be a JSON array of objects, which is the
 	// shape a threshold aggregates over. For a step that declares NO `payload`
 	// this is the whole of it — no other refusal exists for such a step.
@@ -427,6 +462,24 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
+	// The commit the writer left in its worktree, read NOW while the worktree
+	// exists (DKT-4250): the gates measure a checkout of it later, when the
+	// workflow may already have removed the worktree.
+	//
+	// A re-claim that records without --worktree keeps its earlier work_root,
+	// and the gates and the diff still measure THAT tree, so it is the tree the
+	// head is read from and refused on: skipping it would let an executor record
+	// once with a worktree, re-claim, orphan the checkout and record again bare.
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir = step.WorkRoot
+	}
+	recorded, haveRecorded := e.captureRecordedHead(conn, step.RunID, workDir)
+	// Decided here, before the transaction opens: the pool holds one connection,
+	// so a query on it inside the transaction would wait on itself.
+	noHeadToBind := workDir != "" && !haveRecorded && e.HeadFn != nil &&
+		stepHoldsTree(spec) && workDir != runExecRoot(conn, step.RunID)
+
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning the saga: %w", err)
@@ -441,11 +494,41 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
+	// A tree-holding step that records from its own worktree must leave a
+	// head the gates and the diff can bind to. Without one (an unborn or
+	// orphan branch, a worktree that is no repository, a HEAD read that timed
+	// out) no record is stored, the later stages fall back to the live tree
+	// unpinned, and the executor could show one commit to the gates and another
+	// to the diff. Refusing costs one retry; the fallback costs the binding.
+	if noHeadToBind {
+		return validationErr(
+			"step %s records against %s, but no commit resolves there as HEAD; the engine "+
+				"binds the gates and the diff to a recorded commit and will not fall back "+
+				"to an unpinned live tree. Commit the work (a checked-out branch with at "+
+				"least one commit), or pass --worktree for the tree the work is in, and record again",
+			step.Instance, workDir)
+	}
+
 	kind := workflow.ArtifactKind(spec)
 	if kind == "" {
 		return validationErr(
 			"step %s produces no artifact and cannot be completed with one",
 			step.Instance)
+	}
+	// The issue-comment kind is the engine's alone: an emit of that kind would
+	// read as a comment the engine posted, and none was.
+	if kind == IssueCommentArtifactKind {
+		return validationErr(
+			"step %s declares the engine-reserved artifact kind %q",
+			step.Instance, IssueCommentArtifactKind)
+	}
+
+	// The recorded-head kind is the engine's alone: a workflow that declared it
+	// would let an executor plant the sha the gates later measure.
+	if kind == RecordedHeadArtifactKind {
+		return validationErr(
+			"step %s declares the engine-reserved artifact kind %q",
+			step.Instance, RecordedHeadArtifactKind)
 	}
 
 	if _, err := db.InsertArtifactTx(tx, db.Artifact{
@@ -454,6 +537,19 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		Payload: string(opts.Payload),
 		SHA256:  artifactSHA256(opts.Artifact, opts.Payload),
 	}, opts.NowMS); err != nil {
+		return err
+	}
+
+	// Always written for a worktree-recorded step, cleared when no head
+	// resolved: a re-claimed step records again under the same step id, and the
+	// first attempt's head must not stand for the second.
+	if opts.WorkDir != "" || haveRecorded {
+		if err := insertRecordedHeadTx(tx, step, recorded, haveRecorded, workDir, opts.NowMS); err != nil {
+			return err
+		}
+	} else if err := clearRecordedHeadIfAnyTx(tx, step, opts.NowMS); err != nil {
+		// A re-claim recorded without a worktree keeps its earlier work_root, so
+		// the first attempt's head must not stand for it.
 		return err
 	}
 
@@ -508,6 +604,22 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		}
 		if opts.GapIssues != nil {
 			*opts.GapIssues = append(*opts.GapIssues, model.FormatID(issueID))
+		}
+	}
+
+	// Issue comments record beside the declared emit and post in the SAME
+	// transaction (DKT-4272), each keyed by its artifact so none posts twice.
+	for _, comment := range opts.Comments {
+		artifactID, err := db.InsertArtifactTx(tx, db.Artifact{
+			RunID: step.RunID, StepID: step.ID, Kind: IssueCommentArtifactKind,
+			Body:   string(comment),
+			SHA256: workflow.SHA256(comment),
+		}, opts.NowMS)
+		if err != nil {
+			return err
+		}
+		if err := postStepCommentTx(tx, step, artifactID, comment); err != nil {
+			return err
 		}
 	}
 
@@ -591,6 +703,10 @@ type gapAttrs struct {
 	Labels   []string
 	Files    []string
 	Scope    []string
+	// ACBlocking is `AC-Blocking: true` (DKT-4279): the writer declares that
+	// this gap stops one of the issue's acceptance criteria from being met.
+	// It affects the step's routing, not the issue the gap materializes.
+	ACBlocking bool
 }
 
 // gapHeaderLine matches one `Key: value` line of a gap's leading header block.
@@ -666,6 +782,11 @@ func parseGapHeader(gap []byte) gapAttrs {
 			attrs.Files = parseGapList(value, attrs.Files)
 		case "scope":
 			attrs.Scope = parseGapList(value, attrs.Scope)
+		case "ac-blocking":
+			switch strings.ToLower(value) {
+			case "true", "yes":
+				attrs.ACBlocking = true
+			}
 		}
 	}
 
@@ -744,6 +865,48 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 		return false, fmt.Errorf("reading the declared emit: %w", err)
 	}
 	return strings.TrimSpace(body) == "", nil
+}
+
+// acBlockingGap reports whether a gap recorded beside the step's latest
+// candidate declares `AC-Blocking: true` in its header (DKT-4279).
+//
+// A writer that records a candidate AND a gap saying an acceptance criterion
+// cannot be met has told the pipeline its own product is known to fall short.
+// Reviews of that candidate only rediscover the blocker the writer named, so
+// the completion parks for the operator before any review row is offered. The
+// engine reads only what the gap declares about itself, as parseGapHeader does
+// for priority and kind; it never interprets what the gap says.
+//
+// A retry re-does the work under the same step id and deletes nothing, so the
+// first attempt's gaps are still there. A completion records its candidate
+// first and its gaps after it, so the gaps that speak for the completion being
+// routed are the ones newer than the latest candidate; an earlier attempt's
+// blocker must not park a retry that recorded none. A step that declares no
+// emit, or declares the gap kind itself, has no separate candidate to bound
+// the read, and every gap counts.
+func acBlockingGap(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, error) {
+	query := `SELECT body FROM artifacts WHERE step_id = ? AND kind = ?`
+	args := []any{step.ID, GapArtifactKind}
+	if kind := workflow.ArtifactKind(spec); kind != "" && kind != GapArtifactKind {
+		query += ` AND id > COALESCE(
+			(SELECT MAX(id) FROM artifacts WHERE step_id = ? AND kind = ?), 0)`
+		args = append(args, step.ID, kind)
+	}
+	rows, err := conn.Query(query, args...)
+	if err != nil {
+		return false, fmt.Errorf("reading gap artifacts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			return false, fmt.Errorf("reading a gap artifact: %w", err)
+		}
+		if parseGapHeader([]byte(body)).ACBlocking {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // ResumeSaga advances a step's saga from its recorded resume point, to
@@ -995,9 +1158,72 @@ func (e *Engine) runGateStage(
 		PinRoot: pinRoot, FilePins: filePins,
 	}
 
-	rows, err := runGate(e.Gates, spec, sc)
-	if err != nil {
-		return fmt.Errorf("running gate %s on %s: %w", gate.Name, step.Instance, err)
+	// THE ENGINE OWNS THE CHECKOUT A COMPLETION GATE MEASURES (DKT-4250). The
+	// writer's worktree is the workflow's, and it is removed once the writer
+	// returns, which can be before a detached saga reaches this stage: gates
+	// then ran against a missing tree and parked correct work. The commit the
+	// writer recorded is still in the object database, so the gate measures a
+	// detached checkout of exactly that sha, and the checkout is removed when
+	// this stage settles. If the step recorded no commit (a writer that
+	// committed nothing, whose work is only the worktree's uncommitted state)
+	// or the sha cannot be checked out, the recorded worktree stays the tree,
+	// as before: measuring a different tree is the defect, so there is no
+	// substitute.
+	//
+	// The recorded commit is authoritative for the whole saga: the diff stage
+	// (computeIssueDiff) reads the same sha, so the commit the gates measure is
+	// the commit the diff names and close integrates. Whatever the worktree
+	// does after the record cannot make gates that passed one commit stand for
+	// another. The writer's worktree stays a containment root (sc.Worktree).
+	//
+	// Once a record is honored there is NO fallback to the live worktree: a
+	// sha the object database no longer holds records a `skipped` row (the
+	// gate could not measure), never a measurement of whatever the worktree
+	// holds now.
+	sc.Worktree = step.WorkRoot
+	var rows []GateResultRow
+	skipRow := func(why string) []GateResultRow {
+		return []GateResultRow{{Gate: gate.Name, Ordinal: 0, Verdict: VerdictSkipped, Reason: why}}
+	}
+	measured := false
+	liveRec := recordedHead{}
+	if step.WorkRoot != "" {
+		if rec, ok := recordedHeadOf(conn, step); ok {
+			switch {
+			case rec.Live:
+				// The record holds work a checkout would not reproduce, so the
+				// worktree is measured; it must still stand at the recorded head
+				// before AND after the gate, or the gate did not measure the
+				// commit the diff will name.
+				liveRec = rec
+				if e.liveHeadMoved(rec, step.WorkRoot) {
+					rows, measured = skipRow(liveHeadMovedReason(rec)), true
+				}
+			default:
+				tree := reconstructTarget(conn, step.RunID, rec.Head)
+				if tree.Dir == "" {
+					rows, measured = skipRow(fmt.Sprintf(
+						"the commit %.12s this step recorded cannot be checked out, so the "+
+							"gate could not measure it; not measuring the worktree in its place",
+						rec.Head)), true
+				} else {
+					defer tree.release()
+					sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
+					sc.Base = rec.Base
+				}
+			}
+		}
+	}
+
+	if !measured {
+		var err error
+		rows, err = runGate(e.Gates, spec, sc)
+		if err != nil {
+			return fmt.Errorf("running gate %s on %s: %w", gate.Name, step.Instance, err)
+		}
+		if liveRec.Head != "" && e.liveHeadMoved(liveRec, step.WorkRoot) {
+			rows = skipRow(liveHeadMovedReason(liveRec))
+		}
 	}
 
 	// ---- Transaction B: record the result and advance. ---------------------
@@ -1073,6 +1299,9 @@ func (e *Engine) runRoutingStage(
 		//     `any(diff.empty == false)` false on an `--as retry` and skipped
 		//     review over the change the ledger still held.
 		diffFacts *DiffFacts
+		// diffRefused is the reason the diff stage declined to read the step's
+		// recorded commit; non-empty parks the step (see the call below).
+		diffRefused string
 	)
 	if isExecutorStep(step) && stepHoldsTree(spec) {
 		// Since DKT-75 the diff is recomputed at the completion of every
@@ -1091,11 +1320,21 @@ func (e *Engine) runRoutingStage(
 		// sibling. Action/human/vote steps are still excluded: they change no
 		// tree either.
 		var err error
-		diffBody, diffPayload, err = e.computeIssueDiff(conn, step)
+		diffBody, diffPayload, err = e.computeIssueDiff(conn, step, true)
+		// A refusal to read the recorded commit PARKS the step for the operator
+		// instead of failing the stage. An error here leaves the step at the
+		// routing stage, which `docket next` re-runs on every call and which
+		// `step resolve` refuses (it takes a waiting-human step): one refused
+		// diff wedged the whole run. The park below is that disposition.
+		var refusal *diffRefusalError
+		if errors.As(err, &refusal) {
+			diffRefused, err = refusal.Error(), nil
+			diffBody, diffPayload = "", ""
+		}
 		if err != nil {
 			return err
 		}
-		wantsDiff = true
+		wantsDiff = diffRefused == ""
 
 		// An absent round record is `{0, 0, true}` rather than nil, so
 		// `any(diff.empty == false)` is DECIDED false for a step that recorded
@@ -1261,11 +1500,17 @@ func (e *Engine) runRoutingStage(
 	// pipeline over an empty change — a full judge fanout independently
 	// verifying "nothing to judge" was the measured cost. `waiting-human`
 	// stops the lineage at its source; `step resolve` is the disposition.
-	gapOnly := false
+	gapOnly, blockingGap := false, false
 	if isExecutorStep(step) {
 		gapOnly, err = gapOnlyCompletion(conn, step, spec)
 		if err != nil {
 			return err
+		}
+		if !gapOnly {
+			blockingGap, err = acBlockingGap(conn, step, spec)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1310,6 +1555,29 @@ func (e *Engine) runRoutingStage(
 		routing = workflow.OnFailWaitingHuman
 		reason = "the step recorded only gap artifacts; operator disposes"
 		class = db.ParkClassGapOnly
+	case blockingGap:
+		// DKT-4279: the step recorded a candidate AND a gap it marked
+		// `AC-Blocking`. Its own record says an acceptance criterion cannot be
+		// met, so the reviews that would follow only rediscover the blocker
+		// (three reviews and a synthesis spent ~4.65M cache-read tokens doing so
+		// on RUN-158). Like the gap-only case above, it is decided before the
+		// gate verdict: a fix loop cannot implement what the writer says the
+		// scope forbids. The operator disposes: accept the candidate for review
+		// anyway, amend the scope and retry, or retire the work.
+		routing = workflow.OnFailWaitingHuman
+		reason = "the step recorded a candidate and a gap it marked AC-Blocking; " +
+			"its own record says an acceptance criterion cannot be met, so no " +
+			"review is offered until the operator disposes"
+		class = db.ParkClassPartialWithGap
+	case diffRefused != "":
+		// The commit the gates measured cannot be read back for the diff, so no
+		// diff is recorded and nothing downstream would review the change. Like
+		// a gate that measured nothing, this is an environment condition an
+		// operator can act on (restore the object, re-pin the worktree), not a
+		// judgment of the work, so it must not route on `on_fail`.
+		routing = workflow.OnFailWaitingHuman
+		reason = fmt.Sprintf("%s (the gates' verdict was %q, so a failing or skipped gate is not cleared by this park); operator disposes", diffRefused, verdict)
+		class = db.ParkClassGateSkipped
 	case len(unmeasured) > 0:
 		// A GATE THAT MEASURED NOTHING PARKS (DKT-254). It is decided before
 		// the fail case because `skipped` is not-pass and would otherwise be
@@ -1650,6 +1918,14 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 	return tx.Commit()
 }
 
+// diffRefusalError is computeIssueDiff declining to read a recorded commit: the
+// facts say the diff cannot be bound to what the gates measured. It is a typed
+// error so the routing stage parks the step for an operator rather than leaving
+// the stage failed (see the call in runRoutingStage).
+type diffRefusalError struct{ msg string }
+
+func (e *diffRefusalError) Error() string { return e.msg }
+
 // computeIssueDiff is the diff half of the routing stage: the `issue.diff`
 // body and round-record payload for step's tree as it stands NOW, computed
 // exactly as a completion records it. It runs a git subprocess, so it belongs
@@ -1671,7 +1947,7 @@ func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
 //
 // With no DiffFn wired there is nothing to measure: both halves come back
 // empty and the caller records that as the truthful first answer.
-func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload string, err error) {
+func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool) (body, payload string, err error) {
 	scope, err := snapshotScope(conn, step.RunID, step.IssueID)
 	if err != nil {
 		return "", "", err
@@ -1688,6 +1964,38 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	// for the shared checkout, the run's PINNED starting commit — see
 	// runDiffBase's doc for why.
 	base, liveBase := runDiffBase(conn, step.RunID, step.ID, dir, execRoot)
+	// A step that recorded its commit (DKT-4250) is diffed at THAT commit, in a
+	// checkout of it against the fork point recorded with it: the commit the
+	// gates measured is the commit this diff names and close integrates, and a
+	// worktree that moved on or vanished since the record changes neither. If
+	// the sha cannot be checked out the stage REFUSES rather than read the
+	// live worktree, which may hold a different commit than the one the gates
+	// measured. An operator re-pin passes useRecorded = false: it names a tree
+	// to read NOW.
+	var liveRec *recordedHead
+	if useRecorded && step.WorkRoot != "" {
+		if rec, ok := recordedHeadOf(conn, step); ok && rec.Live {
+			liveRec = &rec
+			// A Live record reads the worktree, but only while it still stands at
+			// the recorded head: a different HEAD is a different commit than the
+			// gates measured.
+			if e.liveHeadMoved(rec, step.WorkRoot) {
+				return "", "", &diffRefusalError{fmt.Sprintf(
+					"the diff for %s was not recorded: the worktree no longer stands at "+
+						"the commit %.12s it recorded", step.Instance, rec.Head)}
+			}
+		} else if ok {
+			tree := reconstructTarget(conn, step.RunID, rec.Head)
+			if tree.Dir == "" {
+				return "", "", &diffRefusalError{fmt.Sprintf(
+					"the diff for %s was not recorded: the commit %.12s it recorded "+
+						"cannot be checked out, and the worktree is not read in its place",
+					step.Instance, rec.Head)}
+			}
+			defer tree.release()
+			dir, base, liveBase = tree.Dir, rec.Base, false
+		}
+	}
 	body, err = e.DiffFn(dir, base, scope)
 	if err != nil {
 		return "", "", fmt.Errorf("computing the diff for %s: %w", step.Instance, err)
@@ -1709,6 +2017,17 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step) (body, payload st
 	// DKT-106: record the tree's HEAD beside the diff and, on a loop
 	// re-entry, append this ROUND's delta to the cumulative body.
 	payload = e.appendRoundDelta(conn, step, dir, execRoot, base, liveBase, &body)
+	// The HEAD check above ran BEFORE the diff, and the hand-back head just read
+	// is what close integrates: a live worktree that moved while the diff ran
+	// would hand back a commit the gates never measured. The worktree must still
+	// stand at the recorded head, and a hand-back head the payload names (it
+	// names none for uncommitted work) must be that head.
+	if liveRec != nil && (e.liveHeadMoved(*liveRec, step.WorkRoot) ||
+		(handBackHead(payload) != "" && handBackHead(payload) != liveRec.Head)) {
+		return "", "", &diffRefusalError{fmt.Sprintf(
+			"the diff for %s was not recorded: the worktree moved off the commit %.12s "+
+				"it recorded while the diff was computed", step.Instance, liveRec.Head)}
+	}
 	return body, payload, nil
 }
 
@@ -2714,11 +3033,25 @@ func outOfScopeDiff(dir, base string, outside []string) string {
 // untracked half. A merge commit renders no patch under `diff-tree -p` and
 // records an empty body — the annotation's contract names one ordinary commit.
 func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
-	body, err := commitDiff(execRoot, sha, scope)
+	return gitRevPatch(execRoot, []string{"--root", sha}, scope)
+}
+
+// GitRangePatch renders the combined patch of from..to, tree against tree, the
+// way GitCommitPatch renders one commit: scoped, with the same out-of-scope
+// disclosure. It is RangePatchFn's real implementation (the whole integrated
+// range of a multi-commit writer).
+func GitRangePatch(execRoot, from, to string, scope []string) (string, error) {
+	return gitRevPatch(execRoot, []string{from, to}, scope)
+}
+
+// gitRevPatch is the shared body of GitCommitPatch and GitRangePatch: revs are
+// the `git diff-tree` revision arguments.
+func gitRevPatch(execRoot string, revs, scope []string) (string, error) {
+	body, err := commitDiff(execRoot, revs, scope)
 	if err != nil {
 		return "", err
 	}
-	outside := commitOutOfScopeNames(execRoot, sha, scope)
+	outside := commitOutOfScopeNames(execRoot, revs, scope)
 	if len(outside) == 0 {
 		return body, nil
 	}
@@ -2733,7 +3066,7 @@ func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
 		outOfScopeMarker + " their hunks follow (DKT-86) ===\n" +
 			"# A file the change touched must not hide behind a narrow scope —\n" +
 			"# read them as evidence, not as this issue's own claim.\n")
-	extra, err := commitDiff(execRoot, sha, outside)
+	extra, err := commitDiff(execRoot, revs, outside)
 	if err != nil {
 		extra = ""
 	}
@@ -2747,32 +3080,31 @@ func GitCommitPatch(execRoot, sha string, scope []string) (string, error) {
 
 // commitDiff is one pathspec'd `git diff-tree -p` of a commit against its
 // parent. An empty pathspec renders the whole commit, for rawDiff's reason.
-func commitDiff(execRoot, sha string, paths []string) (string, error) {
-	args := gitDirArgs(execRoot, "diff-tree", "-p", "--no-commit-id", "--root", sha, "--")
+func commitDiff(execRoot string, revs, paths []string) (string, error) {
+	args := gitDirArgs(execRoot, append(append([]string{"diff-tree", "-p", "--full-index", "--text", "--no-textconv", "--no-commit-id"}, revs...), "--")...)
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
 		args = append(args, paths...)
 	}
-	out, err := exec.Command("git", args...).Output()
-	return string(out), err
+	out, err := gitCommand(args...).Output()
+	return capFileDiffs(string(out)), err
 }
 
 // commitOutOfScopeNames lists the paths a commit touched that its issue's
 // scope excludes — outOfScopeNames's question asked of a commit rather than a
 // working tree. Failures name nothing: the disclosure is best-effort
 // enrichment of a record, never a reason to refuse one.
-func commitOutOfScopeNames(execRoot, sha string, scope []string) []string {
+func commitOutOfScopeNames(execRoot string, revs, scope []string) []string {
 	if len(scope) == 0 {
 		return nil
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"diff-tree", "--name-only", "--no-commit-id", "-r", "--root", sha)...).Output()
+	names := append([]string{"diff-tree", "--name-only", "--no-commit-id", "-r"}, revs...)
+	out, err := gitCommand(gitDirArgs(execRoot, names...)...).Output()
 	if err != nil {
 		return nil
 	}
-	in, err := exec.Command("git", append(gitDirArgs(execRoot,
-		"diff-tree", "--name-only", "--no-commit-id", "-r", "--root", sha, "--"), scope...)...).Output()
+	in, err := gitCommand(append(gitDirArgs(execRoot, append(names, "--")...), scope...)...).Output()
 	if err != nil {
 		return nil
 	}
@@ -2797,14 +3129,14 @@ func commitOutOfScopeNames(execRoot, sha string, scope []string) []string {
 // whole tree: an issue that declared nothing has not narrowed what it may
 // touch, so neither does the diff. Each caller keeps its own error policy.
 func rawDiff(dir, base string, paths []string) (string, error) {
-	args := gitDirArgs(dir, "diff", base, "--")
+	args := gitDirArgs(dir, "diff", "--full-index", "--text", "--no-ext-diff", "--no-textconv", base, "--")
 	if len(paths) == 0 {
 		args = args[:len(args)-1]
 	} else {
 		args = append(args, paths...)
 	}
-	out, err := exec.Command("git", args...).Output()
-	return string(out), err
+	out, err := gitCommand(args...).Output()
+	return capFileDiffs(string(out)), err
 }
 
 // runExecRoot resolves the checkout `sharedCheckoutHead` should read HEAD
@@ -3035,7 +3367,7 @@ func roundDeltaBase(dir, execRoot, prev string, unreviewedFollows bool, unreview
 // mergeBase resolves the best common ancestor of two revisions in dir's
 // history, "" when git cannot answer.
 func mergeBase(dir, a, b string) string {
-	out, err := exec.Command("git", gitDirArgs(dir, "merge-base", a, b)...).Output()
+	out, err := gitCommand(gitDirArgs(dir, "merge-base", a, b)...).Output()
 	if err != nil {
 		return ""
 	}
@@ -3046,7 +3378,7 @@ func mergeBase(dir, a, b string) string {
 // Any failure — unresolvable commit, not a repository — reads as "no", which
 // sends every caller to its conservative default.
 func isAncestor(dir, anc, desc string) bool {
-	return exec.Command("git",
+	return gitCommand(
 		gitDirArgs(dir, "merge-base", "--is-ancestor", anc, desc)...).Run() == nil
 }
 
@@ -3061,7 +3393,7 @@ func gitAncestorOfHead(execRoot, sha string) (ancestor, known bool) {
 	if execRoot == "" || sha == "" {
 		return false, false
 	}
-	err := exec.Command("git",
+	err := gitCommand(
 		gitDirArgs(execRoot, "merge-base", "--is-ancestor", sha, "HEAD")...).Run()
 	if err == nil {
 		return true, true
@@ -3096,11 +3428,11 @@ func gitCommitResolvable(execRoot, sha string) (exists, known bool) {
 	if execRoot == "" || sha == "" {
 		return false, false
 	}
-	if exec.Command("git",
+	if gitCommand(
 		gitDirArgs(execRoot, "cat-file", "-e", sha+"^{commit}")...).Run() == nil {
 		return true, true
 	}
-	err := exec.Command("git",
+	err := gitCommand(
 		gitDirArgs(execRoot, "cat-file", "-e", sha)...).Run()
 	if err == nil {
 		// Present but not peelable to a commit: definitively unresolvable as
@@ -3182,7 +3514,7 @@ func gitStepPatchContainedInHead(execRoot, sha, base string) (contained, known b
 	if !known || !contained {
 		return contained, known, nil
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot, "cherry", "HEAD", base)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, "cherry", "HEAD", base)...).Output()
 	if err != nil {
 		return contained, known, nil
 	}
@@ -3206,7 +3538,7 @@ func gitPatchContainedInHeadFrom(execRoot, sha, base string) (contained, known b
 		cherry = append(cherry, base)
 		wantRange, squashRange = base+".."+sha, base+".."+sha
 	}
-	out, err := exec.Command("git", gitDirArgs(execRoot, cherry...)...).Output()
+	out, err := gitCommand(gitDirArgs(execRoot, cherry...)...).Output()
 	if err != nil {
 		return false, false
 	}
@@ -3270,8 +3602,8 @@ func gitPatchContainedInHeadFrom(execRoot, sha, base string) (contained, known b
 // <sha>` as each entry's first line — the boundary patch-id splits on —
 // without the message body a default format prints between it and the diff.
 func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"log", "--no-color", "--format=commit %H", "-p", "-U0",
+	out, err := gitCommand(gitDirArgs(execRoot,
+		"log", "--no-textconv", "--no-color", "--format=commit %H", "-p", "-U0",
 		"--inter-hunk-context=0", "--no-merges", "--no-renames", rangeSpec)...).Output()
 	if err != nil {
 		return nil, false
@@ -3283,8 +3615,8 @@ func gitZeroContextPatchIDs(execRoot, rangeSpec string) (ids []string, ok bool) 
 // diff — `git diff HEAD...<sha>`, everything since the merge base as one
 // patch — which is what a squashed integration commits.
 func gitZeroContextRangePatchID(execRoot, rangeSpec string) (id string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"diff", "--no-color", "--no-ext-diff", "--no-renames", "-U0",
+	out, err := gitCommand(gitDirArgs(execRoot,
+		"diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0",
 		"--inter-hunk-context=0", rangeSpec)...).Output()
 	if err != nil {
 		return "", false
@@ -3300,7 +3632,7 @@ func gitZeroContextRangePatchID(execRoot, rangeSpec string) (id string, ok bool)
 // the ids it prints, in order. --stable makes an id independent of the order
 // files appear in, so two renderings of one change cannot disagree on it.
 func gitPatchIDsOf(execRoot string, patch []byte) (ids []string, ok bool) {
-	cmd := exec.Command("git", gitDirArgs(execRoot, "patch-id", "--stable")...)
+	cmd := gitCommand(gitDirArgs(execRoot, "patch-id", "--stable")...)
 	cmd.Stdin = bytes.NewReader(patch)
 	out, err := cmd.Output()
 	if err != nil {
@@ -3393,9 +3725,9 @@ func gitTouchedPathsMatchHead(execRoot, sha string) (match, known bool) {
 		// would otherwise read as pathspec magic, and these paths came from
 		// git itself — they are names, not patterns.
 		args := gitDirArgs(execRoot, "--literal-pathspecs",
-			"diff", "--quiet", sha, "HEAD", "--")
+			"diff", "--no-ext-diff", "--no-textconv", "--quiet", sha, "HEAD", "--")
 		args = append(args, paths[start:end]...)
-		err := exec.Command("git", args...).Run()
+		err := gitCommand(args...).Run()
 		if err == nil {
 			continue // this batch is identical on both sides
 		}
@@ -3434,7 +3766,7 @@ func gitWholeTreeMatchesHead(execRoot, sha string) (match, known bool) {
 // revision — git absent, not a repository, a GC'd or never-fetched object, a
 // repository with no commits — reports "not answered" rather than "".
 func gitTreeHash(execRoot, rev string) (tree string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
+	out, err := gitCommand(gitDirArgs(execRoot,
 		"rev-parse", "--verify", "--quiet", rev+"^{tree}")...).Output()
 	if err != nil {
 		return "", false
@@ -3447,7 +3779,7 @@ func gitTreeHash(execRoot, rev string) (tree string, ok bool) {
 // shared. Unrelated histories and unresolvable objects report "not answered",
 // which is TreeMatchFn's silent case.
 func gitMergeBaseWithHead(execRoot, sha string) (base string, ok bool) {
-	out, err := exec.Command("git",
+	out, err := gitCommand(
 		gitDirArgs(execRoot, "merge-base", sha, "HEAD")...).Output()
 	if err != nil {
 		return "", false
@@ -3463,8 +3795,8 @@ func gitMergeBaseWithHead(execRoot, sha string) (base string, ok bool) {
 // pair from the comparison, and the delete/add reading names both sides —
 // which is exactly the pair the tree check has to look at.
 func gitPathsTouchedSince(execRoot, base, sha string) (paths []string, ok bool) {
-	out, err := exec.Command("git", gitDirArgs(execRoot,
-		"--literal-pathspecs", "diff", "--no-renames", "--name-only", "-z",
+	out, err := gitCommand(gitDirArgs(execRoot,
+		"--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
 		base, sha)...).Output()
 	if err != nil {
 		return nil, false
@@ -3839,7 +4171,9 @@ func untrackedDiff(dir string, scope []string) string {
 		args = append(args, scope...)
 	}
 
-	listed, err := exec.Command("git", args...).Output()
+	// One hook listing serves every per-file diff below.
+	hooksOff := configHookFlags(dir)
+	listed, err := gitCommandHooksOff(hooksOff, args...).Output()
 	if err != nil {
 		return ""
 	}
@@ -3859,9 +4193,9 @@ func untrackedDiff(dir string, scope []string) string {
 		// literal is correct here rather than os.DevNull. The `-C` matters
 		// here too: ls-files listed paths RELATIVE TO dir, so the diff must
 		// resolve them from the same place.
-		out, _ := exec.Command("git",
-			gitDirArgs(dir, "diff", "--no-index", "--", "/dev/null", path)...).Output()
-		b.Write(out)
+		out, _ := gitCommandHooksOff(hooksOff,
+			gitDirArgs(dir, "diff", "--full-index", "--text", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", path)...).Output()
+		b.WriteString(capFileDiffs(string(out)))
 	}
 	return b.String()
 }
@@ -3881,7 +4215,7 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 	}
 
 	list := func(args []string) map[string]bool {
-		out, err := exec.Command("git", args...).Output()
+		out, err := gitCommand(args...).Output()
 		if err != nil {
 			return nil
 		}
@@ -3894,7 +4228,7 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 		return names
 	}
 
-	all := list(gitDirArgs(dir, "diff", "--name-only", base, "--"))
+	all := list(gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"))
 	for path := range list(gitDirArgs(dir, "ls-files", "--others", "--exclude-standard")) {
 		all[path] = true
 	}
@@ -3903,7 +4237,7 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 	}
 
 	inScope := list(append(
-		gitDirArgs(dir, "diff", "--name-only", base, "--"), scope...))
+		gitDirArgs(dir, "diff", "--no-ext-diff", "--no-textconv", "--name-only", base, "--"), scope...))
 	for path := range list(append(
 		gitDirArgs(dir, "ls-files", "--others", "--exclude-standard", "--"), scope...)) {
 		inScope[path] = true
@@ -4037,6 +4371,13 @@ func measureDiff(body string) DiffFacts {
 		case strings.HasPrefix(line, "diff --git "):
 			files[line] = struct{}{}
 			inHeader = true
+		case cappedMarker.MatchString(line):
+			// A capped section's lines were dropped from the body; the marker
+			// carries their count, so a padded file cannot measure as small.
+			m := cappedMarker.FindStringSubmatch(line)
+			adds, _ := strconv.Atoi(m[1])
+			dels, _ := strconv.Atoi(m[2])
+			facts.Lines += adds + dels
 		case strings.HasPrefix(line, "@@"):
 			inHeader = false
 		case inHeader && (strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ")):

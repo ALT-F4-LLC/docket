@@ -270,12 +270,16 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// deferral, the coordination facts only the conductor observes. A
 		// budget and a chain deferral are one outcome with two causes.
 		"vote-reseated", "step-deferred",
+
+		// The retry-eligible park (DKT-4257) — ONE: the scheduler noticing a
+		// gap-only park's prerequisites closed, which no operator verb causes.
+		"park-retry-eligible",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the enumeration names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 59 {
+	if len(eventKinds) != 60 {
 		t.Errorf("eventKinds has %d entries; the original set plus stage 4, "+
 			"stage 5, stage 6, stage 7, "+
 			"DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -288,8 +292,8 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
 			"DKT-2766's config-changed kind, DKT-2758's "+
 			"dispatch-close-refused kind, DKT-2776's claim-refused kind, the "+
-			"step-reminted kind, and DKT-2759's two conductor-fact kinds "+
-			"enumerate 59 (see DKT-21)",
+			"step-reminted kind, DKT-2759's two conductor-fact kinds, and "+
+			"DKT-4257's retry-eligible kind enumerate 60 (see DKT-21)",
 			len(eventKinds))
 	}
 }

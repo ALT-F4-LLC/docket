@@ -1205,3 +1205,48 @@ func TestLoopHoldReasonNamesTheOpenBody(t *testing.T) {
 			"to ignore", answer.LoopHeldReason)
 	}
 }
+
+// DKT-4249: a re-review row claimed BY NAME while its round's fix body is still
+// open is refused, as the offer already withholds it. Claimed at the pre-fix
+// tree it judged the wrong tree and parked a false loop-stalled.
+func TestAClaimOfAReReviewRowWaitsForItsRoundsFixBody(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "round claim", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+	driveIssueToLoopReentry(t, conn, e, issue)
+
+	reviewID := stepIDIn(t, conn, issue, "review@1#0")
+	_, err = ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS})
+	if err == nil {
+		t.Fatal("review@1 was claimed while fix@1 was still open")
+	}
+	if !strings.Contains(err.Error(), string(CondPredecessors)) ||
+		!strings.Contains(err.Error(), "fix@1 (pending)") {
+		t.Errorf("refusal = %q; want the after-predecessor condition naming fix@1 (pending)", err)
+	}
+
+	// Claimed, then gated: the body is open either way.
+	fixID := stepIDIn(t, conn, issue, "fix@1")
+	claim, err := ClaimStep(conn, fixID, ClaimOptions{Owner: "worker", NowMS: nowMS})
+	testsupport.Must(t, err, "claim fix@1: %v", err)
+	if _, err := ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS}); err == nil {
+		t.Error("review@1 was claimed while fix@1 was claimed")
+	}
+
+	execSQL(t, conn, `UPDATE steps SET status = 'gated' WHERE id = ?`, fixID)
+	if _, err := ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS}); err == nil {
+		t.Error("review@1 was claimed while fix@1 was gated")
+	}
+	execSQL(t, conn, `UPDATE steps SET status = 'claimed' WHERE id = ?`, fixID)
+
+	// Once the body records, the row claims.
+	testsupport.Must(t, e.CompleteStep(conn, fixID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("the fix summary"), NowMS: nowMS,
+	}), "complete fix@1")
+	_, err = ClaimStep(conn, reviewID, ClaimOptions{Owner: "judge", NowMS: nowMS})
+	testsupport.Must(t, err, "review@1 after the fix recorded: %v", err)
+}

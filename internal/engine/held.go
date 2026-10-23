@@ -402,6 +402,11 @@ func heldClusterLink(
 		if a.StepID != routing.ID {
 			continue
 		}
+		// The engine-reserved kinds are not the routing step's payload; this
+		// is the filter resolveHeldPayload applies to the same artifacts.
+		if a.Kind == GapArtifactKind || a.Kind == IssueCommentArtifactKind || a.Kind == RecordedHeadArtifactKind {
+			continue
+		}
 		if latest == nil || a.ID > latest.ID {
 			latest = a
 		}
@@ -692,9 +697,14 @@ func resolveHeldPayload(
 		kind    string
 		payload sql.NullString
 	)
+	// The engine records its own artifacts beside the declared emit (a gap, an
+	// issue comment, a recorded head), and an executor can add them; none is the
+	// held payload, and the newest of them is not the artifact to resolve.
 	err := tx.QueryRow(
 		`SELECT id, kind, payload FROM artifacts
-		  WHERE step_id = ? ORDER BY id DESC LIMIT 1`, routingStep.ID,
+		  WHERE step_id = ? AND kind NOT IN (?, ?, ?)
+		  ORDER BY id DESC LIMIT 1`, routingStep.ID,
+		GapArtifactKind, IssueCommentArtifactKind, RecordedHeadArtifactKind,
 	).Scan(&priorID, &kind, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing to resolve. The routing step will route over whatever it has,

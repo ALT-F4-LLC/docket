@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -59,42 +58,9 @@ var docCommentAddCmd = &cobra.Command{
 			}
 		}
 
-		if body == "" && jsonMode {
-			return cmdErr(fmt.Errorf("message is required in JSON mode"), output.ErrValidation)
-		}
-
-		if body == "" {
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "vi"
-			}
-
-			tmpFile, err := os.CreateTemp("", "docket-comment-*.md")
-			if err != nil {
-				return cmdErr(fmt.Errorf("creating temp file: %w", err), output.ErrGeneral)
-			}
-			tmpPath := tmpFile.Name()
-			if err := tmpFile.Close(); err != nil {
-				os.Remove(tmpPath)
-				return cmdErr(fmt.Errorf("closing temp file: %w", err), output.ErrGeneral)
-			}
-			defer os.Remove(tmpPath)
-
-			editorCmd := exec.Command(editor, tmpPath)
-			editorCmd.Stdin = os.Stdin
-			editorCmd.Stdout = os.Stdout
-			editorCmd.Stderr = os.Stderr
-
-			if err := editorCmd.Run(); err != nil {
-				return cmdErr(fmt.Errorf("editor exited with error: %w", err), output.ErrGeneral)
-			}
-
-			content, err := os.ReadFile(tmpPath)
-			if err != nil {
-				return cmdErr(fmt.Errorf("reading temp file: %w", err), output.ErrGeneral)
-			}
-
-			body = strings.TrimSpace(string(content))
+		body, err = commentBodyOrEditor(body, cmd.Flags().Changed("message"), jsonMode)
+		if err != nil {
+			return err
 		}
 
 		if body == "" {

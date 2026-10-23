@@ -15,8 +15,12 @@ const (
 	ScopeDocCreate    = "doc.create"
 	ScopeVoteCreate   = "vote.create"
 	ScopeIssueComment = "issue.comment.add"
-	ScopeDocComment   = "doc.comment.add"
-	ScopeRunStart     = "run.start"
+	// ScopeStepComment keys the comment a step records with `step complete
+	// --comment-file`. No verb takes a caller-supplied key in it, so a key
+	// cannot be pre-seeded to suppress a step's comment.
+	ScopeStepComment = "step.comment"
+	ScopeDocComment  = "doc.comment.add"
+	ScopeRunStart    = "run.start"
 )
 
 // LookupIdempotencyKey returns the entity id previously recorded for

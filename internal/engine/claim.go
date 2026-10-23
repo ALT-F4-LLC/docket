@@ -258,7 +258,7 @@ func claimRecordingRefusals(
 	result, err := claimStepWithGates(conn, stepID, opts, e)
 	code, isEngine := CodeOf(err)
 	if (isEngine && code == CodeConflict) || errors.Is(err, db.ErrLeaseHeld) {
-		if recErr := recordClaimRefused(conn, stepID, opts, err.Error()); recErr != nil {
+		if recErr := recordClaimRefused(conn, stepID, opts, err.Error(), refusalHolders(err)); recErr != nil {
 			return nil, recErr
 		}
 	}
@@ -281,14 +281,20 @@ var (
 )
 
 // recordClaimRefused writes the `claim-refused` event (DKT-2776).
-func recordClaimRefused(conn *sql.DB, stepID int, opts ClaimOptions, reason string) error {
+func recordClaimRefused(
+	conn *sql.DB, stepID int, opts ClaimOptions, reason string, holders []Holder,
+) error {
 	step, err := db.GetStep(conn, stepID)
 	if err != nil {
 		return fmt.Errorf("recording the refused claim: %w", err)
 	}
-	data, err := json.Marshal(map[string]any{
+	detail := map[string]any{
 		"step": model.FormatStepID(stepID), "owner": opts.Owner, "reason": reason,
-	})
+	}
+	if len(holders) > 0 {
+		detail["holders"] = holders
+	}
+	data, err := json.Marshal(detail)
 	if err != nil {
 		return fmt.Errorf("recording the refused claim: %w", err)
 	}
@@ -522,13 +528,44 @@ func claimStepWithGates(
 		// DKT-23: the claimant that hears this has already paid its spawn, and
 		// "no headroom" without the cap, the occupancy, and the workflow that
 		// set the bound sent RUN-2's operator grepping the corpus.
-		if cond == CondHeadroom {
-			return nil, conflictErr(
-				"step %s is not ready to claim: %s (%s)",
-				fresh.Instance, cond, sched.HeadroomDetail(fresh))
+		// A scope or headroom refusal also names the steps holding what it needed
+		// (DKT-4264), so a dispatcher releases a lane when its holder reaches a
+		// state that frees the scope, not when it guesses the holder has.
+		switch cond {
+		case CondHeadroom:
+			holders := sched.ClassHolders(fresh)
+			detail := sched.HeadroomDetail(fresh)
+			if clause := holderClause(holders); clause != "" {
+				detail += "; " + clause
+			}
+			refusal := conflictErr(
+				"step %s is not ready to claim: %s (%s)", fresh.Instance, cond, detail)
+			refusal.Holders = holders
+			return nil, refusal
+		case CondScope:
+			holders := sched.ScopeHolders(fresh)
+			msg := fmt.Sprintf("step %s is not ready to claim: %s", fresh.Instance, cond)
+			if clause := holderClause(holders); clause != "" {
+				msg += " (" + clause + ")"
+			}
+			return nil, &Error{Code: CodeConflict, Message: msg, Holders: holders}
 		}
 		return nil, conflictErr(
 			"step %s is not ready to claim: %s", fresh.Instance, cond)
+	}
+
+	// ---- A round's re-review waits for its fix body (DKT-4249). -------------
+	//
+	// The offer already withholds a re-review row behind an open loop body
+	// (blockingLoopBodyAbsent), but a claim that names the row directly never
+	// passed through the offer, and `after` does not order the round's review
+	// behind its fix. A review, verify-ac or vote claimed while fix@N was still
+	// open judged the tree BEFORE the fix and parked a false loop-stalled. The
+	// claim asks the same predicate the offer does, so the two cannot disagree.
+	if sched.blockingLoopBodyAbsent(fresh, nil) {
+		return nil, conflictErr(
+			"step %s is not ready to claim: %s (%s is still open)",
+			fresh.Instance, CondPredecessors, sched.loopHolds[fresh.Instance])
 	}
 
 	// ---- The ESCALATED claim's own budget check (DKT-867). ------------------
@@ -1335,4 +1372,13 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		view.Owner, view.ExpiresMS = lease.Owner, lease.ExpiresMS
 	}
 	return view, nil
+}
+
+// refusalHolders returns the holders a claim refusal named, or nil.
+func refusalHolders(err error) []Holder {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Holders
+	}
+	return nil
 }

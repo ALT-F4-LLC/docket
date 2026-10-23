@@ -46,7 +46,8 @@ import (
 //     widen — and a refresh with no widen behind it has nothing to copy and is
 //     refused (below).
 //  2. NO STEP STRADDLES IT. It refuses while any of the issue's steps is
-//     `claimed`, `running`, or `gated`, and while a dispatch is open — the
+//     `claimed`, `running`, or `gated` (DKT-4267: an open dispatch no longer
+//     refuses it; the issue's manifest rows with nothing in flight render the amended packet) — the
 //     repin quiescence rule (repin.go), applied to the other frozen premise. A
 //     step that already holds a packet rendered under the old scope must not
 //     record its diff under the new one.
@@ -230,17 +231,10 @@ func RefreshIssueScopeInRun(
 	case err != nil:
 		return nil, err
 	}
-	if open, err := db.OpenDispatchTx(tx, runID); err == nil {
-		return nil, conflictErr(
-			"a dispatch is open for %s (%s, expiring at %d); close or abandon "+
-				"it before refreshing — its manifest was offered under the "+
-				"frozen scope, and a relay spawning from it would claim rows "+
-				"whose packets no longer say what the manifest's reader saw",
-			run.Ref(), FormatDispatchID(open.ID), open.ExpiresMS)
-	} else if !errors.Is(err, db.ErrNoOpenDispatch) {
+	underDispatch, err := refreshUnderDispatchTx(tx, runID, issueID)
+	if err != nil {
 		return nil, err
 	}
-
 	refreshed, err := reScopedSnapshot(ri.IssueSnapshot, live)
 	if err != nil {
 		return nil, err
@@ -250,10 +244,10 @@ func RefreshIssueScopeInRun(
 	}
 
 	// One event, carrying both scopes, the steps it reaches, and why.
-	data, err := rulingData(by, map[string]any{
+	data, err := rulingData(by, withDispatchRows(map[string]any{
 		"issue": model.FormatID(issueID), "reason": reason,
 		"from": frozen, "to": live, "steps": steps,
-	})
+	}, underDispatch))
 	if err != nil {
 		return nil, fmt.Errorf("recording the scope refresh: %w", err)
 	}

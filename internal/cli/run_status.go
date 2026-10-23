@@ -45,6 +45,14 @@ type runStatusResult struct {
 	// (DKT-3310), so an operator reads it without the events verb. Absent
 	// when no activation recorded one.
 	ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
+	// Unexpanded lists the bound issues that hold no step yet, each with its
+	// unmet depends_on chains (DKT-4255). A close-out gate states roster
+	// coverage from this block rather than from a hand diff of the issue list
+	// against the step list. Absent when every bound issue holds a step.
+	Unexpanded []engine.UnexpandedIssue `json:"unexpanded,omitempty"`
+	// RetryEligible lists gap-only parks whose depends_on or blocks prerequisites are all
+	// done (DKT-4257), the same list `dispatch open` carries. Absent when none.
+	RetryEligible []engine.RetryEligible `json:"retry_eligible,omitempty"`
 }
 
 // pinJSON is the `pins` wire element: `{path, sha256}` for a file pin, and the
@@ -61,12 +69,14 @@ type pinJSON struct {
 // into it — the rollup is about the run, not part of it.
 func (r runStatusResult) VersionedPayload() any {
 	return struct {
-		Run            any                    `json:"run"`
-		Issues         int                    `json:"issues"`
-		Steps          []model.StatusCount    `json:"steps,omitempty"`
-		Pins           []pinJSON              `json:"pins,omitempty"`
-		PinDrift       []engine.PinVerdict    `json:"pin_drift,omitempty"`
-		ActivationHead *engine.ActivationHead `json:"activation_head,omitempty"`
+		Run            any                      `json:"run"`
+		Issues         int                      `json:"issues"`
+		Steps          []model.StatusCount      `json:"steps,omitempty"`
+		Pins           []pinJSON                `json:"pins,omitempty"`
+		PinDrift       []engine.PinVerdict      `json:"pin_drift,omitempty"`
+		ActivationHead *engine.ActivationHead   `json:"activation_head,omitempty"`
+		Unexpanded     []engine.UnexpandedIssue `json:"unexpanded,omitempty"`
+		RetryEligible  []engine.RetryEligible   `json:"retry_eligible,omitempty"`
 	}{
 		Run:            model.VersionedRun{Run: *r.Run},
 		Issues:         r.Issues,
@@ -74,6 +84,8 @@ func (r runStatusResult) VersionedPayload() any {
 		Pins:           r.Pins,
 		PinDrift:       r.PinDrift,
 		ActivationHead: r.ActivationHead,
+		Unexpanded:     r.Unexpanded,
+		RetryEligible:  r.RetryEligible,
 	}
 }
 
@@ -180,7 +192,21 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 		return runErr(err)
 	}
 
-	result := runStatusResult{Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head}
+	unexpanded, err := engine.UnexpandedIssues(conn, runID)
+	if err != nil {
+		return runErr(err)
+	}
+
+	retryEligible, err := engine.RetryEligibleParks(conn, runID)
+	if err != nil {
+		return runErr(err)
+	}
+
+	result := runStatusResult{
+		Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head,
+		Unexpanded:    unexpanded,
+		RetryEligible: retryEligible,
+	}
 	for _, p := range pins {
 		result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
 	}
@@ -248,6 +274,35 @@ func renderRunStatus(r runStatusResult) string {
 			parts = append(parts, fmt.Sprintf("%s %d", sc.Status, sc.Count))
 		}
 		fmt.Fprintf(&b, "Steps: %s\n", strings.Join(parts, ", "))
+	}
+
+	if len(r.Unexpanded) > 0 {
+		fmt.Fprintf(&b, "Unexpanded (no steps yet): %d\n", len(r.Unexpanded))
+		for _, u := range r.Unexpanded {
+			fmt.Fprintf(&b, "  %s (%s)", u.Issue, u.Status)
+			if len(u.BlockedBy) == 0 {
+				b.WriteString("  not blocked\n")
+				continue
+			}
+			b.WriteString("\n")
+			for _, chain := range u.BlockedBy {
+				hops := make([]string, 0, len(chain))
+				for _, h := range chain {
+					hops = append(hops, fmt.Sprintf("%s (%s)", h.Issue, h.Status))
+				}
+				fmt.Fprintf(&b, "    blocked by %s\n", strings.Join(hops, " -> "))
+			}
+			if u.BlockedByTruncated {
+				b.WriteString("    (more chains not shown)\n")
+			}
+		}
+	}
+
+	if len(r.RetryEligible) > 0 {
+		b.WriteString("Retry-eligible parks (gap-only, prerequisites done):\n")
+		for _, re := range r.RetryEligible {
+			fmt.Fprintf(&b, "  %s  %s  after %s\n", re.Step, re.Issue, strings.Join(re.DependsOn, ", "))
+		}
 	}
 
 	if len(r.Pins) > 0 {

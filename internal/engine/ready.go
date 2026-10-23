@@ -1198,9 +1198,17 @@ func instancesAt(steps []*db.Step, issueID int, name string, ordinal int) []*db.
 // Computed FRESH on every call, stored nowhere. Exclusion is symmetric, so
 // the comparison is over scope lists rather than over any recorded claim.
 func (s *Scheduler) scopeConflict(step *db.Step) bool {
+	return len(s.scopeConflicts(step)) > 0
+}
+
+// scopeConflicts is R4's answer as the steps that cause it: every claimed or
+// running holder whose issue scope intersects this step's, in step order. A
+// claim refusal names them (DKT-4264), so the predicate and the refusal read
+// one definition of "holder".
+func (s *Scheduler) scopeConflicts(step *db.Step) []*db.Step {
 	facts := s.issues[step.IssueID]
 	if facts == nil || len(facts.scopeGlobs) == 0 {
-		return false // S1: a scope-less issue is never excluded.
+		return nil // S1: a scope-less issue is never excluded.
 	}
 
 	// A step that does not hold the tree is not excluded BY the tree. Judges
@@ -1210,7 +1218,7 @@ func (s *Scheduler) scopeConflict(step *db.Step) bool {
 	// never touch. Exclusion is symmetric, so this is also the first half of
 	// letting such steps coexist across issues.
 	if !s.holdsTree(step) {
-		return false
+		return nil
 	}
 
 	holders := make([]*db.Step, 0, len(s.steps)+len(s.foreign))
@@ -1224,6 +1232,7 @@ func (s *Scheduler) scopeConflict(step *db.Step) bool {
 	}
 	holders = append(holders, s.foreign...)
 
+	var conflicting []*db.Step
 	for _, holder := range holders {
 		if holder.IssueID == step.IssueID {
 			// Two steps of the SAME issue share a scope by construction.
@@ -1234,10 +1243,10 @@ func (s *Scheduler) scopeConflict(step *db.Step) bool {
 		}
 		other := s.foreignScope(holder.IssueID)
 		if ScopesIntersect(facts.scopeGlobs, other) {
-			return true
+			conflicting = append(conflicting, holder)
 		}
 	}
-	return false
+	return conflicting
 }
 
 // foreignScope reads a holder's scope: from this run's loaded facts when the
@@ -1353,6 +1362,93 @@ func (s *Scheduler) HeadroomDetail(step *db.Step) string {
 		detail += fmt.Sprintf(", set by [limits] in %s", source)
 	}
 	return detail
+}
+
+// Holder names one step that holds what a refused claim needed, with the
+// status it holds it in.
+type Holder struct {
+	Step   string `json:"step"`
+	Status string `json:"status"`
+}
+
+// holdersOf renders steps as Holders in step-id order, so a refusal and its
+// event list them the same way on every run.
+func holdersOf(steps []*db.Step) []Holder {
+	sorted := append([]*db.Step(nil), steps...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	out := make([]Holder, 0, len(sorted))
+	for _, st := range sorted {
+		out = append(out, Holder{Step: model.FormatStepID(st.ID), Status: st.Status})
+	}
+	return out
+}
+
+// ScopeHolders names the claimed or running steps that make CondScope refuse
+// this step (DKT-4264).
+func (s *Scheduler) ScopeHolders(step *db.Step) []Holder {
+	return holdersOf(s.scopeConflicts(step))
+}
+
+// HolderUnacknowledgedReap is the status a Holder carries for a lapsed writer
+// whose reap nobody has acknowledged: it holds a slot until the ack, whatever
+// the step's own status says.
+const HolderUnacknowledgedReap = "unacknowledged-reap"
+
+// ClassHolders names the steps occupying this step's class headroom: the
+// claimed, running, and gated steps classInFlight counts, so a CondHeadroom
+// refusal says which launches still hold the slots (DKT-4264). A gated holder
+// is the usual answer — its worker finished and its gates still run. The
+// unacknowledged reaps classInFlight also counts follow, as their reaped steps,
+// so a refusal with no live holder still names what to wait on.
+func (s *Scheduler) ClassHolders(step *db.Step) []Holder {
+	var held []*db.Step
+	for _, other := range s.steps {
+		if other.ID == step.ID || other.Class != step.Class {
+			continue
+		}
+		switch other.Status {
+		case db.StepClaimed, db.StepRunning, db.StepGated:
+			if !s.suspendedOnOwnPanel(other) {
+				held = append(held, other)
+			}
+		}
+	}
+	holders := holdersOf(held)
+	if s.reapHold != nil {
+		for _, ack := range s.openReaps {
+			if ack.Class == step.Class && ack.StepID != step.ID {
+				holders = append(holders, Holder{
+					Step: model.FormatStepID(ack.StepID), Status: HolderUnacknowledgedReap,
+				})
+			}
+		}
+	}
+	return holders
+}
+
+// maxRefusalHolders bounds the holders a refusal's message lists. The event
+// keeps them all.
+const maxRefusalHolders = 8
+
+// holderClause renders holders for a refusal message: "held by STEP-3
+// (gated), STEP-4 (claimed)", cut at maxRefusalHolders. Empty when none.
+func holderClause(holders []Holder) string {
+	if len(holders) == 0 {
+		return ""
+	}
+	shown := holders
+	if len(shown) > maxRefusalHolders {
+		shown = shown[:maxRefusalHolders]
+	}
+	parts := make([]string, 0, len(shown))
+	for _, h := range shown {
+		parts = append(parts, fmt.Sprintf("%s (%s)", h.Step, h.Status))
+	}
+	clause := "held by " + strings.Join(parts, ", ")
+	if more := len(holders) - len(shown); more > 0 {
+		clause += fmt.Sprintf(" and %d more", more)
+	}
+	return clause
 }
 
 // budgetHeadroom is R7. The seam that once returned `true` is now the real

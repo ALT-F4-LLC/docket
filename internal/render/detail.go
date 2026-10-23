@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/tree"
+	"github.com/rivo/uniseg"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -441,6 +442,13 @@ func renderComments(comments []*model.Comment) string {
 		if err != nil {
 			body = c.Body
 		}
+		// With colors off (or a markdown failure) the body comes back as
+		// written: wrap it so the terminal does not, and indent every row under
+		// the header. The colored output is wrapped by glamour.
+		if err != nil || !ColorsEnabled() {
+			body = wrapBody(body, commentBodyWidth+2)
+		}
+		body = indentBody(body)
 
 		commentHeader := fmt.Sprintf("%s  %s",
 			styles.author.Render(c.AuthorOrAnonymous()),
@@ -634,7 +642,12 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	if len(comments) > 0 {
 		b.WriteString("\nComments\n")
 		for _, c := range comments {
-			fmt.Fprintf(&b, "  %s  %s\n  %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt), c.Body)
+			// Every body line is indented deeper than the header, so no body line
+			// can read as the next comment's header (author, then age), and
+			// every row is wrapped here, so the terminal never wraps one back to
+			// the header's column.
+			fmt.Fprintf(&b, "  %s  %s\n    %s\n\n", c.AuthorOrAnonymous(), humanize.Time(c.CreatedAt),
+				strings.ReplaceAll(wrapBody(c.Body, commentBodyWidth), "\n", "\n    "))
 		}
 	}
 
@@ -657,4 +670,46 @@ func renderPlainDetail(issue *model.Issue, subIssues []*model.Issue, relations [
 	}
 
 	return b.String()
+}
+
+// indentBody gives every line of a comment body at least a two-space indent,
+// deeper than the comment header, so no line reads as the next header.
+func indentBody(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "  ") {
+			lines[i] = "  " + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// commentBodyWidth is the widest a body row may be before the reader's
+// terminal wraps it; a wrap puts the rest of a row at column 0, where a header
+// sits, so the passthrough paths wrap each row themselves, under the indent.
+const commentBodyWidth = 76
+
+// wrapBody expands tabs and breaks every row of s into rows no wider than
+// width display columns, so the terminal never wraps one. It is for text shown
+// as written (no color, or a markdown failure); glamour wraps its own output.
+func wrapBody(s string, width int) string {
+	var out []string
+	for _, line := range strings.Split(strings.ReplaceAll(s, "\t", "    "), "\n") {
+		var row strings.Builder
+		cols := 0
+		for g := uniseg.NewGraphemes(line); g.Next(); {
+			// A cluster is never split, and it counts as wide as either measure
+			// says, so an emoji with a presentation selector is not under-counted.
+			w := max(g.Width(), lipgloss.Width(g.Str()))
+			if cols+w > width {
+				out = append(out, row.String())
+				row.Reset()
+				cols = 0
+			}
+			row.WriteString(g.Str())
+			cols += w
+		}
+		out = append(out, row.String())
+	}
+	return strings.Join(out, "\n")
 }

@@ -461,16 +461,17 @@ dead attempt's usage remains back-fillable against it.`,
 
 var stepHoldCmd = &cobra.Command{
 	Use:   "hold STEP-N --reason R",
-	Short: "Park one ready step for the operator",
-	Long: `Park one READY step waiting-human (park class ` + "`held`" + `), so the next
-dispatch stops offering it while the rest of its issue runs on.
+	Short: "Park one pending step for the operator",
+	Long: `Park one PENDING step waiting-human (park class ` + "`held`" + `), so the next
+dispatch stops offering any row of its issue until every held step is released.
 
 A step that declares no max_attempts is re-offered after every failure, and
 before this verb the only way to stop offering it was ` + "`run abandon --issue`" + `,
 which ends every step of the issue. A held step resolves like any other park:
 ` + "`step resolve --as retry`" + ` returns it to the pool, ` + "`--as skip`" + ` skips it.
 
-Ready steps only. A claimed step that keeps failing is force-reaped first
+Pending steps only, ready or staged behind an unfinished predecessor (` + "`run hold-issue`" + `
+holds every pending step of one issue at once). A claimed step that keeps failing is force-reaped first
 (` + "`step reap`" + `, which spends no attempt) and then held. --reason is required
 and becomes the step's park reason; the hold is recorded as one step-held event
 carrying the reason, the actor, and the working directory.
@@ -671,6 +672,18 @@ backlog issue related to the step's own — same transaction, so the residue
 cannot evaporate. No workflow declaration is needed; the channel is always
 open.
 
+--comment-file (repeatable) posts an issue comment the step's acceptance
+criterion requires, without the executor running ` + "`docket issue comment add`" + `
+itself, which a worktree-isolated executor cannot. The body is recorded as an
+auxiliary artifact of kind ` + "`issue-comment`" + ` and posted by the engine on the
+step's OWN issue, attributed to the step, in the same transaction as the
+recording. There is no way to name another issue: a recorded artifact is
+executor-authored text. At most 4 comments of 16 KiB each, none empty, PER
+RECORDING: a step re-claimed after a retry records again and posts again. The
+comment posts when the step is recorded, before its gates run, so it stands
+even if a gate later fails, as a filed gap does. A recording whose comment
+cannot post (its idempotency key is already taken) is refused whole.
+
 A GAP FILE MAY RANK THE ISSUE IT FILES. Its first line is the issue title;
 immediately after it, consecutive ` + "`Key: value`" + ` lines are read as a header
 block, ending at the first line that is not one (a blank line included). The
@@ -680,6 +693,10 @@ body is stored verbatim either way — the header is read, never stripped.
   Priority: critical|high|medium|low|none wins over Severity when both appear
   Kind:     bug|feature|task|epic|chore   defaults to task
   Labels:   a, b, c                       comma-separated, at most 16
+  AC-Blocking: true                       the gap stops an acceptance criterion
+                                          from being met; with a non-empty
+                                          emit the step parks partial-with-gap
+                                          and its reviews wait for the operator
 
 Unrecognized keys are skipped WITHOUT ending the block, so a convention line
 like ` + "`Home: THIS repository`" + ` on line two composes with a ` + "`Severity:`" + ` line
@@ -718,13 +735,24 @@ did: priority none, kind task, no labels.`,
 		// Gaps are read whole before anything runs, so a bad path refuses
 		// without spending the completion.
 		var gaps [][]byte
-		gapPaths, _ := cmd.Flags().GetStringSlice("gap-file")
+		gapPaths, _ := cmd.Flags().GetStringArray("gap-file")
 		for _, path := range gapPaths {
 			gap, err := os.ReadFile(path)
 			if err != nil {
 				return cmdErr(fmt.Errorf("reading --gap-file: %w", err), output.ErrNotFound)
 			}
 			gaps = append(gaps, gap)
+		}
+
+		// Comments are read whole before anything runs, for the gaps' reason.
+		var comments [][]byte
+		commentPaths, _ := cmd.Flags().GetStringArray("comment-file")
+		for _, path := range commentPaths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return cmdErr(fmt.Errorf("reading --comment-file: %w", err), output.ErrNotFound)
+			}
+			comments = append(comments, body)
 		}
 
 		// --worktree names the checkout the WORK happened in, for a conductor
@@ -743,7 +771,7 @@ did: priority none, kind task, no labels.`,
 		err = e.CompleteStep(conn, id, engine.CompleteOptions{
 			Token: token, WorkDir: workDir, Artifact: artifact, Payload: payload,
 			Usage: usage, Metadata: metadata,
-			Gaps: gaps, GapIssues: &gapIssues, Pending: &pending,
+			Gaps: gaps, GapIssues: &gapIssues, Comments: comments, Pending: &pending,
 			NowMS: model.NowMS(),
 		})
 		if err != nil {
@@ -1246,14 +1274,23 @@ overwriting the same key. The engine interprets no key inside it.
 write-class step whose landed content diverged from its recorded commit — a
 cherry-pick whose conflict was resolved by hand, an operator-ruled patch on
 top of a gate failure. The engine VERIFIES the sha is an ancestor of the
-shared checkout's HEAD and refuses otherwise; then it re-records the step's
-` + "`issue.diff`" + ` from that commit's own patch (superseding the stale record,
-the way ` + "`step resolve --worktree`" + ` re-pins one), so every downstream
+shared checkout's HEAD and refuses otherwise, and that its line carries every
+commit of the writer's chain: a patch-equal commit, or a commit whose message
+carries, as a line, the ` + "`git cherry-pick -x`" + ` trailer naming the writer commit and whose
+changed files are exactly that commit's (a hand-resolved pick edits a hunk,
+so it is not patch-equal; the trailer is the committer's own claim and the file
+check is what bounds it; only commits after the writer's base count); then it
+re-records the step's ` + "`issue.diff`" + ` over the whole integrated range, from the
+first parent of the earliest commit that carries the chain to the sha
+(superseding the stale record, the way ` + "`step resolve --worktree`" + ` re-pins one;
+a sha later than the pick also sweeps in the commits between), so every downstream
 packet binds to the resolved tree and ` + "`dispatch close`" + ` accepts the step
 with a ` + "`resolved`" + ` verdict instead of needing --skip-integration-check.
 It also sets ` + "`integrated_sha`" + ` in the step's metadata. The sha must be
-the full 40-hex id of ONE ordinary commit whose patch is the step's landed
-work; a merge commit records an empty diff. Both flags may be given together.
+the full 40-hex id of the commit that carries the step's landed work: the last
+commit of a pick, a squash, or a merge (a merge records the diff from the
+writer's base, so it can include a sibling's files). Both flags may be given
+together.
 On a run bound to a conductor capability, --integrated-sha requires that
 token via DOCKET_TOKEN or stdin (never argv); --metadata alone does not.
 
@@ -1294,6 +1331,74 @@ func runStepAnnotate(cmd *cobra.Command, args []string, w *output.Writer) error 
 	// resolution reports its re-pin: on the success line and as
 	// `issue_diff_repin` in the envelope.
 	return emitResolvedState(w, conn, id, "Annotated", nil, ann.Repin)
+}
+
+var stepIntegrateCmd = &cobra.Command{
+	Use:   "integrate STEP-N...",
+	Short: "Cherry-pick finished write-class steps onto the shared branch and annotate them",
+	Long: `Integrate finished write-class steps: for each STEP-N, in the order named,
+cherry-pick the step's recorded writer chain onto the shared checkout's branch
+with ` + "`git cherry-pick -x`" + ` and annotate the step with the resulting HEAD,
+the sequence a conductor otherwise types by hand. It is the one engine verb that
+WRITES git.
+
+Before anything is written, every named step must pass its read-only checks: it
+is done, it is an executor step that holds the tree, its recorded commits exist
+in the shared checkout with no merge commit among them, it is not already
+annotated as integrated, and the shared HEAD does not already carry it. The
+shared checkout must be on a branch with no change to a tracked file and no
+operation in progress. A step that fails any check refuses the whole verb with
+nothing written.
+
+A pick that does not apply is aborted, the checkout is verified to stand where
+it started, and the verb exits nonzero without annotating. The engine never
+resets, amends or discards: if the pick lands but the annotation is refused, the
+error names the sha to give ` + "`step annotate --integrated-sha`" + `. A later step
+that fails leaves the earlier steps integrated and annotated, and they are
+reported. Repository hooks do not run from the pick; filters, merge drivers
+and commit signing follow your git configuration.
+
+On a run bound to a conductor capability the verb requires that token via
+DOCKET_TOKEN or stdin (never argv); every named step must belong to a run that
+token governs.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runStepIntegrate(cmd, args, getWriter(cmd))
+	},
+}
+
+func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error {
+	// Every git command the pick and its verification run builds its own
+	// environment without the redirecting and replace-ref variables
+	// (engine.integrateGitEnv), so this process's environment is not scrubbed.
+	conn := getDB(cmd)
+
+	ids := make([]int, 0, len(args))
+	for _, a := range args {
+		id, err := stepArg(a)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	by, err := rulingBy()
+	if err != nil {
+		return err
+	}
+	token := stepConductorToken(conn, ids[0], os.Stdin)
+	done, err := engine.NewEngine().IntegrateSteps(conn, ids, by, token, model.NowMS())
+	if err != nil {
+		for _, d := range done {
+			w.Warn("%s integrated at %.12s (%d commit(s)) before the failure", d.Step, d.IntegratedSHA, len(d.Picked))
+		}
+		return stepErr(err, stepLabel(ids[0]))
+	}
+	var parts []string
+	for _, d := range done {
+		parts = append(parts, fmt.Sprintf("%s -> %.12s (%d commit(s))", d.Step, d.IntegratedSHA, len(d.Picked)))
+	}
+	w.Success(done, "Integrated "+strings.Join(parts, "; "))
+	return nil
 }
 
 // stepDetailPayload is `step show`'s shape for a step that has something to
@@ -1948,9 +2053,14 @@ func init() {
 
 	stepCompleteCmd.Flags().String("artifact-file", "", "File holding the artifact body (required)")
 	stepCompleteCmd.Flags().String("payload-file", "", "File holding the JSON payload")
-	stepCompleteCmd.Flags().StringSlice("gap-file", nil,
+	stepCompleteCmd.Flags().StringArray("gap-file", nil,
 		"File holding one out-of-scope problem (repeatable); each records a `gap` "+
 			"artifact beside the declared emit and files a related backlog issue")
+	stepCompleteCmd.Flags().StringArray("comment-file", nil,
+		"File holding one issue comment the acceptance criterion requires "+
+			"(repeatable, at most 4, 16 KiB each); the engine posts it on the "+
+			"step's own issue, attributed to the step, in the same transaction "+
+			"as the recording")
 	stepCompleteCmd.Flags().String("usage", "", `Opaque usage record: {"unit": n, ...}, recorded in the run's ledger`)
 	stepCompleteCmd.Flags().String("metadata", "", "Opaque metadata JSON")
 	stepCompleteCmd.Flags().String("worktree", "",
@@ -2026,7 +2136,7 @@ func init() {
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
 		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd, stepHoldCmd,
-		stepAnnotateCmd, stepPreGateCmd, stepResumeCmd,
+		stepAnnotateCmd, stepIntegrateCmd, stepPreGateCmd, stepResumeCmd,
 		stepShowCmd, stepListCmd, stepContextCmd, stepRenderCmd,
 		stepArtifactsCmd, stepArtifactCmd,
 	} {

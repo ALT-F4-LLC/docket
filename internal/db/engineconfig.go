@@ -184,6 +184,16 @@ const (
 	// minted `human` is one operator's decision, not a panel's spend.
 	KeyVoteHoldCost = "vote.hold.cost"
 
+	// KeyRoutingSecurityLabel names the label that sends an issue down the
+	// security review track, and KeyRoutingSecurityLexicon the terms that make
+	// an UNLABELLED issue look like it belongs there (DKT-4275). `run activate
+	// --dry-run` lints against both; nothing else reads them, and neither
+	// changes routing. The lexicon ships empty because the engine attaches no
+	// domain meaning to a word: the instance that knows its own security
+	// surface supplies the vocabulary. An empty label turns the lint off.
+	KeyRoutingSecurityLabel   = "routing.security_label"
+	KeyRoutingSecurityLexicon = "routing.security_lexicon"
+
 	// KeyAutoRegister toggles auto-registration: whether `run activate`
 	// registers a workflow/schema it finds in an instance-config root
 	// (~/.docket/config, <repo>/.docket/config) on its own, or leaves that to
@@ -457,6 +467,32 @@ var engineConfigSpecs = []ConfigSpec{
 		Default: "",
 		Doc: "Comma-separated voters on a materialized held step. Empty (the " +
 			"default) mints held steps as `human` for one operator to decide",
+	},
+	{
+		Key:     KeyRoutingSecurityLabel,
+		Kind:    KindName,
+		Default: "security",
+		Doc: "Label the instance's workflows treat as security; the engine " +
+			"routes nothing on it. `run activate --dry-run` warns about bound " +
+			"issues that lack it but look security-shaped; empty turns the " +
+			"warning off",
+	},
+	{
+		Key:     KeyRoutingSecurityLexicon,
+		Kind:    KindNameList,
+		Default: "",
+		Doc: "Comma-separated terms that make an unlabelled issue look " +
+			"security-shaped in `run activate --dry-run`; a term is a case-folded " +
+			"substring match in which `-`, `_`, Unicode dashes, any whitespace and " +
+			"zero-width format characters match a space (look-alike letters, " +
+			"combining marks and a missing separator do not); " +
+			"Empty (the default) leaves only the " +
+			"scope-overlap check, which skips scopes with no literal prefix " +
+			"(`**`, `**/x.go`) and issues with no scope: an empty warning list " +
+			"is not a clearance. The overlap check compares declared scope " +
+			"strings only (no path normalization or case folding, no writer " +
+			"diff, no symlinks) against labelled issues in the same run; " +
+			"`routing_lint` in the dry-run JSON says what was checkable",
 	},
 	{
 		Key:     KeyVoteHoldCost,
