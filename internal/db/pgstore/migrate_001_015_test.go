@@ -14,8 +14,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/stdlib"
-
-	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 // sqliteToPostgresType maps the SQLite declared types in the schema fixtures
@@ -260,16 +258,11 @@ func TestMigrateV8BackfillsGateTrail(t *testing.T) {
 
 // emptyTestSchema returns a pool on DOCKET_TEST_POSTGRES_DSN whose every
 // connection uses a fresh schema, dropped when the test ends, so each test
-// starts from an empty database. The password comes from
-// DOCKET_TEST_POSTGRES_PASSWORD_FILE under the store's DSN policy; it builds
-// the pool from that config rather than through Open so it can set the
-// search_path. Without a DSN it skips unless DOCKET_TEST_POSTGRES_REQUIRED is set.
+// starts from an empty database. It builds the pool from testConnConfig rather
+// than through Open so it can set the search_path.
 func emptyTestSchema(t *testing.T) *sql.DB {
 	t.Helper()
-	cfg, err := resolveDSN(testsupport.PostgresDSN(t), testsupport.PostgresPasswordFile(), (*os.File).Stat)
-	if err != nil {
-		t.Fatalf("resolving DOCKET_TEST_POSTGRES_DSN: %v", err)
-	}
+	cfg := testConnConfig(t)
 
 	admin := stdlib.OpenDB(*cfg.Copy())
 	t.Cleanup(func() { admin.Close() })

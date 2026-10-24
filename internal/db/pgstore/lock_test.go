@@ -125,16 +125,13 @@ func TestPgstoreWriteLock(t *testing.T) {
 	})
 
 	t.Run("a writer runs at read committed whatever the server default", func(t *testing.T) {
-		cfg, err := pgx.ParseConfig(testsupport.PostgresDSN(t))
-		if err != nil {
-			t.Fatalf("parsing DOCKET_TEST_POSTGRES_DSN: %v", err)
-		}
+		cfg := testConnConfig(t)
 		cfg.RuntimeParams["default_transaction_isolation"] = "repeatable read"
 		strictDB := stdlib.OpenDB(*cfg)
 		defer strictDB.Close()
 
 		var isolation string
-		err = WithWriteTx(ctx, strictDB, func(tx *sql.Tx) error {
+		err := WithWriteTx(ctx, strictDB, func(tx *sql.Tx) error {
 			return tx.QueryRowContext(ctx, `SHOW transaction_isolation`).Scan(&isolation)
 		})
 		if err != nil {
@@ -163,16 +160,25 @@ func writeLockWaiters(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// lockTestDB returns a pool on DOCKET_TEST_POSTGRES_DSN, with the password from
-// DOCKET_TEST_POSTGRES_PASSWORD_FILE. The advisory lock is database-wide, so no
-// schema isolation applies.
+// lockTestDB returns a pool on the test server. The advisory lock is
+// database-wide, so no schema isolation applies.
 func lockTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db := stdlib.OpenDB(*testConnConfig(t))
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// testConnConfig returns the connection config for DOCKET_TEST_POSTGRES_DSN
+// under the store's DSN policy, with the password from
+// DOCKET_TEST_POSTGRES_PASSWORD_FILE. Every live-server test builds its pool
+// from it, so none connects without the password file. It skips or fails as
+// testsupport.PostgresDSN does when the DSN is empty.
+func testConnConfig(t *testing.T) *pgx.ConnConfig {
 	t.Helper()
 	cfg, err := resolveDSN(testsupport.PostgresDSN(t), testsupport.PostgresPasswordFile(), (*os.File).Stat)
 	if err != nil {
 		t.Fatalf("resolving DOCKET_TEST_POSTGRES_DSN: %v", err)
 	}
-	db := stdlib.OpenDB(*cfg)
-	t.Cleanup(func() { db.Close() })
-	return db
+	return cfg
 }
