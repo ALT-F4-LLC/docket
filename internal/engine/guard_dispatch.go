@@ -336,7 +336,7 @@ func applyAcks(conn *sql.DB, runID int, seqs []int64, nowMS int64) error {
 	if err := ackReapsTx(tx, runID, seqs, store.AckByGuardSpawn, nowMS); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("acknowledging reaps: %w", err)
 	}
 	return nil
@@ -684,5 +684,5 @@ func recordGuardCarveOut(
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }

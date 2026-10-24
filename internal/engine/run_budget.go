@@ -199,7 +199,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 	// resolves it (DKT-80): the row states what is true now, and the trail —
 	// why the run stopped, and what was done about it — lives in the events.
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("setting the budget: %w", err)
 	}
 	return answer, nil

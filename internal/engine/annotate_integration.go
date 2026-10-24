@@ -250,7 +250,7 @@ func (e *Engine) AnnotateIntegration(
 	}); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("annotating %s: %w", step.Instance, err)
 	}
 

@@ -342,7 +342,7 @@ func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) er
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // ResolveOptions are `step resolve`'s inputs — the CompleteOptions/ClaimOptions
@@ -983,7 +983,7 @@ func (e *Engine) resolveStep(
 	); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("committing the resolution: %w", err)
 	}
 
@@ -1298,7 +1298,7 @@ func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // failureNote is one line of the activity trail for a failed step: what failed,
@@ -1359,7 +1359,7 @@ func commit(tx *sql.Tx, err error) error {
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // HeartbeatStep extends a live lease held by token. It does not touch

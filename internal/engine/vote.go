@@ -484,7 +484,7 @@ func recordVoteEvent(
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // voteTallyDetail renders the `vote-tallied` event's detail: the proposal, the
@@ -577,7 +577,7 @@ func routeVoteStep(
 			tx, step, triaged, spec, def, outcome, nowMS); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return commitWrite(tx)
 	}
 
 	routing := RoutingPass
@@ -803,10 +803,10 @@ func routeVoteStep(
 		if err := reconcileRun(tx, step.RunID, nowMS); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return commitWrite(tx)
 	}
 	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }

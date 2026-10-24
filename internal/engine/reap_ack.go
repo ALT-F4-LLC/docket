@@ -301,7 +301,7 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 	if err := store.TxOn(tx).ExemptStepAttemptFromBudgetTx(step.ID, nowMS); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("reaping %s: %w", step.Instance, err)
 	}
 	return nil

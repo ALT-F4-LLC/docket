@@ -103,7 +103,7 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 	}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("holding %s: %w", fresh.Instance, err)
 	}
 	return nil

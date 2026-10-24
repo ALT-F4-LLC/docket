@@ -207,7 +207,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("conducting %s: %w", model.FormatRunID(runID), err)
 	}
 	return &ConductResult{Run: run, Token: token, Rotated: rotated}, nil

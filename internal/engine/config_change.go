@@ -51,7 +51,7 @@ func SetConfig(conn *sql.DB, projectID int, key, value, changedBy string) error 
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("storing config %s: %w", key, err)
 	}
 	return nil

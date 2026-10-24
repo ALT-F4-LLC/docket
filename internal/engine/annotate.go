@@ -79,7 +79,7 @@ func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*stor
 	}); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("annotating %s: %w", step.Instance, err)
 	}
 

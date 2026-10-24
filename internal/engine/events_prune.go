@@ -179,7 +179,7 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("pruning events: %w", err)
 	}
 	return &PruneResult{

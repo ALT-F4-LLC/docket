@@ -144,7 +144,7 @@ func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Aut
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
 	return &RunNote{ID: id, Text: text, Authority: under.Kind, RecordedAtMS: nowMS}, nil

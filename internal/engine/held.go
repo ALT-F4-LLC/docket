@@ -223,7 +223,7 @@ func enterHeld(tx *sql.Tx, step *store.Step, held []int, tally holdTally, nowMS 
 	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, store.SagaRouting, store.SagaHeld, nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // materializeHeldCluster creates the gate step for one held cluster.
@@ -1018,7 +1018,7 @@ func (e *Engine) decideMaterializedStep(
 	}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("committing the held decision: %w", err)
 	}
 

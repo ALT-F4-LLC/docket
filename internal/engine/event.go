@@ -882,7 +882,7 @@ func RecordTrustEvent(conn *sql.DB, kind string, grant TrustGrant, atMS int64) e
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // Attribution is WHO ran an operator verb and from WHERE — the two claim-level
@@ -1103,5 +1103,5 @@ func RecordProjectRegisteredEvent(conn *sql.DB, reg ProjectRegistration, atMS in
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }

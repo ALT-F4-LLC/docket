@@ -81,7 +81,7 @@ func (e *Engine) resolveInterruptedGate(
 			tx.Rollback()
 			return evErr
 		}
-		if cErr := tx.Commit(); cErr != nil {
+		if cErr := commitWrite(tx); cErr != nil {
 			return fmt.Errorf("committing the gate re-run announcement: %w", cErr)
 		}
 		return e.runGateStage(conn, step, gate, stage, nowMS)
@@ -278,5 +278,5 @@ func (e *Engine) parkInterruptedGate(
 	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, step.SagaStage, "", nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }

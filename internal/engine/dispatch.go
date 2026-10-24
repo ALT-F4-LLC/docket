@@ -346,7 +346,7 @@ func (e *Engine) OpenDispatch(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("opening a dispatch: %w", err)
 	}
 
@@ -554,7 +554,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("extending a dispatch: %w", err)
 	}
 
@@ -2009,7 +2009,7 @@ func recordCloseRefused(conn *sql.DB, runID, dispatchID int, reason string, nowM
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // closeDispatch is CloseDispatch's body. openID receives the open dispatch's
@@ -2151,7 +2151,7 @@ func (e *Engine) closeDispatch(
 		}); err != nil {
 			return nil, err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitWrite(tx); err != nil {
 			return nil, fmt.Errorf("recording the acceptance: %w", err)
 		}
 		return &CloseOutcome{
@@ -2189,7 +2189,7 @@ func (e *Engine) closeDispatch(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("closing a dispatch: %w", err)
 	}
 	return &CloseOutcome{
@@ -2286,7 +2286,7 @@ func (e *Engine) AbandonDispatchWith(
 		return nil, lostTheCloseRace(tx, open.ID)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("abandoning a dispatch: %w", err)
 	}
 	return &CloseOutcome{

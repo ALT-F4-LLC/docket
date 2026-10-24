@@ -138,7 +138,7 @@ func (e *Engine) BackfillVoteUsage(
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("committing the back-fill: %w", err)
 	}
 	return nil
@@ -482,7 +482,7 @@ func (e *Engine) BackfillUsage(
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing the back-fill: %w", err)
 	}
 	return &BackfillOutcome{

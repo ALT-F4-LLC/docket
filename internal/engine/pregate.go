@@ -562,7 +562,7 @@ func announcePreGate(conn *sql.DB, step *store.Step, gate string, nowMS int64) e
 		tx.Rollback()
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("committing the pre-gate announcement: %w", err)
 	}
 	return nil
@@ -610,7 +610,7 @@ func recordPreGateRowsIf(
 	if err := recordGateEvents(tx, step, gate, rows); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return false, err
 	}
 	return true, nil

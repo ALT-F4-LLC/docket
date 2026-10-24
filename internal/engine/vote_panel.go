@@ -125,5 +125,5 @@ func recordPanelRunEvents(conn *sql.DB, run store.ProposalRunLink, proposalID in
 			return err
 		}
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }

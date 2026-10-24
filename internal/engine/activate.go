@@ -487,7 +487,7 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 		return result, nil
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing activation: %w", err)
 	}
 

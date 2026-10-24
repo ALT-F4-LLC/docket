@@ -265,7 +265,7 @@ func RefreshIssueScopeInRun(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("refreshing the snapshotted scope: %w", err)
 	}
 	return &RefreshedScope{

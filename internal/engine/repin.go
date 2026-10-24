@@ -540,7 +540,7 @@ func repinRunOptsIn(
 		outcome.Added = append(outcome.Added, a)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("repinning %s: %w", run.Ref(), err)
 	}
 	return outcome, nil

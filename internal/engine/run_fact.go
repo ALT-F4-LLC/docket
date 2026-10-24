@@ -166,7 +166,7 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 	if err := tx.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&fact.Seq); err != nil {
 		return nil, fmt.Errorf("reading the fact's seq: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("recording the run fact: %w", err)
 	}
 	return fact, nil

@@ -332,7 +332,7 @@ func (e *Engine) enterActionSaga(conn *sql.DB, step *store.Step, nowMS int64) er
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // stageZero authorizes the holder, validates, and commits stage 1.
@@ -559,7 +559,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *store.Step, opts CompleteOptions)
 		return err
 	}
 
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // gapTitle derives the materialized issue's title from a gap body: the first
@@ -953,7 +953,7 @@ func (e *Engine) runGateStage(
 		txA.Rollback()
 		return err
 	}
-	if err := txA.Commit(); err != nil {
+	if err := commitWrite(txA); err != nil {
 		return fmt.Errorf("committing the gate announcement: %w", err)
 	}
 
@@ -1020,7 +1020,7 @@ func (e *Engine) runGateStage(
 	if err := store.TxOn(txB).AdvanceSagaTx(step.ID, step.SagaStage, stage, nowMS); err != nil {
 		return err
 	}
-	return txB.Commit()
+	return commitWrite(txB)
 }
 
 // enterRouting moves a step from its last gate to the routing stage.
@@ -1034,7 +1034,7 @@ func (e *Engine) enterRouting(conn *sql.DB, step *store.Step, nowMS int64) error
 	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, step.SagaStage, store.SagaRouting, nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // runRoutingStage is stage N+1: ONE TRANSACTION SPANNING step, issue mirror,
@@ -1647,7 +1647,7 @@ func finishRoutingStage(tx *sql.Tx, step *store.Step, nowMS int64) error {
 	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, step.SagaStage, "", nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // computeIssueDiff is the diff half of the routing stage: the `issue.diff`

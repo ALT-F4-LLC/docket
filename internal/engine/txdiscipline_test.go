@@ -47,7 +47,7 @@ import (
 // The check: within a function, the region between a transaction opener
 // (`conn.Begin()`, `conn.BeginTx()`, `db.BeginReadSnapshot()`,
 // `store.BeginSQLiteTx()`, `store.BeginSQLiteReadSnapshot()`, or a package
-// helper returning *sql.Tx) and the matching `Commit()` is a LIVE
+// helper returning *sql.Tx) and the matching `Commit()` or `commitWrite()` is a LIVE
 // TRANSACTION, and no call inside that region may touch the pool — neither
 // directly (`conn.Query`) nor by passing `conn` to a helper that might.
 //
@@ -143,8 +143,13 @@ func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []
 		if !ok {
 			return true
 		}
-		if helper, ok := call.Fun.(*ast.Ident); ok && txOpeners[helper.Name] {
-			begins = append(begins, call.Pos())
+		if helper, ok := call.Fun.(*ast.Ident); ok {
+			switch {
+			case txOpeners[helper.Name]:
+				begins = append(begins, call.Pos())
+			case helper.Name == "commitWrite":
+				commits = append(commits, call.Pos())
+			}
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -293,6 +298,10 @@ func TestPoolReadsInsideTransactionsOpeners(t *testing.T) {
 		{
 			name: "read after commit",
 			body: "tx, _ := conn.BeginTx(ctx, nil)\ntx.Commit()\nconn.QueryRow(\"q\")",
+		},
+		{
+			name: "read after commitWrite",
+			body: "tx, _ := conn.Begin()\ncommitWrite(tx)\nconn.QueryRow(\"q\")",
 		},
 	}
 	for _, tc := range cases {

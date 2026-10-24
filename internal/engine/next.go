@@ -210,7 +210,7 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing next: %w", err)
 	}
 

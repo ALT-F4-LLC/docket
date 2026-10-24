@@ -194,7 +194,7 @@ func RefreshIssueFilesInRun(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("refreshing the snapshotted attachment list: %w", err)
 	}
 	return &RefreshedFiles{

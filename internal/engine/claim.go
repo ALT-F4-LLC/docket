@@ -304,7 +304,7 @@ func recordClaimRefused(conn *sql.DB, stepID int, opts ClaimOptions, reason stri
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 func claimStepWithGates(
@@ -514,7 +514,7 @@ func claimStepWithGates(
 		// depend on which step happened to be claimed next.
 		if cond == CondBudget {
 			refusal := enforceBudgetTx(tx, sched, fresh, claimCost, opts.NowMS)
-			if err := tx.Commit(); err != nil {
+			if err := commitWrite(tx); err != nil {
 				return nil, fmt.Errorf("committing the budget pause: %w", err)
 			}
 			return nil, refusal
@@ -543,7 +543,7 @@ func claimStepWithGates(
 	// same snapshot, same pause-and-refuse contract as the CondBudget branch.
 	if opts.CostMultiplier > 0 && !sched.budgetAdmits(fresh, claimCost) {
 		refusal := enforceBudgetTx(tx, sched, fresh, claimCost, opts.NowMS)
-		if err := tx.Commit(); err != nil {
+		if err := commitWrite(tx); err != nil {
 			return nil, fmt.Errorf("committing the budget pause: %w", err)
 		}
 		return nil, refusal
@@ -722,7 +722,7 @@ func claimStepWithGates(
 			`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
 			return nil, fmt.Errorf("reading step version: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitWrite(tx); err != nil {
 			return nil, fmt.Errorf("committing claim: %w", err)
 		}
 		return &ClaimResult{
@@ -771,7 +771,7 @@ func claimStepWithGates(
 		return nil, fmt.Errorf("reading step version: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing the claim: %w", err)
 	}
 
@@ -878,7 +878,7 @@ func claimStepWithGates(
 		return nil, incompleteClaim(committed, fmt.Errorf("reading step version: %w", err))
 	}
 
-	if err := txB.Commit(); err != nil {
+	if err := commitWrite(txB); err != nil {
 		return nil, incompleteClaim(committed, fmt.Errorf(
 			"committing the claim's context: %w", err))
 	}
@@ -981,7 +981,7 @@ func reMintOwnClaim(
 	}); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing the re-minted token: %w", err)
 	}
 

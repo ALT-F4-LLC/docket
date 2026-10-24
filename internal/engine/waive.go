@@ -123,7 +123,7 @@ func (e *Engine) WaiveStaleTargets(
 		out = append(out, WaivedTarget{ID: id, Instance: instance, Target: targetSHA})
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("recording the stale-target waiver(s): %w", err)
 	}
 	return out, nil

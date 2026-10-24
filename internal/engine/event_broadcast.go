@@ -1,6 +1,9 @@
 package engine
 
-import "sync"
+import (
+	"database/sql"
+	"sync"
+)
 
 // EventBroadcast is the in-process notice that events were appended. Open
 // event streams subscribe to it and re-read the store when woken, so a wake
@@ -41,4 +44,30 @@ func (b *EventBroadcast) Publish() {
 		default:
 		}
 	}
+}
+
+// appendBroadcast is the process's one append notice. The package owns it
+// rather than Engine because most writers are package functions over a
+// *sql.DB that never see an Engine; only commitWrite publishes on it.
+var appendBroadcast EventBroadcast
+
+// AppendBroadcast returns the broadcast that rings after every engine write
+// transaction commits in this process. Writers in other processes do not ring
+// it.
+func AppendBroadcast() *EventBroadcast {
+	return &appendBroadcast
+}
+
+// commitWrite commits an engine write transaction and, once the commit has
+// succeeded, publishes on the append broadcast. Every engine transaction that
+// can call recordEvent commits through here, so an append becomes a wake only
+// when it is durable; a rollback or a failed commit publishes nothing. A
+// commit that appended no event still publishes: a wake carries no data and
+// subscribers re-read the store, so an empty wake costs one read.
+func commitWrite(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	appendBroadcast.Publish()
+	return nil
 }

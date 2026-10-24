@@ -206,7 +206,7 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		return nil, nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, nil, fmt.Errorf("moving run %s: %w", model.FormatRunID(runID), err)
 	}
 	return updated, worktrees, nil
@@ -433,7 +433,7 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("abandoning an issue: %w", err)
 	}
 	return &AbandonIssueOutcome{
