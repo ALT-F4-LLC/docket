@@ -18,10 +18,10 @@ const (
 )
 
 // displayableDSNKeys are the query keys whose values Redacted prints as is:
-// the keys pgstore allows a DSN to set, none of which carries a password. Any
-// other key is treated as secret.
+// the keys pgstore allows a DSN to set, except "user", because the username
+// is secret in displayed output. Any other key is treated as secret.
 var displayableDSNKeys = map[string]bool{
-	"host": true, "port": true, "dbname": true, "user": true, "sslmode": true,
+	"host": true, "port": true, "dbname": true, "sslmode": true,
 	"sslrootcert": true, "sslcert": true, "sslkey": true,
 	"connect_timeout": true, "application_name": true,
 }
@@ -60,8 +60,9 @@ func (d PostgresDSN) String() string   { return d.Redacted() }
 func (d PostgresDSN) GoString() string { return "config.PostgresDSN{" + d.Redacted() + "}" }
 
 // Redacted renders the DSN for display. It keeps the scheme, host, port,
-// database path, username, and the values of displayableDSNKeys, and replaces
-// the userinfo password and every other query value with RedactedMarker. It
+// database path, and the values of displayableDSNKeys, and replaces the
+// userinfo username and password and every other query value with
+// RedactedMarker. It
 // drops any fragment. A DSN that is not a postgres:// or postgresql:// URL,
 // including the key/value form, or that fails to parse, renders as the marker
 // alone: neither the input nor a parse error that quotes it is returned. An
@@ -90,9 +91,9 @@ func (d PostgresDSN) Redacted() string {
 	shown := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawQuery: query.Encode()}
 	if u.User != nil {
 		if _, hasPassword := u.User.Password(); hasPassword {
-			shown.User = url.UserPassword(u.User.Username(), RedactedMarker)
+			shown.User = url.UserPassword(RedactedMarker, RedactedMarker)
 		} else {
-			shown.User = url.User(u.User.Username())
+			shown.User = url.User(RedactedMarker)
 		}
 	}
 	return shown.String()

@@ -37,22 +37,56 @@ func TestPostgresDSNRedactedHidesEverySecret(t *testing.T) {
 	}
 }
 
+func TestPostgresDSNRedactedHidesUsername(t *testing.T) {
+	cases := []struct {
+		name, dsn string
+		keepsHost bool
+	}{
+		{"userinfo username and password", "postgres://USERNAMESECRET:PWSECRET@host/db", true},
+		{"userinfo username only", "postgres://USERNAMESECRET@host/db", true},
+		{"percent-encoded userinfo username", "postgres://%55SERNAMESECRET@host/db", true},
+		{"user query parameter", "postgres://host/db?user=USERNAMESECRET", true},
+		{"percent-encoded user key", "postgres://host/db?us%65r=USERNAMESECRET", true},
+		{"duplicate user key", "postgres://host/db?user=a&user=USERNAMESECRET", true},
+		{"key/value form", "host=h user=USERNAMESECRET password=PWSECRET dbname=d", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := (PostgresDSN{raw: tc.dsn}).Redacted()
+			for _, secret := range []string{"USERNAMESECRET", "PWSECRET"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("Redacted() = %q, which contains the secret %q", got, secret)
+				}
+			}
+			if !strings.Contains(got, RedactedMarker) {
+				t.Errorf("Redacted() = %q, want the marker %q", got, RedactedMarker)
+			}
+			if tc.keepsHost && !strings.Contains(got, "host/db") {
+				t.Errorf("Redacted() = %q, want the host and database kept", got)
+			}
+		})
+	}
+}
+
 func TestPostgresDSNRedactedKeepsPasswordFreeDSN(t *testing.T) {
-	const dsn = "postgres://u@127.0.0.1:5432/db?sslmode=disable"
-	if got := (PostgresDSN{raw: dsn}).Redacted(); got != dsn {
-		t.Errorf("Redacted() = %q, want %q unchanged", got, dsn)
+	const dsn = "postgres://u@127.0.0.1:5432/db?application_name=x&sslmode=disable"
+	const want = "postgres://" + RedactedMarker + "@127.0.0.1:5432/db?application_name=x&sslmode=disable"
+	if got := (PostgresDSN{raw: dsn}).Redacted(); got != want {
+		t.Errorf("Redacted() = %q, want %q", got, want)
 	}
 }
 
 func TestPostgresDSNFormattingNeverPrintsRaw(t *testing.T) {
-	dsn := PostgresDSN{raw: "postgres://u:FMTSECRET@host/db"}
+	dsn := PostgresDSN{raw: "postgres://FMTUSERSECRET:FMTSECRET@host/db"}
 	encoded, err := json.Marshal(PostgresSettings{DSN: dsn})
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	for _, out := range []string{fmt.Sprint(dsn), fmt.Sprintf("%v %+v %#v", dsn, dsn, dsn), string(encoded)} {
-		if strings.Contains(out, "FMTSECRET") {
-			t.Errorf("formatted DSN %q contains the secret", out)
+		for _, secret := range []string{"FMTUSERSECRET", "FMTSECRET"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("formatted DSN %q contains the secret %q", out, secret)
+			}
 		}
 	}
 }
