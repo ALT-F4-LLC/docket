@@ -3,6 +3,7 @@ package config
 import (
 	"net/url"
 	"os"
+	"strings"
 )
 
 // RedactedMarker replaces every secret a displayed DSN carries. It needs no
@@ -67,13 +68,19 @@ func (d PostgresDSN) GoString() string { return "config.PostgresDSN{" + d.Redact
 // position. It drops any fragment. A DSN that is not a postgres:// or
 // postgresql:// URL, including the key/value form, or that fails to parse,
 // renders as the marker alone: neither the input nor a parse error that
-// quotes it is returned. An unset DSN renders as "".
+// quotes it is returned. A DSN whose path, query, or fragment holds an "@"
+// also renders as the marker alone: that "@" means an unescaped "/", "?", or
+// "#" in the userinfo cut the authority short, so password bytes sit in those
+// parts. An unset DSN renders as "".
 func (d PostgresDSN) Redacted() string {
 	if d.raw == "" {
 		return ""
 	}
 	u, err := url.Parse(d.raw)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Opaque != "" {
+		return RedactedMarker
+	}
+	if strings.Contains(u.Path, "@") || strings.Contains(u.RawQuery, "@") || strings.Contains(u.Fragment, "@") {
 		return RedactedMarker
 	}
 	query, err := url.ParseQuery(u.RawQuery)

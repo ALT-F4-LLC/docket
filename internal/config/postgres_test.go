@@ -71,6 +71,30 @@ func TestPostgresDSNRedactedHidesUsername(t *testing.T) {
 	}
 }
 
+func TestPostgresDSNRedactedCollapsesMisparsedUserinfo(t *testing.T) {
+	cases := []struct {
+		name, dsn string
+	}{
+		{"unescaped slash after digit prefix", "postgres://u:12/PATHSECRET@host/db"},
+		{"password holding at-sign and slash", "postgres://u:p@s/TAILSECRET@host/db"},
+		{"unescaped hash", "postgres://u:12#HASHSECRET@host/db"},
+		{"unescaped question mark before displayable key", "postgres://u:12?sslmode=QSECRET@host/db"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (PostgresDSN{raw: tc.dsn}).Redacted(); got != RedactedMarker {
+				t.Errorf("Redacted() = %q, want exactly %q", got, RedactedMarker)
+			}
+		})
+	}
+}
+
+func TestPostgresDSNRedactedKeepsHostForUsernameOnlyDSN(t *testing.T) {
+	if got := (PostgresDSN{raw: "postgres://u@host/db"}).Redacted(); !strings.Contains(got, "host/db") {
+		t.Errorf("Redacted() = %q, want the host and database kept", got)
+	}
+}
+
 func TestPostgresDSNRedactedKeepsPasswordFreeDSN(t *testing.T) {
 	const dsn = "postgres://u@127.0.0.1:5432/db?application_name=x&sslmode=disable"
 	const want = "postgres://" + RedactedMarker + "@127.0.0.1:5432/db?application_name=x&sslmode=disable"
