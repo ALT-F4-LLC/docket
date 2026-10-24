@@ -73,6 +73,23 @@ jobs:
     needs:
       - check
     runs-on: ubuntu-latest
+    # pgstore refuses a DSN that carries a password, and the tests open the
+    # server with no password file, so the throwaway server trusts loopback
+    # connections instead.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: docket
+          POSTGRES_DB: docket_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U docket -d docket_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -89,6 +106,10 @@ jobs:
       - run: go test -timeout 30m ./...
         env:
           DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
+          DOCKET_TEST_POSTGRES_DSN: postgres://docket@127.0.0.1:5432/docket_test?sslmode=disable
+          # Only this job runs a server, so only it turns a skipped
+          # PostgreSQL test into a failure.
+          DOCKET_TEST_POSTGRES_REQUIRED: "1"
 
   build:
     needs:
