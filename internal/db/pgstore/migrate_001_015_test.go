@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -261,14 +260,15 @@ func TestMigrateV8BackfillsGateTrail(t *testing.T) {
 
 // emptyTestSchema returns a pool on DOCKET_TEST_POSTGRES_DSN whose every
 // connection uses a fresh schema, dropped when the test ends, so each test
-// starts from an empty database. It connects through the driver rather than
-// Open: the migrations, not the DSN policy, are under test, and the test DSN
-// may carry a password. Without a DSN it skips locally and fails under CI.
+// starts from an empty database. The password comes from
+// DOCKET_TEST_POSTGRES_PASSWORD_FILE under the store's DSN policy; it builds
+// the pool from that config rather than through Open so it can set the
+// search_path. Without a DSN it skips unless DOCKET_TEST_POSTGRES_REQUIRED is set.
 func emptyTestSchema(t *testing.T) *sql.DB {
 	t.Helper()
-	cfg, err := pgx.ParseConfig(testsupport.PostgresDSN(t))
+	cfg, err := resolveDSN(testsupport.PostgresDSN(t), testsupport.PostgresPasswordFile(), (*os.File).Stat)
 	if err != nil {
-		t.Fatalf("parsing DOCKET_TEST_POSTGRES_DSN: %v", err)
+		t.Fatalf("resolving DOCKET_TEST_POSTGRES_DSN: %v", err)
 	}
 
 	admin := stdlib.OpenDB(*cfg.Copy())

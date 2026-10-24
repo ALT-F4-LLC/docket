@@ -42,7 +42,7 @@ func TestPgstoreOpenVersionCheck(t *testing.T) {
 	})
 
 	t.Run("opens a real 16 server", func(t *testing.T) {
-		db, err := Open(context.Background(), testsupport.PostgresDSN(t), "")
+		db, err := Open(context.Background(), testsupport.PostgresDSN(t), testsupport.PostgresPasswordFile())
 		if err != nil {
 			t.Fatalf("Open against DOCKET_TEST_POSTGRES_DSN: %v", err)
 		}

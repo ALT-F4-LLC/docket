@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -162,13 +163,14 @@ func writeLockWaiters(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// lockTestDB returns a pool on DOCKET_TEST_POSTGRES_DSN. The advisory lock is
-// database-wide, so no schema isolation applies.
+// lockTestDB returns a pool on DOCKET_TEST_POSTGRES_DSN, with the password from
+// DOCKET_TEST_POSTGRES_PASSWORD_FILE. The advisory lock is database-wide, so no
+// schema isolation applies.
 func lockTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	cfg, err := pgx.ParseConfig(testsupport.PostgresDSN(t))
+	cfg, err := resolveDSN(testsupport.PostgresDSN(t), testsupport.PostgresPasswordFile(), (*os.File).Stat)
 	if err != nil {
-		t.Fatalf("parsing DOCKET_TEST_POSTGRES_DSN: %v", err)
+		t.Fatalf("resolving DOCKET_TEST_POSTGRES_DSN: %v", err)
 	}
 	db := stdlib.OpenDB(*cfg)
 	t.Cleanup(func() { db.Close() })
