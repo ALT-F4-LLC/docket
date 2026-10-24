@@ -93,11 +93,13 @@ type PinReport struct {
 	// (GateExecutedCopyChanged) or is absent (GateExecutedCopyAbsent), and
 	// those whose copy under a work root a step recorded differs from the pin
 	// (GateStepCopyChanged) or is absent, or whose work root is gone
-	// (GateStepCopyAbsent), by gate name. Sound() reads only
-	// GateExecutedCopyChanged: a `make <target>` entry names no script file,
-	// an absent copy cannot run, and a step may legitimately edit a gate
-	// script, so Sound() does not read GateStepCopyChanged or
-	// GateStepCopyAbsent. Empty (never nil) only when every declared gate was
+	// (GateStepCopyAbsent, or GateStepCopyCheckedAtSpawn when the gate's
+	// recorded run there spawned on a copy the runner matched to the pin), by
+	// gate name. Sound() reads only GateExecutedCopyChanged: a `make <target>`
+	// entry names no script file, an absent copy cannot run, and a step may
+	// legitimately edit a gate script, so Sound() does not read
+	// GateStepCopyChanged, GateStepCopyAbsent, or GateStepCopyCheckedAtSpawn.
+	// Empty (never nil) only when every declared gate was
 	// checked, found pinned, and found matching where it would execute, in
 	// gate-name order.
 	Gates []GateVerdict `json:"gates"`

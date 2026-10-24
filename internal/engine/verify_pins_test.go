@@ -1173,3 +1173,192 @@ func TestVerifyPinsReportsAnUncheckableStepWorktreeCopy(t *testing.T) {
 		}
 	})
 }
+
+// acCommandsAsWired names the fixture's ac-commands script relatively, the way
+// the real trust entry does (`bash scripts/qa/ac-commands.sh`), so the gate
+// runs each step work root's copy, and returns the trust loader.
+func acCommandsAsWired(t *testing.T) func() (*trust.Store, error) {
+	t.Helper()
+	entry := func(name string, argv ...string) trust.Entry {
+		return trust.Entry{
+			Name: name, Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv), Global: true,
+		}
+	}
+	return sandboxTrust(t,
+		entry("build", "bash", "scripts/qa/build.sh"),
+		entry("ac-commands", "bash", "scripts/qa/ac-commands.sh"),
+		entry("tests", "make", "tests"),
+	)
+}
+
+// recordGateRuns stores gate results for a step as the gate runner records
+// them; RunID and StepID are filled from step.
+func recordGateRuns(t *testing.T, conn *sql.DB, step *db.Step, rows ...db.GateResultRow) {
+	t.Helper()
+	tx, err := conn.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	for _, r := range rows {
+		r.RunID, r.StepID = step.RunID, step.ID
+		testsupport.Must(t, db.InsertGateResultTx(tx, r), "InsertGateResultTx")
+	}
+	testsupport.Must(t, tx.Commit(), "Commit")
+}
+
+// acCommandsRun is a completion-side ac-commands result: a run that spawned
+// and exited with exit, or, with exit nil, an attempt that ran nothing.
+func acCommandsRun(ordinal int, verdict string, exit *int, reason string) db.GateResultRow {
+	return db.GateResultRow{
+		Gate: "ac-commands", Ordinal: ordinal, Verdict: verdict, Exit: exit, Reason: reason,
+		Argv: []string{"bash", "scripts/qa/ac-commands.sh"},
+	}
+}
+
+func exitCode(n int) *int { return &n }
+
+// gateRunnerNote is the note the gate runner's copy check attaches to a run of
+// ac-commands from dir under sc, produced by the runner's own check so the
+// test follows its wording.
+func gateRunnerNote(t *testing.T, dir string, sc StepContext) string {
+	t.Helper()
+	notes, err := checkGateScriptCopies([]string{"bash", "scripts/qa/ac-commands.sh"}, dir, sc)
+	testsupport.Must(t, err, "checkGateScriptCopies: %v", err)
+	if len(notes) != 1 {
+		t.Fatalf("premise: the runner must attach one note, got %q", notes)
+	}
+	return notes[0]
+}
+
+// TestVerifyPinsKeepsAGoneStepWorktreesCheckedCopy: the gate runner compares
+// a step's copy of a relatively named gate script with the pin before it
+// spawns, and records the run. Once the step's work root is swept, that
+// recorded run is the evidence of the copy the gate executed, so the gate's
+// row is not step-copy-absent: it says the copy was checked at spawn and names
+// the step and the gone root. A failing gate checked its copy all the same.
+func TestVerifyPinsKeepsAGoneStepWorktreesCheckedCopy(t *testing.T) {
+	for name, run := range map[string]db.GateResultRow{
+		"passing run": acCommandsRun(0, db.GateVerdictPass, exitCode(0), ""),
+		"failing run": acCommandsRun(0, db.GateVerdictFail, exitCode(1), ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, conn, runID := gateScriptFixture(t)
+			load := acCommandsAsWired(t)
+			w := secondCheckout(t)
+			step := recordedSteps(t, conn, runID, 1)[0]
+			recordWorkRoot(t, conn, step, w)
+			recordGateRuns(t, conn, step, run)
+			testsupport.Must(t, os.RemoveAll(w), "removing the step's work root")
+
+			report := gateReportWith(t, conn, runID, load, a)
+
+			if rows := gateRowsWith(report, "ac-commands", GateStepCopyAbsent); len(rows) != 0 {
+				t.Errorf("ac-commands reports %q for a copy its recorded run checked: %+v",
+					GateStepCopyAbsent, rows)
+			}
+			rows := gateRowsWith(report, "ac-commands", GateStepCopyCheckedAtSpawn)
+			if len(rows) != 1 {
+				t.Fatalf("gate ac-commands has %d %q rows, want 1: %+v",
+					len(rows), GateStepCopyCheckedAtSpawn, report.Gates)
+			}
+			for _, want := range []string{step.Ref(), w} {
+				if !strings.Contains(rows[0].Reason, want) {
+					t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
+				}
+			}
+			if report.ExecutedCopyChanged != 0 || !report.Sound() {
+				t.Errorf("a checked step copy made the run unsound: %s", PinReportReason(report))
+			}
+		})
+	}
+}
+
+// TestVerifyPinsClaimsNoCheckedCopyWithoutACheckedRun: a gone work root reads
+// as checked only from its latest completion-side run of the gate that spawned
+// with no copy note. A latest attempt that ran nothing (a refused copy, a gone
+// tree), a pre-gate run, or no run at all leaves the root step-copy-absent; a
+// run whose copy the issue's scope exempted, or that the run held no pin for,
+// is step-copy-changed, since nothing compared it with the pin.
+func TestVerifyPinsClaimsNoCheckedCopyWithoutACheckedRun(t *testing.T) {
+	edited := secondCheckout(t)
+	testsupport.Must(t, os.WriteFile(filepath.Join(edited, "scripts/qa/ac-commands.sh"),
+		[]byte("exit 0\n"), 0o755), "editing the copy")
+
+	for name, tc := range map[string]struct {
+		runs func(a string) []db.GateResultRow
+		want string
+	}{
+		"no run": {
+			runs: func(string) []db.GateResultRow { return nil },
+			want: GateStepCopyAbsent,
+		},
+		"latest attempt refused": {
+			runs: func(string) []db.GateResultRow {
+				return []db.GateResultRow{
+					acCommandsRun(0, db.GateVerdictPass, exitCode(0), ""),
+					acCommandsRun(1, db.GateVerdictSkipped, nil, "the copy differs; not running it"),
+				}
+			},
+			want: GateStepCopyAbsent,
+		},
+		"only a pre-gate run": {
+			runs: func(string) []db.GateResultRow {
+				pre := acCommandsRun(0, db.GateVerdictPass, exitCode(0), "")
+				pre.Pre = true
+				return []db.GateResultRow{pre}
+			},
+			want: GateStepCopyAbsent,
+		},
+		"copy exempted by scope": {
+			runs: func(a string) []db.GateResultRow {
+				note := gateRunnerNote(t, edited, StepContext{
+					PinRoot: a,
+					FilePins: map[string]string{
+						filepath.Join(a, "scripts/qa/ac-commands.sh"): workflow.SHA256([]byte("echo ac\n")),
+					},
+					Scope: []string{"scripts/qa/"},
+				})
+				return []db.GateResultRow{acCommandsRun(0, db.GateVerdictPass, exitCode(0), note)}
+			},
+			want: GateStepCopyChanged,
+		},
+		"copy run unpinned": {
+			runs: func(string) []db.GateResultRow {
+				note := gateRunnerNote(t, edited, StepContext{})
+				return []db.GateResultRow{acCommandsRun(0, db.GateVerdictPass, exitCode(0), note)}
+			},
+			want: GateStepCopyChanged,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, conn, runID := gateScriptFixture(t)
+			load := acCommandsAsWired(t)
+			w := secondCheckout(t)
+			step := recordedSteps(t, conn, runID, 1)[0]
+			recordWorkRoot(t, conn, step, w)
+			recordGateRuns(t, conn, step, tc.runs(a)...)
+			testsupport.Must(t, os.RemoveAll(w), "removing the step's work root")
+
+			report := gateReportWith(t, conn, runID, load, a)
+
+			if rows := gateRowsWith(report, "ac-commands", GateStepCopyCheckedAtSpawn); len(rows) != 0 {
+				t.Errorf("ac-commands reports %q without a checked run: %+v", GateStepCopyCheckedAtSpawn, rows)
+			}
+			var gone []GateVerdict
+			for _, g := range report.Gates {
+				if strings.Contains(g.Reason, w) {
+					gone = append(gone, g)
+				}
+			}
+			if len(gone) != 1 {
+				t.Fatalf("the removed root %s has %d rows, want 1: %+v", w, len(gone), report.Gates)
+			}
+			if gone[0].Gate != "ac-commands" || gone[0].Status != tc.want ||
+				!strings.Contains(gone[0].Reason, step.Ref()) {
+				t.Errorf("the removed root's row is %+v, want gate ac-commands, status %q, naming %s",
+					gone[0], tc.want, step.Ref())
+			}
+			if !report.Sound() {
+				t.Errorf("a gone step work root made the run unsound: %s", PinReportReason(report))
+			}
+		})
+	}
+}

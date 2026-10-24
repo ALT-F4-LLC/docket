@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -56,10 +57,20 @@ const GateExecutedCopyAbsent = "executed-copy-absent"
 const GateStepCopyChanged = "step-copy-changed"
 
 // GateStepCopyAbsent is the status of a gate whose relatively named script
-// does not exist under a work root a step of the run recorded, or of the one
-// row a work root that no longer exists gets. Like GateStepCopyChanged it
-// never makes PinReport.Sound false.
+// does not exist under a work root a step of the run recorded, or of a work
+// root that no longer exists when no recorded gate run there compared its
+// copy with the pin. Like GateStepCopyChanged it never makes PinReport.Sound
+// false.
 const GateStepCopyAbsent = "step-copy-absent"
+
+// GateStepCopyCheckedAtSpawn is the status of a gate whose step work root no
+// longer exists, but whose latest recorded run there spawned after the gate
+// runner compared that root's copy of each relatively named, pinned script
+// with the pin and found it matching. It is the persisted evidence of the
+// copy the gate executed: the check happened at spawn, and the store keeps the
+// runner's verdict, not a hash of the bytes. It never makes PinReport.Sound
+// false.
+const GateStepCopyCheckedAtSpawn = "step-copy-checked-at-spawn"
 
 // GateVerdict is one finding about a declared gate's script: the run does not
 // pin it, it could not be checked, or a copy of it where a gate runs (the
@@ -221,7 +232,9 @@ func matchedGateArgv(
 // steps recorded, where those steps' gates ran, and reports a difference or
 // an absence as a non-blocking row (GateStepCopyChanged, GateStepCopyAbsent):
 // a step may legitimately edit a gate script, and refusing a changed copy at
-// spawn time belongs to the gate runner.
+// spawn time belongs to the gate runner. Once such a work root is swept, the
+// gate's recorded run there stands in for the copy (GateStepCopyCheckedAtSpawn
+// and the rows goneRootRunVerdict lists).
 //
 // Trust entries are matched under the run's project identity
 // (projectIdentity, projects.identity), in activation and in verify-pins
@@ -282,10 +295,11 @@ func gateScriptPins(
 // pinned gate whose copy under invokingRoot differs from its pin, or is
 // absent, is listed too (see executedCopyVerdict), and so is each differing
 // or absent copy under stepRoots (see stepCopyVerdicts). A step work root
-// that no longer exists is listed once, under the first gate with a script to
-// compare there (see goneRootVerdicts), not once per gate and script. An
-// empty list means every declared gate was checked, found pinned, and found
-// matching where it would execute.
+// that no longer exists is listed under each gate with a script to compare
+// whose recorded run there it holds (see goneRootRunVerdict), or, holding
+// none, once under the first such gate (see goneRootVerdicts), not once per
+// gate and script. An empty list means every declared gate was checked, found
+// pinned, and found matching where it would execute.
 func gateVerdicts(
 	defs map[int]*workflow.Definition, pins []PinVerdict,
 	loadStore func() (*trust.Store, error), projectIdentity, execRoot, invokingRoot string,
@@ -314,7 +328,11 @@ func gateVerdicts(
 			pinned[p.Ref] = p.Pinned
 		}
 	}
-	goneRootsListed := false
+	// A gone root's row from no recorded run goes where the first gate with a
+	// script to compare lists its rows, once every gate has had the chance to
+	// list a recorded run for that root.
+	goneRootsAt, goneRootsGate := -1, ""
+	goneRootRan := make([]bool, len(stepRoots))
 	for _, name := range names {
 		argv, unmatched := matchedGateArgv(trusted, identity, name)
 		if argv == nil {
@@ -367,11 +385,25 @@ func gateVerdicts(
 		if v, ok := executedCopyVerdict(name, scripts, execRoot, invokingRoot); ok {
 			out = append(out, v)
 		}
-		if !goneRootsListed {
-			out = append(out, goneRootVerdicts(name, stepRoots)...)
-			goneRootsListed = true
+		if goneRootsAt < 0 {
+			goneRootsAt, goneRootsGate = len(out), name
+		}
+		for i, wr := range stepRoots {
+			if v, ok := goneRootRunVerdict(name, wr); ok {
+				out = append(out, v)
+				goneRootRan[i] = true
+			}
 		}
 		out = append(out, stepCopyVerdicts(name, scripts, stepRoots)...)
+	}
+	if goneRootsAt >= 0 {
+		var unrun []stepWorkRoot
+		for i, wr := range stepRoots {
+			if !goneRootRan[i] {
+				unrun = append(unrun, wr)
+			}
+		}
+		out = slices.Insert(out, goneRootsAt, goneRootVerdicts(goneRootsGate, unrun)...)
 	}
 	return out
 }
@@ -501,12 +533,23 @@ func executedCopyVerdict(
 }
 
 // stepWorkRoot is one distinct work root the run's steps recorded
-// (steps.work_root), as first recorded, the steps that recorded it, and
-// whether it no longer exists.
+// (steps.work_root), as first recorded, the steps that recorded it (refs and
+// ids, in the same order), and whether it no longer exists. A gone root also
+// carries, by gate, the latest completion-side run its steps recorded (see
+// latestGateRuns): with the tree swept, that run is what remains of the copy
+// the gate executed there.
 type stepWorkRoot struct {
-	path  string
-	steps []string
-	gone  bool
+	path       string
+	steps      []string
+	stepIDs    []int
+	gone       bool
+	latestRuns map[string]recordedGateRun
+}
+
+// recordedGateRun is one gate result and the ref of the step that recorded it.
+type recordedGateRun struct {
+	step string
+	row  store.GateResultRow
 }
 
 // stepWorkRoots groups the run's recorded step work roots by symlink-resolved
@@ -541,8 +584,41 @@ func stepWorkRoots(steps []*store.Step, execRoot, invokingRoot string) []stepWor
 			out = append(out, stepWorkRoot{path: s.WorkRoot, gone: errors.Is(err, os.ErrNotExist)})
 		}
 		out[i].steps = append(out[i].steps, s.Ref())
+		out[i].stepIDs = append(out[i].stepIDs, s.ID)
 	}
 	return out
+}
+
+// latestGateRuns fills each gone root's latestRuns with, per gate, the
+// newest completion-side result its steps recorded. Pre-gate results are
+// left out: a pre-gate measures the claim's tree, not the work root the step
+// recorded. The newest result wins across ordinals and steps, so a later
+// attempt that ran nothing overrides an earlier one that ran.
+func latestGateRuns(
+	roots []stepWorkRoot, gateResults func(stepID int) ([]store.GateResultRow, error),
+) error {
+	for i := range roots {
+		if !roots[i].gone {
+			continue
+		}
+		latest := map[string]recordedGateRun{}
+		for j, id := range roots[i].stepIDs {
+			rows, err := gateResults(id)
+			if err != nil {
+				return err
+			}
+			for _, row := range rows {
+				if row.Pre {
+					continue
+				}
+				if prior, ok := latest[row.Gate]; !ok || row.ID > prior.row.ID {
+					latest[row.Gate] = recordedGateRun{step: roots[i].steps[j], row: row}
+				}
+			}
+		}
+		roots[i].latestRuns = latest
+	}
+	return nil
 }
 
 // resolvedPath is path with symlinks resolved, or cleaned when it does not
@@ -556,10 +632,11 @@ func resolvedPath(path string) string {
 
 // goneRootVerdicts lists each step work root that no longer exists as one
 // GateStepCopyAbsent row under gate, naming the root and every step that
-// recorded it. No copy under a gone root can be compared for any gate, so
-// gateVerdicts lists these once, under the first gate with a script to
-// compare, rather than once per gate and script: work roots are swept at
-// integration, and per-script rows for each would bury a differing copy.
+// recorded it. gateVerdicts passes only the gone roots no recorded gate run
+// speaks for: no copy under them can be compared for any gate, so they are
+// listed once, under the first gate with a script to compare, rather than
+// once per gate and script: work roots are swept at integration, and
+// per-script rows for each would bury a differing copy.
 func goneRootVerdicts(gate string, roots []stepWorkRoot) []GateVerdict {
 	var out []GateVerdict
 	for _, wr := range roots {
@@ -572,12 +649,59 @@ func goneRootVerdicts(gate string, roots []stepWorkRoot) []GateVerdict {
 	return out
 }
 
+// uncheckedCopyNotes are the phrases of the notes checkGateScriptCopies adds
+// to a run's reason when the run spawned without its copy matching the pin:
+// the issue's scope exempted a differing copy, or the run held no pin for the
+// script. The runner writes the reason; the gate's child writes only its
+// output.
+var uncheckedCopyNotes = []string{
+	"was not checked because the issue's scope edits it",
+	"ran unchecked",
+}
+
+// goneRootRunVerdict is gate's row for a gone work root, read from the latest
+// completion-side run of gate its steps recorded, or false when they recorded
+// none. The gate runner compares the copy under the work root with the pin
+// before every spawn and refuses a differing one unless the issue's scope
+// covers it, so a run that spawned with no note from that check executed a
+// matching copy (GateStepCopyCheckedAtSpawn). A run carrying such a note
+// executed a copy nothing compared (GateStepCopyChanged), and a latest attempt
+// that spawned nothing leaves no executed copy (GateStepCopyAbsent).
+func goneRootRunVerdict(gate string, wr stepWorkRoot) (GateVerdict, bool) {
+	if !wr.gone {
+		return GateVerdict{}, false
+	}
+	run, ok := wr.latestRuns[gate]
+	if !ok {
+		return GateVerdict{}, false
+	}
+	gone := fmt.Sprintf("the work root %q recorded by %s no longer exists; the latest run of the gate "+
+		"there, %s ordinal %d,", wr.path, strings.Join(wr.steps, ", "), run.step, run.row.Ordinal)
+	spawned := run.row.Exit != nil &&
+		(run.row.Verdict == store.GateVerdictPass || run.row.Verdict == store.GateVerdictFail)
+	switch {
+	case !spawned:
+		return GateVerdict{Gate: gate, Status: GateStepCopyAbsent, Reason: fmt.Sprintf(
+			"%s ran nothing (verdict %s), so no copy it executed was checked", gone, run.row.Verdict)}, true
+	case slices.ContainsFunc(uncheckedCopyNotes, func(note string) bool {
+		return strings.Contains(run.row.Reason, note)
+	}):
+		return GateVerdict{Gate: gate, Status: GateStepCopyChanged, Reason: fmt.Sprintf(
+			"%s ran a copy the gate runner did not compare with the pin: %q", gone, run.row.Reason)}, true
+	default:
+		return GateVerdict{Gate: gate, Status: GateStepCopyCheckedAtSpawn, Reason: fmt.Sprintf(
+			"%s spawned after the gate runner found the copy of each pinned script there matching "+
+				"the pin; the check was made at spawn, and no copy remains to hash now", gone)}, true
+	}
+}
+
 // stepCopyVerdicts compares each existing step work root's copy of the
 // gate's relatively named, pinned scripts with the pin, and lists one row per
 // root and script whose copy differs, cannot be checked
 // (GateStepCopyChanged), or is absent (GateStepCopyAbsent). Each row names
 // every step that recorded the root. Unlike executedCopyVerdict it reports
-// every difference, not the first. Gone roots are goneRootVerdicts' rows.
+// every difference, not the first. Gone roots are goneRootRunVerdict's and
+// goneRootVerdicts' rows.
 func stepCopyVerdicts(gate string, scripts []pinnedRelativeScript, roots []stepWorkRoot) []GateVerdict {
 	var out []GateVerdict
 	for _, wr := range roots {
@@ -605,8 +729,9 @@ func stepCopyVerdicts(gate string, scripts []pinnedRelativeScript, roots []stepW
 
 // verifyGateScripts fills the report's gate half, comparing executed copies
 // under invokingRoot and under the run's recorded step work roots. It reads
-// the run's step definitions, steps, exec root, and project identity and the
-// trust store; it writes nothing.
+// the run's step definitions, steps, exec root, and project identity, the
+// gate results of steps whose work root is gone, and the trust store; it
+// writes nothing.
 func verifyGateScripts(
 	conn *sql.DB, runID int, report *PinReport,
 	loadStore func() (*trust.Store, error), invokingRoot string,
@@ -628,9 +753,12 @@ func verifyGateScripts(
 	if err != nil {
 		return err
 	}
+	roots := stepWorkRoots(steps, run.ExecRoot, invokingRoot)
+	if err := latestGateRuns(roots, st.GateResultsForStep); err != nil {
+		return err
+	}
 	report.Gates = gateVerdicts(defs, report.Pins, loadStore,
-		project.Identity, run.ExecRoot, invokingRoot,
-		stepWorkRoots(steps, run.ExecRoot, invokingRoot))
+		project.Identity, run.ExecRoot, invokingRoot, roots)
 	report.UnpinnedGates, report.ExecutedCopyChanged = 0, 0
 	for _, g := range report.Gates {
 		switch g.Status {
