@@ -73,16 +73,17 @@ jobs:
     needs:
       - check
     runs-on: ubuntu-latest
-    # pgstore refuses a DSN that carries a password, and the tests open the
-    # server with no password file, so the throwaway server trusts loopback
-    # connections instead.
+    # pgstore refuses a DSN that carries a password, so the DSN below stays
+    # passwordless and the tests read the password from a 0600 file, the same
+    # path production uses. The password is a literal for this throwaway
+    # service container, not a repository secret.
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_USER: docket
           POSTGRES_DB: docket_test
-          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_PASSWORD: docket-ci-throwaway
         ports:
           - 5432:5432
         options: >-
@@ -103,10 +104,19 @@ jobs:
       # Pinned so CI and local runs agree; v0.7.0 is staticcheck 2026.1.
       - run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 
+      # pgstore requires the password file to be a regular 0600 file owned by
+      # the current user.
+      - name: Write the Postgres password file
+        run: |
+          umask 077
+          printf '%s' 'docket-ci-throwaway' > "$RUNNER_TEMP/pgpass"
+          chmod 600 "$RUNNER_TEMP/pgpass"
+
       - run: go test -timeout 30m ./...
         env:
           DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
           DOCKET_TEST_POSTGRES_DSN: postgres://docket@127.0.0.1:5432/docket_test?sslmode=disable
+          DOCKET_TEST_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/pgpass
           # Only this job runs a server, so only it turns a skipped
           # PostgreSQL test into a failure.
           DOCKET_TEST_POSTGRES_REQUIRED: "1"
