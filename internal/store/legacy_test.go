@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -183,6 +184,44 @@ func TestBeginSQLiteReadSnapshotDoesNotSeeAnUncommittedWrite(t *testing.T) {
 	if entry.Source != "default" {
 		t.Fatalf("snapshot saw %s = %q (source %s) from an uncommitted write, want the default", key, entry.Value, entry.Source)
 	}
+}
+
+func TestStoreOnBeginReadSnapshotReturnsWhileATxIsOpen(t *testing.T) {
+	conn := openMigratedDB(t)
+	st := StoreOn(conn)
+
+	sqlTx, err := conn.Begin()
+	testsupport.Must(t, err, "opening the caller's transaction: %v", err)
+	t.Cleanup(func() { sqlTx.Rollback() })
+	tx := TxOn(sqlTx)
+
+	type result struct {
+		snapshot ReadTx
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		snapshot, err := st.BeginReadSnapshot()
+		done <- result{snapshot, err}
+	}()
+	select {
+	case r := <-done:
+		if r.snapshot == nil && r.err == nil {
+			t.Fatal("BeginReadSnapshot returned neither a ReadTx nor an error")
+		}
+		if r.snapshot != nil {
+			r.snapshot.Rollback()
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("BeginReadSnapshot on StoreOn did not return within 5s while a Tx held the only connection")
+	}
+
+	err = tx.Rollback()
+	testsupport.Must(t, err, "rolling back the caller's transaction: %v", err)
+	snapshot, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "BeginReadSnapshot once the Tx has ended: %v", err)
+	err = snapshot.Rollback()
+	testsupport.Must(t, err, "rolling back the snapshot: %v", err)
 }
 
 func TestSQLTxRejectsATxThatIsNotSQLite(t *testing.T) {
