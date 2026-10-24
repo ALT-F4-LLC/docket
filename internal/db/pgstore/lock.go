@@ -15,9 +15,12 @@ const writeLockKey int64 = 0x646f636b6574
 // WithWriteTx runs fn in a read-write transaction that holds the global write
 // lock, so no two writers overlap. The lock is transaction-scoped: commit or
 // rollback releases it, and a pooled connection never carries it past the
-// transaction. fn's error rolls the transaction back and is returned.
+// transaction. fn's error rolls the transaction back and is returned. The
+// transaction runs at READ COMMITTED whatever the server default, so each
+// statement after the lock sees every earlier writer's commit; a REPEATABLE
+// READ snapshot would be taken by the lock call itself, before the wait.
 func WithWriteTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("beginning postgres write transaction: %w", err)
 	}

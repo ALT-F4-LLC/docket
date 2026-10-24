@@ -3,10 +3,12 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -53,6 +55,19 @@ func TestPgstoreWriteLock(t *testing.T) {
 		}
 	})
 
+	t.Run("the read-only call's transaction refuses writes", func(t *testing.T) {
+		readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelRead()
+		err := WithReadTx(readCtx, db, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(readCtx, `CREATE TEMP TABLE pgstore_read_only_probe (n int)`)
+			return err
+		})
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "25006" {
+			t.Fatalf("write inside WithReadTx: got %v, want SQLSTATE 25006 (read_only_sql_transaction)", err)
+		}
+	})
+
 	secondEntered := make(chan struct{})
 	secondDone := make(chan error, 1)
 	go func() {
@@ -93,6 +108,41 @@ func TestPgstoreWriteLock(t *testing.T) {
 	default:
 		t.Fatal("second writer returned without running its function")
 	}
+
+	t.Run("a failing writer returns its error and releases the lock", func(t *testing.T) {
+		errWriter := errors.New("writer failed")
+		// ctx outlives this subtest, so only the rollback can end the failed
+		// transaction and release its lock before the next writer's deadline.
+		if err := WithWriteTx(ctx, db, func(*sql.Tx) error { return errWriter }); !errors.Is(err, errWriter) {
+			t.Fatalf("failing writer: got %v, want %v", err, errWriter)
+		}
+		nextCtx, cancelNext := context.WithTimeout(ctx, 5*time.Second)
+		defer cancelNext()
+		if err := WithWriteTx(nextCtx, db, func(*sql.Tx) error { return nil }); err != nil {
+			t.Fatalf("writer after a failed writer: %v", err)
+		}
+	})
+
+	t.Run("a writer runs at read committed whatever the server default", func(t *testing.T) {
+		cfg, err := pgx.ParseConfig(testsupport.PostgresDSN(t))
+		if err != nil {
+			t.Fatalf("parsing DOCKET_TEST_POSTGRES_DSN: %v", err)
+		}
+		cfg.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+		strictDB := stdlib.OpenDB(*cfg)
+		defer strictDB.Close()
+
+		var isolation string
+		err = WithWriteTx(ctx, strictDB, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx, `SHOW transaction_isolation`).Scan(&isolation)
+		})
+		if err != nil {
+			t.Fatalf("writer on a repeatable-read default: %v", err)
+		}
+		if isolation != "read committed" {
+			t.Fatalf("writer isolation = %q, want %q", isolation, "read committed")
+		}
+	})
 }
 
 // writeLockWaiters counts sessions queued on writeLockKey. PostgreSQL shows a
