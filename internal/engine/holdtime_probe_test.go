@@ -627,7 +627,9 @@ func checkHoldTimeReport(report string) error {
 		seen[clients] = true
 		for i, rtt := range holdTimeRoundTripsMS {
 			want := estimatedPGUtil(nums[1], nums[2], nums[3], rtt)
-			if got := nums[4+i]; math.Abs(got-want) > 0.0005 {
+			// A cell is want rounded to 3 places. At an exact half-step the two
+			// differ by half a unit plus float error, so allow a tiny epsilon.
+			if got := nums[4+i]; math.Abs(got-want) > 0.0005+1e-9 {
 				return fmt.Errorf("%d clients @ %s ms: listed utilization %.3f, recomputed %.4f",
 					clients, formatRTT(rtt), got, want)
 			}
@@ -687,6 +689,28 @@ func TestHoldTimeProbe(t *testing.T) {
 	err = os.WriteFile(out, []byte(report), 0o644)
 	testsupport.Must(t, err, "writing %s: %v", out, err)
 	t.Logf("wrote %s", out)
+}
+
+// TestCheckHoldTimeReportRoundsUtilization pins that a listed utilization cell
+// may differ from its recomputed figure by rounding to 3 places, including at
+// an exact half-step, and no further.
+func TestCheckHoldTimeReportRoundsUtilization(t *testing.T) {
+	// 1111.0 commits/s * (1.500 ms + 1.00 * 1 ms) / 1000 = 2.7775 at 1 ms RTT,
+	// and 1.8887 at 0.2 ms RTT.
+	report := func(listedAt1ms string) string {
+		lines := []string{utilTableHeader(), "|" + strings.Repeat("---|", 6+len(holdTimeRoundTripsMS))}
+		for _, n := range holdTimeClientCounts {
+			lines = append(lines, fmt.Sprintf("| %d | 1111.0 | 1.500 | 1.00 | 1.889 | %s | 0.500 | no |", n, listedAt1ms))
+		}
+		return strings.Join(lines, "\n") + "\n"
+	}
+
+	if err := checkHoldTimeReport(report("2.778")); err != nil {
+		t.Errorf("a cell rounded from 2.7775 to 2.778 was rejected: %v", err)
+	}
+	if err := checkHoldTimeReport(report("2.780")); err == nil || !strings.Contains(err.Error(), "listed utilization 2.780") {
+		t.Errorf("a cell of 2.780 for a recomputed 2.7775 was not rejected for its utilization: %v", err)
+	}
 }
 
 // TestHoldTimeReportRecomputes checks the committed report: a row per client
