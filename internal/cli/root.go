@@ -109,6 +109,52 @@ func emitGuardNotApplicable(cmd *cobra.Command, dbPath string) {
 	}
 }
 
+// checkGuardBinding returns an error when this project is linked to a daemon,
+// or when the link file cannot be read and so whether it is linked is
+// unknown. Nil means no binding. This client routes no guard to a daemon, so a
+// linked project with no local store has engine state the guard cannot
+// consult.
+func checkGuardBinding(cfg *config.Config) error {
+	clientConfigPath, err := config.ClientConfigPath()
+	if err != nil {
+		return fmt.Errorf("locating the link file: %w", err)
+	}
+	links, err := loadLinkFile(linkFilePath(clientConfigPath))
+	if err != nil {
+		return err
+	}
+	entry, ok := links.Links[cfg.Identity]
+	if !ok {
+		return nil
+	}
+	target := "the local daemon socket"
+	if entry.Profile != "" {
+		target = fmt.Sprintf("server profile %q", entry.Profile)
+	}
+	return fmt.Errorf(
+		"project %s is linked to daemon project %d on %s, and this client cannot consult a daemon for guards",
+		cfg.Identity, entry.ProjectID, target)
+}
+
+// guardUnavailable turns a guard failure that is not a verdict into a denial.
+//
+// Hooks block only on exit 2, so a guard that exits 1 because its engine
+// state could not be read fails open. A GENERAL_ERROR or an uncoded error
+// (opening, migrating, or querying the store; reading the link file) means
+// the guard could not consult state, and it denies with an UNAVAILABLE
+// reason. Errors that already carry another code are verdicts or usage
+// errors; for those it returns nil and the error renders unchanged.
+func guardUnavailable(err error) error {
+	var ce *CmdError
+	if errors.As(err, &ce) {
+		if ce.Code != output.ErrGeneral {
+			return nil
+		}
+		err = ce.Err
+	}
+	return fmt.Errorf("UNAVAILABLE: the guard cannot consult engine state, so it denies: %w", err)
+}
+
 var rootCmd = &cobra.Command{
 	Use:     "docket",
 	Short:   "Local-first CLI issue tracker",
@@ -197,7 +243,13 @@ var rootCmd = &cobra.Command{
 			// surprisingly-permissive hook can see why: `not_applicable` in
 			// the JSON envelope, and a stderr note in human mode. It is not
 			// silent, just not a denial.
+			//
+			// A project linked to a daemon is not "no engine": its state lives
+			// there, so the binding is checked before the allow.
 			if isGuardCmd(cmd) {
+				if err := checkGuardBinding(cfg); err != nil {
+					return err
+				}
 				emitGuardNotApplicable(cmd, cfg.DBPath)
 				return errSkipRun
 			}
@@ -508,7 +560,7 @@ func Execute() int {
 	// completes a step must never find it installed.
 	engine.LaunchDetachedPreGates = launchDetachedPreGates
 	engine.LaunchDetachedSaga = launchDetachedSaga
-	if err := rootCmd.Execute(); err != nil {
+	if cmd, err := rootCmd.ExecuteC(); err != nil {
 		// PersistentPreRunE already wrote this invocation's output and asked
 		// to stop before RunE. Not a failure: exit 0, render nothing.
 		if errors.Is(err, errSkipRun) {
@@ -534,6 +586,15 @@ func Execute() int {
 		}
 		quietMode, _ := rootCmd.PersistentFlags().GetBool("quiet")
 		w := output.NewWithVersion(version, quietMode)
+
+		// The code is UNAVAILABLE but the exit is a guard's deny exit, which
+		// is NOT_FOUND's: UNAVAILABLE's own exit 10 would not block a hook.
+		if isGuardCmd(cmd) {
+			if denial := guardUnavailable(err); denial != nil {
+				w.Error(denial, output.ErrUnavailable)
+				return output.ExitCodeForError(output.ErrNotFound)
+			}
+		}
 
 		var ce *CmdError
 		if errors.As(err, &ce) {

@@ -33,6 +33,10 @@ import (
 //
 // Everything below still denies through exit 2. The break is scoped to the
 // absence of a database, not to any verdict a guard actually computed.
+//
+// ENGINE STATE THAT EXISTS BUT CANNOT BE CONSULTED IS A DENIAL: a store that
+// does not open, or a project linked to a daemon. Execute renders it with code
+// UNAVAILABLE and exit 2, because any other exit lets a hook proceed.
 
 var guardCmd = &cobra.Command{
 	Use:   "guard",
@@ -42,6 +46,11 @@ var guardCmd = &cobra.Command{
 They are hook predicates, not ordinary verbs: EXIT 0 means allow, EXIT 2 means
 deny and a reason is printed. That contract is independent of the error
 taxonomy other verbs use, so exit 2 here means "denied", not "not found".
+
+With no database and no daemon link for this project, a guard allows (exit 0)
+as not applicable. When engine state exists but cannot be consulted (the
+database does not open, or the project is linked to a daemon), a guard denies
+(exit 2) with code UNAVAILABLE.
 
 The reason goes to stderr in human mode and into the JSON envelope's error
 field under --json.`,

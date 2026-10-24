@@ -80,7 +80,7 @@ func runProjectLink(cmd *cobra.Command, args []string) error {
 			output.ErrValidation)
 	}
 
-	path := filepath.Join(filepath.Dir(client.Path), "links.toml")
+	path := linkFilePath(client.Path)
 	links, err := loadLinkFile(path)
 	if err != nil {
 		return userConfigCmdError(err)
@@ -102,6 +102,12 @@ func runProjectLink(cmd *cobra.Command, args []string) error {
 	}{cfg.Identity, profile, projectID, path},
 		fmt.Sprintf("linked %s to project %d on %s", cfg.Identity, projectID, target))
 	return nil
+}
+
+// linkFilePath is the link file's location: links.toml beside the client
+// config at clientConfigPath.
+func linkFilePath(clientConfigPath string) string {
+	return filepath.Join(filepath.Dir(clientConfigPath), "links.toml")
 }
 
 // loadLinkFile reads the link file after the trust file's integrity checks
