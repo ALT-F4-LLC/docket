@@ -134,21 +134,39 @@ func TestWriterInfoEmitsInDefaultMode(t *testing.T) {
 	}
 }
 
-func TestExitCodeForErrorMapping(t *testing.T) {
+// TestExitCodeForError pins every exit code by name and number. Exit codes are
+// the most widely depended-upon part of the CLI contract: 0 to 9 never change,
+// and new codes only append.
+func TestExitCodeForError(t *testing.T) {
+	if ExitSuccess != 0 {
+		t.Errorf("ExitSuccess = %d, want 0", ExitSuccess)
+	}
 	tests := []struct {
+		name string
 		code ErrorCode
+		exit int
 		want int
 	}{
-		{ErrGeneral, ExitGeneral},
-		{ErrNotFound, ExitNotFound},
-		{ErrValidation, ExitValidation},
-		{ErrConflict, ExitConflict},
-		{ErrorCode("unknown"), ExitGeneral},
+		{"ExitGeneral", ErrGeneral, ExitGeneral, 1},
+		{"ExitNotFound", ErrNotFound, ExitNotFound, 2},
+		{"ExitValidation", ErrValidation, ExitValidation, 3},
+		{"ExitConflict", ErrConflict, ExitConflict, 4},
+		{"ExitAuth", ErrAuth, ExitAuth, 5},
+		{"ExitStaleLease", ErrStaleLease, ExitStaleLease, 6},
+		{"ExitTimeout", ErrTimeout, ExitTimeout, 7},
+		{"ExitUntrusted", ErrUntrusted, ExitUntrusted, 8},
+		{"ExitGone", ErrGone, ExitGone, 9},
+		{"ExitUnavailable", ErrUnavailable, ExitUnavailable, 10},
+		{"ExitIncompatible", ErrIncompatible, ExitIncompatible, 11},
+		{"ExitUnauthenticated", ErrUnauthenticated, ExitUnauthenticated, 12},
+		{"unknown code", ErrorCode("NEVER_DEFINED"), ExitGeneral, 1},
 	}
-
 	for _, tt := range tests {
+		if tt.exit != tt.want {
+			t.Errorf("%s = %d, want %d", tt.name, tt.exit, tt.want)
+		}
 		if got := ExitCodeForError(tt.code); got != tt.want {
-			t.Errorf("ExitCodeForError(%q) = %d, want %d", tt.code, got, tt.want)
+			t.Errorf("%s: ExitCodeForError(%q) = %d, want %d", tt.name, tt.code, got, tt.want)
 		}
 	}
 }

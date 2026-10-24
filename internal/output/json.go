@@ -45,9 +45,20 @@ const (
 	// would believe it had the full history. Restarting from the retained
 	// minimum applies to the cursor only, not to a context read.
 	ErrGone ErrorCode = "GONE"
+	// ErrUnavailable means the client could not reach the daemon: the
+	// connection was refused or the transport failed before any response.
+	ErrUnavailable ErrorCode = "UNAVAILABLE"
+	// ErrIncompatible means the daemon serves an API major the client does not
+	// speak.
+	ErrIncompatible ErrorCode = "INCOMPATIBLE"
+	// ErrUnauthenticated means the daemon rejected the client's HTTP bearer
+	// token. It has its own exit code so a script can tell a refused daemon
+	// credential apart from AUTH_ERROR.
+	ErrUnauthenticated ErrorCode = "UNAUTHENTICATED"
 )
 
-// Exit code constants. 0-4 are the pre-existing contract and are fixed.
+// Exit code constants. 0-9 are the pre-existing contract and are fixed; new
+// codes only ever append.
 const (
 	ExitSuccess    = 0
 	ExitGeneral    = 1
@@ -59,6 +70,10 @@ const (
 	ExitTimeout    = 7
 	ExitUntrusted  = 8
 	ExitGone       = 9
+
+	ExitUnavailable     = 10
+	ExitIncompatible    = 11
+	ExitUnauthenticated = 12
 )
 
 // ExitCodeForError maps an ErrorCode to its corresponding exit code.
@@ -81,6 +96,12 @@ func ExitCodeForError(code ErrorCode) int {
 		return ExitUntrusted
 	case ErrGone:
 		return ExitGone
+	case ErrUnavailable:
+		return ExitUnavailable
+	case ErrIncompatible:
+		return ExitIncompatible
+	case ErrUnauthenticated:
+		return ExitUnauthenticated
 	default:
 		return ExitGeneral
 	}

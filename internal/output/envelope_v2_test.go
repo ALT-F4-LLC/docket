@@ -166,30 +166,6 @@ func TestIsTruncated(t *testing.T) {
 	}
 }
 
-// TestExtendedErrorTaxonomy pins every code→exit mapping. The first four are
-// the pre-existing contract and must never be renumbered.
-func TestExtendedErrorTaxonomy(t *testing.T) {
-	tests := []struct {
-		code ErrorCode
-		want int
-	}{
-		{ErrGeneral, 1},
-		{ErrNotFound, 2},
-		{ErrValidation, 3},
-		{ErrConflict, 4},
-		{ErrAuth, 5},
-		{ErrStaleLease, 6},
-		{ErrTimeout, 7},
-		{ErrUntrusted, 8},
-		{ErrorCode("NEVER_DEFINED"), 1},
-	}
-	for _, tt := range tests {
-		if got := ExitCodeForError(tt.code); got != tt.want {
-			t.Errorf("ExitCodeForError(%q) = %d, want %d", tt.code, got, tt.want)
-		}
-	}
-}
-
 // TestErrorCodeStringsAreStable pins the wire strings — they are a public
 // contract consumed by scripts.
 func TestErrorCodeStringsAreStable(t *testing.T) {
@@ -202,6 +178,10 @@ func TestErrorCodeStringsAreStable(t *testing.T) {
 		ErrStaleLease: "STALE_LEASE",
 		ErrTimeout:    "TIMEOUT",
 		ErrUntrusted:  "UNTRUSTED",
+
+		ErrUnavailable:     "UNAVAILABLE",
+		ErrIncompatible:    "INCOMPATIBLE",
+		ErrUnauthenticated: "UNAUTHENTICATED",
 	}
 	for code, str := range want {
 		if string(code) != str {
