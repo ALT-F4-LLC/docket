@@ -3,12 +3,13 @@ package pgstore
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestPgstoreWriteLock(t *testing.T) {
@@ -112,18 +113,10 @@ func writeLockWaiters(t *testing.T, db *sql.DB) int {
 }
 
 // lockTestDB returns a pool on DOCKET_TEST_POSTGRES_DSN. The advisory lock is
-// database-wide, so no schema isolation applies. In CI an unset DSN fails the
-// test instead of skipping it.
+// database-wide, so no schema isolation applies.
 func lockTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DOCKET_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		if os.Getenv("CI") != "" {
-			t.Fatal("DOCKET_TEST_POSTGRES_DSN is unset in CI; the write-lock check needs a PostgreSQL server")
-		}
-		t.Skip("DOCKET_TEST_POSTGRES_DSN is unset; skipping the write-lock check")
-	}
-	cfg, err := pgx.ParseConfig(dsn)
+	cfg, err := pgx.ParseConfig(testsupport.PostgresDSN(t))
 	if err != nil {
 		t.Fatalf("parsing DOCKET_TEST_POSTGRES_DSN: %v", err)
 	}

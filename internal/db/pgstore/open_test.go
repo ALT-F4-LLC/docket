@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
 func TestPgstoreOpenVersionCheck(t *testing.T) {
@@ -41,12 +42,7 @@ func TestPgstoreOpenVersionCheck(t *testing.T) {
 	})
 
 	t.Run("opens a real 16 server", func(t *testing.T) {
-		dsn := os.Getenv("DOCKET_TEST_POSTGRES_DSN")
-		if dsn == "" {
-			t.Skip("DOCKET_TEST_POSTGRES_DSN is unset; skipping the real-server check")
-		}
-
-		db, err := Open(context.Background(), dsn, "")
+		db, err := Open(context.Background(), testsupport.PostgresDSN(t), "")
 		if err != nil {
 			t.Fatalf("Open against DOCKET_TEST_POSTGRES_DSN: %v", err)
 		}
