@@ -28,7 +28,14 @@ type gitContext struct {
 	// reason: remote URLs and root commits are repo-controlled and survive a
 	// hostile clone; where the repository sits on the operator's disk is not
 	// and does not.
+	//
+	// It is empty unless Registered.
 	Identity string
+	// Registered reports whether Toplevel is a checkout the repository at the
+	// common directory registered as its own (see isRegisteredCheckout). Only
+	// a registered checkout may claim Identity; an unregistered one still has
+	// a Toplevel, which bounds the local-store walk.
+	Registered bool
 }
 
 // GitHead reports dir's checked-out branch and commit, best-effort: a
@@ -55,9 +62,10 @@ func GitHead(dir string) (branch, commit string) {
 // predates --path-format) — callers then fall back to cwd-derived values,
 // which is the correct answer for a directory that simply is not a checkout.
 //
-// It is also false when the toplevel is not a checkout of the repository git
-// reports: a `.git` file or `commondir` is input from whoever wrote the
-// directory, and can name any repository on disk. See isRegisteredCheckout.
+// A toplevel that is not a checkout of the repository git reports still
+// resolves, with Registered false and no Identity: a `.git` file or
+// `commondir` is input from whoever wrote the directory, and can name any
+// repository on disk. See isRegisteredCheckout.
 func lookupGit(dir string) (gitContext, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -87,9 +95,9 @@ func lookupGit(dir string) (gitContext, bool) {
 		identity = filepath.Dir(commonDir)
 	}
 	if !isRegisteredCheckout(toplevel, gitDir, commonDir, identity) {
-		return gitContext{}, false
+		return gitContext{Toplevel: toplevel}, true
 	}
-	return gitContext{Toplevel: toplevel, Identity: identity}, true
+	return gitContext{Toplevel: toplevel, Identity: identity, Registered: true}, true
 }
 
 // isRegisteredCheckout reports whether toplevel is a checkout of the

@@ -129,6 +129,39 @@ func TestResolveFindsLocalStoreFromSubdir(t *testing.T) {
 	}
 }
 
+// TestResolveLocalStoreFromSubdirOfUnregisteredCheckout: a checkout whose git
+// directory lives elsewhere (`git init --separate-git-dir`) is not registered
+// for identity, but its toplevel still bounds the local-store walk, so the
+// store at the toplevel is found from a nested subdirectory.
+func TestResolveLocalStoreFromSubdirOfUnregisteredCheckout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	world := canon(t, t.TempDir())
+	work := filepath.Join(world, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, work, "init", "-q", "--separate-git-dir", filepath.Join(world, "sepgit.d"))
+	mkStore(t, work)
+	sub := filepath.Join(work, "pkg", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if git, ok := lookupGit(sub); !ok || git.Registered || git.Toplevel != work {
+		t.Fatalf("lookupGit = %+v/%v; the scenario needs an unregistered checkout with toplevel %q", git, ok, work)
+	}
+
+	cfg := resolveAt(t, sub, "", t.TempDir())
+	if cfg.Source != SourceLocal {
+		t.Fatalf("source = %q, want local; the toplevel bounds the walk even when the checkout is unregistered", cfg.Source)
+	}
+	if cfg.DocketDir != filepath.Join(work, ".docket") || cfg.ExecRoot != work {
+		t.Errorf("DocketDir/ExecRoot = %q/%q, want %q/%q",
+			cfg.DocketDir, cfg.ExecRoot, filepath.Join(work, ".docket"), work)
+	}
+}
+
 // TestResolveLocalWalkStopsAtToplevel: a `.docket` ABOVE the repository can
 // never capture it — the walk is bounded by the worktree toplevel.
 func TestResolveLocalWalkStopsAtToplevel(t *testing.T) {

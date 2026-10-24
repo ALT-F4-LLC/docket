@@ -161,7 +161,7 @@ func Resolve() (*Config, error) {
 	}
 	store := filepath.Join(home, ".docket")
 	execRoot, identity := cwd, cwd
-	if inRepo {
+	if git.Registered {
 		execRoot = git.Toplevel
 		identity = git.Identity
 	}
@@ -174,7 +174,7 @@ func Resolve() (*Config, error) {
 		// Only a git-derived identity is anchored here: the cwd fallback above
 		// is a guess about which project this is, and a guess must not create
 		// one (DKT-58).
-		Anchored: inRepo,
+		Anchored: git.Registered,
 	}, nil
 }
 
