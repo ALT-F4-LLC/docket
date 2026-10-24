@@ -3,7 +3,6 @@ package engine
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -114,7 +113,7 @@ type EventQuery struct {
 	// repository at all is a fact about the store and appears in every scoped
 	// view, because a scoped feed that hid it would be an audit trail with a
 	// blind spot; one that names another repository belongs to that
-	// repository's trail, not to this one's. See eventFilter.
+	// repository's trail, not to this one's. See store.EventFilter.
 	//
 	// IT IS IGNORED WHEN RunID IS SET (DKT-583). A run belongs to exactly ONE
 	// project, so `--run` is ALREADY a project scope — a narrower one. Anding
@@ -150,195 +149,66 @@ func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
 	// the same discipline `dispatch verify` uses — stronger than
 	// "the code has no INSERT", because it also covers anything a helper writes.
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
 	// The GONE probe comes FIRST, because a cursor below the retained
 	// minimum must not be answered with the events that happen to remain. A
 	// short list would tell a consumer it had caught up.
-	if err := checkRetainedMinimumTx(tx, q.Since); err != nil {
+	if err := checkRetainedMinimumTx(st, q.Since); err != nil {
 		return nil, err
 	}
 
-	where, args := eventFilter(q)
-
-	// The COUNT carries the SAME alias and the SAME filter as the page query, so
-	// `total` counts exactly what the page slices from. Two filters written
-	// separately is how a `truncated` flag ends up describing a different set
-	// from the one it was computed over.
-	var total int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM events e`+where, args...,
-	).Scan(&total); err != nil {
-		return nil, fmt.Errorf("counting events: %w", err)
-	}
-
-	// `--tail N` selects the NEWEST N rows, then hands them back OLDEST FIRST.
-	//
-	// The descending ORDER BY lives in an inner query whose only job is to pick
-	// the window; the outer one restores `seq ASC` before anything is scanned.
-	// The rows a caller sees are therefore ascending in every mode, which is
-	// what "no reverse mode" protects — a feed that emitted newest-first would
-	// invite a consumer to store the FIRST seq as its cursor and skip
-	// everything under it.
-	// The joins resolve each row's OWNING project (DKT-67): the issue's, for
-	// rendering its id under the right prefix, and the run's-or-issue's, for
-	// naming the project itself. They are LEFT joins throughout because a
-	// store-level event has neither.
-	selectCols := `e.seq, e.at_ms, e.kind, e.run_id, e.step_id, e.issue_id, ` +
-		`s.instance, ip.prefix, COALESCE(rp.name, ip.name), e.data`
-	from := ` FROM events e` +
-		` LEFT JOIN steps s ON s.id = e.step_id` +
-		` LEFT JOIN issues i ON i.id = e.issue_id` +
-		` LEFT JOIN projects ip ON ip.id = i.project_id` +
-		` LEFT JOIN runs r ON r.id = e.run_id` +
-		` LEFT JOIN projects rp ON rp.id = r.project_id`
-
-	var query string
-	switch {
-	case q.Tail > 0:
-		query = `SELECT * FROM (SELECT ` + selectCols + from + where +
-			fmt.Sprintf(` ORDER BY e.seq DESC LIMIT %d) ORDER BY seq ASC`, q.Tail)
-	default:
-		query = `SELECT ` + selectCols + from + where + ` ORDER BY e.seq ASC`
-		if q.Limit > 0 {
-			query += fmt.Sprintf(` LIMIT %d`, q.Limit)
-		}
-	}
-
-	rows, err := tx.Query(query, args...)
+	// The count and the page take the SAME filter, so `total` counts exactly
+	// what the page slices from. Two filters written separately is how a
+	// `truncated` flag ends up describing a different set from the one it was
+	// computed over.
+	filter := eventFilter(q)
+	total, err := st.CountEventsTx(filter)
 	if err != nil {
-		return nil, fmt.Errorf("reading events: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
+
+	// `--tail N` selects the NEWEST N rows, handed back OLDEST FIRST, so the
+	// rows a caller sees are ascending in every mode — what "no reverse mode"
+	// protects. A feed that emitted newest-first would invite a consumer to
+	// store the FIRST seq as its cursor and skip everything under it.
+	rows, err := st.ListEventsTx(filter, q.Limit, q.Tail)
+	if err != nil {
+		return nil, err
+	}
 
 	var out []Event
-	for rows.Next() {
-		var (
-			e           Event
-			runID       sql.NullInt64
-			stepID      sql.NullInt64
-			issueID     sql.NullInt64
-			instance    sql.NullString
-			issuePrefix sql.NullString
-			projectName sql.NullString
-			data        string
-		)
-		if err := rows.Scan(
-			&e.Seq, &e.AtMS, &e.Kind, &runID, &stepID, &issueID, &instance,
-			&issuePrefix, &projectName, &data,
-		); err != nil {
-			return nil, fmt.Errorf("reading an event: %w", err)
+	for _, row := range rows {
+		e := Event{
+			Seq: row.Seq, AtMS: row.AtMS, Kind: row.Kind,
+			Step: row.Instance, Project: row.ProjectName,
+			Data: json.RawMessage(row.Data),
 		}
-		// All are OMITTED when NULL, per the `?` in the public event shape.
-		if runID.Valid {
-			e.Run = model.FormatRunID(int(runID.Int64))
+		// All are OMITTED when absent, per the `?` in the public event shape.
+		if row.RunID != 0 {
+			e.Run = model.FormatRunID(row.RunID)
 		}
-		if stepID.Valid {
-			e.StepID = model.FormatStepID(int(stepID.Int64))
+		if row.StepID != 0 {
+			e.StepID = model.FormatStepID(row.StepID)
 		}
-		if issueID.Valid {
+		if row.IssueID != 0 {
 			// DKT-67: the OWNING project's prefix, not the querying project's.
-			e.Issue = model.FormatIDWithPrefix(int(issueID.Int64), issuePrefix.String)
+			e.Issue = model.FormatIDWithPrefix(row.IssueID, row.IssuePrefix)
 		}
-		if instance.Valid {
-			e.Step = instance.String
-		}
-		if projectName.Valid {
-			e.Project = projectName.String
-		}
-		e.Data = json.RawMessage(data)
 		out = append(out, e)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading events: %w", err)
 	}
 
 	return &EventPage{Events: out, Total: total}, nil
 }
 
-// eventFilter builds the WHERE for the strict cursor and the run scope.
-//
-// The cursor clause is present even at `--since 0`, where `seq > 0` matches
-// every row: writing it unconditionally keeps ONE query shape, and the index
-// serves both. A version that dropped the clause for the default would be two
-// plans to reason about for no gain.
-func eventFilter(q EventQuery) (string, []any) {
-	where := ` WHERE e.seq > ?`
-	args := []any{q.Since}
-	if q.RunID != 0 {
-		where += ` AND e.run_id = ?`
-		args = append(args, q.RunID)
+// eventFilter maps the query onto the store's event filter, which owns the
+// cursor clause, the three-way project attribution, and dropping the project
+// scope under `--run` (DKT-583, DKT-68).
+func eventFilter(q EventQuery) store.EventFilter {
+	return store.EventFilter{
+		Since: q.Since, RunID: q.RunID, Kind: q.Kind, StepID: q.StepID, ProjectID: q.ProjectID,
 	}
-	if q.Kind != "" {
-		where += ` AND e.kind = ?`
-		args = append(args, q.Kind)
-	}
-	if q.StepID != 0 {
-		where += ` AND e.step_id = ?`
-		args = append(args, q.StepID)
-	}
-	// THE PROJECT SCOPE IS DROPPED UNDER `--run` (DKT-583). A run has exactly
-	// one project, so the run clause above is already that project's scope and
-	// anding a second one on top can only turn a neighbouring project's feed
-	// into an empty page that reports success. `run report`, `step show`, and
-	// `step artifact` all answer for a run outside the invoking project; the
-	// event feed now agrees with them instead of contradicting them silently.
-	if q.ProjectID != 0 && q.RunID == 0 {
-		// Three-way attribution, per the field comment: the run's project,
-		// else the issue's, else store-level. The cursor contract survives
-		// scoping — seq stays monotonic, and a filtered-out neighbor is an
-		// event this view never owes, not one it skipped.
-		//
-		// THE STORE-LEVEL ARM IS NARROWER THAN IT WAS (DKT-68). It used to
-		// admit every project-less row into every project's feed, on the
-		// argument that a user-level allowlist is as relevant to one project as
-		// to the store. Measured against eight concurrent sessions that made a
-		// scoped `--tail 60` return 8 rows of local history and 52 trust rows
-		// generated by other repositories — 87% noise, with the history the
-		// operator asked for pushed off the top.
-		//
-		// The argument was right about the FACTS and wrong about the ROWS. A
-		// trust grant bound to another repository is not this project's audit
-		// trail; a grant bound to THIS one is, and so is a genuinely
-		// store-global grant. Both of those still appear. The payloads already
-		// carry the binding — `trust-added`/`trust-removed` write `repo`,
-		// `project-registered` writes `identity` — so the feed can tell the
-		// cases apart instead of showing all of them to everyone.
-		//
-		// A row that names NO repository stays visible everywhere, which is the
-		// original argument surviving where it actually applies.
-		where += ` AND (
-			e.run_id IN (SELECT id FROM runs WHERE project_id = ?)
-			OR (e.run_id IS NULL AND e.issue_id IN (SELECT id FROM issues WHERE project_id = ?))
-			OR (e.run_id IS NULL AND e.issue_id IS NULL AND (
-				` + eventRepoBinding + ` IS NULL
-				OR ` + eventRepoBinding + ` = (SELECT identity FROM projects WHERE id = ?))))`
-		args = append(args, q.ProjectID, q.ProjectID, q.ProjectID)
-	}
-	return where, args
 }
-
-// eventRepoBinding is the repository path a store-level event's payload names,
-// or NULL when it names none (DKT-68).
-//
-// NULLIF collapses the empty string to NULL because a GLOBAL trust entry writes
-// `"repo": ""` — it binds to no repository by design — and an entry that
-// applies everywhere must remain visible everywhere. Without it, every global
-// grant would vanish from every scoped feed, which is the opposite of the
-// audit-completeness property this filter is trying to preserve.
-//
-// THE json_valid GUARD IS LOAD-BEARING, not defensive dressing. SQLite's
-// `json_extract` does not return NULL for malformed input — it ABORTS THE
-// QUERY with "malformed JSON", so one corrupt `data` cell anywhere in the table
-// would make every scoped `events list` fail outright, and an operator would
-// lose the whole feed over a single bad row. The writer normalizes `data` to a
-// JSON object so this is unreachable through product code, but a
-// hand-edited row reaches it, and eventDetail already takes the position that a
-// corrupted row should still render rather than break the read. An unparseable
-// payload names no repository, so it stays visible everywhere — the same answer
-// this filter gives every other unattributable store-level event.
-const eventRepoBinding = `NULLIF(COALESCE(
-	CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.repo') END,
-	CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.identity') END), '')`
 
 // checkRetainedMinimumTx answers GONE when the cursor names events a prune
 // deleted, that is, when it sits below the event low watermark.
@@ -346,8 +216,8 @@ const eventRepoBinding = `NULLIF(COALESCE(
 // The watermark, not MIN(seq), is the evidence of a prune: a seq gap left by
 // allocated-but-uncommitted values raises MIN(seq) without deleting anything,
 // and an empty table with a zero watermark has lost nothing.
-func checkRetainedMinimumTx(tx *sql.Tx, since int64) error {
-	watermark, err := eventLowWatermarkTx(tx)
+func checkRetainedMinimumTx(st store.ReadTx, since int64) error {
+	watermark, err := st.EventLowWatermarkTx()
 	if err != nil {
 		return err
 	}
@@ -360,18 +230,6 @@ func checkRetainedMinimumTx(tx *sql.Tx, since int64) error {
 		"events at seq > %d are below the retained minimum (%d): they no longer "+
 			"exist and cannot be replayed; resume from seq %d, accepting the gap",
 		since, watermark+1, watermark)
-}
-
-// eventLowWatermarkTx reads the highest pruned event seq, 0 when nothing was
-// pruned.
-func eventLowWatermarkTx(tx *sql.Tx) (int64, error) {
-	var watermark int64
-	if err := tx.QueryRow(
-		`SELECT seq FROM event_low_watermark WHERE id = 1`,
-	).Scan(&watermark); err != nil {
-		return 0, fmt.Errorf("reading the event low watermark: %w", err)
-	}
-	return watermark, nil
 }
 
 // ---- the attribution table ------------------------------------------------
@@ -645,31 +503,21 @@ func ActorCounts(conn *sql.DB, runID int) (map[Actor]int, error) {
 		return nil, fmt.Errorf("counting events by kind: %w", err)
 	}
 	defer tx.Rollback()
-	return actorCountsTx(tx, runID)
+	return actorCountsTx(store.TxOn(tx), runID)
 }
 
 // actorCountsTx is the same rollup inside a caller's transaction, which is where
 // the report needs it: its zero-write property comes from the report computing
 // every section in ONE read-only transaction, and a pool read from inside it
 // would deadlock against the one-connection pool.
-func actorCountsTx(tx *sql.Tx, runID int) (map[Actor]int, error) {
-	rows, err := tx.Query(
-		`SELECT kind, COUNT(*) FROM events WHERE run_id = ? GROUP BY kind ORDER BY kind`,
-		runID)
+func actorCountsTx(st store.ReadTx, runID int) (map[Actor]int, error) {
+	kindCounts, err := st.EventKindCountsTx(runID)
 	if err != nil {
-		return nil, fmt.Errorf("counting events by kind: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 
 	counts := make(map[Actor]int, 4)
-	for rows.Next() {
-		var (
-			kind string
-			n    int
-		)
-		if err := rows.Scan(&kind, &n); err != nil {
-			return nil, fmt.Errorf("counting events by kind: %w", err)
-		}
+	for kind, n := range kindCounts {
 		actor, ok := eventActors[kind]
 		if !ok {
 			// Unreachable: the writer refuses a kind outside the closed set, so
@@ -683,9 +531,6 @@ func actorCountsTx(tx *sql.Tx, runID int) (map[Actor]int, error) {
 		}
 		counts[actor] += n
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("counting events by kind: %w", err)
-	}
 	return counts, nil
 }
 
@@ -697,7 +542,7 @@ func actorCountsTx(tx *sql.Tx, runID int) (map[Actor]int, error) {
 // no events is OMITTED rather than shown as zero: a run with no gates has no
 // gate row, which is the same rule every other section in this document follows.
 func actorReportTx(tx *sql.Tx, runID int) ([]ActorCount, error) {
-	counts, err := actorCountsTx(tx, runID)
+	counts, err := actorCountsTx(store.TxOn(tx), runID)
 	if err != nil {
 		return nil, err
 	}
@@ -787,15 +632,12 @@ func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
 		return nil, fmt.Errorf("reading the activation head: %w", err)
 	}
 	defer tx.Rollback()
-	var raw string
-	err = tx.QueryRow(
-		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
-		runID, EventRunActivated).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	raw, found, err := store.TxOn(tx).LatestEventDataTx(runID, EventRunActivated)
 	if err != nil {
 		return nil, fmt.Errorf("reading the activation head: %w", err)
+	}
+	if !found {
+		return nil, nil
 	}
 	var data struct {
 		Branch string `json:"head_branch"`

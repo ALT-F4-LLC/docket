@@ -102,18 +102,19 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 		return nil, fmt.Errorf("pruning events: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
 	if q.BeforeRun != 0 {
-		if _, err := store.TxOn(tx).GetRunTx(q.BeforeRun); err != nil {
+		if _, err := st.GetRunTx(q.BeforeRun); err != nil {
 			return nil, notFoundErr(err, "run %s not found",
 				model.FormatRunID(q.BeforeRun))
 		}
 	}
 
-	where, args := pruneFilter(q)
+	sel := pruneSelection(q)
 
 	// REFUSAL 1: events of non-terminal runs are never deleted.
-	if err := refuseLiveRunsTx(tx, where, args); err != nil {
+	if err := refuseLiveRunsTx(st, sel); err != nil {
 		return nil, err
 	}
 
@@ -127,23 +128,19 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 	held := 0
 	if retain > 0 && q.BeforeRun == 0 {
 		cutoff := q.NowMS - retain.Milliseconds()
-		held, err = countHeldByRetentionTx(tx, where, args, cutoff)
+		held, err = st.CountEventsHeldByRetentionTx(sel, cutoff)
 		if err != nil {
 			return nil, err
 		}
-		where += ` AND at_ms < ?`
-		args = append(args, cutoff)
-	}
-
-	var pruned int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM events`+where, args...,
-	).Scan(&pruned); err != nil {
-		return nil, fmt.Errorf("counting the events to prune: %w", err)
+		sel.BeforeAtMS = cutoff
 	}
 
 	if q.DryRun {
-		min, err := retainedMinimumTx(tx)
+		pruned, err := st.CountPrunableEventsTx(sel)
+		if err != nil {
+			return nil, err
+		}
+		min, err := retainedMinimumTx(st)
 		if err != nil {
 			return nil, err
 		}
@@ -152,8 +149,9 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 		}, nil
 	}
 
-	if _, err := tx.Exec(`DELETE FROM events`+where, args...); err != nil {
-		return nil, fmt.Errorf("pruning events: %w", err)
+	pruned, err := st.DeletePrunableEventsTx(sel)
+	if err != nil {
+		return nil, err
 	}
 
 	// The prune writes ONE EVENT OF ITS OWN, in the same transaction, AFTER
@@ -173,10 +171,10 @@ func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
 		}
 	}
 
-	if err := raiseEventLowWatermarkTx(tx); err != nil {
+	if err := st.RaiseEventLowWatermarkTx(); err != nil {
 		return nil, err
 	}
-	min, err := retainedMinimumTx(tx)
+	min, err := retainedMinimumTx(st)
 	if err != nil {
 		return nil, err
 	}
@@ -208,30 +206,18 @@ func validatePruneTarget(q PruneQuery) error {
 	return nil
 }
 
-// pruneFilter builds the WHERE that the count, the DELETE, and the live-run
-// check all run over.
+// pruneSelection names the events that the count, the DELETE, and the
+// live-run check all run over.
 //
-// ONE FILTER, THREE STATEMENTS. The count a caller is shown, the rows that are
-// deleted, and the runs that are checked must be the same set — two filters
+// ONE SELECTION, THREE STATEMENTS. The count a caller is shown, the rows that
+// are deleted, and the runs that are checked must be the same set — two filters
 // written separately is how a verb ends up reporting one number, deleting
 // another, and validating a third.
-//
-// The columns are written UNQUALIFIED (`seq`, not `e.seq`) because `DELETE FROM
-// events` cannot take an alias. The live-run check aliases its `events` as `e`
-// but adds nothing of its own to this clause, so the unqualified names resolve
-// against `events` there too — `runs` has no `seq` and its `id` is spelled
-// differently from `run_id`, so there is nothing for them to collide with.
-func pruneFilter(q PruneQuery) (string, []any) {
+func pruneSelection(q PruneQuery) store.EventPruneSelection {
 	if q.BeforeRun != 0 {
-		return ` WHERE run_id = ?`, []any{q.BeforeRun}
+		return store.EventPruneSelection{RunID: q.BeforeRun}
 	}
-	where := ` WHERE seq < ?`
-	args := []any{q.Before}
-	if q.RunID != 0 {
-		where += ` AND run_id = ?`
-		args = append(args, q.RunID)
-	}
-	return where, args
+	return store.EventPruneSelection{BeforeSeq: q.Before, RunID: q.RunID}
 }
 
 // refuseLiveRunsTx enforces that an event belonging to a run that is not
@@ -260,31 +246,17 @@ func pruneFilter(q PruneQuery) (string, []any) {
 // Events with NO RUN — trust grants — pass this check. There is no run
 // whose liveness could forbid them, and refusing them would make the repo-wide
 // feed unprunable forever.
-func refuseLiveRunsTx(tx *sql.Tx, where string, args []any) error {
-	rows, err := tx.Query(
-		`SELECT DISTINCT r.id, r.status
-		   FROM events e JOIN runs r ON r.id = e.run_id`+where+` ORDER BY r.id`,
-		args...)
+func refuseLiveRunsTx(st store.ReadTx, sel store.EventPruneSelection) error {
+	runs, err := st.PrunableEventRunsTx(sel)
 	if err != nil {
-		return fmt.Errorf("checking the runs a prune would touch: %w", err)
+		return err
 	}
-	defer rows.Close()
 
 	var live []string
-	for rows.Next() {
-		var (
-			id     int
-			status model.RunStatus
-		)
-		if err := rows.Scan(&id, &status); err != nil {
-			return fmt.Errorf("reading a run's status: %w", err)
+	for _, run := range runs {
+		if !run.Status.Terminal() {
+			live = append(live, fmt.Sprintf("%s (%s)", model.FormatRunID(run.RunID), run.Status))
 		}
-		if !status.Terminal() {
-			live = append(live, fmt.Sprintf("%s (%s)", model.FormatRunID(id), status))
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("checking the runs a prune would touch: %w", err)
 	}
 	if len(live) == 0 {
 		return nil
@@ -300,42 +272,14 @@ func refuseLiveRunsTx(tx *sql.Tx, where string, args []any) error {
 		strings.Join(live, ", "))
 }
 
-// countHeldByRetentionTx counts the rows the boundary protects, so the
-// result can name them.
-func countHeldByRetentionTx(tx *sql.Tx, where string, args []any, cutoff int64) (int, error) {
-	var held int
-	err := tx.QueryRow(
-		`SELECT COUNT(*) FROM events`+where+` AND at_ms >= ?`,
-		append(append([]any{}, args...), cutoff)...,
-	).Scan(&held)
-	if err != nil {
-		return 0, fmt.Errorf("counting the events the retention window holds: %w", err)
-	}
-	return held, nil
-}
-
 // retainedMinimumTx reports the lowest seq no prune has deleted, the
 // watermark plus 1, which is what a consumer's cursor must not fall below.
-func retainedMinimumTx(tx *sql.Tx) (int64, error) {
-	watermark, err := eventLowWatermarkTx(tx)
+func retainedMinimumTx(st store.ReadTx) (int64, error) {
+	watermark, err := st.EventLowWatermarkTx()
 	if err != nil {
 		return 0, err
 	}
 	return watermark + 1, nil
-}
-
-// raiseEventLowWatermarkTx moves the watermark up to just below the lowest
-// surviving seq. It never lowers it, and leaves it alone when no event
-// survives.
-func raiseEventLowWatermarkTx(tx *sql.Tx) error {
-	if _, err := tx.Exec(
-		`UPDATE event_low_watermark
-		    SET seq = MAX(seq, (SELECT MIN(seq) - 1 FROM events))
-		  WHERE id = 1 AND EXISTS (SELECT 1 FROM events)`,
-	); err != nil {
-		return fmt.Errorf("raising the event low watermark: %w", err)
-	}
-	return nil
 }
 
 // prunedEventData is the `events-pruned` payload: what was asked for, and what
