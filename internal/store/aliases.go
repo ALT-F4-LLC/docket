@@ -27,6 +27,10 @@ type (
 	DocListOptions        = db.DocListOptions
 	DocSummary            = db.DocSummary
 	DocUpdate             = db.DocUpdate
+	EventFilter           = db.EventFilter
+	EventPruneSelection   = db.EventPruneSelection
+	EventRow              = db.EventRow
+	EventRunStatus        = db.EventRunStatus
 	GateOverrideGrant     = db.GateOverrideGrant
 	ListOptions           = db.ListOptions
 	MetadataKeyRollup     = db.MetadataKeyRollup
@@ -66,6 +70,7 @@ var (
 	ErrLabelColorConflict        = db.ErrLabelColorConflict
 	ErrLeaseExpired              = db.ErrLeaseExpired
 	ErrLeaseHeld                 = db.ErrLeaseHeld
+	ErrNoEventLowWatermark       = db.ErrNoEventLowWatermark
 	ErrNoOpenDispatch            = db.ErrNoOpenDispatch
 	ErrNotAttached               = db.ErrNotAttached
 	ErrNotFound                  = db.ErrNotFound

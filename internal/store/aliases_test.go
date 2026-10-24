@@ -112,6 +112,10 @@ func TestAliasedTypesAreTheDBTypes(t *testing.T) {
 	var docList DocListOptions = db.DocListOptions{}
 	var docSummary DocSummary = db.DocSummary{}
 	var docUpdate DocUpdate = db.DocUpdate{}
+	var eventFilter EventFilter = db.EventFilter{}
+	var pruneSel EventPruneSelection = db.EventPruneSelection{}
+	var eventRow EventRow = db.EventRow{}
+	var eventRun EventRunStatus = db.EventRunStatus{}
 	var grant GateOverrideGrant = db.GateOverrideGrant{}
 	var list ListOptions = db.ListOptions{}
 	var metaRollup MetadataKeyRollup = db.MetadataKeyRollup{}
@@ -154,6 +158,10 @@ func TestAliasedTypesAreTheDBTypes(t *testing.T) {
 	var _ db.DocListOptions = docList
 	var _ db.DocSummary = docSummary
 	var _ db.DocUpdate = docUpdate
+	var _ db.EventFilter = eventFilter
+	var _ db.EventPruneSelection = pruneSel
+	var _ db.EventRow = eventRow
+	var _ db.EventRunStatus = eventRun
 	var _ db.GateOverrideGrant = grant
 	var _ db.ListOptions = list
 	var _ db.MetadataKeyRollup = metaRollup
@@ -296,6 +304,7 @@ func TestAliasedSentinelsMatchTheDBErrors(t *testing.T) {
 		{"ErrLabelColorConflict", ErrLabelColorConflict, db.ErrLabelColorConflict},
 		{"ErrLeaseExpired", ErrLeaseExpired, db.ErrLeaseExpired},
 		{"ErrLeaseHeld", ErrLeaseHeld, db.ErrLeaseHeld},
+		{"ErrNoEventLowWatermark", ErrNoEventLowWatermark, db.ErrNoEventLowWatermark},
 		{"ErrNoOpenDispatch", ErrNoOpenDispatch, db.ErrNoOpenDispatch},
 		{"ErrNotAttached", ErrNotAttached, db.ErrNotAttached},
 		{"ErrNotFound", ErrNotFound, db.ErrNotFound},
