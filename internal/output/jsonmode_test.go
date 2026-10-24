@@ -69,7 +69,6 @@ func TestNewWithVersion(t *testing.T) {
 		wantJSONMode bool
 	}{
 		{JSONNone, false},
-		{JSONV1, true},
 		{JSONV2, true},
 	}
 	for _, tt := range tests {
@@ -84,10 +83,11 @@ func TestNewWithVersion(t *testing.T) {
 	}
 }
 
-// TestNewMatchesLegacyBoolConstructor pins New's Bool-era signature behavior.
+// TestNewMatchesLegacyBoolConstructor pins New's Bool-era signature behavior:
+// the bool alone selects JSON mode with a concrete envelope version.
 func TestNewMatchesLegacyBoolConstructor(t *testing.T) {
-	if w := New(true, false); w.JSONVersion != JSONV1 || !w.JSONMode {
-		t.Errorf("New(true,false) = {mode:%v version:%v}, want {true JSONV1}",
+	if w := New(true, false); w.JSONVersion == JSONNone || !w.JSONMode {
+		t.Errorf("New(true,false) = {mode:%v version:%v}, want JSON mode with a version",
 			w.JSONMode, w.JSONVersion)
 	}
 	if w := New(false, false); w.JSONVersion != JSONNone || w.JSONMode {

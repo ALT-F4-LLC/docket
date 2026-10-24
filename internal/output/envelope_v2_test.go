@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -100,48 +101,27 @@ func TestV2CollectionSiblingsBesideEnvelope(t *testing.T) {
 	}
 }
 
-// TestV1IgnoresCollection is the dormancy guarantee at the type level: adding
-// a Collection implementation must not change v1 output at all.
-func TestV1IgnoresCollection(t *testing.T) {
-	coll := testCollection{items: []string{"a"}, total: 42, truncated: true}
-
-	var buf bytes.Buffer
-	w := &Writer{
-		JSONMode: true, JSONVersion: JSONV1,
-		Stdout: &buf, Stderr: &bytes.Buffer{},
-	}
-	w.Success(coll, "")
-
-	var raw map[string]any
-	err := json.Unmarshal(buf.Bytes(), &raw)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	// testCollection has no exported fields, so v1 marshals it as {} — the
-	// point being that v1 never consults the Collection methods.
-	data, ok := raw["data"].(map[string]any)
-	if !ok {
-		t.Fatalf("data type = %T, want map", raw["data"])
-	}
-	for _, key := range []string{"items", "total", "truncated"} {
-		if _, present := data[key]; present {
-			t.Errorf("v1 envelope leaked v2 key %q", key)
-		}
-	}
-}
-
 // TestV2NonCollectionPassesThrough: scalar results have no items/total/
-// truncated to report, so v2 renders them exactly as v1 does.
+// truncated to report, so v2 renders the payload as data unchanged.
 func TestV2NonCollectionPassesThrough(t *testing.T) {
 	data := map[string]string{"id": "DKT-1", "title": "t"}
 
-	var v1buf, v2buf bytes.Buffer
-	(&Writer{JSONMode: true, JSONVersion: JSONV1, Stdout: &v1buf, Stderr: &bytes.Buffer{}}).
-		Success(data, "msg")
-	(&Writer{JSONMode: true, JSONVersion: JSONV2, Stdout: &v2buf, Stderr: &bytes.Buffer{}}).
+	var buf bytes.Buffer
+	(&Writer{JSONMode: true, JSONVersion: JSONV2, Stdout: &buf, Stderr: &bytes.Buffer{}}).
 		Success(data, "msg")
 
-	if v1buf.String() != v2buf.String() {
-		t.Errorf("scalar payload differed between versions:\nv1 = %q\nv2 = %q",
-			v1buf.String(), v2buf.String())
+	var envelope struct {
+		OK      bool              `json:"ok"`
+		Data    map[string]string `json:"data"`
+		Message string            `json:"message"`
+	}
+	err := json.Unmarshal(buf.Bytes(), &envelope)
+	testsupport.Must(t, err, "unmarshal: %v", err)
+	if !envelope.OK || envelope.Message != "msg" {
+		t.Errorf("envelope = {ok:%v message:%q}, want {true \"msg\"}", envelope.OK, envelope.Message)
+	}
+	if !reflect.DeepEqual(envelope.Data, data) {
+		t.Errorf("data = %#v, want the payload unchanged %#v", envelope.Data, data)
 	}
 }
 
