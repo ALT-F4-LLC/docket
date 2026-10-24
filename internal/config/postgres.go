@@ -60,13 +60,14 @@ func (d PostgresDSN) String() string   { return d.Redacted() }
 func (d PostgresDSN) GoString() string { return "config.PostgresDSN{" + d.Redacted() + "}" }
 
 // Redacted renders the DSN for display. It keeps the scheme, host, port,
-// database path, and the values of displayableDSNKeys, and replaces the
-// userinfo username and password and every other query value with
-// RedactedMarker. It
-// drops any fragment. A DSN that is not a postgres:// or postgresql:// URL,
-// including the key/value form, or that fails to parse, renders as the marker
-// alone: neither the input nor a parse error that quotes it is returned. An
-// unset DSN renders as "".
+// database path, and the displayableDSNKeys query parameters, and replaces
+// the userinfo username and password with RedactedMarker. Every other query
+// key, name and value alike, collapses into a single RedactedMarker=
+// RedactedMarker parameter, because a misplaced secret can land in a key
+// position. It drops any fragment. A DSN that is not a postgres:// or
+// postgresql:// URL, including the key/value form, or that fails to parse,
+// renders as the marker alone: neither the input nor a parse error that
+// quotes it is returned. An unset DSN renders as "".
 func (d PostgresDSN) Redacted() string {
 	if d.raw == "" {
 		return ""
@@ -79,16 +80,16 @@ func (d PostgresDSN) Redacted() string {
 	if err != nil {
 		return RedactedMarker
 	}
+	shownQuery := url.Values{}
 	for key, values := range query {
 		if displayableDSNKeys[key] {
-			continue
-		}
-		for i := range values {
-			values[i] = RedactedMarker
+			shownQuery[key] = values
+		} else {
+			shownQuery.Set(RedactedMarker, RedactedMarker)
 		}
 	}
 
-	shown := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawQuery: query.Encode()}
+	shown := url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path, RawQuery: shownQuery.Encode()}
 	if u.User != nil {
 		if _, hasPassword := u.User.Password(); hasPassword {
 			shown.User = url.UserPassword(RedactedMarker, RedactedMarker)

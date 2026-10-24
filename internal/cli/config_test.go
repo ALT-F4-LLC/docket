@@ -58,6 +58,7 @@ func TestConfigRedactsPostgresDSNAndNeverReadsPasswordFile(t *testing.T) {
 		"password query parameter": "postgres://u@host/db?sslmode=disable&password=QUERYSECRET",
 		"userinfo username":        "postgres://USERNAMESECRET:PWSECRET@host/db",
 		"user query parameter":     "postgres://host/db?user=USERNAMESECRET",
+		"secret query key":         "postgres://u@host/db?KEYSECRET=x",
 	}
 	for storeName, store := range stores {
 		for dsnName, dsn := range dsns {
@@ -65,7 +66,7 @@ func TestConfigRedactsPostgresDSNAndNeverReadsPasswordFile(t *testing.T) {
 				t.Run(storeName+"/"+dsnName+"/json="+map[bool]string{false: "off", true: "on"}[jsonMode], func(t *testing.T) {
 					t.Setenv(config.PostgresDSNEnv, dsn)
 					out := runConfigOutput(t, store(t), jsonMode)
-					for _, secret := range []string{"USERSECRET", "QUERYSECRET", "FILESECRET", "USERNAMESECRET", "PWSECRET"} {
+					for _, secret := range []string{"USERSECRET", "QUERYSECRET", "FILESECRET", "USERNAMESECRET", "PWSECRET", "KEYSECRET"} {
 						if strings.Contains(out, secret) {
 							t.Errorf("docket config output contains %s:\n%s", secret, out)
 						}

@@ -22,6 +22,9 @@ func TestPostgresDSNRedactedHidesEverySecret(t *testing.T) {
 		{"malformed query", "postgres://u@host/db?password=QSECRET%zz", "QSECRET"},
 		{"fragment", "postgres://u:p@host/db#FRAGSECRET", "FRAGSECRET"},
 		{"opaque", "postgres:OPAQUESECRET", "OPAQUESECRET"},
+		{"secret query key", "postgres://u@host/db?KEYSECRET=x", "KEYSECRET"},
+		{"secret query key without value", "postgres://u@host/db?KEYSECRET", "KEYSECRET"},
+		{"password tail after unescaped ampersand", "postgres://u@host/db?password=ab&AMPSECRET", "AMPSECRET"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
