@@ -7,12 +7,12 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -711,7 +711,7 @@ func writePinEpochs(
 func stepResolution(
 	a engine.StepAttempt, dispositions map[string]engine.IssueDisposition,
 ) string {
-	if a.Status != db.StepFailedRouted && a.Status != db.StepWaitingHuman {
+	if a.Status != store.StepFailedRouted && a.Status != store.StepWaitingHuman {
 		return ""
 	}
 	if strings.HasPrefix(a.Routing, workflow.OnFailAbandonIssue) {
@@ -773,7 +773,7 @@ func reasonHead(reason string, max int) string {
 }
 
 func writeMetadataRollup(
-	rollup []db.MetadataKeyRollup, title string,
+	rollup []store.MetadataKeyRollup, title string,
 	header func(title string), line func(k, v string),
 ) {
 	if len(rollup) == 0 {
@@ -854,14 +854,14 @@ func writeStepMetadata(
 			// a TERMINAL, and the value goes through db's own renderer so
 			// this section and the rollup above spell one value identically.
 			parts = append(parts, fmt.Sprintf("%s=%s",
-				exec.Render(k), exec.Render(db.RenderMetadataValue(a.Metadata[k]))))
+				exec.Render(k), exec.Render(store.RenderMetadataValue(a.Metadata[k]))))
 		}
 		line(stepLabel(a)+":", detail+" — "+strings.Join(parts, ", "))
 	}
 }
 
 func writeVerdicts(
-	counts []db.VerdictCount, title string,
+	counts []store.VerdictCount, title string,
 	header func(title string), line func(k, v string),
 ) {
 	if len(counts) == 0 {

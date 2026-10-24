@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -88,7 +88,7 @@ type runListResult struct {
 // newRunListResult builds the list result with an empty collection rendered as
 // `[]`, never `null`.
 //
-// db.ListRuns returns a nil slice when nothing matches, and encoding/json
+// Store.ListRuns returns a nil slice when nothing matches, and encoding/json
 // renders a nil slice as `null`. The collection envelope's items never are,
 // but a writer that marshals this struct directly would print `"runs":null`,
 // and a reader iterating `.data.runs[]` fails on it. `step list --issue`
@@ -108,8 +108,6 @@ func (r runListResult) CollectionTruncated() bool {
 }
 
 func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
 	all, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
 
@@ -126,7 +124,7 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 
-	runs, total, err := db.ListRuns(conn, db.RunListOptions{
+	runs, total, err := store.StoreOn(getDB(cmd)).ListRuns(store.RunListOptions{
 		ProjectID:  getProjectID(cmd),
 		ActiveOnly: !all, Limit: limit,
 	})
@@ -145,18 +143,19 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 	conn := getDB(cmd)
+	st := store.StoreOn(conn)
 
 	runID, err := model.ParseRunID(ref)
 	if err != nil {
 		return cmdErr(err, output.ErrValidation)
 	}
 
-	run, err := db.GetRun(conn, runID)
+	run, err := st.GetRun(runID)
 	if err != nil {
 		return runErr(err)
 	}
 
-	runIssues, err := db.ListRunIssues(conn, runID)
+	runIssues, err := st.ListRunIssues(runID)
 	if err != nil {
 		return runErr(err)
 	}
@@ -169,7 +168,7 @@ func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
 	if err != nil {
 		return runErr(err)
 	}
-	pins, err := db.ListPins(conn, runID)
+	pins, err := st.ListPins(runID)
 	if err != nil {
 		return runErr(err)
 	}
