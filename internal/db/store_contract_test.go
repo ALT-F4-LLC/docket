@@ -36,6 +36,8 @@ func TestStoreContract(t *testing.T) {
 	cases = append(cases, versionContract...)
 	cases = append(cases, leaseContract...)
 	cases = append(cases, commentContract...)
+	cases = append(cases, relationContract...)
+	cases = append(cases, issueContract...)
 
 	for _, s := range stores {
 		t.Run(s.name, func(t *testing.T) {

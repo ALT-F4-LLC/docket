@@ -74,26 +74,6 @@ func TestListIssuesDefaultSortOrder(t *testing.T) {
 	}
 }
 
-// TestListIssuesEmptyIsNotNil pins ListIssues' zero-result contract: an
-// empty database returns a non-nil empty slice, not nil.
-func TestListIssuesEmptyIsNotNil(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize: %v", err)
-
-	issues, total, err := ListIssues(db, ListOptions{})
-	testsupport.Must(t, err, "ListIssues: %v", err)
-	if total != 0 {
-		t.Fatalf("total = %d, want 0", total)
-	}
-	if issues == nil {
-		t.Fatalf("ListIssues returned nil, want a non-nil empty slice")
-	}
-	if len(issues) != 0 {
-		t.Fatalf("len(issues) = %d, want 0", len(issues))
-	}
-}
-
 func TestListIssuesDefaultSortCreatedAtTiebreaker(t *testing.T) {
 	db := mustOpen(t)
 	err := Initialize(db)
