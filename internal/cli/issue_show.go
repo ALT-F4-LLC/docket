@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -300,7 +300,9 @@ func fetchIssueDetail(conn *sql.DB, source string) (*model.Issue, showResult, er
 		return nil, showResult{}, err
 	}
 
-	issue, err := db.GetIssue(conn, id)
+	st := store.StoreOn(conn)
+
+	issue, err := st.GetIssue(id)
 	if err != nil {
 		if e := notFound(err, fmt.Sprintf("issue %s", source)); e != nil {
 			return nil, showResult{}, e
@@ -309,42 +311,42 @@ func fetchIssueDetail(conn *sql.DB, source string) (*model.Issue, showResult, er
 	}
 
 	// Hydrate labels.
-	issue.Labels, err = db.GetIssueLabels(conn, id)
+	issue.Labels, err = st.GetIssueLabels(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
 	}
 
 	// Hydrate files.
-	issue.Files, err = db.GetIssueFiles(conn, id)
+	issue.Files, err = st.GetIssueFiles(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 	}
 
-	if err := db.HydrateDocs(conn, []*model.Issue{issue}); err != nil {
+	if err := st.HydrateDocs([]*model.Issue{issue}); err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
-	subIssues, err := db.GetSubIssues(conn, id)
+	subIssues, err := st.GetSubIssues(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
 	}
 
-	relations, err := db.GetIssueRelations(conn, id)
+	relations, err := st.GetIssueRelations(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
 	}
 
-	linkedProposals, err := db.GetIssueProposals(conn, id)
+	linkedProposals, err := st.GetIssueProposals(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
 	}
 
-	comments, err := db.ListComments(conn, id)
+	comments, err := st.ListComments(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
 	}
 
-	activity, err := db.GetActivity(conn, id, 10)
+	activity, err := st.GetActivity(id, 10)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
 	}
@@ -358,7 +360,7 @@ func fetchIssueDetail(conn *sql.DB, source string) (*model.Issue, showResult, er
 
 	// Scope is stored as a JSON array in `issues.scope_globs`, or NULL when
 	// the issue declares none. The empty string is the NULL case.
-	scopeJSON, err := db.IssueScopeGlobs(conn, id)
+	scopeJSON, err := st.IssueScopeGlobs(id)
 	if err != nil {
 		return nil, showResult{}, cmdErr(fmt.Errorf("fetching scope: %w", err), output.ErrGeneral)
 	}

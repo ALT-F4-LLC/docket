@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -81,7 +81,7 @@ func applyScope(cmd *cobra.Command, conn *sql.DB, issueID int) error {
 	if err != nil {
 		return err
 	}
-	if err := db.SetIssueScopeGlobs(conn, issueID, globsJSON); err != nil {
+	if err := store.StoreOn(conn).SetIssueScopeGlobs(issueID, globsJSON); err != nil {
 		return cmdErr(err, output.ErrGeneral)
 	}
 	return nil
