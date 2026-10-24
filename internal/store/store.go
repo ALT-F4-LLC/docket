@@ -209,8 +209,13 @@ type ReadTx interface {
 	BudgetDefaultTx(projectID int) (float64, error)
 	BudgetUnitTx(projectID int) (string, error)
 	ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOverride, error)
+	CountEventsHeldByRetentionTx(sel db.EventPruneSelection, cutoffMS int64) (int, error)
+	CountEventsTx(f db.EventFilter) (int, error)
+	CountPrunableEventsTx(sel db.EventPruneSelection) (int, error)
 	DispatchGraceTx(projectID int) (time.Duration, error)
 	DispatchTTLTx(projectID int) (time.Duration, error)
+	EventKindCountsTx(runID int) (map[string]int, error)
+	EventLowWatermarkTx() (int64, error)
 	GateResultsForStepTx(stepID int) ([]db.GateResultRow, error)
 	GetArtifactTx(id int) (*db.Artifact, error)
 	GetConfigTx(projectID int, key string) (db.ConfigEntry, error)
@@ -224,7 +229,9 @@ type ReadTx interface {
 	GetStepTx(id int) (*db.Step, error)
 	IssueScopeGlobsTx(issueID int) (string, error)
 	IssueStatusResolutionTx(issueID int) (model.Status, string, error)
+	LatestEventDataTx(runID int, kind string) (data string, found bool, err error)
 	ListDispatchRowsTx(dispatchID int) ([]db.DispatchRow, error)
+	ListEventsTx(f db.EventFilter, limit, tail int) ([]db.EventRow, error)
 	ListIssueStepsTx(runID, issueID int) ([]*db.Step, error)
 	ListPinsTx(runID int) ([]db.Pin, error)
 	ListRunArtifactsTx(runID int) ([]*db.Artifact, error)
@@ -237,6 +244,7 @@ type ReadTx interface {
 	LoopGrantsTx(runID, issueID int) (int, error)
 	NextActionOrdinalTx(stepID int, action string) (int, error)
 	OpenDispatchTx(runID int) (*db.Dispatch, error)
+	PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error)
 	ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error)
 	RegisteredVoteRulesTx(projectID int) ([]string, error)
 	ReportedUsageTx(runID int, unit string) (float64, error)
@@ -273,6 +281,7 @@ type Tx interface {
 	CloseDispatchTx(id int, status, reason string, nowMS int64) (bool, error)
 	CloseOpenProposalsTx(ids []int, reason string) (int, error)
 	CoverGateOverrideGrantsTx(ids []int) error
+	DeletePrunableEventsTx(sel db.EventPruneSelection) (int, error)
 	ExemptStepAttemptFromBudgetTx(id int, nowMS int64) error
 	ExtendDispatchTx(id int, expiresMS, extendedSeq int64) (bool, error)
 	GrantLoopTx(runID, issueID int) (int, error)
@@ -316,6 +325,7 @@ type Tx interface {
 	MarkStepAttemptFailedTx(id int, nowMS int64) error
 	MarkStepClaimReapedTx(id int, nowMS int64) error
 	MarkStepUsageRecordedTx(stepID int) error
+	RaiseEventLowWatermarkTx() error
 	ReapStepTx(id int, nowMS int64) error
 	RefreshClaimLeaseTx(id int, tokenHash string, ttlMS, nowMS int64) (bool, error)
 	ReleaseStepLeaseTx(id int, nowMS int64) error

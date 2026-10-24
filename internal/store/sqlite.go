@@ -751,12 +751,32 @@ func (t *sqliteTx) ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOve
 	return db.ClassMaxOverridesTx(t.tx, projectID)
 }
 
+func (t *sqliteTx) CountEventsHeldByRetentionTx(sel db.EventPruneSelection, cutoffMS int64) (int, error) {
+	return db.CountEventsHeldByRetentionTx(t.tx, sel, cutoffMS)
+}
+
+func (t *sqliteTx) CountEventsTx(f db.EventFilter) (int, error) {
+	return db.CountEventsTx(t.tx, f)
+}
+
+func (t *sqliteTx) CountPrunableEventsTx(sel db.EventPruneSelection) (int, error) {
+	return db.CountPrunableEventsTx(t.tx, sel)
+}
+
 func (t *sqliteTx) DispatchGraceTx(projectID int) (time.Duration, error) {
 	return db.DispatchGraceTx(t.tx, projectID)
 }
 
 func (t *sqliteTx) DispatchTTLTx(projectID int) (time.Duration, error) {
 	return db.DispatchTTLTx(t.tx, projectID)
+}
+
+func (t *sqliteTx) EventKindCountsTx(runID int) (map[string]int, error) {
+	return db.EventKindCountsTx(t.tx, runID)
+}
+
+func (t *sqliteTx) EventLowWatermarkTx() (int64, error) {
+	return db.EventLowWatermarkTx(t.tx)
 }
 
 func (t *sqliteTx) GateResultsForStepTx(stepID int) ([]db.GateResultRow, error) {
@@ -811,8 +831,16 @@ func (t *sqliteTx) IssueStatusResolutionTx(issueID int) (model.Status, string, e
 	return db.IssueStatusResolutionTx(t.tx, issueID)
 }
 
+func (t *sqliteTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
+	return db.LatestEventDataTx(t.tx, runID, kind)
+}
+
 func (t *sqliteTx) ListDispatchRowsTx(dispatchID int) ([]db.DispatchRow, error) {
 	return db.ListDispatchRowsTx(t.tx, dispatchID)
+}
+
+func (t *sqliteTx) ListEventsTx(f db.EventFilter, limit, tail int) ([]db.EventRow, error) {
+	return db.ListEventsTx(t.tx, f, limit, tail)
 }
 
 func (t *sqliteTx) ListIssueStepsTx(runID, issueID int) ([]*db.Step, error) {
@@ -861,6 +889,10 @@ func (t *sqliteTx) NextActionOrdinalTx(stepID int, action string) (int, error) {
 
 func (t *sqliteTx) OpenDispatchTx(runID int) (*db.Dispatch, error) {
 	return db.OpenDispatchTx(t.tx, runID)
+}
+
+func (t *sqliteTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error) {
+	return db.PrunableEventRunsTx(t.tx, sel)
 }
 
 func (t *sqliteTx) ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error) {
@@ -969,6 +1001,10 @@ func (t *sqliteTx) CloseOpenProposalsTx(ids []int, reason string) (int, error) {
 
 func (t *sqliteTx) CoverGateOverrideGrantsTx(ids []int) error {
 	return db.CoverGateOverrideGrantsTx(t.tx, ids)
+}
+
+func (t *sqliteTx) DeletePrunableEventsTx(sel db.EventPruneSelection) (int, error) {
+	return db.DeletePrunableEventsTx(t.tx, sel)
 }
 
 func (t *sqliteTx) ExemptStepAttemptFromBudgetTx(id int, nowMS int64) error {
@@ -1141,6 +1177,10 @@ func (t *sqliteTx) MarkStepClaimReapedTx(id int, nowMS int64) error {
 
 func (t *sqliteTx) MarkStepUsageRecordedTx(stepID int) error {
 	return db.MarkStepUsageRecordedTx(t.tx, stepID)
+}
+
+func (t *sqliteTx) RaiseEventLowWatermarkTx() error {
+	return db.RaiseEventLowWatermarkTx(t.tx)
 }
 
 func (t *sqliteTx) ReapStepTx(id int, nowMS int64) error {
