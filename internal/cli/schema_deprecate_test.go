@@ -265,6 +265,9 @@ func TestSchemaListHidesRetiredVersionsByDefault(t *testing.T) {
 			} `json:"data"`
 		}
 		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "decoding the envelope:\n%s", buf.String())
+		if env.Data.Items == nil {
+			t.Fatalf("the listing carries no v2 items:\n%s", buf.String())
+		}
 		for i := range env.Data.Items {
 			if env.Data.Items[i].Name == "findings" {
 				return &env.Data.Items[i], buf.String()
