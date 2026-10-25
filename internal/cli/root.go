@@ -5,11 +5,16 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/api"
+	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -526,6 +531,34 @@ func checkDaemonURL(ctx context.Context, rawURL string, resolver daemonHostResol
 		}
 	}
 	return nil
+}
+
+// daemonDialFunc opens the connection to a daemon address. (*net.Dialer).DialContext
+// satisfies it.
+type daemonDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// newDaemonClient returns a Connect client for the daemon at daemonURL, or
+// checkDaemonURL's refusal before anything is built or dialed. The client
+// applies the same check to every redirect target before following it, and
+// ignores proxy environment variables, so plaintext reaches only the
+// loopback daemon the URL names.
+func newDaemonClient(ctx context.Context, daemonURL string, resolver daemonHostResolver, dial daemonDialFunc, logger *slog.Logger) (docketv1connect.DocketServiceClient, error) {
+	if err := checkDaemonURL(ctx, daemonURL, resolver); err != nil {
+		return nil, err
+	}
+	httpClient := &http.Client{
+		Transport: &http.Transport{DialContext: dial},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := checkDaemonURL(req.Context(), req.URL.String(), resolver); err != nil {
+				return err
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
+	return api.NewClient(httpClient, daemonURL, logger), nil
 }
 
 func getCfg(cmd *cobra.Command) *config.Config {
