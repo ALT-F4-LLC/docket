@@ -16,7 +16,8 @@ import (
 
 // TestPgStoreReadsDoNotBlockOnWriteLock holds the global write lock from a
 // second pool and checks that the store's pure reads, and a read snapshot,
-// still return, while a store write queues on the lock until it is released.
+// still return, while store writes, in a transaction or as a lone statement,
+// queue on the lock until it is released.
 func TestPgStoreReadsDoNotBlockOnWriteLock(t *testing.T) {
 	st := openTestStore(t)
 	issueID, _, err := st.CreateIssueIdempotent(&model.Issue{
@@ -104,32 +105,50 @@ func TestPgStoreReadsDoNotBlockOnWriteLock(t *testing.T) {
 		})
 	}
 
-	t.Run("a write queues on the lock until the holder releases it", func(t *testing.T) {
-		done := make(chan error, 1)
-		go func() {
+	// One write opens a transaction; the other is a single Exec outside any
+	// transaction, which the connection wraps in a locked one.
+	writes := []struct {
+		name  string
+		write func() error
+	}{
+		{"CreateCommentIdempotent", func() error {
 			_, err := st.CreateCommentIdempotent(&model.Comment{IssueID: issueID, Body: "under the lock"}, "")
-			done <- err
-		}()
+			return err
+		}},
+		{"SetIssueScopeGlobs", func() error {
+			return st.SetIssueScopeGlobs(issueID, `["internal/**"]`)
+		}},
+	}
+	t.Run("writes queue on the lock until the holder releases it", func(t *testing.T) {
+		done := make([]chan error, len(writes))
+		for i, w := range writes {
+			done[i] = make(chan error, 1)
+			go func() { done[i] <- w.write() }()
+		}
 		deadline := time.Now().Add(10 * time.Second)
-		for writeLockWaiters(t, holder) == 0 {
-			select {
-			case err := <-done:
-				t.Fatalf("write returned while another session held the write lock: %v", err)
-			default:
+		for writeLockWaiters(t, holder) < len(writes) {
+			for i, w := range writes {
+				select {
+				case err := <-done[i]:
+					t.Fatalf("%s returned while another session held the write lock: %v", w.name, err)
+				default:
+				}
 			}
 			if time.Now().After(deadline) {
-				t.Fatal("write neither returned nor queued on the write lock within 10s")
+				t.Fatalf("the writes neither returned nor all queued on the write lock within 10s")
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
 		release()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("write after release: %v", err)
+		for i, w := range writes {
+			select {
+			case err := <-done[i]:
+				if err != nil {
+					t.Fatalf("%s after release: %v", w.name, err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s did not finish within 10s of the lock's release", w.name)
 			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("write did not finish within 10s of the lock's release")
 		}
 	})
 
@@ -190,6 +209,59 @@ func TestRebindPlaceholders(t *testing.T) {
 	for _, c := range cases {
 		if got := rebindPlaceholders(c.in, c.nargs); got != c.want {
 			t.Errorf("rebindPlaceholders(%q, %d) = %q, want %q", c.in, c.nargs, got, c.want)
+		}
+	}
+}
+
+// TestStoreConnRefusesOtherWriteIsolation checks that a read-write
+// transaction runs at READ COMMITTED when the caller names no level or that
+// one, and fails when the caller asks for another.
+func TestStoreConnRefusesOtherWriteIsolation(t *testing.T) {
+	pool := sql.OpenDB(newStoreConnector(testConnConfig(t)))
+	t.Cleanup(func() { pool.Close() })
+	ctx := context.Background()
+
+	for _, level := range []sql.IsolationLevel{sql.LevelDefault, sql.LevelReadCommitted} {
+		tx, err := pool.BeginTx(ctx, &sql.TxOptions{Isolation: level})
+		if err != nil {
+			t.Fatalf("BeginTx(%s): %v", level, err)
+		}
+		var got string
+		if err := tx.QueryRow(`SHOW transaction_isolation`).Scan(&got); err != nil {
+			t.Fatalf("reading transaction_isolation: %v", err)
+		}
+		tx.Rollback()
+		if got != "read committed" {
+			t.Errorf("BeginTx(%s) runs at %q, want read committed", level, got)
+		}
+	}
+	for _, level := range []sql.IsolationLevel{sql.LevelRepeatableRead, sql.LevelSerializable} {
+		tx, err := pool.BeginTx(ctx, &sql.TxOptions{Isolation: level})
+		if err == nil {
+			tx.Rollback()
+			t.Errorf("BeginTx(%s) succeeded, want a refusal", level)
+		}
+	}
+}
+
+func TestJSONCallsToJSONB(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`SELECT 1`, `SELECT 1`},
+		{
+			`EXISTS (SELECT 1 FROM json_each(domain_tags) WHERE value = ?)`,
+			`EXISTS (SELECT 1 FROM jsonb_array_elements_text(domain_tags) WHERE value = ?)`,
+		},
+		{
+			`CASE WHEN json_valid(e.data) THEN json_extract(e.data, '$.repo') END`,
+			`CASE WHEN (e.data IS JSON) THEN (e.data ->> 'repo') END`,
+		},
+		{`JSON_EXTRACT(COALESCE(d, '{}'), '$.k')`, `(COALESCE(d, '{}') ->> 'k')`},
+		{`json_extract(d, '$.a.b')`, `json_extract(d, '$.a.b')`},
+		{`SELECT 'json_valid(x)', my_json_valid(x)`, `SELECT 'json_valid(x)', my_json_valid(x)`},
+	}
+	for _, c := range cases {
+		if got := jsonCallsToJSONB(c.in); got != c.want {
+			t.Errorf("jsonCallsToJSONB(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

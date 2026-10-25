@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -75,10 +76,11 @@ func (s *pgStore) Begin() (store.Tx, error) {
 	return &pgTx{tx: tx}, nil
 }
 
-// BeginReadSnapshot opens a READ ONLY transaction, as WithReadTx does, which
-// takes no lock and so returns while a writer holds it.
+// BeginReadSnapshot opens a READ ONLY transaction at REPEATABLE READ, so every
+// read in it sees the state committed before its first statement. Like
+// WithReadTx it takes no lock, so it returns while a writer holds one.
 func (s *pgStore) BeginReadSnapshot() (store.ReadTx, error) {
-	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +89,21 @@ func (s *pgStore) BeginReadSnapshot() (store.ReadTx, error) {
 
 func (t *pgTx) Commit() error   { return t.tx.Commit() }
 func (t *pgTx) Rollback() error { return t.tx.Rollback() }
+
+// advanceIdentity follows an explicit-id insert into table: when it inserted
+// a row, it moves the table's id sequence past every id the table holds, so a
+// later create does not reuse an imported id. SQLite's AUTOINCREMENT does
+// this on its own. It never moves the sequence back.
+func (t *pgTx) advanceIdentity(table string, inserted bool, err error) (bool, error) {
+	if err != nil || !inserted {
+		return inserted, err
+	}
+	if _, err := t.tx.Exec(`SELECT setval(seq, GREATEST(top, COALESCE(pg_sequence_last_value(seq), 0)))
+		FROM (SELECT pg_get_serial_sequence('` + table + `', 'id')::regclass AS seq, MAX(id) AS top FROM ` + table + `) s`); err != nil {
+		return true, fmt.Errorf("advancing the %s id sequence: %w", table, err)
+	}
+	return true, nil
+}
 
 func (s *pgStore) ActionOutputsFor(stepID int, action string) ([]string, error) {
 	return db.ActionOutputsFor(s.db, stepID, action)
@@ -1045,7 +1062,8 @@ func (t *pgTx) InsertActionResultTx(r db.ActionResultRow) error {
 }
 
 func (t *pgTx) InsertActivityWithID(a *model.Activity) (bool, error) {
-	return db.InsertActivityWithID(t.tx, a)
+	inserted, err := db.InsertActivityWithID(t.tx, a)
+	return t.advanceIdentity("activity_log", inserted, err)
 }
 
 func (t *pgTx) InsertArtifactTx(a db.Artifact, nowMS int64) (int, error) {
@@ -1053,7 +1071,8 @@ func (t *pgTx) InsertArtifactTx(a db.Artifact, nowMS int64) (int, error) {
 }
 
 func (t *pgTx) InsertCommentWithID(comment *model.Comment) (bool, error) {
-	return db.InsertCommentWithID(t.tx, comment)
+	inserted, err := db.InsertCommentWithID(t.tx, comment)
+	return t.advanceIdentity("comments", inserted, err)
 }
 
 func (t *pgTx) InsertDispatchRowTx(dispatchID int, row db.DispatchRow) error {
@@ -1065,7 +1084,8 @@ func (t *pgTx) InsertDispatchTx(runID int, openedSeq, expiresMS, nowMS int64) (i
 }
 
 func (t *pgTx) InsertDocCommentWithID(c *model.DocComment) (bool, error) {
-	return db.InsertDocCommentWithID(t.tx, c)
+	inserted, err := db.InsertDocCommentWithID(t.tx, c)
+	return t.advanceIdentity("doc_comments", inserted, err)
 }
 
 func (t *pgTx) InsertDocIssueLink(docID, issueID int, createdAt string) (bool, error) {
@@ -1073,11 +1093,13 @@ func (t *pgTx) InsertDocIssueLink(docID, issueID int, createdAt string) (bool, e
 }
 
 func (t *pgTx) InsertDocRevisionWithID(r *model.DocRevision) (bool, error) {
-	return db.InsertDocRevisionWithID(t.tx, r)
+	inserted, err := db.InsertDocRevisionWithID(t.tx, r)
+	return t.advanceIdentity("doc_revisions", inserted, err)
 }
 
 func (t *pgTx) InsertDocWithID(doc *model.Doc) (bool, error) {
-	return db.InsertDocWithID(t.tx, doc)
+	inserted, err := db.InsertDocWithID(t.tx, doc)
+	return t.advanceIdentity("docs", inserted, err)
 }
 
 func (t *pgTx) InsertEngineComment(issueID int, body string, nowMS int64) (int, error) {
@@ -1109,11 +1131,13 @@ func (t *pgTx) InsertIssueLabelMapping(issueID, labelID int) (bool, error) {
 }
 
 func (t *pgTx) InsertIssueWithID(issue *model.Issue) (bool, error) {
-	return db.InsertIssueWithID(t.tx, issue)
+	inserted, err := db.InsertIssueWithID(t.tx, issue)
+	return t.advanceIdentity("issues", inserted, err)
 }
 
 func (t *pgTx) InsertLabelWithID(label *model.Label) (bool, error) {
-	return db.InsertLabelWithID(t.tx, label)
+	inserted, err := db.InsertLabelWithID(t.tx, label)
+	return t.advanceIdentity("labels", inserted, err)
 }
 
 func (t *pgTx) InsertPinTx(p db.Pin) error {
@@ -1129,7 +1153,8 @@ func (t *pgTx) InsertProposalIssueLink(proposalID, issueID int) (bool, error) {
 }
 
 func (t *pgTx) InsertProposalWithID(p *model.Proposal) (bool, error) {
-	return db.InsertProposalWithID(t.tx, p)
+	inserted, err := db.InsertProposalWithID(t.tx, p)
+	return t.advanceIdentity("proposals", inserted, err)
 }
 
 func (t *pgTx) InsertReapAckTx(ack db.ReapAck, nowMS int64) error {
@@ -1137,7 +1162,8 @@ func (t *pgTx) InsertReapAckTx(ack db.ReapAck, nowMS int64) error {
 }
 
 func (t *pgTx) InsertRelationWithID(rel *model.Relation) (bool, error) {
-	return db.InsertRelationWithID(t.tx, rel)
+	inserted, err := db.InsertRelationWithID(t.tx, rel)
+	return t.advanceIdentity("issue_relations", inserted, err)
 }
 
 func (t *pgTx) InsertRunNoteTx(n db.RunNote) (int, error) {
@@ -1173,7 +1199,8 @@ func (t *pgTx) InsertVoteUsageTx(voteID int64, unit string, quantity float64, so
 }
 
 func (t *pgTx) InsertVoteWithID(v *model.Vote) (bool, error) {
-	return db.InsertVoteWithID(t.tx, v)
+	inserted, err := db.InsertVoteWithID(t.tx, v)
+	return t.advanceIdentity("votes", inserted, err)
 }
 
 func (t *pgTx) InsertWorkflowTx(wf *model.Workflow, nowMS int64) (*model.Workflow, bool, error) {

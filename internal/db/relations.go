@@ -78,7 +78,7 @@ func CreateRelation(db *sql.DB, rel *model.Relation) (int, error) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	var id64 int
+	var id int
 	if err := tx.QueryRow(
 		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
 		 VALUES (?, ?, ?, ?) RETURNING id`,
@@ -86,7 +86,7 @@ func CreateRelation(db *sql.DB, rel *model.Relation) (int, error) {
 		rel.TargetIssueID,
 		string(rel.RelationType),
 		now,
-	).Scan(&id64); err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting relation: %w", err)
 	}
 
@@ -106,7 +106,7 @@ func CreateRelation(db *sql.DB, rel *model.Relation) (int, error) {
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return int(id64), nil
+	return id, nil
 }
 
 // DeleteRelation removes a relation matching the given source, target, and type.

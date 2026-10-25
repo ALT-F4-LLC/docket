@@ -554,13 +554,15 @@ func MoveIssueProject(
 		} else if err != nil {
 			return nil, fmt.Errorf("resolving label %q in the target project: %w", l.name, err)
 		}
-		// OR IGNORE + sweep rather than a bare UPDATE: an issue somehow already
+		// Skip + sweep rather than a bare UPDATE: an issue somehow already
 		// holding the target row must not abort the whole migration on the
 		// primary key.
 		if _, err := tx.Exec(
-			`UPDATE OR IGNORE issue_labels SET label_id = ?
-			  WHERE label_id = ? AND issue_id IN (`+placeholders+`)`,
-			append([]any{newID, l.id}, args...)...); err != nil {
+			`UPDATE issue_labels SET label_id = ?
+			  WHERE label_id = ? AND issue_id IN (`+placeholders+`)
+			    AND NOT EXISTS (SELECT 1 FROM issue_labels held
+			                     WHERE held.issue_id = issue_labels.issue_id AND held.label_id = ?)`,
+			append(append([]any{newID, l.id}, args...), newID)...); err != nil {
 			return nil, fmt.Errorf("re-mapping label %q: %w", l.name, err)
 		}
 		if _, err := tx.Exec(

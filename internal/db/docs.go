@@ -605,7 +605,7 @@ func appendDocRevision(tx *sql.Tx, docID int, body, changeKind, author, createdA
 		docID, next, body, changeKind, author, createdAt,
 	)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "PRIMARY KEY") {
+		if isUniqueOrPKConflict(err) {
 			return 0, ErrConflict
 		}
 		return 0, fmt.Errorf("inserting doc revision: %w", err)

@@ -347,19 +347,18 @@ const (
 // max` is finite, because that decision needs the scheduler's merged limits,
 // which the storage layer does not have and must not guess at.
 func InsertReapAckTx(tx *sql.Tx, ack ReapAck, nowMS int64) error {
+	// UNIQUE(reaped_seq): the same reap event cannot be recorded twice. A
+	// caller re-deriving an ack row for an event that already has one is a
+	// no-op rather than a failure — the row that exists says exactly what
+	// this one would have. ON CONFLICT skips it without failing the
+	// statement, which on PostgreSQL would abort the caller's transaction.
 	_, err := tx.Exec(
 		`INSERT INTO reap_acks (run_id, step_id, class, reaped_seq, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (reaped_seq) DO NOTHING`,
 		ack.RunID, ack.StepID, ack.Class, ack.ReapedSeq, nowMS,
 	)
 	if err != nil {
-		if isUniqueOrPKConflict(err) {
-			// UNIQUE(reaped_seq): the same reap event cannot be recorded twice.
-			// Reaching here means a caller re-derived an ack row for an event
-			// that already has one, which is a no-op rather than a failure — the
-			// row that exists says exactly what this one would have.
-			return nil
-		}
 		return fmt.Errorf("recording the reap of step %s for acknowledgment: %w",
 			model.FormatStepID(ack.StepID), err)
 	}

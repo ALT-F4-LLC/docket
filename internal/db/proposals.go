@@ -333,7 +333,7 @@ func CastVoteWeighted(db *sql.DB, v *model.Vote, equal bool) (*CastVoteResult, e
 		now,
 	).Scan(&v.ID); err != nil {
 		// UNIQUE constraint violation on (proposal_id, voter_name) means duplicate voter.
-		if strings.Contains(err.Error(), "UNIQUE constraint") {
+		if isUniqueOrPKConflict(err) {
 			return nil, ErrConflict
 		}
 		return nil, fmt.Errorf("inserting vote: %w", err)
@@ -597,7 +597,7 @@ func LinkProposalIssue(db *sql.DB, proposalID, issueID int) error {
 		proposalID, issueID,
 	)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "PRIMARY KEY") {
+		if isUniqueOrPKConflict(err) {
 			return ErrConflict
 		}
 		return fmt.Errorf("linking proposal to issue: %w", err)
