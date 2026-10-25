@@ -112,10 +112,10 @@ func eventsListCmdWithDB(conn *sql.DB) *cobra.Command {
 type eventsListJSON struct {
 	OK   bool `json:"ok"`
 	Data struct {
-		Events []struct {
+		Items []struct {
 			Seq int64  `json:"seq"`
 			Run string `json:"run"`
-		} `json:"events"`
+		} `json:"items"`
 		Total int `json:"total"`
 	} `json:"data"`
 }
@@ -137,6 +137,7 @@ func eventsFor(
 	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, invoking))
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runEventsList(cmd, w); err != nil {
 		t.Fatalf("runEventsList(--run %q): %v", runRef, err)
 	}
@@ -199,15 +200,15 @@ func TestEventsListRunInAnotherProjectIsNotAnEmptySuccess(t *testing.T) {
 	if !out.OK {
 		t.Fatalf("`events list --run %s` failed outright: %+v", thereRun, out)
 	}
-	if out.Data.Total == 0 || len(out.Data.Events) == 0 {
+	if out.Data.Total == 0 || len(out.Data.Items) == 0 {
 		t.Fatalf("`events list --run %s` from another project answered ok with an "+
 			"empty feed — DKT-583's exact defect: %+v", thereRun, out.Data)
 	}
-	if len(out.Data.Events) != 2 || out.Data.Total != 2 {
+	if len(out.Data.Items) != 2 || out.Data.Total != 2 {
 		t.Fatalf("answered %d events (total %d), want the run's 2",
-			len(out.Data.Events), out.Data.Total)
+			len(out.Data.Items), out.Data.Total)
 	}
-	for _, e := range out.Data.Events {
+	for _, e := range out.Data.Items {
 		if e.Run != thereRun {
 			t.Errorf("the feed carries an event from another run: %+v", e)
 		}
@@ -222,12 +223,12 @@ func TestEventsListRunInTheInvokingProjectIsUnchanged(t *testing.T) {
 
 	out := eventsFor(t, conn, here, hereRun, false)
 
-	if len(out.Data.Events) != 1 || out.Data.Total != 1 {
+	if len(out.Data.Items) != 1 || out.Data.Total != 1 {
 		t.Fatalf("the invoking project's own run answered %d events (total %d), want 1",
-			len(out.Data.Events), out.Data.Total)
+			len(out.Data.Items), out.Data.Total)
 	}
-	if out.Data.Events[0].Run != hereRun {
-		t.Errorf("answered %q, want %q", out.Data.Events[0].Run, hereRun)
+	if out.Data.Items[0].Run != hereRun {
+		t.Errorf("answered %q, want %q", out.Data.Items[0].Run, hereRun)
 	}
 }
 
@@ -239,9 +240,9 @@ func TestEventsListAllProjectsWithRunStillAnswers(t *testing.T) {
 
 	out := eventsFor(t, conn, here, thereRun, true)
 
-	if len(out.Data.Events) != 2 || out.Data.Total != 2 {
+	if len(out.Data.Items) != 2 || out.Data.Total != 2 {
 		t.Fatalf("--all-projects --run %s answered %d events (total %d), want 2",
-			thereRun, len(out.Data.Events), out.Data.Total)
+			thereRun, len(out.Data.Items), out.Data.Total)
 	}
 }
 
@@ -253,13 +254,13 @@ func TestEventsListWithoutRunStaysScopedToTheInvokingProject(t *testing.T) {
 
 	out := eventsFor(t, conn, here, "", false)
 
-	if len(out.Data.Events) != 1 {
+	if len(out.Data.Items) != 1 {
 		t.Fatalf("the unfiltered feed answered %d events, want only this project's 1: %+v",
-			len(out.Data.Events), out.Data.Events)
+			len(out.Data.Items), out.Data.Items)
 	}
-	if out.Data.Events[0].Run != hereRun {
+	if out.Data.Items[0].Run != hereRun {
 		t.Errorf("the scoped feed carries %q, want this project's %q",
-			out.Data.Events[0].Run, hereRun)
+			out.Data.Items[0].Run, hereRun)
 	}
 }
 

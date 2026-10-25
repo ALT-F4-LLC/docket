@@ -81,6 +81,7 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 	cmd := docListCmdWithDB(conn)
 	setFlags(t, cmd, map[string]string{"type": "resume-note", "sort": "id:asc"})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 
 	var env struct {
 		Data struct {
-			Docs  []map[string]json.RawMessage `json:"docs"`
+			Items []map[string]json.RawMessage `json:"items"`
 			Total int                          `json:"total"`
 		} `json:"data"`
 	}
@@ -99,11 +100,11 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 
-	if len(env.Data.Docs) != 11 || env.Data.Total != 11 {
-		t.Fatalf("docs = %d, total = %d, want 11 and 11", len(env.Data.Docs), env.Data.Total)
+	if len(env.Data.Items) != 11 || env.Data.Total != 11 {
+		t.Fatalf("items = %d, total = %d, want 11 and 11", len(env.Data.Items), env.Data.Total)
 	}
 
-	for i, row := range env.Data.Docs {
+	for i, row := range env.Data.Items {
 		if _, ok := row["body"]; ok {
 			t.Errorf("row %d carries a body key; listings must be body-free", i)
 		}
@@ -139,26 +140,27 @@ func TestDocListJSON_WithBodyRestoresBodies(t *testing.T) {
 		"type": "resume-note", "sort": "id:asc", "with-body": "true",
 	})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList --with-body: %v", err)
 	}
 
 	var env struct {
 		Data struct {
-			Docs []struct {
+			Items []struct {
 				ID   string `json:"id"`
 				Body string `json:"body"`
-			} `json:"docs"`
+			} `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 
-	if len(env.Data.Docs) != 11 {
-		t.Fatalf("docs = %d, want 11", len(env.Data.Docs))
+	if len(env.Data.Items) != 11 {
+		t.Fatalf("items = %d, want 11", len(env.Data.Items))
 	}
-	for i, row := range env.Data.Docs {
+	for i, row := range env.Data.Items {
 		if row.Body != bodies[i] {
 			t.Errorf("row %d body = %d bytes, want the full %d-byte body",
 				i, len(row.Body), len(bodies[i]))
@@ -176,20 +178,21 @@ func TestDocListJSON_EmptyIsAnArray(t *testing.T) {
 
 	cmd := docListCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList: %v", err)
 	}
 
 	var env struct {
 		Data struct {
-			Docs json.RawMessage `json:"docs"`
+			Items json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if got := string(env.Data.Docs); got != "[]" {
-		t.Errorf("docs = %s, want []", got)
+	if got := string(env.Data.Items); got != "[]" {
+		t.Errorf("items = %s, want []", got)
 	}
 }
 
