@@ -11,6 +11,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -31,7 +32,7 @@ func nextCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 
 type nextJSON struct {
 	Data struct {
-		Issues []struct {
+		Items []struct {
 			ID    string   `json:"id"`
 			Files []string `json:"files"`
 			Docs  []struct {
@@ -40,7 +41,7 @@ type nextJSON struct {
 				Title  string `json:"title"`
 				Status string `json:"status"`
 			} `json:"docs"`
-		} `json:"issues"`
+		} `json:"items"`
 		Total int `json:"total"`
 	} `json:"data"`
 }
@@ -49,6 +50,7 @@ func runNextJSON(t *testing.T, conn *sql.DB, limit int) nextJSON {
 	t.Helper()
 	cmd := nextCmdWithDB(conn, limit)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 	var nj nextJSON
@@ -79,10 +81,10 @@ func TestNextJSON_HydratesFilesAndDocs(t *testing.T) {
 	linkDocIssue(t, conn, doc, issueID)
 
 	nj := runNextJSON(t, conn, 10)
-	if len(nj.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(nj.Data.Issues))
+	if len(nj.Data.Items) != 1 {
+		t.Fatalf("issues = %d, want 1", len(nj.Data.Items))
 	}
-	iss := nj.Data.Issues[0]
+	iss := nj.Data.Items[0]
 	if len(iss.Files) != 1 || iss.Files[0] != "internal/db/doc_links.go" {
 		t.Errorf("files = %v, want [internal/db/doc_links.go]", iss.Files)
 	}
@@ -100,21 +102,22 @@ func TestNextJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 
 	cmd := nextCmdWithDB(conn, 10)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 
 	var env struct {
 		Data struct {
-			Issues []map[string]json.RawMessage `json:"issues"`
+			Items []map[string]json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	err = json.Unmarshal(buf.Bytes(), &env)
 	testsupport.Must(t, err, "unmarshal: %v", err)
-	if len(env.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(env.Data.Issues))
+	if len(env.Data.Items) != 1 {
+		t.Fatalf("issues = %d, want 1", len(env.Data.Items))
 	}
 	for _, key := range []string{"files", "docs"} {
-		if got := string(env.Data.Issues[0][key]); got != "[]" {
+		if got := string(env.Data.Items[0][key]); got != "[]" {
 			t.Errorf("%s = %s, want []", key, got)
 		}
 	}
@@ -124,7 +127,7 @@ func TestNextJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 // contract as TestNextJSON_FilesAndDocsEmptyAreArrays, one level up: FindReady
 // and filterReady return a nil slice when nothing is ready (planner/plan.go's
 // `var ready []*model.Issue`), and nextResult has no custom MarshalJSON like
-// issueListPayload does — an unguarded nil would serialize `.data.issues` as
+// issueListPayload does — an unguarded nil would serialize `.data.items` as
 // JSON null, breaking any consumer iterating it.
 func TestNextJSON_NoReadyIssuesIsAnEmptyArray(t *testing.T) {
 	conn := newTestDB(t)
@@ -132,17 +135,18 @@ func TestNextJSON_NoReadyIssuesIsAnEmptyArray(t *testing.T) {
 
 	cmd := nextCmdWithDB(conn, 10)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 
 	var env struct {
 		Data struct {
-			Issues json.RawMessage `json:"issues"`
+			Items json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	err = json.Unmarshal(buf.Bytes(), &env)
 	testsupport.Must(t, err, "unmarshal: %v", err)
-	if got := string(env.Data.Issues); got != "[]" {
+	if got := string(env.Data.Items); got != "[]" {
 		t.Errorf("issues = %s, want []", got)
 	}
 }
@@ -220,10 +224,10 @@ func TestNext_HydratesPostLimitOnly(t *testing.T) {
 	linkDocIssue(t, conn, docSecond, second)
 
 	nj := runNextJSON(t, conn, 1)
-	if len(nj.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1 (limit)", len(nj.Data.Issues))
+	if len(nj.Data.Items) != 1 {
+		t.Fatalf("issues = %d, want 1 (limit)", len(nj.Data.Items))
 	}
-	emitted := nj.Data.Issues[0]
+	emitted := nj.Data.Items[0]
 	if emitted.ID != model.FormatID(first) {
 		t.Fatalf("emitted = %s, want %s (priority order)", emitted.ID, model.FormatID(first))
 	}
@@ -233,6 +237,7 @@ func TestNext_HydratesPostLimitOnly(t *testing.T) {
 
 	cmd := nextCmdWithDB(conn, 1)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 	if strings.Contains(buf.String(), "Second Doc") {

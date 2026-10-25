@@ -1327,30 +1327,29 @@ func snapshotRunState(t *testing.T, conn *sql.DB) string {
 	return state
 }
 
-// TestRunStatusListRendersEmptyAsArray pins the v1 shape a bare `run status
-// --json` prints when no run is non-terminal: `"runs":[]`, never
-// `"runs":null`. A conductor iterating `.data.runs[]` fails on null, and the
-// v2 Collection path never had the defect, so the assertion is on the v1
-// bytes the skill's bare invocation reads.
+// TestRunStatusListRendersEmptyAsArray pins the shape `run status --json`
+// prints when no run is non-terminal: `"items":[]`, never `"items":null`. A
+// conductor iterating `.data.items[]` fails on null.
 func TestRunStatusListRendersEmptyAsArray(t *testing.T) {
 	conn := newTestDB(t)
 
 	cmd := runStatusCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runRunStatus(cmd, nil, w)
 	testsupport.Must(t, err, "run status: %v", err)
 
 	var envelope struct {
 		Data struct {
-			Runs  json.RawMessage `json:"runs"`
+			Items json.RawMessage `json:"items"`
 			Total int             `json:"total"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
 		t.Fatalf("decoding envelope %s: %v", buf.String(), err)
 	}
-	if got := string(envelope.Data.Runs); got != "[]" {
-		t.Errorf("runs = %s, want [] — a reader iterating .data.runs[] cannot "+
+	if got := string(envelope.Data.Items); got != "[]" {
+		t.Errorf("items = %s, want [] — a reader iterating .data.items[] cannot "+
 			"iterate null", got)
 	}
 	if envelope.Data.Total != 0 {
