@@ -157,6 +157,9 @@ func TestRunWatch_JSONModeNoANSI(t *testing.T) {
 
 	err := RunWatch(ctx, opts, func(_ context.Context, w *output.Writer) error {
 		callCount++
+		if w.JSONVersion != output.JSONV2 {
+			t.Errorf("JSON-mode watch Writer version = %v, want JSONV2", w.JSONVersion)
+		}
 		fmt.Fprintln(w.Stdout, `{"ok":true}`)
 		if callCount >= 2 {
 			cancel()

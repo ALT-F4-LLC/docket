@@ -130,13 +130,14 @@ type partialFailureEnvelope struct {
 	Code  ErrorCode `json:"code"`
 }
 
-// writeJSONSuccess writes a success envelope to w.
+// writeJSONSuccess writes a success envelope to w, with data in its v2 form
+// (see shapeV2Data).
 func writeJSONSuccess(w io.Writer, data any, message string) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.Encode(successEnvelope{
 		OK:      true,
-		Data:    data,
+		Data:    shapeV2Data(data),
 		Message: message,
 	})
 }

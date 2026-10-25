@@ -43,23 +43,26 @@ func TestParseJSONMode(t *testing.T) {
 	}
 }
 
-// TestZeroValueWriterEmitsV1 pins the Writer zero value: a Writer with
-// JSONMode set but no JSONVersion (as older code and existing tests build)
-// must emit v1, never v2.
-func TestZeroValueWriterEmitsV1(t *testing.T) {
+// TestZeroValueWriterEmitsV2 pins the Writer zero value: a Writer with
+// JSONMode set but no JSONVersion renders the v2 envelope, the only JSON
+// dialect.
+func TestZeroValueWriterEmitsV2(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Writer{JSONMode: true, Stdout: &buf, Stderr: &bytes.Buffer{}}
 	w.Success(testCollection{items: []int{1, 2}, total: 9, truncated: true}, "")
 
-	var raw map[string]any
-	err := json.Unmarshal(buf.Bytes(), &raw)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	dataMap, ok := raw["data"].(map[string]any)
-	if !ok {
-		t.Fatalf("data type = %T, want map", raw["data"])
+	var envelope struct {
+		Data struct {
+			Items     []int `json:"items"`
+			Total     int   `json:"total"`
+			Truncated bool  `json:"truncated"`
+		} `json:"data"`
 	}
-	if _, hasItems := dataMap["items"]; hasItems {
-		t.Error("zero-value Writer emitted a v2 envelope; want v1")
+	err := json.Unmarshal(buf.Bytes(), &envelope)
+	testsupport.Must(t, err, "unmarshal: %v", err)
+	if len(envelope.Data.Items) != 2 || envelope.Data.Total != 9 || !envelope.Data.Truncated {
+		t.Errorf("zero-value Writer data = %+v, want {items:[1 2] total:9 truncated:true}\n%s",
+			envelope.Data, buf.String())
 	}
 }
 
@@ -84,10 +87,10 @@ func TestNewWithVersion(t *testing.T) {
 }
 
 // TestNewMatchesLegacyBoolConstructor pins New's Bool-era signature behavior:
-// the bool alone selects JSON mode with a concrete envelope version.
+// the bool alone selects JSON mode with the v2 envelope.
 func TestNewMatchesLegacyBoolConstructor(t *testing.T) {
-	if w := New(true, false); w.JSONVersion == JSONNone || !w.JSONMode {
-		t.Errorf("New(true,false) = {mode:%v version:%v}, want JSON mode with a version",
+	if w := New(true, false); w.JSONVersion != JSONV2 || !w.JSONMode {
+		t.Errorf("New(true,false) = {mode:%v version:%v}, want {true JSONV2}",
 			w.JSONMode, w.JSONVersion)
 	}
 	if w := New(false, false); w.JSONVersion != JSONNone || w.JSONMode {
