@@ -90,20 +90,15 @@ func InsertWorkflowTx(
 		return existing, false, nil
 	}
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO workflows
 		   (project_id, name, version, description, source_path, source_sha256, body, parsed, created_at_ms, row_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1) RETURNING id`,
 		projectID, wf.Name, wf.Version, nullable(wf.Description), nullable(wf.SourcePath),
 		wf.SourceSHA256, wf.Body, wf.Parsed, nowMS,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return nil, false, fmt.Errorf("inserting workflow: %w", err)
-	}
-
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, false, fmt.Errorf("reading inserted workflow id: %w", err)
 	}
 
 	inserted, err := getWorkflowTx(tx, projectID, wf.Name, wf.Version)

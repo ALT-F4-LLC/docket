@@ -546,17 +546,11 @@ func MoveIssueProject(
 			`SELECT id FROM labels WHERE project_id = ? AND name = ?`,
 			targetProjectID, l.name).Scan(&newID)
 		if errors.Is(err, sql.ErrNoRows) {
-			res, insErr := tx.Exec(
-				`INSERT INTO labels (project_id, name, color) VALUES (?, ?, NULLIF(?, ''))`,
-				targetProjectID, l.name, l.color)
-			if insErr != nil {
+			if insErr := tx.QueryRow(
+				`INSERT INTO labels (project_id, name, color) VALUES (?, ?, NULLIF(?, '')) RETURNING id`,
+				targetProjectID, l.name, l.color).Scan(&newID); insErr != nil {
 				return nil, fmt.Errorf("creating label %q in the target project: %w", l.name, insErr)
 			}
-			id64, insErr := res.LastInsertId()
-			if insErr != nil {
-				return nil, fmt.Errorf("reading the new label id: %w", insErr)
-			}
-			newID = int(id64)
 		} else if err != nil {
 			return nil, fmt.Errorf("resolving label %q in the target project: %w", l.name, err)
 		}

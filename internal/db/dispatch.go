@@ -107,11 +107,12 @@ type DispatchRow struct {
 // dispatch and both then INSERT one. The loser gets ErrDispatchAlreadyOpen and
 // its whole computation is DISCARDED rather than merged.
 func InsertDispatchTx(tx *sql.Tx, runID int, openedSeq, expiresMS, nowMS int64) (int, error) {
-	res, err := tx.Exec(
+	var id int
+	err := tx.QueryRow(
 		`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?) RETURNING id`,
 		runID, DispatchOpen, openedSeq, expiresMS, nowMS,
-	)
+	).Scan(&id)
 	if err != nil {
 		if isUniqueOrPKConflict(err) {
 			return 0, ErrDispatchAlreadyOpen
@@ -119,12 +120,7 @@ func InsertDispatchTx(tx *sql.Tx, runID int, openedSeq, expiresMS, nowMS int64) 
 		return 0, fmt.Errorf("opening a dispatch for %s: %w",
 			model.FormatRunID(runID), err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("opening a dispatch for %s: %w",
-			model.FormatRunID(runID), err)
-	}
-	return int(id), nil
+	return id, nil
 }
 
 // ErrDispatchAlreadyOpen is the open race's loser — a CONFLICT.

@@ -1244,21 +1244,17 @@ const ArtifactMaxBytes = 1 << 20
 // the artifact records" is one commit or it is not the hinge it is specified
 // to be.
 func InsertArtifactTx(tx *sql.Tx, a Artifact, nowMS int64) (int, error) {
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO artifacts
 		   (run_id, step_id, kind, body, payload, sha256, supersedes, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		a.RunID, nullableInt(a.StepID), a.Kind, a.Body, nullable(a.Payload), a.SHA256,
 		nullableIntPtr(a.Supersedes), nowMS,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("recording artifact: %w", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("reading artifact id: %w", err)
-	}
-	return int(id), nil
+	return id, nil
 }
 
 const artifactSelect = `
@@ -1348,8 +1344,8 @@ func scanArtifacts(rows *sql.Rows, err error) ([]*Artifact, error) {
 // now" — and ListStepInputArtifactsTx is how a read-back asks it (DKT-1054).
 func InsertStepInputTx(tx *sql.Tx, stepID, position, artifactID int) error {
 	_, err := tx.Exec(
-		`INSERT OR REPLACE INTO step_inputs (step_id, position, artifact_id)
-		 VALUES (?, ?, ?)`,
+		`INSERT INTO step_inputs (step_id, position, artifact_id)
+		 VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
 		stepID, position, artifactID,
 	)
 	if err != nil {

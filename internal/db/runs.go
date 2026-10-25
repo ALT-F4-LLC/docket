@@ -82,23 +82,18 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO runs (project_id, request, status, budget, usage_budget,
 		                   created_at_ms, updated_at_ms, row_version,
 		                   exec_root, branch, commit_sha, hostname)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) RETURNING id`,
 		projectOrDefault(projectID), request, model.RunPlanning, budget,
 		ctx.UsageBudget, nowMS, nowMS,
 		ctx.ExecRoot, ctx.Branch, ctx.CommitSHA, ctx.Hostname,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return nil, false, fmt.Errorf("creating run: %w", err)
 	}
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return nil, false, fmt.Errorf("reading created run id: %w", err)
-	}
-	id := int(id64)
 
 	for _, issueID := range issueIDs {
 		if _, err := tx.Exec(
@@ -818,8 +813,10 @@ type RunFence struct {
 // hash is of the command as it read when the operator approved the plan.
 func InsertFenceTx(tx *sql.Tx, f RunFence) error {
 	_, err := tx.Exec(
-		`INSERT OR REPLACE INTO run_fences (run_id, issue_id, tag, ordinal, command, sha256)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO run_fences (run_id, issue_id, tag, ordinal, command, sha256)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (run_id, issue_id, tag, ordinal)
+		 DO UPDATE SET command = excluded.command, sha256 = excluded.sha256`,
 		f.RunID, f.IssueID, f.Tag, f.Ordinal, f.Command, f.SHA256,
 	)
 	if err != nil {

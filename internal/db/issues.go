@@ -131,9 +131,10 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	projectID := projectOrDefault(issue.ProjectID)
-	res, err := tx.Exec(
+	var id int
+	err = tx.QueryRow(
 		`INSERT INTO issues (project_id, parent_id, title, description, status, priority, kind, assignee, created_at, updated_at, size)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectID,
 		nilIfZeroPtr(issue.ParentID),
 		issue.Title,
@@ -145,16 +146,10 @@ func CreateIssueIdempotent(db *sql.DB, issue *model.Issue, labels []string, file
 		now,
 		now,
 		string(issue.Size),
-	)
+	).Scan(&id)
 	if err != nil {
 		return 0, false, fmt.Errorf("inserting issue: %w", err)
 	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, false, fmt.Errorf("getting last insert id: %w", err)
-	}
-	id := int(id64)
 
 	// Attach labels, in the issue's own project.
 	for _, name := range labels {
@@ -1105,16 +1100,11 @@ func findOrCreateLabel(tx *sql.Tx, projectID int, name string) (int, error) {
 		return 0, fmt.Errorf("querying label: %w", err)
 	}
 
-	res, err := tx.Exec(
-		"INSERT INTO labels (project_id, name) VALUES (?, ?)", projectID, name)
-	if err != nil {
+	if err := tx.QueryRow(
+		"INSERT INTO labels (project_id, name) VALUES (?, ?) RETURNING id", projectID, name).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting label: %w", err)
 	}
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting label id: %w", err)
-	}
-	return int(id64), nil
+	return id, nil
 }
 
 // nilIfZeroPtr returns nil if p is nil, otherwise returns *p (for sql parameter binding).
@@ -1435,21 +1425,16 @@ func InsertGapIssueTx(tx *sql.Tx, projectID int, gap GapIssue, relatedIssueID in
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO issues (project_id, title, description, status, priority, kind, created_at, updated_at, scope_globs)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectID, gap.Title, gap.Description,
 		string(model.StatusBacklog), string(priority), string(kind),
 		now, now, scopeGlobs,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("materializing a gap issue: %w", err)
 	}
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("materializing a gap issue: %w", err)
-	}
-	id := int(id64)
 
 	// Labels are a per-project namespace, and the gap issue's own project is
 	// the one they live in — the same rule `issue label add` follows.

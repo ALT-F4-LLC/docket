@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -26,14 +27,21 @@ func Open(ctx context.Context, dsn, passwordFile string) (*sql.DB, error) {
 }
 
 func open(ctx context.Context, dsn, passwordFile string, readVersion versionReader) (*sql.DB, error) {
+	return openPool(ctx, dsn, passwordFile, readVersion, func(cfg *pgx.ConnConfig) *sql.DB {
+		return stdlib.OpenDB(*cfg)
+	})
+}
+
+// openPool resolves the DSN under the store's policy, builds the pool with
+// newPool, and checks the server version on it. newPool receives the checked
+// config and keeps it for every pooled connection; sql.Open with the DSN would
+// re-parse it, and re-read the environment, per connection.
+func openPool(ctx context.Context, dsn, passwordFile string, readVersion versionReader, newPool func(*pgx.ConnConfig) *sql.DB) (*sql.DB, error) {
 	cfg, err := resolveDSN(dsn, passwordFile, (*os.File).Stat)
 	if err != nil {
 		return nil, err
 	}
-	// OpenDB keeps the checked config for every pooled connection; sql.Open
-	// with the DSN would re-parse it, and re-read the environment, per
-	// connection.
-	db := stdlib.OpenDB(*cfg)
+	db := newPool(cfg)
 
 	versionNum, err := readVersion(ctx, db)
 	if err != nil {

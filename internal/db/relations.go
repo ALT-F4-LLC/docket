@@ -78,21 +78,16 @@ func CreateRelation(db *sql.DB, rel *model.Relation) (int, error) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id64 int
+	if err := tx.QueryRow(
 		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		rel.SourceIssueID,
 		rel.TargetIssueID,
 		string(rel.RelationType),
 		now,
-	)
-	if err != nil {
+	).Scan(&id64); err != nil {
 		return 0, fmt.Errorf("inserting relation: %w", err)
-	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
 	}
 
 	// Record activity on the source issue.
@@ -320,7 +315,8 @@ func checkDuplicateTx(tx *sql.Tx, sourceID, targetID int, relType model.Relation
 func checkCycleTx(tx *sql.Tx, sourceID, targetID int, relType string) (bool, []int, error) {
 	rows, err := tx.Query(
 		`WITH RECURSIVE reachable(id, path) AS (
-			SELECT ?, CAST(? AS TEXT) || ',' || CAST(? AS TEXT)
+			SELECT CAST(? AS BIGINT),
+			       CAST(CAST(? AS BIGINT) AS TEXT) || ',' || CAST(CAST(? AS BIGINT) AS TEXT)
 			UNION ALL
 			SELECT ir.target_issue_id,
 			       r.path || ',' || CAST(ir.target_issue_id AS TEXT)

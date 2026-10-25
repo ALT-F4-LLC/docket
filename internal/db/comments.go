@@ -49,21 +49,16 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO comments (issue_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		comment.IssueID,
 		comment.Body,
 		comment.Author,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting comment: %w", err)
-	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
 	}
 
 	// Touch the issue's updated_at so recently-commented issues surface in sorted lists.
@@ -76,7 +71,7 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 	}
 
 	if idempotencyKey != "" {
-		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeIssueComment, idempotencyKey, fingerprint, int(id64)); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeIssueComment, idempotencyKey, fingerprint, id); err != nil {
 			return 0, err
 		}
 	}
@@ -85,7 +80,7 @@ func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey 
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return int(id64), nil
+	return id, nil
 }
 
 // commentFingerprint identifies a comment request by its issue, author and
@@ -121,24 +116,19 @@ const EngineAuthor = "docket-engine"
 func InsertEngineComment(tx *sql.Tx, issueID int, body string, nowMS int64) (int, error) {
 	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO comments (issue_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		issueID,
 		body,
 		EngineAuthor,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting engine comment: %w", err)
 	}
 
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-
-	return int(id64), nil
+	return id, nil
 }
 
 // InsertNoteTx records an author-attributed comment against the caller's
@@ -167,28 +157,23 @@ func InsertNoteTx(tx *sql.Tx, issueID int, body, author, now string) (int, error
 		return 0, err
 	}
 
-	res, err = tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO comments (issue_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		issueID,
 		body,
 		author,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting comment: %w", err)
-	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
 	}
 
 	if err := RecordActivity(tx, issueID, "comment_added", "", body, author); err != nil {
 		return 0, err
 	}
 
-	return int(id64), nil
+	return id, nil
 }
 
 // ListComments retrieves all comments for an issue, ordered by the auto-minted

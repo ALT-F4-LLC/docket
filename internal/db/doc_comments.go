@@ -44,12 +44,12 @@ func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey 
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO doc_comments (doc_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		c.DocID, c.Body, c.Author, now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting doc comment: %w", err)
 	}
 
@@ -57,13 +57,8 @@ func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey 
 		return 0, fmt.Errorf("touching doc updated_at: %w", err)
 	}
 
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-
 	if idempotencyKey != "" {
-		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeDocComment, idempotencyKey, fingerprint, int(id64)); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeDocComment, idempotencyKey, fingerprint, id); err != nil {
 			return 0, err
 		}
 	}
@@ -72,7 +67,7 @@ func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey 
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return int(id64), nil
+	return id, nil
 }
 
 // docCommentFingerprint identifies a create request by the content the caller

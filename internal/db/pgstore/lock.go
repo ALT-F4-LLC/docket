@@ -12,6 +12,9 @@ import (
 // connected to it.
 const writeLockKey int64 = 0x646f636b6574
 
+// takeWriteLockSQL waits for and takes writeLockKey until the transaction ends.
+const takeWriteLockSQL = `SELECT pg_advisory_xact_lock($1)`
+
 // WithWriteTx runs fn in a read-write transaction that holds the global write
 // lock, so no two writers overlap. The lock is transaction-scoped: commit or
 // rollback releases it, and a pooled connection never carries it past the
@@ -26,7 +29,7 @@ func WithWriteTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error 
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, writeLockKey); err != nil {
+	if _, err := tx.ExecContext(ctx, takeWriteLockSQL, writeLockKey); err != nil {
 		return fmt.Errorf("taking the postgres write lock: %w", err)
 	}
 	if err := fn(tx); err != nil {

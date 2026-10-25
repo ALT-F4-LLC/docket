@@ -64,9 +64,10 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO proposals (project_id, description, rationale, domain_tags, files_changed, criticality, status, final_outcome, escalation_reason, required_voters, threshold, weighted_score, sealed, hold_on_dissent, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectOrDefault(p.ProjectID),
 		p.Description,
 		p.Rationale,
@@ -84,16 +85,9 @@ func CreateProposalIdempotent(db *sql.DB, p *model.Proposal, idempotencyKey stri
 		p.CreatedBy,
 		now,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting proposal: %w", err)
 	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-	id := int(id64)
 
 	if idempotencyKey != "" {
 		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeVoteCreate, idempotencyKey, fingerprint, id); err != nil {
@@ -323,9 +317,9 @@ func CastVoteWeighted(db *sql.DB, v *model.Vote, equal bool) (*CastVoteResult, e
 		return nil, err
 	}
 
-	res, err := tx.Exec(
+	if err := tx.QueryRow(
 		`INSERT INTO votes (proposal_id, voter_name, voter_role, verdict, confidence, domain_relevance, findings, findings_json, summary, metadata, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		v.ProposalID,
 		v.VoterName,
 		v.VoterRole,
@@ -337,20 +331,13 @@ func CastVoteWeighted(db *sql.DB, v *model.Vote, equal bool) (*CastVoteResult, e
 		v.Summary,
 		metadataStr,
 		now,
-	)
-	if err != nil {
+	).Scan(&v.ID); err != nil {
 		// UNIQUE constraint violation on (proposal_id, voter_name) means duplicate voter.
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
 			return nil, ErrConflict
 		}
 		return nil, fmt.Errorf("inserting vote: %w", err)
 	}
-
-	voteID, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("getting vote id: %w", err)
-	}
-	v.ID = int(voteID)
 
 	// The seat's spend report (DKT-95), in the cast's own transaction: the
 	// vote and its usage land together or not at all. Units are written in
@@ -372,7 +359,7 @@ func CastVoteWeighted(db *sql.DB, v *model.Vote, equal bool) (*CastVoteResult, e
 			// would leave the writer silent about the one distinction the
 			// column preserves against the back-fill's reconstruction.
 			if err := InsertVoteUsageTx(
-				tx, voteID, unit, quantity, UsageSourceReported, model.NowMS()); err != nil {
+				tx, int64(v.ID), unit, quantity, UsageSourceReported, model.NowMS()); err != nil {
 				return nil, err
 			}
 		}

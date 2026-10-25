@@ -97,21 +97,15 @@ func CreateDocIdempotent(db *sql.DB, doc *model.Doc, idempotencyKey string) (int
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO docs (project_id, type, status, title, body, author, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectOrDefault(doc.ProjectID),
 		doc.Type, doc.Status, doc.Title, doc.Body, doc.Author, now, now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting doc: %w", err)
 	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-	id := int(id64)
 
 	if _, err := appendDocRevision(tx, id, doc.Body, docChangeKindCreate, doc.Author, now); err != nil {
 		return 0, err
