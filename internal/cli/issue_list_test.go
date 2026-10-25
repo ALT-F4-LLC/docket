@@ -31,9 +31,10 @@ func listCmdWithDB(conn *sql.DB) *cobra.Command {
 	return cmd
 }
 
+// listJSON decodes the v2 collection envelope an `issue list` emits.
 type listJSON struct {
 	Data struct {
-		Issues []struct {
+		Items []struct {
 			ID    string   `json:"id"`
 			Files []string `json:"files"`
 			Docs  []struct {
@@ -42,8 +43,9 @@ type listJSON struct {
 				Title  string `json:"title"`
 				Status string `json:"status"`
 			} `json:"docs"`
-		} `json:"issues"`
-		Total int `json:"total"`
+		} `json:"items"`
+		Total     int  `json:"total"`
+		Truncated bool `json:"truncated"`
 	} `json:"data"`
 }
 
@@ -55,6 +57,7 @@ func TestListJSON_HydratesFilesAndDocs(t *testing.T) {
 
 	cmd := listCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runIssueList(cmd, nil, w)
 	testsupport.Must(t, err, "runIssueList: %v", err)
 
@@ -62,10 +65,10 @@ func TestListJSON_HydratesFilesAndDocs(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(lj.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(lj.Data.Issues))
+	if len(lj.Data.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(lj.Data.Items))
 	}
-	iss := lj.Data.Issues[0]
+	iss := lj.Data.Items[0]
 	if len(iss.Files) != 1 || iss.Files[0] != "internal/db/doc_links.go" {
 		t.Errorf("files = %v, want [internal/db/doc_links.go]", iss.Files)
 	}
@@ -83,21 +86,22 @@ func TestListJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 
 	cmd := listCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runIssueList(cmd, nil, w)
 	testsupport.Must(t, err, "runIssueList: %v", err)
 
 	var env struct {
 		Data struct {
-			Issues []map[string]json.RawMessage `json:"issues"`
+			Items []map[string]json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	err = json.Unmarshal(buf.Bytes(), &env)
 	testsupport.Must(t, err, "unmarshal: %v", err)
-	if len(env.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(env.Data.Issues))
+	if len(env.Data.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(env.Data.Items))
 	}
 	for _, key := range []string{"files", "docs"} {
-		if got := string(env.Data.Issues[0][key]); got != "[]" {
+		if got := string(env.Data.Items[0][key]); got != "[]" {
 			t.Errorf("%s = %s, want []", key, got)
 		}
 	}
@@ -133,6 +137,7 @@ func TestIssueListRunFlagListsTheRoster(t *testing.T) {
 	run := planningRun(t, conn, bound, alsoBound)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(listCmdWithRun(conn, run.Ref()), nil, w); err != nil {
 		t.Fatalf("runIssueList --run: %v", err)
 	}
@@ -141,8 +146,8 @@ func TestIssueListRunFlagListsTheRoster(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	got := make(map[string]bool, len(lj.Data.Issues))
-	for _, i := range lj.Data.Issues {
+	got := make(map[string]bool, len(lj.Data.Items))
+	for _, i := range lj.Data.Items {
 		got[i.ID] = true
 	}
 	if len(got) != 2 {
@@ -171,6 +176,7 @@ func TestIssueListRunFlagIncludesDoneIssues(t *testing.T) {
 	run := planningRun(t, conn, finished, open)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(listCmdWithRun(conn, run.Ref()), nil, w); err != nil {
 		t.Fatalf("runIssueList --run: %v", err)
 	}
@@ -179,9 +185,9 @@ func TestIssueListRunFlagIncludesDoneIssues(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(lj.Data.Issues) != 2 {
+	if len(lj.Data.Items) != 2 {
 		t.Fatalf("listed %d issues, want the whole roster including the done "+
-			"one: %s", len(lj.Data.Issues), buf.String())
+			"one: %s", len(lj.Data.Items), buf.String())
 	}
 }
 
