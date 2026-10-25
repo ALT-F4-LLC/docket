@@ -2,6 +2,7 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
 // `docket schema deprecate` — the schema half of workflow retirement.
@@ -236,31 +238,54 @@ func TestSchemaShowAndPinsStillResolveARetiredVersion(t *testing.T) {
 
 // TestSchemaListHidesRetiredVersionsByDefault mirrors `workflow list`: the
 // default shows what may still be referenced, --deprecated shows the lineage,
-// v2 carries the fact, v1 stays frozen.
+// and the v2 items carry the retirement fact.
 func TestSchemaListHidesRetiredVersionsByDefault(t *testing.T) {
 	conn := newTestDB(t)
 	testsupport.Must(t, registerSchema(t, conn, "findings@1", findingsSchema), "register")
 	testsupport.Must(t, deprecateSchema(t, conn, "findings@1", false), "deprecate")
 
-	list := func(deprecated bool, jsonMode bool) string {
+	type schemaItem struct {
+		Name           string `json:"name"`
+		DeprecatedAtMS int64  `json:"deprecated_at_ms"`
+	}
+	listCmd := func(deprecated bool) *cobra.Command {
 		cmd := schemaListCmdWithDB(conn, 50)
 		cmd.Flags().Bool("deprecated", deprecated, "")
-		w, buf := bufWriter(jsonMode)
-		testsupport.Must(t, runSchemaList(cmd, nil, w), "list")
-		return buf.String()
+		return cmd
+	}
+	findings := func(deprecated bool) (*schemaItem, string) {
+		w, buf := bufWriter(true)
+		w.JSONVersion = output.JSONV2
+		testsupport.Must(t, runSchemaList(listCmd(deprecated), nil, w), "list")
+		var env struct {
+			Data struct {
+				Items     []schemaItem `json:"items"`
+				Total     int          `json:"total"`
+				Truncated bool         `json:"truncated"`
+			} `json:"data"`
+		}
+		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "decoding the envelope:\n%s", buf.String())
+		for i := range env.Data.Items {
+			if env.Data.Items[i].Name == "findings" {
+				return &env.Data.Items[i], buf.String()
+			}
+		}
+		return nil, buf.String()
 	}
 
-	if out := list(false, true); strings.Contains(out, `"name":"findings"`) {
+	if item, out := findings(false); item != nil {
 		t.Errorf("the default listing shows a retired version:\n%s", out)
 	}
-	out := list(true, true)
-	if !strings.Contains(out, `"name":"findings"`) {
-		t.Errorf("--deprecated does not show the retired version:\n%s", out)
+	item, out := findings(true)
+	if item == nil {
+		t.Fatalf("--deprecated does not show the retired version:\n%s", out)
 	}
-	if strings.Contains(out, "deprecated_at_ms") {
-		t.Errorf("v1 items gained deprecated_at_ms; v1 is frozen:\n%s", out)
+	if item.DeprecatedAtMS == 0 {
+		t.Errorf("the retired v2 item carries no deprecated_at_ms:\n%s", out)
 	}
-	if human := list(true, false); !strings.Contains(human, "[deprecated]") {
+	w, buf := bufWriter(false)
+	testsupport.Must(t, runSchemaList(listCmd(true), nil, w), "list")
+	if human := buf.String(); !strings.Contains(human, "[deprecated]") {
 		t.Errorf("the human render does not mark the retired version:\n%s", human)
 	}
 

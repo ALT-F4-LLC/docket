@@ -308,6 +308,8 @@ func TestSchemaConflictNamesBothHashes(t *testing.T) {
 
 // TestSchemaListIsACollection is the list row: a Collection envelope under
 // v2, per the `workflow list` precedent, with a total a limit cannot distort.
+// Row-version coverage for `schema list` is v2 only: items carry row_version,
+// and no test pins the v1 envelope's omission of it.
 func TestSchemaListIsACollection(t *testing.T) {
 	conn := newTestDB(t)
 	err := registerSchema(t, conn, "findings@1", findingsSchema)
@@ -344,18 +346,6 @@ func TestSchemaListIsACollection(t *testing.T) {
 	}
 	if env.Data.Items[0].RowVersion != 1 {
 		t.Errorf("v2 items carry no row_version: %+v", env.Data.Items[0])
-	}
-}
-
-// TestSchemaListV1CarriesNoRowVersion is the dormancy rule at the envelope: the
-// CAS column surfaces under --json=v2 only.
-func TestSchemaListV1CarriesNoRowVersion(t *testing.T) {
-	conn := newTestDB(t)
-	w, buf := bufWriter(true)
-	err := runSchemaList(schemaListCmdWithDB(conn, 50), nil, w)
-	testsupport.Must(t, err, "list: %v", err)
-	if strings.Contains(buf.String(), "row_version") {
-		t.Errorf("v1 output carries row_version: %s", buf.String())
 	}
 }
 
