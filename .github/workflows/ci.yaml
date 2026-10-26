@@ -112,7 +112,11 @@ jobs:
           printf '%s' 'docket-ci-throwaway' > "$RUNNER_TEMP/pgpass"
           chmod 600 "$RUNNER_TEMP/pgpass"
 
-      - run: go test -timeout 30m ./...
+      # The shared Store contract suite runs first, so a divergence between
+      # the SQLite and PostgreSQL stores fails before the full suite starts.
+      - run: |
+          go test ./internal/db/... -run TestStoreContract
+          go test -timeout 30m ./...
         env:
           DOCKET_SWEEP_WORKFLOWS_DIR: ${{ github.workspace }}/internal/workflow/testdata/ci-routing-corpus
           DOCKET_TEST_POSTGRES_DSN: postgres://docket@127.0.0.1:5432/docket_test?sslmode=disable
