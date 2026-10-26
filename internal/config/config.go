@@ -460,6 +460,12 @@ type DaemonConfig struct {
 	TLSKeyFile  string `toml:"tls_key_file"`
 	// BearerSecret is the secret every HTTP request must present.
 	BearerSecret BearerSecret `toml:"bearer_secret"`
+	// MinClientAPIMajor and MaxClientAPIMajor bound, inclusively, the API
+	// majors a client may declare in its handshake. Both are required. A
+	// client that declares no major sends 0, so only a window starting at 0
+	// admits it.
+	MinClientAPIMajor uint32 `toml:"min_client_api_major"`
+	MaxClientAPIMajor uint32 `toml:"max_client_api_major"`
 	// Path is where the configuration was read from, for diagnostics.
 	Path string `toml:"-"`
 }
@@ -547,6 +553,12 @@ func parseDaemonConfig(data []byte, path string) (*DaemonConfig, error) {
 	}
 	if !dc.BearerSecret.set {
 		return nil, fmt.Errorf("%w: %s must set bearer_secret", ErrDaemonConfigParse, path)
+	}
+	if !md.IsDefined("min_client_api_major") || !md.IsDefined("max_client_api_major") {
+		return nil, fmt.Errorf("%w: %s must set both min_client_api_major and max_client_api_major", ErrDaemonConfigParse, path)
+	}
+	if dc.MinClientAPIMajor > dc.MaxClientAPIMajor {
+		return nil, fmt.Errorf("%w: %s has min_client_api_major %d above max_client_api_major %d", ErrDaemonConfigParse, path, dc.MinClientAPIMajor, dc.MaxClientAPIMajor)
 	}
 	dc.Path = path
 	return &dc, nil

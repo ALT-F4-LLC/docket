@@ -674,6 +674,8 @@ func daemonConfigBody(secretLine string) string {
 		"listen = \"0.0.0.0:8443\"\n" +
 		"tls_cert_file = \"/etc/docket/cert.pem\"\n" +
 		"tls_key_file = \"/etc/docket/key.pem\"\n" +
+		"min_client_api_major = 2\n" +
+		"max_client_api_major = 3\n" +
 		secretLine + "\n"
 }
 
@@ -705,6 +707,9 @@ func TestLoadDaemonConfigReadsPrivateFile(t *testing.T) {
 	}
 	if dc.Listen != "0.0.0.0:8443" || dc.TLSCertFile != "/etc/docket/cert.pem" || dc.TLSKeyFile != "/etc/docket/key.pem" {
 		t.Errorf("loaded %+v, want the listen address and TLS paths from the file", dc)
+	}
+	if dc.MinClientAPIMajor != 2 || dc.MaxClientAPIMajor != 3 {
+		t.Errorf("client API major window = [%d, %d], want [2, 3] from the file", dc.MinClientAPIMajor, dc.MaxClientAPIMajor)
 	}
 	if !dc.BearerSecret.Matches(secret) {
 		t.Error("the loaded secret does not match the configured value")
@@ -741,16 +746,19 @@ func TestLoadDaemonConfigRefusesMalformed(t *testing.T) {
 	secret := testBearerSecret(t)
 	valid := daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret))
 	cases := map[string]string{
-		"unknown key":         valid + "bearer_secert = \"x\"\n",
-		"unknown version":     strings.Replace(valid, "version = 1", "version = 2", 1),
-		"no listen":           strings.Replace(valid, "listen = \"0.0.0.0:8443\"\n", "", 1),
-		"listen without port": strings.Replace(valid, "0.0.0.0:8443", "0.0.0.0", 1),
-		"no cert":             strings.Replace(valid, "tls_cert_file = \"/etc/docket/cert.pem\"\n", "", 1),
-		"no key":              strings.Replace(valid, "tls_key_file = \"/etc/docket/key.pem\"\n", "", 1),
-		"no secret":           daemonConfigBody(""),
-		"empty secret":        daemonConfigBody(`bearer_secret = ""`),
-		"short secret":        daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret[:31])),
-		"secret with space":   daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret[:20]+" "+secret[20:])),
+		"unknown key":          valid + "bearer_secert = \"x\"\n",
+		"unknown version":      strings.Replace(valid, "version = 1", "version = 2", 1),
+		"no listen":            strings.Replace(valid, "listen = \"0.0.0.0:8443\"\n", "", 1),
+		"listen without port":  strings.Replace(valid, "0.0.0.0:8443", "0.0.0.0", 1),
+		"no cert":              strings.Replace(valid, "tls_cert_file = \"/etc/docket/cert.pem\"\n", "", 1),
+		"no key":               strings.Replace(valid, "tls_key_file = \"/etc/docket/key.pem\"\n", "", 1),
+		"no window min":        strings.Replace(valid, "min_client_api_major = 2\n", "", 1),
+		"no window max":        strings.Replace(valid, "max_client_api_major = 3\n", "", 1),
+		"window min above max": strings.Replace(valid, "min_client_api_major = 2", "min_client_api_major = 4", 1),
+		"no secret":            daemonConfigBody(""),
+		"empty secret":         daemonConfigBody(`bearer_secret = ""`),
+		"short secret":         daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret[:31])),
+		"secret with space":    daemonConfigBody(fmt.Sprintf("bearer_secret = %q", secret[:20]+" "+secret[20:])),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -85,12 +85,20 @@ func testSecret(t *testing.T) string {
 // loopback one.
 func writeDaemonConfig(t *testing.T, xdg, certFile, keyFile, secret string) {
 	t.Helper()
+	writeDaemonConfigWindow(t, xdg, certFile, keyFile, secret, 1, 1)
+}
+
+// writeDaemonConfigWindow is writeDaemonConfig declaring the client API major
+// window [minMajor, maxMajor].
+func writeDaemonConfigWindow(t *testing.T, xdg, certFile, keyFile, secret string, minMajor, maxMajor uint32) {
+	t.Helper()
 	dir := filepath.Join(xdg, "docket")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := fmt.Sprintf("version = 1\nlisten = \"0.0.0.0:0\"\ntls_cert_file = %q\ntls_key_file = %q\nbearer_secret = %q\n",
-		certFile, keyFile, secret)
+	body := fmt.Sprintf("version = 1\nlisten = \"0.0.0.0:0\"\ntls_cert_file = %q\ntls_key_file = %q\nbearer_secret = %q\n"+
+		"min_client_api_major = %d\nmax_client_api_major = %d\n",
+		certFile, keyFile, secret, minMajor, maxMajor)
 	if err := os.WriteFile(filepath.Join(dir, "daemon.toml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
