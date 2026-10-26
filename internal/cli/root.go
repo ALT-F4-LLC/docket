@@ -13,6 +13,8 @@ import (
 	"os"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"github.com/ALT-F4-LLC/docket/internal/api"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -165,6 +167,9 @@ var rootCmd = &cobra.Command{
 	Short:   "Local-first CLI issue tracker",
 	Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, buildDate),
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// A daemon served from this binary reports this binary's build.
+		api.DaemonVersion = version
+
 		// Reject an unknown --json value up front, so it can never degrade
 		// silently into human output further down.
 		rawJSON, _ := cmd.Flags().GetString("json")
@@ -559,6 +564,23 @@ func newDaemonClient(ctx context.Context, daemonURL string, resolver daemonHostR
 		},
 	}
 	return api.NewClient(httpClient, daemonURL, logger), nil
+}
+
+// connectLocalDaemon connects to the local daemon at baseURL through
+// httpClient. Locally the client and daemon are expected to be one build, so a
+// daemon on another build gets one stderr warning naming both, and the command
+// goes on.
+func connectLocalDaemon(cmd *cobra.Command, httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) (docketv1connect.DocketServiceClient, error) {
+	client, meta, err := api.Connect(cmd.Context(), httpClient, baseURL, logger)
+	if err != nil {
+		return nil, err
+	}
+	if daemonBuild := meta.GetDaemonVersion(); daemonBuild != version {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: docket client build %s differs from the local daemon build %s\n",
+			version, daemonBuild)
+	}
+	return client, nil
 }
 
 func getCfg(cmd *cobra.Command) *config.Config {

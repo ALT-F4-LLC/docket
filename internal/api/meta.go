@@ -11,7 +11,7 @@ import (
 )
 
 // DaemonVersion is the daemon build version Handshake reports. The CLI sets
-// it from its own build version before serving.
+// it from its own build version during command setup.
 var DaemonVersion = "dev"
 
 // MetaHandler serves Handshake, the RPC a client calls before any verb. A

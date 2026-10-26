@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,7 +15,9 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
 
+	"github.com/ALT-F4-LLC/docket/internal/api"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
@@ -243,5 +246,96 @@ func TestDaemonClientIgnoresEnvironmentProxy(t *testing.T) {
 	}
 	if got := proxy.hits.Load(); got != 0 {
 		t.Errorf("proxy received %d requests, want 0", got)
+	}
+}
+
+// setBuilds stands in for the ldflags-stamped client build and the build a
+// daemon reports, restoring both when the test ends.
+func setBuilds(t *testing.T, client, daemon string) {
+	t.Helper()
+	previousClient, previousDaemon := version, api.DaemonVersion
+	version, api.DaemonVersion = client, daemon
+	t.Cleanup(func() { version, api.DaemonVersion = previousClient, previousDaemon })
+}
+
+// runLocalDaemonCommand serves the real meta handler as the local daemon,
+// runs a command that connects to it, and returns the command's stderr and
+// error.
+func runLocalDaemonCommand(t *testing.T) (string, error) {
+	t.Helper()
+	path, handler := api.NewHandler(api.MetaHandler{}, discardLogger)
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	daemon := httptest.NewServer(mux)
+	t.Cleanup(daemon.Close)
+
+	cmd := &cobra.Command{
+		Use: "probe",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := connectLocalDaemon(cmd, daemon.Client(), daemon.URL, discardLogger)
+			return err
+		},
+	}
+	var stderr bytes.Buffer
+	cmd.SetArgs(nil)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(&stderr)
+	err := cmd.Execute()
+	return stderr.String(), err
+}
+
+// TestLocalDaemonBuildMismatchWarnsOnce: a local daemon on another build gets
+// one stderr warning naming both builds, and the command still succeeds.
+func TestLocalDaemonBuildMismatchWarnsOnce(t *testing.T) {
+	const client, daemon = "v1.4.0-client+aa11", "v1.3.9-daemon+bb22"
+	setBuilds(t, client, daemon)
+
+	stderr, err := runLocalDaemonCommand(t)
+
+	if err != nil {
+		t.Errorf("command error = %v, want nil (exit 0) on a build mismatch", err)
+	}
+	var warnings []string
+	for line := range strings.Lines(stderr) {
+		if strings.Contains(line, client) || strings.Contains(line, daemon) {
+			warnings = append(warnings, line)
+		}
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("stderr has %d lines naming a build, want exactly 1; stderr:\n%s", len(warnings), stderr)
+	}
+	if !strings.Contains(warnings[0], client) || !strings.Contains(warnings[0], daemon) {
+		t.Errorf("warning %q names only one build, want both %q and %q", warnings[0], client, daemon)
+	}
+}
+
+// TestLocalDaemonSameBuildIsSilent: a local daemon on the client's own build
+// gets no warning.
+func TestLocalDaemonSameBuildIsSilent(t *testing.T) {
+	const build = "v1.4.0-same+cc33"
+	setBuilds(t, build, build)
+
+	stderr, err := runLocalDaemonCommand(t)
+
+	if err != nil {
+		t.Errorf("command error = %v, want nil", err)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty for equal builds", stderr)
+	}
+}
+
+// TestCommandSetupSetsDaemonVersion: command setup hands the cli build
+// version to the daemon half, so a daemon served from this binary reports it.
+func TestCommandSetupSetsDaemonVersion(t *testing.T) {
+	const build = "v2.0.1-setup+dd44"
+	setBuilds(t, build, "dev")
+
+	if _, err := runRootVerb(t, versionCmd, "version"); err != nil {
+		t.Fatalf("docket version: %v", err)
+	}
+
+	if api.DaemonVersion != build {
+		t.Errorf("api.DaemonVersion = %q after command setup, want the cli build %q", api.DaemonVersion, build)
 	}
 }
