@@ -12,6 +12,7 @@ import (
 // a fresh schema. It skips without DOCKET_TEST_POSTGRES_DSN.
 func TestStoreContract(t *testing.T) {
 	t.Run("PinContentRoundTrips", testPinContentRoundTrips)
+	t.Run("EventWatermarkAndGap", testEventWatermarkAndGap)
 }
 
 // testPinContentRoundTrips inserts a pin with its file's bytes and reads the

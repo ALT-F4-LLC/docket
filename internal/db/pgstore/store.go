@@ -809,10 +809,6 @@ func (t *pgTx) EventKindCountsTx(runID int) (map[string]int, error) {
 	return db.EventKindCountsTx(t.tx, runID)
 }
 
-func (t *pgTx) EventLowWatermarkTx() (int64, error) {
-	return db.EventLowWatermarkTx(t.tx)
-}
-
 func (t *pgTx) GateResultsForStepTx(stepID int) ([]db.GateResultRow, error) {
 	return db.GateResultsForStepTx(t.tx, stepID)
 }
