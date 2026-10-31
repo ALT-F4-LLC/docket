@@ -9,9 +9,9 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // IncompatibleError reports a daemon message this client cannot interpret
@@ -39,9 +39,9 @@ type stringEnum struct {
 }
 
 var stepStatuses = []string{
-	db.StepPending, db.StepClaimed, db.StepRunning, db.StepGated, db.StepDone,
-	db.StepWaitingHuman, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
-	db.StepReady, db.StepStaged,
+	store.StepPending, store.StepClaimed, store.StepRunning, store.StepGated, store.StepDone,
+	store.StepWaitingHuman, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
+	store.StepReady, store.StepStaged,
 }
 
 var eventKinds = engine.EventKinds()
