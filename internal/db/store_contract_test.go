@@ -48,6 +48,7 @@ func TestStoreContract(t *testing.T) {
 	cases = append(cases, relationContract...)
 	cases = append(cases, issueContract...)
 	cases = append(cases, methodGroupContract...)
+	cases = append(cases, contractCase{"EventWatermarkAndGap", contractEventWatermarkAndGap})
 
 	for _, s := range stores {
 		t.Run(s.name, func(t *testing.T) {
@@ -137,6 +138,22 @@ var methodGroupContract = []contractCase{
 	{"LinkProposalIssueTwiceIsConflict", contractLinkProposalIssueTwiceIsConflict},
 	{"MoveIssueProjectRemapsLabels", contractMoveIssueProjectRemapsLabels},
 	{"CountEventsByProjectReads", contractCountEventsByProjectReads},
+}
+
+// contractEventWatermarkAndGap runs the shared watermark-and-gap case inside
+// one write transaction of the store's own, arranging through its *sql.Tx and
+// reading the watermark through the same Tx, so the read sees the uncommitted
+// arrangement. Only the SQLite store exposes that *sql.Tx; pgstore runs the
+// case on its own pool.
+func contractEventWatermarkAndGap(t *testing.T, st store.Store) {
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	defer tx.Rollback()
+	conn, ok := store.SQLTx(tx)
+	if !ok {
+		t.Skip("this store exposes no *sql.Tx; its own package runs EventWatermarkContract")
+	}
+	testsupport.EventWatermarkContract(t, conn, tx.EventLowWatermarkTx)
 }
 
 // createContractProposal opens a proposal needing two voters.

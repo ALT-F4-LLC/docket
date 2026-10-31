@@ -5,16 +5,23 @@ import (
 	"testing"
 )
 
+// SQLConn is the statement surface *sql.DB and *sql.Tx share.
+type SQLConn interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // EventWatermarkContract is the store-contract case for the event low
 // watermark, shared by every store. On a freshly migrated store it checks that
 // the migration seeded the one-row watermark at 0, and that the retained
 // minimum the store's read yields is the row's seq plus 1 even when the event
 // log holds a seq gap that no prune made.
 //
-// conn reaches the store's own tables and arranges the events and the row;
-// readWatermark is the store's watermark read, called afresh for each check.
+// conn reaches the store's own tables and arranges the events and the row,
+// either on a pool or inside a transaction; readWatermark is the store's
+// watermark read, called afresh for each check, and must see what conn wrote.
 // The statements bind no placeholders, so either engine runs them unchanged.
-func EventWatermarkContract(t *testing.T, conn *sql.DB, readWatermark func() (int64, error)) {
+func EventWatermarkContract(t *testing.T, conn SQLConn, readWatermark func() (int64, error)) {
 	t.Helper()
 	rowSeq := func() int64 {
 		t.Helper()
