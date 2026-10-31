@@ -215,6 +215,9 @@ message Issue {
   ScopeGlobs scope = 16;
   string resolution = 17;
   string size = 18;
+  // body_snapshot is the issue body frozen at run activation, as a context
+  // bundle carries it.
+  string body_snapshot = 19;
 }
 
 message Comment {
@@ -394,6 +397,9 @@ message ContextInput {
   string artifact = 3;
   string body = 4;
   string payload_json = 5;
+  // producer_step is the instance identity of the step that produced the
+  // artifact, empty for an engine-produced artifact.
+  string producer_step = 6;
 }
 
 message ContextPin {
@@ -421,6 +427,18 @@ message StepContextBundle {
   string target_worktree = 9;
   string diff_base = 10;
   string resolution = 11;
+  // notes are the run's standing notes, in insertion order.
+  repeated RunNote notes = 12;
+  // resolution_record is the routing that sent the step back and its note,
+  // unset when the step has no routing record.
+  ContextResolution resolution_record = 13;
+}
+
+// ContextResolution is a step's routing record as its context bundle carries
+// it.
+message ContextResolution {
+  string routing = 1;
+  string note = 2;
 }
 
 message Event {

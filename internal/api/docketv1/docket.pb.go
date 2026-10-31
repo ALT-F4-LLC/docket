@@ -250,25 +250,28 @@ func (x *DocRef) GetStatus() string {
 }
 
 type Issue struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	ParentId      string                 `protobuf:"bytes,2,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
-	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
-	Description   string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
-	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
-	Priority      string                 `protobuf:"bytes,6,opt,name=priority,proto3" json:"priority,omitempty"`
-	Kind          string                 `protobuf:"bytes,7,opt,name=kind,proto3" json:"kind,omitempty"`
-	Assignee      string                 `protobuf:"bytes,8,opt,name=assignee,proto3" json:"assignee,omitempty"`
-	Labels        []string               `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty"`
-	Files         []string               `protobuf:"bytes,10,rep,name=files,proto3" json:"files,omitempty"`
-	Docs          []*DocRef              `protobuf:"bytes,11,rep,name=docs,proto3" json:"docs,omitempty"`
-	CreatedAt     string                 `protobuf:"bytes,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     string                 `protobuf:"bytes,13,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	Version       int32                  `protobuf:"varint,14,opt,name=version,proto3" json:"version,omitempty"`
-	Lease         *Lease                 `protobuf:"bytes,15,opt,name=lease,proto3" json:"lease,omitempty"`
-	Scope         *ScopeGlobs            `protobuf:"bytes,16,opt,name=scope,proto3" json:"scope,omitempty"`
-	Resolution    string                 `protobuf:"bytes,17,opt,name=resolution,proto3" json:"resolution,omitempty"`
-	Size          string                 `protobuf:"bytes,18,opt,name=size,proto3" json:"size,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	ParentId    string                 `protobuf:"bytes,2,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
+	Title       string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	Description string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
+	Status      string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	Priority    string                 `protobuf:"bytes,6,opt,name=priority,proto3" json:"priority,omitempty"`
+	Kind        string                 `protobuf:"bytes,7,opt,name=kind,proto3" json:"kind,omitempty"`
+	Assignee    string                 `protobuf:"bytes,8,opt,name=assignee,proto3" json:"assignee,omitempty"`
+	Labels      []string               `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty"`
+	Files       []string               `protobuf:"bytes,10,rep,name=files,proto3" json:"files,omitempty"`
+	Docs        []*DocRef              `protobuf:"bytes,11,rep,name=docs,proto3" json:"docs,omitempty"`
+	CreatedAt   string                 `protobuf:"bytes,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt   string                 `protobuf:"bytes,13,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	Version     int32                  `protobuf:"varint,14,opt,name=version,proto3" json:"version,omitempty"`
+	Lease       *Lease                 `protobuf:"bytes,15,opt,name=lease,proto3" json:"lease,omitempty"`
+	Scope       *ScopeGlobs            `protobuf:"bytes,16,opt,name=scope,proto3" json:"scope,omitempty"`
+	Resolution  string                 `protobuf:"bytes,17,opt,name=resolution,proto3" json:"resolution,omitempty"`
+	Size        string                 `protobuf:"bytes,18,opt,name=size,proto3" json:"size,omitempty"`
+	// body_snapshot is the issue body frozen at run activation, as a context
+	// bundle carries it.
+	BodySnapshot  string `protobuf:"bytes,19,opt,name=body_snapshot,json=bodySnapshot,proto3" json:"body_snapshot,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -425,6 +428,13 @@ func (x *Issue) GetResolution() string {
 func (x *Issue) GetSize() string {
 	if x != nil {
 		return x.Size
+	}
+	return ""
+}
+
+func (x *Issue) GetBodySnapshot() string {
+	if x != nil {
+		return x.BodySnapshot
 	}
 	return ""
 }
@@ -1948,12 +1958,15 @@ func (x *Artifact) GetCreatedAtMs() int64 {
 }
 
 type ContextInput struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	Artifact      string                 `protobuf:"bytes,3,opt,name=artifact,proto3" json:"artifact,omitempty"`
-	Body          string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
-	PayloadJson   string                 `protobuf:"bytes,5,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Kind        string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Artifact    string                 `protobuf:"bytes,3,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	Body        string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	PayloadJson string                 `protobuf:"bytes,5,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	// producer_step is the instance identity of the step that produced the
+	// artifact, empty for an engine-produced artifact.
+	ProducerStep  string `protobuf:"bytes,6,opt,name=producer_step,json=producerStep,proto3" json:"producer_step,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2019,6 +2032,13 @@ func (x *ContextInput) GetBody() string {
 func (x *ContextInput) GetPayloadJson() string {
 	if x != nil {
 		return x.PayloadJson
+	}
+	return ""
+}
+
+func (x *ContextInput) GetProducerStep() string {
+	if x != nil {
+		return x.ProducerStep
 	}
 	return ""
 }
@@ -2150,8 +2170,13 @@ type StepContextBundle struct {
 	TargetWorktree string                 `protobuf:"bytes,9,opt,name=target_worktree,json=targetWorktree,proto3" json:"target_worktree,omitempty"`
 	DiffBase       string                 `protobuf:"bytes,10,opt,name=diff_base,json=diffBase,proto3" json:"diff_base,omitempty"`
 	Resolution     string                 `protobuf:"bytes,11,opt,name=resolution,proto3" json:"resolution,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// notes are the run's standing notes, in insertion order.
+	Notes []*RunNote `protobuf:"bytes,12,rep,name=notes,proto3" json:"notes,omitempty"`
+	// resolution_record is the routing that sent the step back and its note,
+	// unset when the step has no routing record.
+	ResolutionRecord *ContextResolution `protobuf:"bytes,13,opt,name=resolution_record,json=resolutionRecord,proto3" json:"resolution_record,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StepContextBundle) Reset() {
@@ -2261,6 +2286,74 @@ func (x *StepContextBundle) GetResolution() string {
 	return ""
 }
 
+func (x *StepContextBundle) GetNotes() []*RunNote {
+	if x != nil {
+		return x.Notes
+	}
+	return nil
+}
+
+func (x *StepContextBundle) GetResolutionRecord() *ContextResolution {
+	if x != nil {
+		return x.ResolutionRecord
+	}
+	return nil
+}
+
+// ContextResolution is a step's routing record as its context bundle carries
+// it.
+type ContextResolution struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Routing       string                 `protobuf:"bytes,1,opt,name=routing,proto3" json:"routing,omitempty"`
+	Note          string                 `protobuf:"bytes,2,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContextResolution) Reset() {
+	*x = ContextResolution{}
+	mi := &file_docket_v1_docket_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContextResolution) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContextResolution) ProtoMessage() {}
+
+func (x *ContextResolution) ProtoReflect() protoreflect.Message {
+	mi := &file_docket_v1_docket_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContextResolution.ProtoReflect.Descriptor instead.
+func (*ContextResolution) Descriptor() ([]byte, []int) {
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *ContextResolution) GetRouting() string {
+	if x != nil {
+		return x.Routing
+	}
+	return ""
+}
+
+func (x *ContextResolution) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
 type Event struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Seq           int64                  `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
@@ -2276,7 +2369,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_docket_v1_docket_proto_msgTypes[25]
+	mi := &file_docket_v1_docket_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2288,7 +2381,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[25]
+	mi := &file_docket_v1_docket_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2301,7 +2394,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{25}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Event) GetSeq() int64 {
@@ -2365,7 +2458,7 @@ type RunNote struct {
 
 func (x *RunNote) Reset() {
 	*x = RunNote{}
-	mi := &file_docket_v1_docket_proto_msgTypes[26]
+	mi := &file_docket_v1_docket_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2377,7 +2470,7 @@ func (x *RunNote) String() string {
 func (*RunNote) ProtoMessage() {}
 
 func (x *RunNote) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[26]
+	mi := &file_docket_v1_docket_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2390,7 +2483,7 @@ func (x *RunNote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunNote.ProtoReflect.Descriptor instead.
 func (*RunNote) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{26}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *RunNote) GetOrdinal() int32 {
@@ -2435,7 +2528,7 @@ type Manifest struct {
 
 func (x *Manifest) Reset() {
 	*x = Manifest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[27]
+	mi := &file_docket_v1_docket_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2447,7 +2540,7 @@ func (x *Manifest) String() string {
 func (*Manifest) ProtoMessage() {}
 
 func (x *Manifest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[27]
+	mi := &file_docket_v1_docket_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2460,7 +2553,7 @@ func (x *Manifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Manifest.ProtoReflect.Descriptor instead.
 func (*Manifest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{27}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Manifest) GetId() string {
@@ -2517,7 +2610,7 @@ type PinVerdict struct {
 
 func (x *PinVerdict) Reset() {
 	*x = PinVerdict{}
-	mi := &file_docket_v1_docket_proto_msgTypes[28]
+	mi := &file_docket_v1_docket_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2529,7 +2622,7 @@ func (x *PinVerdict) String() string {
 func (*PinVerdict) ProtoMessage() {}
 
 func (x *PinVerdict) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[28]
+	mi := &file_docket_v1_docket_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2542,7 +2635,7 @@ func (x *PinVerdict) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PinVerdict.ProtoReflect.Descriptor instead.
 func (*PinVerdict) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{28}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *PinVerdict) GetPath() string {
@@ -2586,7 +2679,7 @@ type Finding struct {
 
 func (x *Finding) Reset() {
 	*x = Finding{}
-	mi := &file_docket_v1_docket_proto_msgTypes[29]
+	mi := &file_docket_v1_docket_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2598,7 +2691,7 @@ func (x *Finding) String() string {
 func (*Finding) ProtoMessage() {}
 
 func (x *Finding) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[29]
+	mi := &file_docket_v1_docket_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2611,7 +2704,7 @@ func (x *Finding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Finding.ProtoReflect.Descriptor instead.
 func (*Finding) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{29}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Finding) GetSeverity() string {
@@ -2676,7 +2769,7 @@ type Proposal struct {
 
 func (x *Proposal) Reset() {
 	*x = Proposal{}
-	mi := &file_docket_v1_docket_proto_msgTypes[30]
+	mi := &file_docket_v1_docket_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2688,7 +2781,7 @@ func (x *Proposal) String() string {
 func (*Proposal) ProtoMessage() {}
 
 func (x *Proposal) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[30]
+	mi := &file_docket_v1_docket_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2701,7 +2794,7 @@ func (x *Proposal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Proposal.ProtoReflect.Descriptor instead.
 func (*Proposal) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{30}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Proposal) GetId() string {
@@ -2857,7 +2950,7 @@ type Vote struct {
 
 func (x *Vote) Reset() {
 	*x = Vote{}
-	mi := &file_docket_v1_docket_proto_msgTypes[31]
+	mi := &file_docket_v1_docket_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2869,7 +2962,7 @@ func (x *Vote) String() string {
 func (*Vote) ProtoMessage() {}
 
 func (x *Vote) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[31]
+	mi := &file_docket_v1_docket_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2882,7 +2975,7 @@ func (x *Vote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Vote.ProtoReflect.Descriptor instead.
 func (*Vote) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{31}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Vote) GetId() int32 {
@@ -2986,7 +3079,7 @@ type Schema struct {
 
 func (x *Schema) Reset() {
 	*x = Schema{}
-	mi := &file_docket_v1_docket_proto_msgTypes[32]
+	mi := &file_docket_v1_docket_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2998,7 +3091,7 @@ func (x *Schema) String() string {
 func (*Schema) ProtoMessage() {}
 
 func (x *Schema) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[32]
+	mi := &file_docket_v1_docket_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3011,7 +3104,7 @@ func (x *Schema) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Schema.ProtoReflect.Descriptor instead.
 func (*Schema) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{32}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *Schema) GetName() string {
@@ -3094,7 +3187,7 @@ type Workflow struct {
 
 func (x *Workflow) Reset() {
 	*x = Workflow{}
-	mi := &file_docket_v1_docket_proto_msgTypes[33]
+	mi := &file_docket_v1_docket_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3106,7 +3199,7 @@ func (x *Workflow) String() string {
 func (*Workflow) ProtoMessage() {}
 
 func (x *Workflow) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[33]
+	mi := &file_docket_v1_docket_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3119,7 +3212,7 @@ func (x *Workflow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Workflow.ProtoReflect.Descriptor instead.
 func (*Workflow) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{33}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *Workflow) GetName() string {
@@ -3198,7 +3291,7 @@ type UsageRow struct {
 
 func (x *UsageRow) Reset() {
 	*x = UsageRow{}
-	mi := &file_docket_v1_docket_proto_msgTypes[34]
+	mi := &file_docket_v1_docket_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3210,7 +3303,7 @@ func (x *UsageRow) String() string {
 func (*UsageRow) ProtoMessage() {}
 
 func (x *UsageRow) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[34]
+	mi := &file_docket_v1_docket_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3223,7 +3316,7 @@ func (x *UsageRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageRow.ProtoReflect.Descriptor instead.
 func (*UsageRow) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{34}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *UsageRow) GetStep() string {
@@ -3270,7 +3363,7 @@ type IssueFilter struct {
 
 func (x *IssueFilter) Reset() {
 	*x = IssueFilter{}
-	mi := &file_docket_v1_docket_proto_msgTypes[35]
+	mi := &file_docket_v1_docket_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3282,7 +3375,7 @@ func (x *IssueFilter) String() string {
 func (*IssueFilter) ProtoMessage() {}
 
 func (x *IssueFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[35]
+	mi := &file_docket_v1_docket_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3295,7 +3388,7 @@ func (x *IssueFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFilter.ProtoReflect.Descriptor instead.
 func (*IssueFilter) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{35}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *IssueFilter) GetStatus() []string {
@@ -3350,7 +3443,7 @@ type HandshakeRequest struct {
 
 func (x *HandshakeRequest) Reset() {
 	*x = HandshakeRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[36]
+	mi := &file_docket_v1_docket_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3362,7 +3455,7 @@ func (x *HandshakeRequest) String() string {
 func (*HandshakeRequest) ProtoMessage() {}
 
 func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[36]
+	mi := &file_docket_v1_docket_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3375,7 +3468,7 @@ func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeRequest.ProtoReflect.Descriptor instead.
 func (*HandshakeRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{36}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *HandshakeRequest) GetClientVersion() string {
@@ -3408,7 +3501,7 @@ type HandshakeResponse struct {
 
 func (x *HandshakeResponse) Reset() {
 	*x = HandshakeResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[37]
+	mi := &file_docket_v1_docket_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3420,7 +3513,7 @@ func (x *HandshakeResponse) String() string {
 func (*HandshakeResponse) ProtoMessage() {}
 
 func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[37]
+	mi := &file_docket_v1_docket_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3433,7 +3526,7 @@ func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeResponse.ProtoReflect.Descriptor instead.
 func (*HandshakeResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{37}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *HandshakeResponse) GetDaemonVersion() string {
@@ -3489,7 +3582,7 @@ type BoardRequest struct {
 
 func (x *BoardRequest) Reset() {
 	*x = BoardRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[38]
+	mi := &file_docket_v1_docket_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3501,7 +3594,7 @@ func (x *BoardRequest) String() string {
 func (*BoardRequest) ProtoMessage() {}
 
 func (x *BoardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[38]
+	mi := &file_docket_v1_docket_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3514,7 +3607,7 @@ func (x *BoardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoardRequest.ProtoReflect.Descriptor instead.
 func (*BoardRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{38}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *BoardRequest) GetFilter() *IssueFilter {
@@ -3548,7 +3641,7 @@ type BoardColumn struct {
 
 func (x *BoardColumn) Reset() {
 	*x = BoardColumn{}
-	mi := &file_docket_v1_docket_proto_msgTypes[39]
+	mi := &file_docket_v1_docket_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3560,7 +3653,7 @@ func (x *BoardColumn) String() string {
 func (*BoardColumn) ProtoMessage() {}
 
 func (x *BoardColumn) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[39]
+	mi := &file_docket_v1_docket_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3573,7 +3666,7 @@ func (x *BoardColumn) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoardColumn.ProtoReflect.Descriptor instead.
 func (*BoardColumn) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{39}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *BoardColumn) GetStatus() string {
@@ -3599,7 +3692,7 @@ type BoardResponse struct {
 
 func (x *BoardResponse) Reset() {
 	*x = BoardResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[40]
+	mi := &file_docket_v1_docket_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3611,7 +3704,7 @@ func (x *BoardResponse) String() string {
 func (*BoardResponse) ProtoMessage() {}
 
 func (x *BoardResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[40]
+	mi := &file_docket_v1_docket_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3624,7 +3717,7 @@ func (x *BoardResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoardResponse.ProtoReflect.Descriptor instead.
 func (*BoardResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{40}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *BoardResponse) GetColumns() []*BoardColumn {
@@ -3644,7 +3737,7 @@ type ConfigGetRequest struct {
 
 func (x *ConfigGetRequest) Reset() {
 	*x = ConfigGetRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[41]
+	mi := &file_docket_v1_docket_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3656,7 +3749,7 @@ func (x *ConfigGetRequest) String() string {
 func (*ConfigGetRequest) ProtoMessage() {}
 
 func (x *ConfigGetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[41]
+	mi := &file_docket_v1_docket_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3669,7 +3762,7 @@ func (x *ConfigGetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigGetRequest.ProtoReflect.Descriptor instead.
 func (*ConfigGetRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{41}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ConfigGetRequest) GetKey() string {
@@ -3697,7 +3790,7 @@ type ConfigValue struct {
 
 func (x *ConfigValue) Reset() {
 	*x = ConfigValue{}
-	mi := &file_docket_v1_docket_proto_msgTypes[42]
+	mi := &file_docket_v1_docket_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3709,7 +3802,7 @@ func (x *ConfigValue) String() string {
 func (*ConfigValue) ProtoMessage() {}
 
 func (x *ConfigValue) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[42]
+	mi := &file_docket_v1_docket_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3722,7 +3815,7 @@ func (x *ConfigValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigValue.ProtoReflect.Descriptor instead.
 func (*ConfigValue) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{42}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ConfigValue) GetKey() string {
@@ -3755,7 +3848,7 @@ type ConfigGetResponse struct {
 
 func (x *ConfigGetResponse) Reset() {
 	*x = ConfigGetResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[43]
+	mi := &file_docket_v1_docket_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3767,7 +3860,7 @@ func (x *ConfigGetResponse) String() string {
 func (*ConfigGetResponse) ProtoMessage() {}
 
 func (x *ConfigGetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[43]
+	mi := &file_docket_v1_docket_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3780,7 +3873,7 @@ func (x *ConfigGetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigGetResponse.ProtoReflect.Descriptor instead.
 func (*ConfigGetResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{43}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ConfigGetResponse) GetValues() []*ConfigValue {
@@ -3801,7 +3894,7 @@ type ConfigSetRequest struct {
 
 func (x *ConfigSetRequest) Reset() {
 	*x = ConfigSetRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[44]
+	mi := &file_docket_v1_docket_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3813,7 +3906,7 @@ func (x *ConfigSetRequest) String() string {
 func (*ConfigSetRequest) ProtoMessage() {}
 
 func (x *ConfigSetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[44]
+	mi := &file_docket_v1_docket_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3826,7 +3919,7 @@ func (x *ConfigSetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSetRequest.ProtoReflect.Descriptor instead.
 func (*ConfigSetRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{44}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ConfigSetRequest) GetKey() string {
@@ -3859,7 +3952,7 @@ type ConfigSetResponse struct {
 
 func (x *ConfigSetResponse) Reset() {
 	*x = ConfigSetResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[45]
+	mi := &file_docket_v1_docket_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3871,7 +3964,7 @@ func (x *ConfigSetResponse) String() string {
 func (*ConfigSetResponse) ProtoMessage() {}
 
 func (x *ConfigSetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[45]
+	mi := &file_docket_v1_docket_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3884,7 +3977,7 @@ func (x *ConfigSetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSetResponse.ProtoReflect.Descriptor instead.
 func (*ConfigSetResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{45}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ConfigSetResponse) GetValue() *ConfigValue {
@@ -3905,7 +3998,7 @@ type DispatchAbandonRequest struct {
 
 func (x *DispatchAbandonRequest) Reset() {
 	*x = DispatchAbandonRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[46]
+	mi := &file_docket_v1_docket_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3917,7 +4010,7 @@ func (x *DispatchAbandonRequest) String() string {
 func (*DispatchAbandonRequest) ProtoMessage() {}
 
 func (x *DispatchAbandonRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[46]
+	mi := &file_docket_v1_docket_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3930,7 +4023,7 @@ func (x *DispatchAbandonRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchAbandonRequest.ProtoReflect.Descriptor instead.
 func (*DispatchAbandonRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{46}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *DispatchAbandonRequest) GetRun() string {
@@ -3963,7 +4056,7 @@ type DispatchAbandonResponse struct {
 
 func (x *DispatchAbandonResponse) Reset() {
 	*x = DispatchAbandonResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[47]
+	mi := &file_docket_v1_docket_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3975,7 +4068,7 @@ func (x *DispatchAbandonResponse) String() string {
 func (*DispatchAbandonResponse) ProtoMessage() {}
 
 func (x *DispatchAbandonResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[47]
+	mi := &file_docket_v1_docket_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3988,7 +4081,7 @@ func (x *DispatchAbandonResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchAbandonResponse.ProtoReflect.Descriptor instead.
 func (*DispatchAbandonResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{47}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *DispatchAbandonResponse) GetManifest() *Manifest {
@@ -4010,7 +4103,7 @@ type DispatchBackfillUsageRequest struct {
 
 func (x *DispatchBackfillUsageRequest) Reset() {
 	*x = DispatchBackfillUsageRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[48]
+	mi := &file_docket_v1_docket_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4022,7 +4115,7 @@ func (x *DispatchBackfillUsageRequest) String() string {
 func (*DispatchBackfillUsageRequest) ProtoMessage() {}
 
 func (x *DispatchBackfillUsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[48]
+	mi := &file_docket_v1_docket_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4035,7 +4128,7 @@ func (x *DispatchBackfillUsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchBackfillUsageRequest.ProtoReflect.Descriptor instead.
 func (*DispatchBackfillUsageRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{48}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *DispatchBackfillUsageRequest) GetRun() string {
@@ -4076,7 +4169,7 @@ type DispatchBackfillUsageResponse struct {
 
 func (x *DispatchBackfillUsageResponse) Reset() {
 	*x = DispatchBackfillUsageResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[49]
+	mi := &file_docket_v1_docket_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4088,7 +4181,7 @@ func (x *DispatchBackfillUsageResponse) String() string {
 func (*DispatchBackfillUsageResponse) ProtoMessage() {}
 
 func (x *DispatchBackfillUsageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[49]
+	mi := &file_docket_v1_docket_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4101,7 +4194,7 @@ func (x *DispatchBackfillUsageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchBackfillUsageResponse.ProtoReflect.Descriptor instead.
 func (*DispatchBackfillUsageResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{49}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *DispatchBackfillUsageResponse) GetRecorded() int32 {
@@ -4133,7 +4226,7 @@ type DispatchCloseRequest struct {
 
 func (x *DispatchCloseRequest) Reset() {
 	*x = DispatchCloseRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[50]
+	mi := &file_docket_v1_docket_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4145,7 +4238,7 @@ func (x *DispatchCloseRequest) String() string {
 func (*DispatchCloseRequest) ProtoMessage() {}
 
 func (x *DispatchCloseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[50]
+	mi := &file_docket_v1_docket_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4158,7 +4251,7 @@ func (x *DispatchCloseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchCloseRequest.ProtoReflect.Descriptor instead.
 func (*DispatchCloseRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{50}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *DispatchCloseRequest) GetRun() string {
@@ -4221,7 +4314,7 @@ type DispatchCloseResponse struct {
 
 func (x *DispatchCloseResponse) Reset() {
 	*x = DispatchCloseResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[51]
+	mi := &file_docket_v1_docket_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4233,7 +4326,7 @@ func (x *DispatchCloseResponse) String() string {
 func (*DispatchCloseResponse) ProtoMessage() {}
 
 func (x *DispatchCloseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[51]
+	mi := &file_docket_v1_docket_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4246,7 +4339,7 @@ func (x *DispatchCloseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchCloseResponse.ProtoReflect.Descriptor instead.
 func (*DispatchCloseResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{51}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *DispatchCloseResponse) GetManifest() *Manifest {
@@ -4279,7 +4372,7 @@ type DispatchExtendRequest struct {
 
 func (x *DispatchExtendRequest) Reset() {
 	*x = DispatchExtendRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[52]
+	mi := &file_docket_v1_docket_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4291,7 +4384,7 @@ func (x *DispatchExtendRequest) String() string {
 func (*DispatchExtendRequest) ProtoMessage() {}
 
 func (x *DispatchExtendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[52]
+	mi := &file_docket_v1_docket_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4304,7 +4397,7 @@ func (x *DispatchExtendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchExtendRequest.ProtoReflect.Descriptor instead.
 func (*DispatchExtendRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{52}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *DispatchExtendRequest) GetRun() string {
@@ -4324,7 +4417,7 @@ type DispatchExtendResponse struct {
 
 func (x *DispatchExtendResponse) Reset() {
 	*x = DispatchExtendResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[53]
+	mi := &file_docket_v1_docket_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4336,7 +4429,7 @@ func (x *DispatchExtendResponse) String() string {
 func (*DispatchExtendResponse) ProtoMessage() {}
 
 func (x *DispatchExtendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[53]
+	mi := &file_docket_v1_docket_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4349,7 +4442,7 @@ func (x *DispatchExtendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchExtendResponse.ProtoReflect.Descriptor instead.
 func (*DispatchExtendResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{53}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *DispatchExtendResponse) GetManifest() *Manifest {
@@ -4377,7 +4470,7 @@ type DispatchOpenRequest struct {
 
 func (x *DispatchOpenRequest) Reset() {
 	*x = DispatchOpenRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[54]
+	mi := &file_docket_v1_docket_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4389,7 +4482,7 @@ func (x *DispatchOpenRequest) String() string {
 func (*DispatchOpenRequest) ProtoMessage() {}
 
 func (x *DispatchOpenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[54]
+	mi := &file_docket_v1_docket_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4402,7 +4495,7 @@ func (x *DispatchOpenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchOpenRequest.ProtoReflect.Descriptor instead.
 func (*DispatchOpenRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{54}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *DispatchOpenRequest) GetRun() string {
@@ -4437,7 +4530,7 @@ type DispatchOpenResponse struct {
 
 func (x *DispatchOpenResponse) Reset() {
 	*x = DispatchOpenResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[55]
+	mi := &file_docket_v1_docket_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4449,7 +4542,7 @@ func (x *DispatchOpenResponse) String() string {
 func (*DispatchOpenResponse) ProtoMessage() {}
 
 func (x *DispatchOpenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[55]
+	mi := &file_docket_v1_docket_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4462,7 +4555,7 @@ func (x *DispatchOpenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchOpenResponse.ProtoReflect.Descriptor instead.
 func (*DispatchOpenResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{55}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *DispatchOpenResponse) GetManifest() *Manifest {
@@ -4495,7 +4588,7 @@ type DispatchVerifyRequest struct {
 
 func (x *DispatchVerifyRequest) Reset() {
 	*x = DispatchVerifyRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[56]
+	mi := &file_docket_v1_docket_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4507,7 +4600,7 @@ func (x *DispatchVerifyRequest) String() string {
 func (*DispatchVerifyRequest) ProtoMessage() {}
 
 func (x *DispatchVerifyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[56]
+	mi := &file_docket_v1_docket_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4520,7 +4613,7 @@ func (x *DispatchVerifyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchVerifyRequest.ProtoReflect.Descriptor instead.
 func (*DispatchVerifyRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{56}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *DispatchVerifyRequest) GetRun() string {
@@ -4542,7 +4635,7 @@ type RowVerdict struct {
 
 func (x *RowVerdict) Reset() {
 	*x = RowVerdict{}
-	mi := &file_docket_v1_docket_proto_msgTypes[57]
+	mi := &file_docket_v1_docket_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4554,7 +4647,7 @@ func (x *RowVerdict) String() string {
 func (*RowVerdict) ProtoMessage() {}
 
 func (x *RowVerdict) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[57]
+	mi := &file_docket_v1_docket_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4567,7 +4660,7 @@ func (x *RowVerdict) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RowVerdict.ProtoReflect.Descriptor instead.
 func (*RowVerdict) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{57}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *RowVerdict) GetStep() string {
@@ -4608,7 +4701,7 @@ type DispatchVerifyResponse struct {
 
 func (x *DispatchVerifyResponse) Reset() {
 	*x = DispatchVerifyResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[58]
+	mi := &file_docket_v1_docket_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4620,7 +4713,7 @@ func (x *DispatchVerifyResponse) String() string {
 func (*DispatchVerifyResponse) ProtoMessage() {}
 
 func (x *DispatchVerifyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[58]
+	mi := &file_docket_v1_docket_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4633,7 +4726,7 @@ func (x *DispatchVerifyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchVerifyResponse.ProtoReflect.Descriptor instead.
 func (*DispatchVerifyResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{58}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *DispatchVerifyResponse) GetMatch() bool {
@@ -4663,7 +4756,7 @@ type DispatchWaiveTargetRequest struct {
 
 func (x *DispatchWaiveTargetRequest) Reset() {
 	*x = DispatchWaiveTargetRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[59]
+	mi := &file_docket_v1_docket_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4675,7 +4768,7 @@ func (x *DispatchWaiveTargetRequest) String() string {
 func (*DispatchWaiveTargetRequest) ProtoMessage() {}
 
 func (x *DispatchWaiveTargetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[59]
+	mi := &file_docket_v1_docket_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4688,7 +4781,7 @@ func (x *DispatchWaiveTargetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchWaiveTargetRequest.ProtoReflect.Descriptor instead.
 func (*DispatchWaiveTargetRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{59}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *DispatchWaiveTargetRequest) GetRun() string {
@@ -4735,7 +4828,7 @@ type DispatchWaiveTargetResponse struct {
 
 func (x *DispatchWaiveTargetResponse) Reset() {
 	*x = DispatchWaiveTargetResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[60]
+	mi := &file_docket_v1_docket_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4747,7 +4840,7 @@ func (x *DispatchWaiveTargetResponse) String() string {
 func (*DispatchWaiveTargetResponse) ProtoMessage() {}
 
 func (x *DispatchWaiveTargetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[60]
+	mi := &file_docket_v1_docket_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4760,7 +4853,7 @@ func (x *DispatchWaiveTargetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchWaiveTargetResponse.ProtoReflect.Descriptor instead.
 func (*DispatchWaiveTargetResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{60}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *DispatchWaiveTargetResponse) GetWaived() []string {
@@ -4780,7 +4873,7 @@ type DocCommentAddRequest struct {
 
 func (x *DocCommentAddRequest) Reset() {
 	*x = DocCommentAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[61]
+	mi := &file_docket_v1_docket_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4792,7 +4885,7 @@ func (x *DocCommentAddRequest) String() string {
 func (*DocCommentAddRequest) ProtoMessage() {}
 
 func (x *DocCommentAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[61]
+	mi := &file_docket_v1_docket_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4805,7 +4898,7 @@ func (x *DocCommentAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocCommentAddRequest.ProtoReflect.Descriptor instead.
 func (*DocCommentAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{61}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *DocCommentAddRequest) GetDoc() string {
@@ -4831,7 +4924,7 @@ type DocCommentAddResponse struct {
 
 func (x *DocCommentAddResponse) Reset() {
 	*x = DocCommentAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[62]
+	mi := &file_docket_v1_docket_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4843,7 +4936,7 @@ func (x *DocCommentAddResponse) String() string {
 func (*DocCommentAddResponse) ProtoMessage() {}
 
 func (x *DocCommentAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[62]
+	mi := &file_docket_v1_docket_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4856,7 +4949,7 @@ func (x *DocCommentAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocCommentAddResponse.ProtoReflect.Descriptor instead.
 func (*DocCommentAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{62}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *DocCommentAddResponse) GetComment() *DocComment {
@@ -4875,7 +4968,7 @@ type DocCommentListRequest struct {
 
 func (x *DocCommentListRequest) Reset() {
 	*x = DocCommentListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[63]
+	mi := &file_docket_v1_docket_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4887,7 +4980,7 @@ func (x *DocCommentListRequest) String() string {
 func (*DocCommentListRequest) ProtoMessage() {}
 
 func (x *DocCommentListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[63]
+	mi := &file_docket_v1_docket_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4900,7 +4993,7 @@ func (x *DocCommentListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocCommentListRequest.ProtoReflect.Descriptor instead.
 func (*DocCommentListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{63}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *DocCommentListRequest) GetDoc() string {
@@ -4921,7 +5014,7 @@ type DocCommentListResponse struct {
 
 func (x *DocCommentListResponse) Reset() {
 	*x = DocCommentListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[64]
+	mi := &file_docket_v1_docket_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4933,7 +5026,7 @@ func (x *DocCommentListResponse) String() string {
 func (*DocCommentListResponse) ProtoMessage() {}
 
 func (x *DocCommentListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[64]
+	mi := &file_docket_v1_docket_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4946,7 +5039,7 @@ func (x *DocCommentListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocCommentListResponse.ProtoReflect.Descriptor instead.
 func (*DocCommentListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{64}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *DocCommentListResponse) GetItems() []*DocComment {
@@ -4982,7 +5075,7 @@ type DocCreateRequest struct {
 
 func (x *DocCreateRequest) Reset() {
 	*x = DocCreateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[65]
+	mi := &file_docket_v1_docket_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4994,7 +5087,7 @@ func (x *DocCreateRequest) String() string {
 func (*DocCreateRequest) ProtoMessage() {}
 
 func (x *DocCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[65]
+	mi := &file_docket_v1_docket_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5007,7 +5100,7 @@ func (x *DocCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocCreateRequest.ProtoReflect.Descriptor instead.
 func (*DocCreateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{65}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *DocCreateRequest) GetTitle() string {
@@ -5047,7 +5140,7 @@ type DocCreateResponse struct {
 
 func (x *DocCreateResponse) Reset() {
 	*x = DocCreateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[66]
+	mi := &file_docket_v1_docket_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5059,7 +5152,7 @@ func (x *DocCreateResponse) String() string {
 func (*DocCreateResponse) ProtoMessage() {}
 
 func (x *DocCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[66]
+	mi := &file_docket_v1_docket_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5072,7 +5165,7 @@ func (x *DocCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocCreateResponse.ProtoReflect.Descriptor instead.
 func (*DocCreateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{66}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *DocCreateResponse) GetDoc() *Doc {
@@ -5093,7 +5186,7 @@ type DocDeleteRequest struct {
 
 func (x *DocDeleteRequest) Reset() {
 	*x = DocDeleteRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[67]
+	mi := &file_docket_v1_docket_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5105,7 +5198,7 @@ func (x *DocDeleteRequest) String() string {
 func (*DocDeleteRequest) ProtoMessage() {}
 
 func (x *DocDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[67]
+	mi := &file_docket_v1_docket_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5118,7 +5211,7 @@ func (x *DocDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocDeleteRequest.ProtoReflect.Descriptor instead.
 func (*DocDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{67}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *DocDeleteRequest) GetDoc() string {
@@ -5152,7 +5245,7 @@ type DocDeleteResponse struct {
 
 func (x *DocDeleteResponse) Reset() {
 	*x = DocDeleteResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[68]
+	mi := &file_docket_v1_docket_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5164,7 +5257,7 @@ func (x *DocDeleteResponse) String() string {
 func (*DocDeleteResponse) ProtoMessage() {}
 
 func (x *DocDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[68]
+	mi := &file_docket_v1_docket_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5177,7 +5270,7 @@ func (x *DocDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocDeleteResponse.ProtoReflect.Descriptor instead.
 func (*DocDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{68}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *DocDeleteResponse) GetId() string {
@@ -5207,7 +5300,7 @@ type DocEditRequest struct {
 
 func (x *DocEditRequest) Reset() {
 	*x = DocEditRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[69]
+	mi := &file_docket_v1_docket_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5219,7 +5312,7 @@ func (x *DocEditRequest) String() string {
 func (*DocEditRequest) ProtoMessage() {}
 
 func (x *DocEditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[69]
+	mi := &file_docket_v1_docket_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5232,7 +5325,7 @@ func (x *DocEditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocEditRequest.ProtoReflect.Descriptor instead.
 func (*DocEditRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{69}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *DocEditRequest) GetDoc() string {
@@ -5279,7 +5372,7 @@ type DocEditResponse struct {
 
 func (x *DocEditResponse) Reset() {
 	*x = DocEditResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[70]
+	mi := &file_docket_v1_docket_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5291,7 +5384,7 @@ func (x *DocEditResponse) String() string {
 func (*DocEditResponse) ProtoMessage() {}
 
 func (x *DocEditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[70]
+	mi := &file_docket_v1_docket_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5304,7 +5397,7 @@ func (x *DocEditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocEditResponse.ProtoReflect.Descriptor instead.
 func (*DocEditResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{70}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *DocEditResponse) GetDoc() *Doc {
@@ -5324,7 +5417,7 @@ type DocLinkAddRequest struct {
 
 func (x *DocLinkAddRequest) Reset() {
 	*x = DocLinkAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[71]
+	mi := &file_docket_v1_docket_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5336,7 +5429,7 @@ func (x *DocLinkAddRequest) String() string {
 func (*DocLinkAddRequest) ProtoMessage() {}
 
 func (x *DocLinkAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[71]
+	mi := &file_docket_v1_docket_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5349,7 +5442,7 @@ func (x *DocLinkAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocLinkAddRequest.ProtoReflect.Descriptor instead.
 func (*DocLinkAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{71}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *DocLinkAddRequest) GetDoc() string {
@@ -5376,7 +5469,7 @@ type DocLinkAddResponse struct {
 
 func (x *DocLinkAddResponse) Reset() {
 	*x = DocLinkAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[72]
+	mi := &file_docket_v1_docket_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5388,7 +5481,7 @@ func (x *DocLinkAddResponse) String() string {
 func (*DocLinkAddResponse) ProtoMessage() {}
 
 func (x *DocLinkAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[72]
+	mi := &file_docket_v1_docket_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5401,7 +5494,7 @@ func (x *DocLinkAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocLinkAddResponse.ProtoReflect.Descriptor instead.
 func (*DocLinkAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{72}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *DocLinkAddResponse) GetDoc() string {
@@ -5428,7 +5521,7 @@ type DocLinkRemoveRequest struct {
 
 func (x *DocLinkRemoveRequest) Reset() {
 	*x = DocLinkRemoveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[73]
+	mi := &file_docket_v1_docket_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5440,7 +5533,7 @@ func (x *DocLinkRemoveRequest) String() string {
 func (*DocLinkRemoveRequest) ProtoMessage() {}
 
 func (x *DocLinkRemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[73]
+	mi := &file_docket_v1_docket_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5453,7 +5546,7 @@ func (x *DocLinkRemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocLinkRemoveRequest.ProtoReflect.Descriptor instead.
 func (*DocLinkRemoveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{73}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *DocLinkRemoveRequest) GetDoc() string {
@@ -5480,7 +5573,7 @@ type DocLinkRemoveResponse struct {
 
 func (x *DocLinkRemoveResponse) Reset() {
 	*x = DocLinkRemoveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[74]
+	mi := &file_docket_v1_docket_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5492,7 +5585,7 @@ func (x *DocLinkRemoveResponse) String() string {
 func (*DocLinkRemoveResponse) ProtoMessage() {}
 
 func (x *DocLinkRemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[74]
+	mi := &file_docket_v1_docket_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5505,7 +5598,7 @@ func (x *DocLinkRemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocLinkRemoveResponse.ProtoReflect.Descriptor instead.
 func (*DocLinkRemoveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{74}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *DocLinkRemoveResponse) GetDoc() string {
@@ -5536,7 +5629,7 @@ type DocListRequest struct {
 
 func (x *DocListRequest) Reset() {
 	*x = DocListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[75]
+	mi := &file_docket_v1_docket_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5548,7 +5641,7 @@ func (x *DocListRequest) String() string {
 func (*DocListRequest) ProtoMessage() {}
 
 func (x *DocListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[75]
+	mi := &file_docket_v1_docket_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5561,7 +5654,7 @@ func (x *DocListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocListRequest.ProtoReflect.Descriptor instead.
 func (*DocListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{75}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *DocListRequest) GetStatus() []string {
@@ -5617,7 +5710,7 @@ type DocListResponse struct {
 
 func (x *DocListResponse) Reset() {
 	*x = DocListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[76]
+	mi := &file_docket_v1_docket_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5629,7 +5722,7 @@ func (x *DocListResponse) String() string {
 func (*DocListResponse) ProtoMessage() {}
 
 func (x *DocListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[76]
+	mi := &file_docket_v1_docket_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5642,7 +5735,7 @@ func (x *DocListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocListResponse.ProtoReflect.Descriptor instead.
 func (*DocListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{76}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *DocListResponse) GetItems() []*Doc {
@@ -5676,7 +5769,7 @@ type DocShowRequest struct {
 
 func (x *DocShowRequest) Reset() {
 	*x = DocShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[77]
+	mi := &file_docket_v1_docket_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5688,7 +5781,7 @@ func (x *DocShowRequest) String() string {
 func (*DocShowRequest) ProtoMessage() {}
 
 func (x *DocShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[77]
+	mi := &file_docket_v1_docket_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5701,7 +5794,7 @@ func (x *DocShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocShowRequest.ProtoReflect.Descriptor instead.
 func (*DocShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{77}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *DocShowRequest) GetDoc() string {
@@ -5727,7 +5820,7 @@ type DocShowResponse struct {
 
 func (x *DocShowResponse) Reset() {
 	*x = DocShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[78]
+	mi := &file_docket_v1_docket_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5739,7 +5832,7 @@ func (x *DocShowResponse) String() string {
 func (*DocShowResponse) ProtoMessage() {}
 
 func (x *DocShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[78]
+	mi := &file_docket_v1_docket_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5752,7 +5845,7 @@ func (x *DocShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DocShowResponse.ProtoReflect.Descriptor instead.
 func (*DocShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{78}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *DocShowResponse) GetDoc() *Doc {
@@ -5772,7 +5865,7 @@ type DoctorRequest struct {
 
 func (x *DoctorRequest) Reset() {
 	*x = DoctorRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[79]
+	mi := &file_docket_v1_docket_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5784,7 +5877,7 @@ func (x *DoctorRequest) String() string {
 func (*DoctorRequest) ProtoMessage() {}
 
 func (x *DoctorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[79]
+	mi := &file_docket_v1_docket_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5797,7 +5890,7 @@ func (x *DoctorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DoctorRequest.ProtoReflect.Descriptor instead.
 func (*DoctorRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{79}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *DoctorRequest) GetRun() string {
@@ -5825,7 +5918,7 @@ type DoctorCheck struct {
 
 func (x *DoctorCheck) Reset() {
 	*x = DoctorCheck{}
-	mi := &file_docket_v1_docket_proto_msgTypes[80]
+	mi := &file_docket_v1_docket_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5837,7 +5930,7 @@ func (x *DoctorCheck) String() string {
 func (*DoctorCheck) ProtoMessage() {}
 
 func (x *DoctorCheck) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[80]
+	mi := &file_docket_v1_docket_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5850,7 +5943,7 @@ func (x *DoctorCheck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DoctorCheck.ProtoReflect.Descriptor instead.
 func (*DoctorCheck) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{80}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *DoctorCheck) GetName() string {
@@ -5884,7 +5977,7 @@ type DoctorResponse struct {
 
 func (x *DoctorResponse) Reset() {
 	*x = DoctorResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[81]
+	mi := &file_docket_v1_docket_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5896,7 +5989,7 @@ func (x *DoctorResponse) String() string {
 func (*DoctorResponse) ProtoMessage() {}
 
 func (x *DoctorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[81]
+	mi := &file_docket_v1_docket_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5909,7 +6002,7 @@ func (x *DoctorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DoctorResponse.ProtoReflect.Descriptor instead.
 func (*DoctorResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{81}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *DoctorResponse) GetChecks() []*DoctorCheck {
@@ -5937,7 +6030,7 @@ type EventsListRequest struct {
 
 func (x *EventsListRequest) Reset() {
 	*x = EventsListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[82]
+	mi := &file_docket_v1_docket_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5949,7 +6042,7 @@ func (x *EventsListRequest) String() string {
 func (*EventsListRequest) ProtoMessage() {}
 
 func (x *EventsListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[82]
+	mi := &file_docket_v1_docket_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5962,7 +6055,7 @@ func (x *EventsListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventsListRequest.ProtoReflect.Descriptor instead.
 func (*EventsListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{82}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *EventsListRequest) GetSince() int64 {
@@ -5998,7 +6091,7 @@ type EventsListResponse struct {
 
 func (x *EventsListResponse) Reset() {
 	*x = EventsListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[83]
+	mi := &file_docket_v1_docket_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6010,7 +6103,7 @@ func (x *EventsListResponse) String() string {
 func (*EventsListResponse) ProtoMessage() {}
 
 func (x *EventsListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[83]
+	mi := &file_docket_v1_docket_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6023,7 +6116,7 @@ func (x *EventsListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventsListResponse.ProtoReflect.Descriptor instead.
 func (*EventsListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{83}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *EventsListResponse) GetItems() []*Event {
@@ -6064,7 +6157,7 @@ type EventsPruneRequest struct {
 
 func (x *EventsPruneRequest) Reset() {
 	*x = EventsPruneRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[84]
+	mi := &file_docket_v1_docket_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6076,7 +6169,7 @@ func (x *EventsPruneRequest) String() string {
 func (*EventsPruneRequest) ProtoMessage() {}
 
 func (x *EventsPruneRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[84]
+	mi := &file_docket_v1_docket_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6089,7 +6182,7 @@ func (x *EventsPruneRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventsPruneRequest.ProtoReflect.Descriptor instead.
 func (*EventsPruneRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{84}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *EventsPruneRequest) GetBefore() int64 {
@@ -6116,7 +6209,7 @@ type EventsPruneResponse struct {
 
 func (x *EventsPruneResponse) Reset() {
 	*x = EventsPruneResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[85]
+	mi := &file_docket_v1_docket_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6128,7 +6221,7 @@ func (x *EventsPruneResponse) String() string {
 func (*EventsPruneResponse) ProtoMessage() {}
 
 func (x *EventsPruneResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[85]
+	mi := &file_docket_v1_docket_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6141,7 +6234,7 @@ func (x *EventsPruneResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventsPruneResponse.ProtoReflect.Descriptor instead.
 func (*EventsPruneResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{85}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *EventsPruneResponse) GetPruned() int64 {
@@ -6168,7 +6261,7 @@ type ExportRequest struct {
 
 func (x *ExportRequest) Reset() {
 	*x = ExportRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[86]
+	mi := &file_docket_v1_docket_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6180,7 +6273,7 @@ func (x *ExportRequest) String() string {
 func (*ExportRequest) ProtoMessage() {}
 
 func (x *ExportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[86]
+	mi := &file_docket_v1_docket_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6193,7 +6286,7 @@ func (x *ExportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportRequest.ProtoReflect.Descriptor instead.
 func (*ExportRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{86}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *ExportRequest) GetFormat() string {
@@ -6222,7 +6315,7 @@ type ExportResponse struct {
 
 func (x *ExportResponse) Reset() {
 	*x = ExportResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[87]
+	mi := &file_docket_v1_docket_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6234,7 +6327,7 @@ func (x *ExportResponse) String() string {
 func (*ExportResponse) ProtoMessage() {}
 
 func (x *ExportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[87]
+	mi := &file_docket_v1_docket_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6247,7 +6340,7 @@ func (x *ExportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportResponse.ProtoReflect.Descriptor instead.
 func (*ExportResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{87}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *ExportResponse) GetFormat() string {
@@ -6278,7 +6371,7 @@ type ImportRequest struct {
 
 func (x *ImportRequest) Reset() {
 	*x = ImportRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[88]
+	mi := &file_docket_v1_docket_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6290,7 +6383,7 @@ func (x *ImportRequest) String() string {
 func (*ImportRequest) ProtoMessage() {}
 
 func (x *ImportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[88]
+	mi := &file_docket_v1_docket_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6303,7 +6396,7 @@ func (x *ImportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportRequest.ProtoReflect.Descriptor instead.
 func (*ImportRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{88}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *ImportRequest) GetDocument() string {
@@ -6347,7 +6440,7 @@ type ImportResponse struct {
 
 func (x *ImportResponse) Reset() {
 	*x = ImportResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[89]
+	mi := &file_docket_v1_docket_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6359,7 +6452,7 @@ func (x *ImportResponse) String() string {
 func (*ImportResponse) ProtoMessage() {}
 
 func (x *ImportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[89]
+	mi := &file_docket_v1_docket_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6372,7 +6465,7 @@ func (x *ImportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportResponse.ProtoReflect.Descriptor instead.
 func (*ImportResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{89}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *ImportResponse) GetIssues() int32 {
@@ -6419,7 +6512,7 @@ type GateStatusRequest struct {
 
 func (x *GateStatusRequest) Reset() {
 	*x = GateStatusRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[90]
+	mi := &file_docket_v1_docket_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6431,7 +6524,7 @@ func (x *GateStatusRequest) String() string {
 func (*GateStatusRequest) ProtoMessage() {}
 
 func (x *GateStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[90]
+	mi := &file_docket_v1_docket_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6444,7 +6537,7 @@ func (x *GateStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateStatusRequest.ProtoReflect.Descriptor instead.
 func (*GateStatusRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{90}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *GateStatusRequest) GetStep() string {
@@ -6466,7 +6559,7 @@ type GateStatusResponse struct {
 
 func (x *GateStatusResponse) Reset() {
 	*x = GateStatusResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[91]
+	mi := &file_docket_v1_docket_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6478,7 +6571,7 @@ func (x *GateStatusResponse) String() string {
 func (*GateStatusResponse) ProtoMessage() {}
 
 func (x *GateStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[91]
+	mi := &file_docket_v1_docket_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6491,7 +6584,7 @@ func (x *GateStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GateStatusResponse.ProtoReflect.Descriptor instead.
 func (*GateStatusResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{91}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *GateStatusResponse) GetStep() string {
@@ -6534,7 +6627,7 @@ type GuardDecision struct {
 
 func (x *GuardDecision) Reset() {
 	*x = GuardDecision{}
-	mi := &file_docket_v1_docket_proto_msgTypes[92]
+	mi := &file_docket_v1_docket_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6546,7 +6639,7 @@ func (x *GuardDecision) String() string {
 func (*GuardDecision) ProtoMessage() {}
 
 func (x *GuardDecision) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[92]
+	mi := &file_docket_v1_docket_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6559,7 +6652,7 @@ func (x *GuardDecision) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardDecision.ProtoReflect.Descriptor instead.
 func (*GuardDecision) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{92}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *GuardDecision) GetAllow() bool {
@@ -6587,7 +6680,7 @@ type GuardGateRequest struct {
 
 func (x *GuardGateRequest) Reset() {
 	*x = GuardGateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[93]
+	mi := &file_docket_v1_docket_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6599,7 +6692,7 @@ func (x *GuardGateRequest) String() string {
 func (*GuardGateRequest) ProtoMessage() {}
 
 func (x *GuardGateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[93]
+	mi := &file_docket_v1_docket_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6612,7 +6705,7 @@ func (x *GuardGateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardGateRequest.ProtoReflect.Descriptor instead.
 func (*GuardGateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{93}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *GuardGateRequest) GetStep() string {
@@ -6645,7 +6738,7 @@ type GuardGateResponse struct {
 
 func (x *GuardGateResponse) Reset() {
 	*x = GuardGateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[94]
+	mi := &file_docket_v1_docket_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6657,7 +6750,7 @@ func (x *GuardGateResponse) String() string {
 func (*GuardGateResponse) ProtoMessage() {}
 
 func (x *GuardGateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[94]
+	mi := &file_docket_v1_docket_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6670,7 +6763,7 @@ func (x *GuardGateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardGateResponse.ProtoReflect.Descriptor instead.
 func (*GuardGateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{94}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *GuardGateResponse) GetDecision() *GuardDecision {
@@ -6690,7 +6783,7 @@ type GuardRecordRequest struct {
 
 func (x *GuardRecordRequest) Reset() {
 	*x = GuardRecordRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[95]
+	mi := &file_docket_v1_docket_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6702,7 +6795,7 @@ func (x *GuardRecordRequest) String() string {
 func (*GuardRecordRequest) ProtoMessage() {}
 
 func (x *GuardRecordRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[95]
+	mi := &file_docket_v1_docket_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6715,7 +6808,7 @@ func (x *GuardRecordRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardRecordRequest.ProtoReflect.Descriptor instead.
 func (*GuardRecordRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{95}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *GuardRecordRequest) GetRun() string {
@@ -6741,7 +6834,7 @@ type GuardRecordResponse struct {
 
 func (x *GuardRecordResponse) Reset() {
 	*x = GuardRecordResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[96]
+	mi := &file_docket_v1_docket_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6753,7 +6846,7 @@ func (x *GuardRecordResponse) String() string {
 func (*GuardRecordResponse) ProtoMessage() {}
 
 func (x *GuardRecordResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[96]
+	mi := &file_docket_v1_docket_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6766,7 +6859,7 @@ func (x *GuardRecordResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardRecordResponse.ProtoReflect.Descriptor instead.
 func (*GuardRecordResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{96}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *GuardRecordResponse) GetDecision() *GuardDecision {
@@ -6791,7 +6884,7 @@ type GuardSpawnRequest struct {
 
 func (x *GuardSpawnRequest) Reset() {
 	*x = GuardSpawnRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[97]
+	mi := &file_docket_v1_docket_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6803,7 +6896,7 @@ func (x *GuardSpawnRequest) String() string {
 func (*GuardSpawnRequest) ProtoMessage() {}
 
 func (x *GuardSpawnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[97]
+	mi := &file_docket_v1_docket_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6816,7 +6909,7 @@ func (x *GuardSpawnRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardSpawnRequest.ProtoReflect.Descriptor instead.
 func (*GuardSpawnRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{97}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *GuardSpawnRequest) GetRun() string {
@@ -6877,7 +6970,7 @@ type GuardSpawnResponse struct {
 
 func (x *GuardSpawnResponse) Reset() {
 	*x = GuardSpawnResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[98]
+	mi := &file_docket_v1_docket_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6889,7 +6982,7 @@ func (x *GuardSpawnResponse) String() string {
 func (*GuardSpawnResponse) ProtoMessage() {}
 
 func (x *GuardSpawnResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[98]
+	mi := &file_docket_v1_docket_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6902,7 +6995,7 @@ func (x *GuardSpawnResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardSpawnResponse.ProtoReflect.Descriptor instead.
 func (*GuardSpawnResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{98}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *GuardSpawnResponse) GetDecision() *GuardDecision {
@@ -6922,7 +7015,7 @@ type GuardStopRequest struct {
 
 func (x *GuardStopRequest) Reset() {
 	*x = GuardStopRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[99]
+	mi := &file_docket_v1_docket_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6934,7 +7027,7 @@ func (x *GuardStopRequest) String() string {
 func (*GuardStopRequest) ProtoMessage() {}
 
 func (x *GuardStopRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[99]
+	mi := &file_docket_v1_docket_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6947,7 +7040,7 @@ func (x *GuardStopRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardStopRequest.ProtoReflect.Descriptor instead.
 func (*GuardStopRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{99}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *GuardStopRequest) GetRun() string {
@@ -6973,7 +7066,7 @@ type GuardStopResponse struct {
 
 func (x *GuardStopResponse) Reset() {
 	*x = GuardStopResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[100]
+	mi := &file_docket_v1_docket_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6985,7 +7078,7 @@ func (x *GuardStopResponse) String() string {
 func (*GuardStopResponse) ProtoMessage() {}
 
 func (x *GuardStopResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[100]
+	mi := &file_docket_v1_docket_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6998,7 +7091,7 @@ func (x *GuardStopResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuardStopResponse.ProtoReflect.Descriptor instead.
 func (*GuardStopResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{100}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *GuardStopResponse) GetDecision() *GuardDecision {
@@ -7020,7 +7113,7 @@ type IssueClaimRequest struct {
 
 func (x *IssueClaimRequest) Reset() {
 	*x = IssueClaimRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[101]
+	mi := &file_docket_v1_docket_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7032,7 +7125,7 @@ func (x *IssueClaimRequest) String() string {
 func (*IssueClaimRequest) ProtoMessage() {}
 
 func (x *IssueClaimRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[101]
+	mi := &file_docket_v1_docket_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7045,7 +7138,7 @@ func (x *IssueClaimRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueClaimRequest.ProtoReflect.Descriptor instead.
 func (*IssueClaimRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{101}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *IssueClaimRequest) GetIssue() string {
@@ -7089,7 +7182,7 @@ type IssueClaimResponse struct {
 
 func (x *IssueClaimResponse) Reset() {
 	*x = IssueClaimResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[102]
+	mi := &file_docket_v1_docket_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7101,7 +7194,7 @@ func (x *IssueClaimResponse) String() string {
 func (*IssueClaimResponse) ProtoMessage() {}
 
 func (x *IssueClaimResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[102]
+	mi := &file_docket_v1_docket_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7114,7 +7207,7 @@ func (x *IssueClaimResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueClaimResponse.ProtoReflect.Descriptor instead.
 func (*IssueClaimResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{102}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *IssueClaimResponse) GetIssue() string {
@@ -7163,7 +7256,7 @@ type IssueCloseRequest struct {
 
 func (x *IssueCloseRequest) Reset() {
 	*x = IssueCloseRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[103]
+	mi := &file_docket_v1_docket_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7175,7 +7268,7 @@ func (x *IssueCloseRequest) String() string {
 func (*IssueCloseRequest) ProtoMessage() {}
 
 func (x *IssueCloseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[103]
+	mi := &file_docket_v1_docket_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7188,7 +7281,7 @@ func (x *IssueCloseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCloseRequest.ProtoReflect.Descriptor instead.
 func (*IssueCloseRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{103}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *IssueCloseRequest) GetIssue() string {
@@ -7214,7 +7307,7 @@ type IssueCloseResponse struct {
 
 func (x *IssueCloseResponse) Reset() {
 	*x = IssueCloseResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[104]
+	mi := &file_docket_v1_docket_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7226,7 +7319,7 @@ func (x *IssueCloseResponse) String() string {
 func (*IssueCloseResponse) ProtoMessage() {}
 
 func (x *IssueCloseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[104]
+	mi := &file_docket_v1_docket_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7239,7 +7332,7 @@ func (x *IssueCloseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCloseResponse.ProtoReflect.Descriptor instead.
 func (*IssueCloseResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{104}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *IssueCloseResponse) GetIssue() *Issue {
@@ -7259,7 +7352,7 @@ type IssueCommentAddRequest struct {
 
 func (x *IssueCommentAddRequest) Reset() {
 	*x = IssueCommentAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[105]
+	mi := &file_docket_v1_docket_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7271,7 +7364,7 @@ func (x *IssueCommentAddRequest) String() string {
 func (*IssueCommentAddRequest) ProtoMessage() {}
 
 func (x *IssueCommentAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[105]
+	mi := &file_docket_v1_docket_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7284,7 +7377,7 @@ func (x *IssueCommentAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCommentAddRequest.ProtoReflect.Descriptor instead.
 func (*IssueCommentAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{105}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *IssueCommentAddRequest) GetIssue() string {
@@ -7310,7 +7403,7 @@ type IssueCommentAddResponse struct {
 
 func (x *IssueCommentAddResponse) Reset() {
 	*x = IssueCommentAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[106]
+	mi := &file_docket_v1_docket_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7322,7 +7415,7 @@ func (x *IssueCommentAddResponse) String() string {
 func (*IssueCommentAddResponse) ProtoMessage() {}
 
 func (x *IssueCommentAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[106]
+	mi := &file_docket_v1_docket_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7335,7 +7428,7 @@ func (x *IssueCommentAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCommentAddResponse.ProtoReflect.Descriptor instead.
 func (*IssueCommentAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{106}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *IssueCommentAddResponse) GetComment() *Comment {
@@ -7354,7 +7447,7 @@ type IssueCommentListRequest struct {
 
 func (x *IssueCommentListRequest) Reset() {
 	*x = IssueCommentListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[107]
+	mi := &file_docket_v1_docket_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7366,7 +7459,7 @@ func (x *IssueCommentListRequest) String() string {
 func (*IssueCommentListRequest) ProtoMessage() {}
 
 func (x *IssueCommentListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[107]
+	mi := &file_docket_v1_docket_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7379,7 +7472,7 @@ func (x *IssueCommentListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCommentListRequest.ProtoReflect.Descriptor instead.
 func (*IssueCommentListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{107}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *IssueCommentListRequest) GetIssue() string {
@@ -7400,7 +7493,7 @@ type IssueCommentListResponse struct {
 
 func (x *IssueCommentListResponse) Reset() {
 	*x = IssueCommentListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[108]
+	mi := &file_docket_v1_docket_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7412,7 +7505,7 @@ func (x *IssueCommentListResponse) String() string {
 func (*IssueCommentListResponse) ProtoMessage() {}
 
 func (x *IssueCommentListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[108]
+	mi := &file_docket_v1_docket_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7425,7 +7518,7 @@ func (x *IssueCommentListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCommentListResponse.ProtoReflect.Descriptor instead.
 func (*IssueCommentListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{108}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *IssueCommentListResponse) GetItems() []*Comment {
@@ -7467,7 +7560,7 @@ type IssueCreateRequest struct {
 
 func (x *IssueCreateRequest) Reset() {
 	*x = IssueCreateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[109]
+	mi := &file_docket_v1_docket_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7479,7 +7572,7 @@ func (x *IssueCreateRequest) String() string {
 func (*IssueCreateRequest) ProtoMessage() {}
 
 func (x *IssueCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[109]
+	mi := &file_docket_v1_docket_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7492,7 +7585,7 @@ func (x *IssueCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCreateRequest.ProtoReflect.Descriptor instead.
 func (*IssueCreateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{109}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{110}
 }
 
 func (x *IssueCreateRequest) GetTitle() string {
@@ -7574,7 +7667,7 @@ type IssueCreateResponse struct {
 
 func (x *IssueCreateResponse) Reset() {
 	*x = IssueCreateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[110]
+	mi := &file_docket_v1_docket_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7586,7 +7679,7 @@ func (x *IssueCreateResponse) String() string {
 func (*IssueCreateResponse) ProtoMessage() {}
 
 func (x *IssueCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[110]
+	mi := &file_docket_v1_docket_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7599,7 +7692,7 @@ func (x *IssueCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueCreateResponse.ProtoReflect.Descriptor instead.
 func (*IssueCreateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{110}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *IssueCreateResponse) GetIssue() *Issue {
@@ -7621,7 +7714,7 @@ type IssueDeleteRequest struct {
 
 func (x *IssueDeleteRequest) Reset() {
 	*x = IssueDeleteRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[111]
+	mi := &file_docket_v1_docket_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7633,7 +7726,7 @@ func (x *IssueDeleteRequest) String() string {
 func (*IssueDeleteRequest) ProtoMessage() {}
 
 func (x *IssueDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[111]
+	mi := &file_docket_v1_docket_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7646,7 +7739,7 @@ func (x *IssueDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueDeleteRequest.ProtoReflect.Descriptor instead.
 func (*IssueDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{111}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *IssueDeleteRequest) GetIssue() string {
@@ -7687,7 +7780,7 @@ type IssueDeleteResponse struct {
 
 func (x *IssueDeleteResponse) Reset() {
 	*x = IssueDeleteResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[112]
+	mi := &file_docket_v1_docket_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7699,7 +7792,7 @@ func (x *IssueDeleteResponse) String() string {
 func (*IssueDeleteResponse) ProtoMessage() {}
 
 func (x *IssueDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[112]
+	mi := &file_docket_v1_docket_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7712,7 +7805,7 @@ func (x *IssueDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueDeleteResponse.ProtoReflect.Descriptor instead.
 func (*IssueDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{112}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *IssueDeleteResponse) GetDeleted() []string {
@@ -7747,7 +7840,7 @@ type IssueEditRequest struct {
 
 func (x *IssueEditRequest) Reset() {
 	*x = IssueEditRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[113]
+	mi := &file_docket_v1_docket_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7759,7 +7852,7 @@ func (x *IssueEditRequest) String() string {
 func (*IssueEditRequest) ProtoMessage() {}
 
 func (x *IssueEditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[113]
+	mi := &file_docket_v1_docket_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7772,7 +7865,7 @@ func (x *IssueEditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueEditRequest.ProtoReflect.Descriptor instead.
 func (*IssueEditRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{113}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *IssueEditRequest) GetIssue() string {
@@ -7854,7 +7947,7 @@ type IssueEditResponse struct {
 
 func (x *IssueEditResponse) Reset() {
 	*x = IssueEditResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[114]
+	mi := &file_docket_v1_docket_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7866,7 +7959,7 @@ func (x *IssueEditResponse) String() string {
 func (*IssueEditResponse) ProtoMessage() {}
 
 func (x *IssueEditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[114]
+	mi := &file_docket_v1_docket_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7879,7 +7972,7 @@ func (x *IssueEditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueEditResponse.ProtoReflect.Descriptor instead.
 func (*IssueEditResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{114}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *IssueEditResponse) GetIssue() *Issue {
@@ -7899,7 +7992,7 @@ type IssueFileAddRequest struct {
 
 func (x *IssueFileAddRequest) Reset() {
 	*x = IssueFileAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[115]
+	mi := &file_docket_v1_docket_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7911,7 +8004,7 @@ func (x *IssueFileAddRequest) String() string {
 func (*IssueFileAddRequest) ProtoMessage() {}
 
 func (x *IssueFileAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[115]
+	mi := &file_docket_v1_docket_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7924,7 +8017,7 @@ func (x *IssueFileAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFileAddRequest.ProtoReflect.Descriptor instead.
 func (*IssueFileAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{115}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *IssueFileAddRequest) GetIssue() string {
@@ -7951,7 +8044,7 @@ type IssueFileAddResponse struct {
 
 func (x *IssueFileAddResponse) Reset() {
 	*x = IssueFileAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[116]
+	mi := &file_docket_v1_docket_proto_msgTypes[117]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7963,7 +8056,7 @@ func (x *IssueFileAddResponse) String() string {
 func (*IssueFileAddResponse) ProtoMessage() {}
 
 func (x *IssueFileAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[116]
+	mi := &file_docket_v1_docket_proto_msgTypes[117]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7976,7 +8069,7 @@ func (x *IssueFileAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFileAddResponse.ProtoReflect.Descriptor instead.
 func (*IssueFileAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{116}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *IssueFileAddResponse) GetIssue() string {
@@ -8002,7 +8095,7 @@ type IssueFileListRequest struct {
 
 func (x *IssueFileListRequest) Reset() {
 	*x = IssueFileListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[117]
+	mi := &file_docket_v1_docket_proto_msgTypes[118]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8014,7 +8107,7 @@ func (x *IssueFileListRequest) String() string {
 func (*IssueFileListRequest) ProtoMessage() {}
 
 func (x *IssueFileListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[117]
+	mi := &file_docket_v1_docket_proto_msgTypes[118]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8027,7 +8120,7 @@ func (x *IssueFileListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFileListRequest.ProtoReflect.Descriptor instead.
 func (*IssueFileListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{117}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *IssueFileListRequest) GetIssue() string {
@@ -8047,7 +8140,7 @@ type IssueFileListResponse struct {
 
 func (x *IssueFileListResponse) Reset() {
 	*x = IssueFileListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[118]
+	mi := &file_docket_v1_docket_proto_msgTypes[119]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8059,7 +8152,7 @@ func (x *IssueFileListResponse) String() string {
 func (*IssueFileListResponse) ProtoMessage() {}
 
 func (x *IssueFileListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[118]
+	mi := &file_docket_v1_docket_proto_msgTypes[119]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8072,7 +8165,7 @@ func (x *IssueFileListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFileListResponse.ProtoReflect.Descriptor instead.
 func (*IssueFileListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{118}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *IssueFileListResponse) GetIssue() string {
@@ -8099,7 +8192,7 @@ type IssueFileRemoveRequest struct {
 
 func (x *IssueFileRemoveRequest) Reset() {
 	*x = IssueFileRemoveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[119]
+	mi := &file_docket_v1_docket_proto_msgTypes[120]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8111,7 +8204,7 @@ func (x *IssueFileRemoveRequest) String() string {
 func (*IssueFileRemoveRequest) ProtoMessage() {}
 
 func (x *IssueFileRemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[119]
+	mi := &file_docket_v1_docket_proto_msgTypes[120]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8124,7 +8217,7 @@ func (x *IssueFileRemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFileRemoveRequest.ProtoReflect.Descriptor instead.
 func (*IssueFileRemoveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{119}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{120}
 }
 
 func (x *IssueFileRemoveRequest) GetIssue() string {
@@ -8151,7 +8244,7 @@ type IssueFileRemoveResponse struct {
 
 func (x *IssueFileRemoveResponse) Reset() {
 	*x = IssueFileRemoveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[120]
+	mi := &file_docket_v1_docket_proto_msgTypes[121]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8163,7 +8256,7 @@ func (x *IssueFileRemoveResponse) String() string {
 func (*IssueFileRemoveResponse) ProtoMessage() {}
 
 func (x *IssueFileRemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[120]
+	mi := &file_docket_v1_docket_proto_msgTypes[121]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8176,7 +8269,7 @@ func (x *IssueFileRemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueFileRemoveResponse.ProtoReflect.Descriptor instead.
 func (*IssueFileRemoveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{120}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{121}
 }
 
 func (x *IssueFileRemoveResponse) GetIssue() string {
@@ -8205,7 +8298,7 @@ type IssueGraphRequest struct {
 
 func (x *IssueGraphRequest) Reset() {
 	*x = IssueGraphRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[121]
+	mi := &file_docket_v1_docket_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8217,7 +8310,7 @@ func (x *IssueGraphRequest) String() string {
 func (*IssueGraphRequest) ProtoMessage() {}
 
 func (x *IssueGraphRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[121]
+	mi := &file_docket_v1_docket_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8230,7 +8323,7 @@ func (x *IssueGraphRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueGraphRequest.ProtoReflect.Descriptor instead.
 func (*IssueGraphRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{121}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *IssueGraphRequest) GetIssue() string {
@@ -8272,7 +8365,7 @@ type GraphEdge struct {
 
 func (x *GraphEdge) Reset() {
 	*x = GraphEdge{}
-	mi := &file_docket_v1_docket_proto_msgTypes[122]
+	mi := &file_docket_v1_docket_proto_msgTypes[123]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8284,7 +8377,7 @@ func (x *GraphEdge) String() string {
 func (*GraphEdge) ProtoMessage() {}
 
 func (x *GraphEdge) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[122]
+	mi := &file_docket_v1_docket_proto_msgTypes[123]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8297,7 +8390,7 @@ func (x *GraphEdge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GraphEdge.ProtoReflect.Descriptor instead.
 func (*GraphEdge) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{122}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{123}
 }
 
 func (x *GraphEdge) GetSource() string {
@@ -8333,7 +8426,7 @@ type IssueGraphResponse struct {
 
 func (x *IssueGraphResponse) Reset() {
 	*x = IssueGraphResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[123]
+	mi := &file_docket_v1_docket_proto_msgTypes[124]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8345,7 +8438,7 @@ func (x *IssueGraphResponse) String() string {
 func (*IssueGraphResponse) ProtoMessage() {}
 
 func (x *IssueGraphResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[123]
+	mi := &file_docket_v1_docket_proto_msgTypes[124]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8358,7 +8451,7 @@ func (x *IssueGraphResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueGraphResponse.ProtoReflect.Descriptor instead.
 func (*IssueGraphResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{123}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{124}
 }
 
 func (x *IssueGraphResponse) GetRoot() string {
@@ -8401,7 +8494,7 @@ type IssueHeartbeatRequest struct {
 
 func (x *IssueHeartbeatRequest) Reset() {
 	*x = IssueHeartbeatRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[124]
+	mi := &file_docket_v1_docket_proto_msgTypes[125]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8413,7 +8506,7 @@ func (x *IssueHeartbeatRequest) String() string {
 func (*IssueHeartbeatRequest) ProtoMessage() {}
 
 func (x *IssueHeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[124]
+	mi := &file_docket_v1_docket_proto_msgTypes[125]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8426,7 +8519,7 @@ func (x *IssueHeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueHeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*IssueHeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{124}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{125}
 }
 
 func (x *IssueHeartbeatRequest) GetIssue() string {
@@ -8467,7 +8560,7 @@ type IssueHeartbeatResponse struct {
 
 func (x *IssueHeartbeatResponse) Reset() {
 	*x = IssueHeartbeatResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[125]
+	mi := &file_docket_v1_docket_proto_msgTypes[126]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8479,7 +8572,7 @@ func (x *IssueHeartbeatResponse) String() string {
 func (*IssueHeartbeatResponse) ProtoMessage() {}
 
 func (x *IssueHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[125]
+	mi := &file_docket_v1_docket_proto_msgTypes[126]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8492,7 +8585,7 @@ func (x *IssueHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*IssueHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{125}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{126}
 }
 
 func (x *IssueHeartbeatResponse) GetIssue() string {
@@ -8520,7 +8613,7 @@ type IssueLabelAddRequest struct {
 
 func (x *IssueLabelAddRequest) Reset() {
 	*x = IssueLabelAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[126]
+	mi := &file_docket_v1_docket_proto_msgTypes[127]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8532,7 +8625,7 @@ func (x *IssueLabelAddRequest) String() string {
 func (*IssueLabelAddRequest) ProtoMessage() {}
 
 func (x *IssueLabelAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[126]
+	mi := &file_docket_v1_docket_proto_msgTypes[127]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8545,7 +8638,7 @@ func (x *IssueLabelAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelAddRequest.ProtoReflect.Descriptor instead.
 func (*IssueLabelAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{126}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{127}
 }
 
 func (x *IssueLabelAddRequest) GetIssue() string {
@@ -8578,7 +8671,7 @@ type IssueLabelAddResponse struct {
 
 func (x *IssueLabelAddResponse) Reset() {
 	*x = IssueLabelAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[127]
+	mi := &file_docket_v1_docket_proto_msgTypes[128]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8590,7 +8683,7 @@ func (x *IssueLabelAddResponse) String() string {
 func (*IssueLabelAddResponse) ProtoMessage() {}
 
 func (x *IssueLabelAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[127]
+	mi := &file_docket_v1_docket_proto_msgTypes[128]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8603,7 +8696,7 @@ func (x *IssueLabelAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelAddResponse.ProtoReflect.Descriptor instead.
 func (*IssueLabelAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{127}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{128}
 }
 
 func (x *IssueLabelAddResponse) GetIssue() *Issue {
@@ -8623,7 +8716,7 @@ type IssueLabelDeleteRequest struct {
 
 func (x *IssueLabelDeleteRequest) Reset() {
 	*x = IssueLabelDeleteRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[128]
+	mi := &file_docket_v1_docket_proto_msgTypes[129]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8635,7 +8728,7 @@ func (x *IssueLabelDeleteRequest) String() string {
 func (*IssueLabelDeleteRequest) ProtoMessage() {}
 
 func (x *IssueLabelDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[128]
+	mi := &file_docket_v1_docket_proto_msgTypes[129]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8648,7 +8741,7 @@ func (x *IssueLabelDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelDeleteRequest.ProtoReflect.Descriptor instead.
 func (*IssueLabelDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{128}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{129}
 }
 
 func (x *IssueLabelDeleteRequest) GetLabel() string {
@@ -8675,7 +8768,7 @@ type IssueLabelDeleteResponse struct {
 
 func (x *IssueLabelDeleteResponse) Reset() {
 	*x = IssueLabelDeleteResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[129]
+	mi := &file_docket_v1_docket_proto_msgTypes[130]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8687,7 +8780,7 @@ func (x *IssueLabelDeleteResponse) String() string {
 func (*IssueLabelDeleteResponse) ProtoMessage() {}
 
 func (x *IssueLabelDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[129]
+	mi := &file_docket_v1_docket_proto_msgTypes[130]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8700,7 +8793,7 @@ func (x *IssueLabelDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelDeleteResponse.ProtoReflect.Descriptor instead.
 func (*IssueLabelDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{129}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{130}
 }
 
 func (x *IssueLabelDeleteResponse) GetLabel() string {
@@ -8725,7 +8818,7 @@ type IssueLabelListRequest struct {
 
 func (x *IssueLabelListRequest) Reset() {
 	*x = IssueLabelListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[130]
+	mi := &file_docket_v1_docket_proto_msgTypes[131]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8737,7 +8830,7 @@ func (x *IssueLabelListRequest) String() string {
 func (*IssueLabelListRequest) ProtoMessage() {}
 
 func (x *IssueLabelListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[130]
+	mi := &file_docket_v1_docket_proto_msgTypes[131]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8750,7 +8843,7 @@ func (x *IssueLabelListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelListRequest.ProtoReflect.Descriptor instead.
 func (*IssueLabelListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{130}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{131}
 }
 
 type IssueLabelListResponse struct {
@@ -8764,7 +8857,7 @@ type IssueLabelListResponse struct {
 
 func (x *IssueLabelListResponse) Reset() {
 	*x = IssueLabelListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[131]
+	mi := &file_docket_v1_docket_proto_msgTypes[132]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8776,7 +8869,7 @@ func (x *IssueLabelListResponse) String() string {
 func (*IssueLabelListResponse) ProtoMessage() {}
 
 func (x *IssueLabelListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[131]
+	mi := &file_docket_v1_docket_proto_msgTypes[132]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8789,7 +8882,7 @@ func (x *IssueLabelListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelListResponse.ProtoReflect.Descriptor instead.
 func (*IssueLabelListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{131}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{132}
 }
 
 func (x *IssueLabelListResponse) GetItems() []*Label {
@@ -8823,7 +8916,7 @@ type IssueLabelRmRequest struct {
 
 func (x *IssueLabelRmRequest) Reset() {
 	*x = IssueLabelRmRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[132]
+	mi := &file_docket_v1_docket_proto_msgTypes[133]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8835,7 +8928,7 @@ func (x *IssueLabelRmRequest) String() string {
 func (*IssueLabelRmRequest) ProtoMessage() {}
 
 func (x *IssueLabelRmRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[132]
+	mi := &file_docket_v1_docket_proto_msgTypes[133]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8848,7 +8941,7 @@ func (x *IssueLabelRmRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelRmRequest.ProtoReflect.Descriptor instead.
 func (*IssueLabelRmRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{132}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{133}
 }
 
 func (x *IssueLabelRmRequest) GetIssue() string {
@@ -8874,7 +8967,7 @@ type IssueLabelRmResponse struct {
 
 func (x *IssueLabelRmResponse) Reset() {
 	*x = IssueLabelRmResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[133]
+	mi := &file_docket_v1_docket_proto_msgTypes[134]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8886,7 +8979,7 @@ func (x *IssueLabelRmResponse) String() string {
 func (*IssueLabelRmResponse) ProtoMessage() {}
 
 func (x *IssueLabelRmResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[133]
+	mi := &file_docket_v1_docket_proto_msgTypes[134]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8899,7 +8992,7 @@ func (x *IssueLabelRmResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLabelRmResponse.ProtoReflect.Descriptor instead.
 func (*IssueLabelRmResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{133}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{134}
 }
 
 func (x *IssueLabelRmResponse) GetIssue() *Issue {
@@ -8920,7 +9013,7 @@ type IssueLinkAddRequest struct {
 
 func (x *IssueLinkAddRequest) Reset() {
 	*x = IssueLinkAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[134]
+	mi := &file_docket_v1_docket_proto_msgTypes[135]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8932,7 +9025,7 @@ func (x *IssueLinkAddRequest) String() string {
 func (*IssueLinkAddRequest) ProtoMessage() {}
 
 func (x *IssueLinkAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[134]
+	mi := &file_docket_v1_docket_proto_msgTypes[135]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8945,7 +9038,7 @@ func (x *IssueLinkAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLinkAddRequest.ProtoReflect.Descriptor instead.
 func (*IssueLinkAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{134}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{135}
 }
 
 func (x *IssueLinkAddRequest) GetIssue() string {
@@ -8978,7 +9071,7 @@ type IssueLinkAddResponse struct {
 
 func (x *IssueLinkAddResponse) Reset() {
 	*x = IssueLinkAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[135]
+	mi := &file_docket_v1_docket_proto_msgTypes[136]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8990,7 +9083,7 @@ func (x *IssueLinkAddResponse) String() string {
 func (*IssueLinkAddResponse) ProtoMessage() {}
 
 func (x *IssueLinkAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[135]
+	mi := &file_docket_v1_docket_proto_msgTypes[136]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9003,7 +9096,7 @@ func (x *IssueLinkAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLinkAddResponse.ProtoReflect.Descriptor instead.
 func (*IssueLinkAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{135}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{136}
 }
 
 func (x *IssueLinkAddResponse) GetRelation() *Relation {
@@ -9022,7 +9115,7 @@ type IssueLinkListRequest struct {
 
 func (x *IssueLinkListRequest) Reset() {
 	*x = IssueLinkListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[136]
+	mi := &file_docket_v1_docket_proto_msgTypes[137]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9034,7 +9127,7 @@ func (x *IssueLinkListRequest) String() string {
 func (*IssueLinkListRequest) ProtoMessage() {}
 
 func (x *IssueLinkListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[136]
+	mi := &file_docket_v1_docket_proto_msgTypes[137]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9047,7 +9140,7 @@ func (x *IssueLinkListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLinkListRequest.ProtoReflect.Descriptor instead.
 func (*IssueLinkListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{136}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{137}
 }
 
 func (x *IssueLinkListRequest) GetIssue() string {
@@ -9068,7 +9161,7 @@ type IssueLinkListResponse struct {
 
 func (x *IssueLinkListResponse) Reset() {
 	*x = IssueLinkListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[137]
+	mi := &file_docket_v1_docket_proto_msgTypes[138]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9080,7 +9173,7 @@ func (x *IssueLinkListResponse) String() string {
 func (*IssueLinkListResponse) ProtoMessage() {}
 
 func (x *IssueLinkListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[137]
+	mi := &file_docket_v1_docket_proto_msgTypes[138]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9093,7 +9186,7 @@ func (x *IssueLinkListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLinkListResponse.ProtoReflect.Descriptor instead.
 func (*IssueLinkListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{137}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{138}
 }
 
 func (x *IssueLinkListResponse) GetItems() []*Relation {
@@ -9128,7 +9221,7 @@ type IssueLinkRemoveRequest struct {
 
 func (x *IssueLinkRemoveRequest) Reset() {
 	*x = IssueLinkRemoveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[138]
+	mi := &file_docket_v1_docket_proto_msgTypes[139]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9140,7 +9233,7 @@ func (x *IssueLinkRemoveRequest) String() string {
 func (*IssueLinkRemoveRequest) ProtoMessage() {}
 
 func (x *IssueLinkRemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[138]
+	mi := &file_docket_v1_docket_proto_msgTypes[139]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9153,7 +9246,7 @@ func (x *IssueLinkRemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLinkRemoveRequest.ProtoReflect.Descriptor instead.
 func (*IssueLinkRemoveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{138}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{139}
 }
 
 func (x *IssueLinkRemoveRequest) GetIssue() string {
@@ -9186,7 +9279,7 @@ type IssueLinkRemoveResponse struct {
 
 func (x *IssueLinkRemoveResponse) Reset() {
 	*x = IssueLinkRemoveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[139]
+	mi := &file_docket_v1_docket_proto_msgTypes[140]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9198,7 +9291,7 @@ func (x *IssueLinkRemoveResponse) String() string {
 func (*IssueLinkRemoveResponse) ProtoMessage() {}
 
 func (x *IssueLinkRemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[139]
+	mi := &file_docket_v1_docket_proto_msgTypes[140]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9211,7 +9304,7 @@ func (x *IssueLinkRemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLinkRemoveResponse.ProtoReflect.Descriptor instead.
 func (*IssueLinkRemoveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{139}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{140}
 }
 
 func (x *IssueLinkRemoveResponse) GetRelation() *Relation {
@@ -9237,7 +9330,7 @@ type IssueListRequest struct {
 
 func (x *IssueListRequest) Reset() {
 	*x = IssueListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[140]
+	mi := &file_docket_v1_docket_proto_msgTypes[141]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9249,7 +9342,7 @@ func (x *IssueListRequest) String() string {
 func (*IssueListRequest) ProtoMessage() {}
 
 func (x *IssueListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[140]
+	mi := &file_docket_v1_docket_proto_msgTypes[141]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9262,7 +9355,7 @@ func (x *IssueListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueListRequest.ProtoReflect.Descriptor instead.
 func (*IssueListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{140}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{141}
 }
 
 func (x *IssueListRequest) GetFilter() *IssueFilter {
@@ -9332,7 +9425,7 @@ type IssueListResponse struct {
 
 func (x *IssueListResponse) Reset() {
 	*x = IssueListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[141]
+	mi := &file_docket_v1_docket_proto_msgTypes[142]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9344,7 +9437,7 @@ func (x *IssueListResponse) String() string {
 func (*IssueListResponse) ProtoMessage() {}
 
 func (x *IssueListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[141]
+	mi := &file_docket_v1_docket_proto_msgTypes[142]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9357,7 +9450,7 @@ func (x *IssueListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueListResponse.ProtoReflect.Descriptor instead.
 func (*IssueListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{141}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{142}
 }
 
 func (x *IssueListResponse) GetItems() []*Issue {
@@ -9391,7 +9484,7 @@ type IssueLogRequest struct {
 
 func (x *IssueLogRequest) Reset() {
 	*x = IssueLogRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[142]
+	mi := &file_docket_v1_docket_proto_msgTypes[143]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9403,7 +9496,7 @@ func (x *IssueLogRequest) String() string {
 func (*IssueLogRequest) ProtoMessage() {}
 
 func (x *IssueLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[142]
+	mi := &file_docket_v1_docket_proto_msgTypes[143]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9416,7 +9509,7 @@ func (x *IssueLogRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLogRequest.ProtoReflect.Descriptor instead.
 func (*IssueLogRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{142}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{143}
 }
 
 func (x *IssueLogRequest) GetIssue() string {
@@ -9444,7 +9537,7 @@ type IssueLogResponse struct {
 
 func (x *IssueLogResponse) Reset() {
 	*x = IssueLogResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[143]
+	mi := &file_docket_v1_docket_proto_msgTypes[144]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9456,7 +9549,7 @@ func (x *IssueLogResponse) String() string {
 func (*IssueLogResponse) ProtoMessage() {}
 
 func (x *IssueLogResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[143]
+	mi := &file_docket_v1_docket_proto_msgTypes[144]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9469,7 +9562,7 @@ func (x *IssueLogResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueLogResponse.ProtoReflect.Descriptor instead.
 func (*IssueLogResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{143}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{144}
 }
 
 func (x *IssueLogResponse) GetItems() []*Activity {
@@ -9505,7 +9598,7 @@ type IssueMoveRequest struct {
 
 func (x *IssueMoveRequest) Reset() {
 	*x = IssueMoveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[144]
+	mi := &file_docket_v1_docket_proto_msgTypes[145]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9517,7 +9610,7 @@ func (x *IssueMoveRequest) String() string {
 func (*IssueMoveRequest) ProtoMessage() {}
 
 func (x *IssueMoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[144]
+	mi := &file_docket_v1_docket_proto_msgTypes[145]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9530,7 +9623,7 @@ func (x *IssueMoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueMoveRequest.ProtoReflect.Descriptor instead.
 func (*IssueMoveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{144}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{145}
 }
 
 func (x *IssueMoveRequest) GetIssue() string {
@@ -9570,7 +9663,7 @@ type IssueMoveResponse struct {
 
 func (x *IssueMoveResponse) Reset() {
 	*x = IssueMoveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[145]
+	mi := &file_docket_v1_docket_proto_msgTypes[146]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9582,7 +9675,7 @@ func (x *IssueMoveResponse) String() string {
 func (*IssueMoveResponse) ProtoMessage() {}
 
 func (x *IssueMoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[145]
+	mi := &file_docket_v1_docket_proto_msgTypes[146]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9595,7 +9688,7 @@ func (x *IssueMoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueMoveResponse.ProtoReflect.Descriptor instead.
 func (*IssueMoveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{145}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{146}
 }
 
 func (x *IssueMoveResponse) GetIssue() *Issue {
@@ -9615,7 +9708,7 @@ type IssueReleaseRequest struct {
 
 func (x *IssueReleaseRequest) Reset() {
 	*x = IssueReleaseRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[146]
+	mi := &file_docket_v1_docket_proto_msgTypes[147]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9627,7 +9720,7 @@ func (x *IssueReleaseRequest) String() string {
 func (*IssueReleaseRequest) ProtoMessage() {}
 
 func (x *IssueReleaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[146]
+	mi := &file_docket_v1_docket_proto_msgTypes[147]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9640,7 +9733,7 @@ func (x *IssueReleaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueReleaseRequest.ProtoReflect.Descriptor instead.
 func (*IssueReleaseRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{146}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{147}
 }
 
 func (x *IssueReleaseRequest) GetIssue() string {
@@ -9666,7 +9759,7 @@ type IssueReleaseResponse struct {
 
 func (x *IssueReleaseResponse) Reset() {
 	*x = IssueReleaseResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[147]
+	mi := &file_docket_v1_docket_proto_msgTypes[148]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9678,7 +9771,7 @@ func (x *IssueReleaseResponse) String() string {
 func (*IssueReleaseResponse) ProtoMessage() {}
 
 func (x *IssueReleaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[147]
+	mi := &file_docket_v1_docket_proto_msgTypes[148]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9691,7 +9784,7 @@ func (x *IssueReleaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueReleaseResponse.ProtoReflect.Descriptor instead.
 func (*IssueReleaseResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{147}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{148}
 }
 
 func (x *IssueReleaseResponse) GetIssue() string {
@@ -9710,7 +9803,7 @@ type IssueReopenRequest struct {
 
 func (x *IssueReopenRequest) Reset() {
 	*x = IssueReopenRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[148]
+	mi := &file_docket_v1_docket_proto_msgTypes[149]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9722,7 +9815,7 @@ func (x *IssueReopenRequest) String() string {
 func (*IssueReopenRequest) ProtoMessage() {}
 
 func (x *IssueReopenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[148]
+	mi := &file_docket_v1_docket_proto_msgTypes[149]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9735,7 +9828,7 @@ func (x *IssueReopenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueReopenRequest.ProtoReflect.Descriptor instead.
 func (*IssueReopenRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{148}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{149}
 }
 
 func (x *IssueReopenRequest) GetIssue() string {
@@ -9754,7 +9847,7 @@ type IssueReopenResponse struct {
 
 func (x *IssueReopenResponse) Reset() {
 	*x = IssueReopenResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[149]
+	mi := &file_docket_v1_docket_proto_msgTypes[150]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9766,7 +9859,7 @@ func (x *IssueReopenResponse) String() string {
 func (*IssueReopenResponse) ProtoMessage() {}
 
 func (x *IssueReopenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[149]
+	mi := &file_docket_v1_docket_proto_msgTypes[150]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9779,7 +9872,7 @@ func (x *IssueReopenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueReopenResponse.ProtoReflect.Descriptor instead.
 func (*IssueReopenResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{149}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{150}
 }
 
 func (x *IssueReopenResponse) GetIssue() *Issue {
@@ -9798,7 +9891,7 @@ type IssueShowRequest struct {
 
 func (x *IssueShowRequest) Reset() {
 	*x = IssueShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[150]
+	mi := &file_docket_v1_docket_proto_msgTypes[151]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9810,7 +9903,7 @@ func (x *IssueShowRequest) String() string {
 func (*IssueShowRequest) ProtoMessage() {}
 
 func (x *IssueShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[150]
+	mi := &file_docket_v1_docket_proto_msgTypes[151]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9823,7 +9916,7 @@ func (x *IssueShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueShowRequest.ProtoReflect.Descriptor instead.
 func (*IssueShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{150}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{151}
 }
 
 func (x *IssueShowRequest) GetIssues() []string {
@@ -9846,7 +9939,7 @@ type IssueShowDetail struct {
 
 func (x *IssueShowDetail) Reset() {
 	*x = IssueShowDetail{}
-	mi := &file_docket_v1_docket_proto_msgTypes[151]
+	mi := &file_docket_v1_docket_proto_msgTypes[152]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9858,7 +9951,7 @@ func (x *IssueShowDetail) String() string {
 func (*IssueShowDetail) ProtoMessage() {}
 
 func (x *IssueShowDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[151]
+	mi := &file_docket_v1_docket_proto_msgTypes[152]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9871,7 +9964,7 @@ func (x *IssueShowDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueShowDetail.ProtoReflect.Descriptor instead.
 func (*IssueShowDetail) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{151}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{152}
 }
 
 func (x *IssueShowDetail) GetIssue() *Issue {
@@ -9918,7 +10011,7 @@ type IssueShowResponse struct {
 
 func (x *IssueShowResponse) Reset() {
 	*x = IssueShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[152]
+	mi := &file_docket_v1_docket_proto_msgTypes[153]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9930,7 +10023,7 @@ func (x *IssueShowResponse) String() string {
 func (*IssueShowResponse) ProtoMessage() {}
 
 func (x *IssueShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[152]
+	mi := &file_docket_v1_docket_proto_msgTypes[153]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9943,7 +10036,7 @@ func (x *IssueShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueShowResponse.ProtoReflect.Descriptor instead.
 func (*IssueShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{152}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{153}
 }
 
 func (x *IssueShowResponse) GetIssues() []*IssueShowDetail {
@@ -9965,7 +10058,7 @@ type NextRequest struct {
 
 func (x *NextRequest) Reset() {
 	*x = NextRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[153]
+	mi := &file_docket_v1_docket_proto_msgTypes[154]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9977,7 +10070,7 @@ func (x *NextRequest) String() string {
 func (*NextRequest) ProtoMessage() {}
 
 func (x *NextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[153]
+	mi := &file_docket_v1_docket_proto_msgTypes[154]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9990,7 +10083,7 @@ func (x *NextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NextRequest.ProtoReflect.Descriptor instead.
 func (*NextRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{153}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{154}
 }
 
 func (x *NextRequest) GetFilter() *IssueFilter {
@@ -10035,7 +10128,7 @@ type NextResponse struct {
 
 func (x *NextResponse) Reset() {
 	*x = NextResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[154]
+	mi := &file_docket_v1_docket_proto_msgTypes[155]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10047,7 +10140,7 @@ func (x *NextResponse) String() string {
 func (*NextResponse) ProtoMessage() {}
 
 func (x *NextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[154]
+	mi := &file_docket_v1_docket_proto_msgTypes[155]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10060,7 +10153,7 @@ func (x *NextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NextResponse.ProtoReflect.Descriptor instead.
 func (*NextResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{154}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{155}
 }
 
 func (x *NextResponse) GetIssues() []*Issue {
@@ -10101,7 +10194,7 @@ type PinShowRequest struct {
 
 func (x *PinShowRequest) Reset() {
 	*x = PinShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[155]
+	mi := &file_docket_v1_docket_proto_msgTypes[156]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10113,7 +10206,7 @@ func (x *PinShowRequest) String() string {
 func (*PinShowRequest) ProtoMessage() {}
 
 func (x *PinShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[155]
+	mi := &file_docket_v1_docket_proto_msgTypes[156]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10126,7 +10219,7 @@ func (x *PinShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PinShowRequest.ProtoReflect.Descriptor instead.
 func (*PinShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{155}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{156}
 }
 
 func (x *PinShowRequest) GetRun() string {
@@ -10154,7 +10247,7 @@ type PinShowResponse struct {
 
 func (x *PinShowResponse) Reset() {
 	*x = PinShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[156]
+	mi := &file_docket_v1_docket_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10166,7 +10259,7 @@ func (x *PinShowResponse) String() string {
 func (*PinShowResponse) ProtoMessage() {}
 
 func (x *PinShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[156]
+	mi := &file_docket_v1_docket_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10179,7 +10272,7 @@ func (x *PinShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PinShowResponse.ProtoReflect.Descriptor instead.
 func (*PinShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{156}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *PinShowResponse) GetPath() string {
@@ -10214,7 +10307,7 @@ type PlanRequest struct {
 
 func (x *PlanRequest) Reset() {
 	*x = PlanRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[157]
+	mi := &file_docket_v1_docket_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10226,7 +10319,7 @@ func (x *PlanRequest) String() string {
 func (*PlanRequest) ProtoMessage() {}
 
 func (x *PlanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[157]
+	mi := &file_docket_v1_docket_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10239,7 +10332,7 @@ func (x *PlanRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanRequest.ProtoReflect.Descriptor instead.
 func (*PlanRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{157}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *PlanRequest) GetFilter() *IssueFilter {
@@ -10273,7 +10366,7 @@ type PlanPhase struct {
 
 func (x *PlanPhase) Reset() {
 	*x = PlanPhase{}
-	mi := &file_docket_v1_docket_proto_msgTypes[158]
+	mi := &file_docket_v1_docket_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10285,7 +10378,7 @@ func (x *PlanPhase) String() string {
 func (*PlanPhase) ProtoMessage() {}
 
 func (x *PlanPhase) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[158]
+	mi := &file_docket_v1_docket_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10298,7 +10391,7 @@ func (x *PlanPhase) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanPhase.ProtoReflect.Descriptor instead.
 func (*PlanPhase) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{158}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *PlanPhase) GetPhase() int32 {
@@ -10325,7 +10418,7 @@ type PlanResponse struct {
 
 func (x *PlanResponse) Reset() {
 	*x = PlanResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[159]
+	mi := &file_docket_v1_docket_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10337,7 +10430,7 @@ func (x *PlanResponse) String() string {
 func (*PlanResponse) ProtoMessage() {}
 
 func (x *PlanResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[159]
+	mi := &file_docket_v1_docket_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10350,7 +10443,7 @@ func (x *PlanResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanResponse.ProtoReflect.Descriptor instead.
 func (*PlanResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{159}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *PlanResponse) GetPhases() []*PlanPhase {
@@ -10379,7 +10472,7 @@ type PolicyResolveRequest struct {
 
 func (x *PolicyResolveRequest) Reset() {
 	*x = PolicyResolveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[160]
+	mi := &file_docket_v1_docket_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10391,7 +10484,7 @@ func (x *PolicyResolveRequest) String() string {
 func (*PolicyResolveRequest) ProtoMessage() {}
 
 func (x *PolicyResolveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[160]
+	mi := &file_docket_v1_docket_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10404,7 +10497,7 @@ func (x *PolicyResolveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyResolveRequest.ProtoReflect.Descriptor instead.
 func (*PolicyResolveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{160}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{161}
 }
 
 func (x *PolicyResolveRequest) GetRun() string {
@@ -10444,7 +10537,7 @@ type PolicyResolveResponse struct {
 
 func (x *PolicyResolveResponse) Reset() {
 	*x = PolicyResolveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[161]
+	mi := &file_docket_v1_docket_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10456,7 +10549,7 @@ func (x *PolicyResolveResponse) String() string {
 func (*PolicyResolveResponse) ProtoMessage() {}
 
 func (x *PolicyResolveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[161]
+	mi := &file_docket_v1_docket_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10469,7 +10562,7 @@ func (x *PolicyResolveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyResolveResponse.ProtoReflect.Descriptor instead.
 func (*PolicyResolveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{161}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *PolicyResolveResponse) GetSeats() []*VoterAssignment {
@@ -10488,7 +10581,7 @@ type ProjectDeleteRequest struct {
 
 func (x *ProjectDeleteRequest) Reset() {
 	*x = ProjectDeleteRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[162]
+	mi := &file_docket_v1_docket_proto_msgTypes[163]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10500,7 +10593,7 @@ func (x *ProjectDeleteRequest) String() string {
 func (*ProjectDeleteRequest) ProtoMessage() {}
 
 func (x *ProjectDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[162]
+	mi := &file_docket_v1_docket_proto_msgTypes[163]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10513,7 +10606,7 @@ func (x *ProjectDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectDeleteRequest.ProtoReflect.Descriptor instead.
 func (*ProjectDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{162}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{163}
 }
 
 func (x *ProjectDeleteRequest) GetProject() string {
@@ -10532,7 +10625,7 @@ type ProjectDeleteResponse struct {
 
 func (x *ProjectDeleteResponse) Reset() {
 	*x = ProjectDeleteResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[163]
+	mi := &file_docket_v1_docket_proto_msgTypes[164]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10544,7 +10637,7 @@ func (x *ProjectDeleteResponse) String() string {
 func (*ProjectDeleteResponse) ProtoMessage() {}
 
 func (x *ProjectDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[163]
+	mi := &file_docket_v1_docket_proto_msgTypes[164]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10557,7 +10650,7 @@ func (x *ProjectDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectDeleteResponse.ProtoReflect.Descriptor instead.
 func (*ProjectDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{163}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{164}
 }
 
 func (x *ProjectDeleteResponse) GetProject() *Project {
@@ -10575,7 +10668,7 @@ type ProjectListRequest struct {
 
 func (x *ProjectListRequest) Reset() {
 	*x = ProjectListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[164]
+	mi := &file_docket_v1_docket_proto_msgTypes[165]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10587,7 +10680,7 @@ func (x *ProjectListRequest) String() string {
 func (*ProjectListRequest) ProtoMessage() {}
 
 func (x *ProjectListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[164]
+	mi := &file_docket_v1_docket_proto_msgTypes[165]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10600,7 +10693,7 @@ func (x *ProjectListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectListRequest.ProtoReflect.Descriptor instead.
 func (*ProjectListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{164}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{165}
 }
 
 type ProjectListResponse struct {
@@ -10614,7 +10707,7 @@ type ProjectListResponse struct {
 
 func (x *ProjectListResponse) Reset() {
 	*x = ProjectListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[165]
+	mi := &file_docket_v1_docket_proto_msgTypes[166]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10626,7 +10719,7 @@ func (x *ProjectListResponse) String() string {
 func (*ProjectListResponse) ProtoMessage() {}
 
 func (x *ProjectListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[165]
+	mi := &file_docket_v1_docket_proto_msgTypes[166]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10639,7 +10732,7 @@ func (x *ProjectListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectListResponse.ProtoReflect.Descriptor instead.
 func (*ProjectListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{165}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{166}
 }
 
 func (x *ProjectListResponse) GetItems() []*Project {
@@ -10672,7 +10765,7 @@ type ProjectSetPrefixRequest struct {
 
 func (x *ProjectSetPrefixRequest) Reset() {
 	*x = ProjectSetPrefixRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[166]
+	mi := &file_docket_v1_docket_proto_msgTypes[167]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10684,7 +10777,7 @@ func (x *ProjectSetPrefixRequest) String() string {
 func (*ProjectSetPrefixRequest) ProtoMessage() {}
 
 func (x *ProjectSetPrefixRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[166]
+	mi := &file_docket_v1_docket_proto_msgTypes[167]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10697,7 +10790,7 @@ func (x *ProjectSetPrefixRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectSetPrefixRequest.ProtoReflect.Descriptor instead.
 func (*ProjectSetPrefixRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{166}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{167}
 }
 
 func (x *ProjectSetPrefixRequest) GetPrefix() string {
@@ -10716,7 +10809,7 @@ type ProjectSetPrefixResponse struct {
 
 func (x *ProjectSetPrefixResponse) Reset() {
 	*x = ProjectSetPrefixResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[167]
+	mi := &file_docket_v1_docket_proto_msgTypes[168]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10728,7 +10821,7 @@ func (x *ProjectSetPrefixResponse) String() string {
 func (*ProjectSetPrefixResponse) ProtoMessage() {}
 
 func (x *ProjectSetPrefixResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[167]
+	mi := &file_docket_v1_docket_proto_msgTypes[168]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10741,7 +10834,7 @@ func (x *ProjectSetPrefixResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectSetPrefixResponse.ProtoReflect.Descriptor instead.
 func (*ProjectSetPrefixResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{167}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{168}
 }
 
 func (x *ProjectSetPrefixResponse) GetProject() *Project {
@@ -10760,7 +10853,7 @@ type RegistryAuditRequest struct {
 
 func (x *RegistryAuditRequest) Reset() {
 	*x = RegistryAuditRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[168]
+	mi := &file_docket_v1_docket_proto_msgTypes[169]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10772,7 +10865,7 @@ func (x *RegistryAuditRequest) String() string {
 func (*RegistryAuditRequest) ProtoMessage() {}
 
 func (x *RegistryAuditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[168]
+	mi := &file_docket_v1_docket_proto_msgTypes[169]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10785,7 +10878,7 @@ func (x *RegistryAuditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryAuditRequest.ProtoReflect.Descriptor instead.
 func (*RegistryAuditRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{168}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{169}
 }
 
 func (x *RegistryAuditRequest) GetProject() string {
@@ -10808,7 +10901,7 @@ type RegistryDrift struct {
 
 func (x *RegistryDrift) Reset() {
 	*x = RegistryDrift{}
-	mi := &file_docket_v1_docket_proto_msgTypes[169]
+	mi := &file_docket_v1_docket_proto_msgTypes[170]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10820,7 +10913,7 @@ func (x *RegistryDrift) String() string {
 func (*RegistryDrift) ProtoMessage() {}
 
 func (x *RegistryDrift) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[169]
+	mi := &file_docket_v1_docket_proto_msgTypes[170]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10833,7 +10926,7 @@ func (x *RegistryDrift) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryDrift.ProtoReflect.Descriptor instead.
 func (*RegistryDrift) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{169}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{170}
 }
 
 func (x *RegistryDrift) GetProject() string {
@@ -10880,7 +10973,7 @@ type RegistryAuditResponse struct {
 
 func (x *RegistryAuditResponse) Reset() {
 	*x = RegistryAuditResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[170]
+	mi := &file_docket_v1_docket_proto_msgTypes[171]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10892,7 +10985,7 @@ func (x *RegistryAuditResponse) String() string {
 func (*RegistryAuditResponse) ProtoMessage() {}
 
 func (x *RegistryAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[170]
+	mi := &file_docket_v1_docket_proto_msgTypes[171]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10905,7 +10998,7 @@ func (x *RegistryAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistryAuditResponse.ProtoReflect.Descriptor instead.
 func (*RegistryAuditResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{170}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{171}
 }
 
 func (x *RegistryAuditResponse) GetDrift() []*RegistryDrift {
@@ -10925,7 +11018,7 @@ type ReportExecutorsRequest struct {
 
 func (x *ReportExecutorsRequest) Reset() {
 	*x = ReportExecutorsRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[171]
+	mi := &file_docket_v1_docket_proto_msgTypes[172]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10937,7 +11030,7 @@ func (x *ReportExecutorsRequest) String() string {
 func (*ReportExecutorsRequest) ProtoMessage() {}
 
 func (x *ReportExecutorsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[171]
+	mi := &file_docket_v1_docket_proto_msgTypes[172]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10950,7 +11043,7 @@ func (x *ReportExecutorsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportExecutorsRequest.ProtoReflect.Descriptor instead.
 func (*ReportExecutorsRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{171}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{172}
 }
 
 func (x *ReportExecutorsRequest) GetSince() string {
@@ -10980,7 +11073,7 @@ type ExecutorRollup struct {
 
 func (x *ExecutorRollup) Reset() {
 	*x = ExecutorRollup{}
-	mi := &file_docket_v1_docket_proto_msgTypes[172]
+	mi := &file_docket_v1_docket_proto_msgTypes[173]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10992,7 +11085,7 @@ func (x *ExecutorRollup) String() string {
 func (*ExecutorRollup) ProtoMessage() {}
 
 func (x *ExecutorRollup) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[172]
+	mi := &file_docket_v1_docket_proto_msgTypes[173]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11005,7 +11098,7 @@ func (x *ExecutorRollup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutorRollup.ProtoReflect.Descriptor instead.
 func (*ExecutorRollup) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{172}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{173}
 }
 
 func (x *ExecutorRollup) GetExecutor() string {
@@ -11053,7 +11146,7 @@ type ReportExecutorsResponse struct {
 
 func (x *ReportExecutorsResponse) Reset() {
 	*x = ReportExecutorsResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[173]
+	mi := &file_docket_v1_docket_proto_msgTypes[174]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11065,7 +11158,7 @@ func (x *ReportExecutorsResponse) String() string {
 func (*ReportExecutorsResponse) ProtoMessage() {}
 
 func (x *ReportExecutorsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[173]
+	mi := &file_docket_v1_docket_proto_msgTypes[174]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11078,7 +11171,7 @@ func (x *ReportExecutorsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportExecutorsResponse.ProtoReflect.Descriptor instead.
 func (*ReportExecutorsResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{173}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{174}
 }
 
 func (x *ReportExecutorsResponse) GetExecutors() []*ExecutorRollup {
@@ -11108,7 +11201,7 @@ type RunAbandonRequest struct {
 
 func (x *RunAbandonRequest) Reset() {
 	*x = RunAbandonRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[174]
+	mi := &file_docket_v1_docket_proto_msgTypes[175]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11120,7 +11213,7 @@ func (x *RunAbandonRequest) String() string {
 func (*RunAbandonRequest) ProtoMessage() {}
 
 func (x *RunAbandonRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[174]
+	mi := &file_docket_v1_docket_proto_msgTypes[175]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11133,7 +11226,7 @@ func (x *RunAbandonRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunAbandonRequest.ProtoReflect.Descriptor instead.
 func (*RunAbandonRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{174}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{175}
 }
 
 func (x *RunAbandonRequest) GetRun() string {
@@ -11174,7 +11267,7 @@ type RunAbandonResponse struct {
 
 func (x *RunAbandonResponse) Reset() {
 	*x = RunAbandonResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[175]
+	mi := &file_docket_v1_docket_proto_msgTypes[176]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11186,7 +11279,7 @@ func (x *RunAbandonResponse) String() string {
 func (*RunAbandonResponse) ProtoMessage() {}
 
 func (x *RunAbandonResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[175]
+	mi := &file_docket_v1_docket_proto_msgTypes[176]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11199,7 +11292,7 @@ func (x *RunAbandonResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunAbandonResponse.ProtoReflect.Descriptor instead.
 func (*RunAbandonResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{175}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{176}
 }
 
 func (x *RunAbandonResponse) GetRun() *Run {
@@ -11228,7 +11321,7 @@ type RunActivateRequest struct {
 
 func (x *RunActivateRequest) Reset() {
 	*x = RunActivateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[176]
+	mi := &file_docket_v1_docket_proto_msgTypes[177]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11240,7 +11333,7 @@ func (x *RunActivateRequest) String() string {
 func (*RunActivateRequest) ProtoMessage() {}
 
 func (x *RunActivateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[176]
+	mi := &file_docket_v1_docket_proto_msgTypes[177]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11253,7 +11346,7 @@ func (x *RunActivateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunActivateRequest.ProtoReflect.Descriptor instead.
 func (*RunActivateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{176}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{177}
 }
 
 func (x *RunActivateRequest) GetRun() string {
@@ -11295,7 +11388,7 @@ type RunActivateResponse struct {
 
 func (x *RunActivateResponse) Reset() {
 	*x = RunActivateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[177]
+	mi := &file_docket_v1_docket_proto_msgTypes[178]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11307,7 +11400,7 @@ func (x *RunActivateResponse) String() string {
 func (*RunActivateResponse) ProtoMessage() {}
 
 func (x *RunActivateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[177]
+	mi := &file_docket_v1_docket_proto_msgTypes[178]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11320,7 +11413,7 @@ func (x *RunActivateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunActivateResponse.ProtoReflect.Descriptor instead.
 func (*RunActivateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{177}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{178}
 }
 
 func (x *RunActivateResponse) GetRun() *Run {
@@ -11355,7 +11448,7 @@ type RunBudgetRequest struct {
 
 func (x *RunBudgetRequest) Reset() {
 	*x = RunBudgetRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[178]
+	mi := &file_docket_v1_docket_proto_msgTypes[179]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11367,7 +11460,7 @@ func (x *RunBudgetRequest) String() string {
 func (*RunBudgetRequest) ProtoMessage() {}
 
 func (x *RunBudgetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[178]
+	mi := &file_docket_v1_docket_proto_msgTypes[179]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11380,7 +11473,7 @@ func (x *RunBudgetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunBudgetRequest.ProtoReflect.Descriptor instead.
 func (*RunBudgetRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{178}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{179}
 }
 
 func (x *RunBudgetRequest) GetRun() string {
@@ -11416,7 +11509,7 @@ type RunBudgetResponse struct {
 
 func (x *RunBudgetResponse) Reset() {
 	*x = RunBudgetResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[179]
+	mi := &file_docket_v1_docket_proto_msgTypes[180]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11428,7 +11521,7 @@ func (x *RunBudgetResponse) String() string {
 func (*RunBudgetResponse) ProtoMessage() {}
 
 func (x *RunBudgetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[179]
+	mi := &file_docket_v1_docket_proto_msgTypes[180]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11441,7 +11534,7 @@ func (x *RunBudgetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunBudgetResponse.ProtoReflect.Descriptor instead.
 func (*RunBudgetResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{179}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{180}
 }
 
 func (x *RunBudgetResponse) GetRun() string {
@@ -11481,7 +11574,7 @@ type RunConductRequest struct {
 
 func (x *RunConductRequest) Reset() {
 	*x = RunConductRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[180]
+	mi := &file_docket_v1_docket_proto_msgTypes[181]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11493,7 +11586,7 @@ func (x *RunConductRequest) String() string {
 func (*RunConductRequest) ProtoMessage() {}
 
 func (x *RunConductRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[180]
+	mi := &file_docket_v1_docket_proto_msgTypes[181]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11506,7 +11599,7 @@ func (x *RunConductRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunConductRequest.ProtoReflect.Descriptor instead.
 func (*RunConductRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{180}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{181}
 }
 
 func (x *RunConductRequest) GetRun() string {
@@ -11526,7 +11619,7 @@ type RunConductResponse struct {
 
 func (x *RunConductResponse) Reset() {
 	*x = RunConductResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[181]
+	mi := &file_docket_v1_docket_proto_msgTypes[182]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11538,7 +11631,7 @@ func (x *RunConductResponse) String() string {
 func (*RunConductResponse) ProtoMessage() {}
 
 func (x *RunConductResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[181]
+	mi := &file_docket_v1_docket_proto_msgTypes[182]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11551,7 +11644,7 @@ func (x *RunConductResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunConductResponse.ProtoReflect.Descriptor instead.
 func (*RunConductResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{181}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{182}
 }
 
 func (x *RunConductResponse) GetRun() string {
@@ -11584,7 +11677,7 @@ type RunFactAddRequest struct {
 
 func (x *RunFactAddRequest) Reset() {
 	*x = RunFactAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[182]
+	mi := &file_docket_v1_docket_proto_msgTypes[183]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11596,7 +11689,7 @@ func (x *RunFactAddRequest) String() string {
 func (*RunFactAddRequest) ProtoMessage() {}
 
 func (x *RunFactAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[182]
+	mi := &file_docket_v1_docket_proto_msgTypes[183]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11609,7 +11702,7 @@ func (x *RunFactAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunFactAddRequest.ProtoReflect.Descriptor instead.
 func (*RunFactAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{182}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{183}
 }
 
 func (x *RunFactAddRequest) GetRun() string {
@@ -11677,7 +11770,7 @@ type RunFactAddResponse struct {
 
 func (x *RunFactAddResponse) Reset() {
 	*x = RunFactAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[183]
+	mi := &file_docket_v1_docket_proto_msgTypes[184]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11689,7 +11782,7 @@ func (x *RunFactAddResponse) String() string {
 func (*RunFactAddResponse) ProtoMessage() {}
 
 func (x *RunFactAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[183]
+	mi := &file_docket_v1_docket_proto_msgTypes[184]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11702,7 +11795,7 @@ func (x *RunFactAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunFactAddResponse.ProtoReflect.Descriptor instead.
 func (*RunFactAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{183}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{184}
 }
 
 func (x *RunFactAddResponse) GetEvent() *Event {
@@ -11722,7 +11815,7 @@ type RunIssueAddRequest struct {
 
 func (x *RunIssueAddRequest) Reset() {
 	*x = RunIssueAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[184]
+	mi := &file_docket_v1_docket_proto_msgTypes[185]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11734,7 +11827,7 @@ func (x *RunIssueAddRequest) String() string {
 func (*RunIssueAddRequest) ProtoMessage() {}
 
 func (x *RunIssueAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[184]
+	mi := &file_docket_v1_docket_proto_msgTypes[185]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11747,7 +11840,7 @@ func (x *RunIssueAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunIssueAddRequest.ProtoReflect.Descriptor instead.
 func (*RunIssueAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{184}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{185}
 }
 
 func (x *RunIssueAddRequest) GetRun() string {
@@ -11773,7 +11866,7 @@ type RunIssueAddResponse struct {
 
 func (x *RunIssueAddResponse) Reset() {
 	*x = RunIssueAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[185]
+	mi := &file_docket_v1_docket_proto_msgTypes[186]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11785,7 +11878,7 @@ func (x *RunIssueAddResponse) String() string {
 func (*RunIssueAddResponse) ProtoMessage() {}
 
 func (x *RunIssueAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[185]
+	mi := &file_docket_v1_docket_proto_msgTypes[186]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11798,7 +11891,7 @@ func (x *RunIssueAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunIssueAddResponse.ProtoReflect.Descriptor instead.
 func (*RunIssueAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{185}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{186}
 }
 
 func (x *RunIssueAddResponse) GetRun() *Run {
@@ -11818,7 +11911,7 @@ type RunIssueRemoveRequest struct {
 
 func (x *RunIssueRemoveRequest) Reset() {
 	*x = RunIssueRemoveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[186]
+	mi := &file_docket_v1_docket_proto_msgTypes[187]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11830,7 +11923,7 @@ func (x *RunIssueRemoveRequest) String() string {
 func (*RunIssueRemoveRequest) ProtoMessage() {}
 
 func (x *RunIssueRemoveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[186]
+	mi := &file_docket_v1_docket_proto_msgTypes[187]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11843,7 +11936,7 @@ func (x *RunIssueRemoveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunIssueRemoveRequest.ProtoReflect.Descriptor instead.
 func (*RunIssueRemoveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{186}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{187}
 }
 
 func (x *RunIssueRemoveRequest) GetRun() string {
@@ -11869,7 +11962,7 @@ type RunIssueRemoveResponse struct {
 
 func (x *RunIssueRemoveResponse) Reset() {
 	*x = RunIssueRemoveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[187]
+	mi := &file_docket_v1_docket_proto_msgTypes[188]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11881,7 +11974,7 @@ func (x *RunIssueRemoveResponse) String() string {
 func (*RunIssueRemoveResponse) ProtoMessage() {}
 
 func (x *RunIssueRemoveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[187]
+	mi := &file_docket_v1_docket_proto_msgTypes[188]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11894,7 +11987,7 @@ func (x *RunIssueRemoveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunIssueRemoveResponse.ProtoReflect.Descriptor instead.
 func (*RunIssueRemoveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{187}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{188}
 }
 
 func (x *RunIssueRemoveResponse) GetRun() *Run {
@@ -11917,7 +12010,7 @@ type RunNoteAddRequest struct {
 
 func (x *RunNoteAddRequest) Reset() {
 	*x = RunNoteAddRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[188]
+	mi := &file_docket_v1_docket_proto_msgTypes[189]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11929,7 +12022,7 @@ func (x *RunNoteAddRequest) String() string {
 func (*RunNoteAddRequest) ProtoMessage() {}
 
 func (x *RunNoteAddRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[188]
+	mi := &file_docket_v1_docket_proto_msgTypes[189]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11942,7 +12035,7 @@ func (x *RunNoteAddRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunNoteAddRequest.ProtoReflect.Descriptor instead.
 func (*RunNoteAddRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{188}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{189}
 }
 
 func (x *RunNoteAddRequest) GetRun() string {
@@ -11982,7 +12075,7 @@ type RunNoteAddResponse struct {
 
 func (x *RunNoteAddResponse) Reset() {
 	*x = RunNoteAddResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[189]
+	mi := &file_docket_v1_docket_proto_msgTypes[190]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11994,7 +12087,7 @@ func (x *RunNoteAddResponse) String() string {
 func (*RunNoteAddResponse) ProtoMessage() {}
 
 func (x *RunNoteAddResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[189]
+	mi := &file_docket_v1_docket_proto_msgTypes[190]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12007,7 +12100,7 @@ func (x *RunNoteAddResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunNoteAddResponse.ProtoReflect.Descriptor instead.
 func (*RunNoteAddResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{189}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{190}
 }
 
 func (x *RunNoteAddResponse) GetNote() *RunNote {
@@ -12026,7 +12119,7 @@ type RunNoteListRequest struct {
 
 func (x *RunNoteListRequest) Reset() {
 	*x = RunNoteListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[190]
+	mi := &file_docket_v1_docket_proto_msgTypes[191]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12038,7 +12131,7 @@ func (x *RunNoteListRequest) String() string {
 func (*RunNoteListRequest) ProtoMessage() {}
 
 func (x *RunNoteListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[190]
+	mi := &file_docket_v1_docket_proto_msgTypes[191]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12051,7 +12144,7 @@ func (x *RunNoteListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunNoteListRequest.ProtoReflect.Descriptor instead.
 func (*RunNoteListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{190}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{191}
 }
 
 func (x *RunNoteListRequest) GetRun() string {
@@ -12072,7 +12165,7 @@ type RunNoteListResponse struct {
 
 func (x *RunNoteListResponse) Reset() {
 	*x = RunNoteListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[191]
+	mi := &file_docket_v1_docket_proto_msgTypes[192]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12084,7 +12177,7 @@ func (x *RunNoteListResponse) String() string {
 func (*RunNoteListResponse) ProtoMessage() {}
 
 func (x *RunNoteListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[191]
+	mi := &file_docket_v1_docket_proto_msgTypes[192]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12097,7 +12190,7 @@ func (x *RunNoteListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunNoteListResponse.ProtoReflect.Descriptor instead.
 func (*RunNoteListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{191}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{192}
 }
 
 func (x *RunNoteListResponse) GetItems() []*RunNote {
@@ -12132,7 +12225,7 @@ type RunPauseRequest struct {
 
 func (x *RunPauseRequest) Reset() {
 	*x = RunPauseRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[192]
+	mi := &file_docket_v1_docket_proto_msgTypes[193]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12144,7 +12237,7 @@ func (x *RunPauseRequest) String() string {
 func (*RunPauseRequest) ProtoMessage() {}
 
 func (x *RunPauseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[192]
+	mi := &file_docket_v1_docket_proto_msgTypes[193]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12157,7 +12250,7 @@ func (x *RunPauseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunPauseRequest.ProtoReflect.Descriptor instead.
 func (*RunPauseRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{192}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{193}
 }
 
 func (x *RunPauseRequest) GetRun() string {
@@ -12190,7 +12283,7 @@ type RunPauseResponse struct {
 
 func (x *RunPauseResponse) Reset() {
 	*x = RunPauseResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[193]
+	mi := &file_docket_v1_docket_proto_msgTypes[194]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12202,7 +12295,7 @@ func (x *RunPauseResponse) String() string {
 func (*RunPauseResponse) ProtoMessage() {}
 
 func (x *RunPauseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[193]
+	mi := &file_docket_v1_docket_proto_msgTypes[194]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12215,7 +12308,7 @@ func (x *RunPauseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunPauseResponse.ProtoReflect.Descriptor instead.
 func (*RunPauseResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{193}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{194}
 }
 
 func (x *RunPauseResponse) GetRun() *Run {
@@ -12237,7 +12330,7 @@ type RunRefreshBodyRequest struct {
 
 func (x *RunRefreshBodyRequest) Reset() {
 	*x = RunRefreshBodyRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[194]
+	mi := &file_docket_v1_docket_proto_msgTypes[195]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12249,7 +12342,7 @@ func (x *RunRefreshBodyRequest) String() string {
 func (*RunRefreshBodyRequest) ProtoMessage() {}
 
 func (x *RunRefreshBodyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[194]
+	mi := &file_docket_v1_docket_proto_msgTypes[195]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12262,7 +12355,7 @@ func (x *RunRefreshBodyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRefreshBodyRequest.ProtoReflect.Descriptor instead.
 func (*RunRefreshBodyRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{194}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{195}
 }
 
 func (x *RunRefreshBodyRequest) GetRun() string {
@@ -12304,7 +12397,7 @@ type RunRefreshBodyResponse struct {
 
 func (x *RunRefreshBodyResponse) Reset() {
 	*x = RunRefreshBodyResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[195]
+	mi := &file_docket_v1_docket_proto_msgTypes[196]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12316,7 +12409,7 @@ func (x *RunRefreshBodyResponse) String() string {
 func (*RunRefreshBodyResponse) ProtoMessage() {}
 
 func (x *RunRefreshBodyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[195]
+	mi := &file_docket_v1_docket_proto_msgTypes[196]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12329,7 +12422,7 @@ func (x *RunRefreshBodyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRefreshBodyResponse.ProtoReflect.Descriptor instead.
 func (*RunRefreshBodyResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{195}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{196}
 }
 
 func (x *RunRefreshBodyResponse) GetRun() string {
@@ -12365,7 +12458,7 @@ type RunRefreshFilesRequest struct {
 
 func (x *RunRefreshFilesRequest) Reset() {
 	*x = RunRefreshFilesRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[196]
+	mi := &file_docket_v1_docket_proto_msgTypes[197]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12377,7 +12470,7 @@ func (x *RunRefreshFilesRequest) String() string {
 func (*RunRefreshFilesRequest) ProtoMessage() {}
 
 func (x *RunRefreshFilesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[196]
+	mi := &file_docket_v1_docket_proto_msgTypes[197]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12390,7 +12483,7 @@ func (x *RunRefreshFilesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRefreshFilesRequest.ProtoReflect.Descriptor instead.
 func (*RunRefreshFilesRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{196}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{197}
 }
 
 func (x *RunRefreshFilesRequest) GetRun() string {
@@ -12432,7 +12525,7 @@ type RunRefreshFilesResponse struct {
 
 func (x *RunRefreshFilesResponse) Reset() {
 	*x = RunRefreshFilesResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[197]
+	mi := &file_docket_v1_docket_proto_msgTypes[198]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12444,7 +12537,7 @@ func (x *RunRefreshFilesResponse) String() string {
 func (*RunRefreshFilesResponse) ProtoMessage() {}
 
 func (x *RunRefreshFilesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[197]
+	mi := &file_docket_v1_docket_proto_msgTypes[198]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12457,7 +12550,7 @@ func (x *RunRefreshFilesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRefreshFilesResponse.ProtoReflect.Descriptor instead.
 func (*RunRefreshFilesResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{197}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{198}
 }
 
 func (x *RunRefreshFilesResponse) GetRun() string {
@@ -12493,7 +12586,7 @@ type RunRefreshScopeRequest struct {
 
 func (x *RunRefreshScopeRequest) Reset() {
 	*x = RunRefreshScopeRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[198]
+	mi := &file_docket_v1_docket_proto_msgTypes[199]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12505,7 +12598,7 @@ func (x *RunRefreshScopeRequest) String() string {
 func (*RunRefreshScopeRequest) ProtoMessage() {}
 
 func (x *RunRefreshScopeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[198]
+	mi := &file_docket_v1_docket_proto_msgTypes[199]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12518,7 +12611,7 @@ func (x *RunRefreshScopeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRefreshScopeRequest.ProtoReflect.Descriptor instead.
 func (*RunRefreshScopeRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{198}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{199}
 }
 
 func (x *RunRefreshScopeRequest) GetRun() string {
@@ -12560,7 +12653,7 @@ type RunRefreshScopeResponse struct {
 
 func (x *RunRefreshScopeResponse) Reset() {
 	*x = RunRefreshScopeResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[199]
+	mi := &file_docket_v1_docket_proto_msgTypes[200]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12572,7 +12665,7 @@ func (x *RunRefreshScopeResponse) String() string {
 func (*RunRefreshScopeResponse) ProtoMessage() {}
 
 func (x *RunRefreshScopeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[199]
+	mi := &file_docket_v1_docket_proto_msgTypes[200]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12585,7 +12678,7 @@ func (x *RunRefreshScopeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRefreshScopeResponse.ProtoReflect.Descriptor instead.
 func (*RunRefreshScopeResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{199}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{200}
 }
 
 func (x *RunRefreshScopeResponse) GetRun() string {
@@ -12622,7 +12715,7 @@ type RunRepinRequest struct {
 
 func (x *RunRepinRequest) Reset() {
 	*x = RunRepinRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[200]
+	mi := &file_docket_v1_docket_proto_msgTypes[201]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12634,7 +12727,7 @@ func (x *RunRepinRequest) String() string {
 func (*RunRepinRequest) ProtoMessage() {}
 
 func (x *RunRepinRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[200]
+	mi := &file_docket_v1_docket_proto_msgTypes[201]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12647,7 +12740,7 @@ func (x *RunRepinRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRepinRequest.ProtoReflect.Descriptor instead.
 func (*RunRepinRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{200}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{201}
 }
 
 func (x *RunRepinRequest) GetRun() string {
@@ -12696,7 +12789,7 @@ type RunRepinResponse struct {
 
 func (x *RunRepinResponse) Reset() {
 	*x = RunRepinResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[201]
+	mi := &file_docket_v1_docket_proto_msgTypes[202]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12708,7 +12801,7 @@ func (x *RunRepinResponse) String() string {
 func (*RunRepinResponse) ProtoMessage() {}
 
 func (x *RunRepinResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[201]
+	mi := &file_docket_v1_docket_proto_msgTypes[202]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12721,7 +12814,7 @@ func (x *RunRepinResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunRepinResponse.ProtoReflect.Descriptor instead.
 func (*RunRepinResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{201}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{202}
 }
 
 func (x *RunRepinResponse) GetRun() string {
@@ -12754,7 +12847,7 @@ type RunReportRequest struct {
 
 func (x *RunReportRequest) Reset() {
 	*x = RunReportRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[202]
+	mi := &file_docket_v1_docket_proto_msgTypes[203]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12766,7 +12859,7 @@ func (x *RunReportRequest) String() string {
 func (*RunReportRequest) ProtoMessage() {}
 
 func (x *RunReportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[202]
+	mi := &file_docket_v1_docket_proto_msgTypes[203]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12779,7 +12872,7 @@ func (x *RunReportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunReportRequest.ProtoReflect.Descriptor instead.
 func (*RunReportRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{202}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{203}
 }
 
 func (x *RunReportRequest) GetRun() string {
@@ -12803,7 +12896,7 @@ type RunReportResponse struct {
 
 func (x *RunReportResponse) Reset() {
 	*x = RunReportResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[203]
+	mi := &file_docket_v1_docket_proto_msgTypes[204]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12815,7 +12908,7 @@ func (x *RunReportResponse) String() string {
 func (*RunReportResponse) ProtoMessage() {}
 
 func (x *RunReportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[203]
+	mi := &file_docket_v1_docket_proto_msgTypes[204]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12828,7 +12921,7 @@ func (x *RunReportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunReportResponse.ProtoReflect.Descriptor instead.
 func (*RunReportResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{203}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{204}
 }
 
 func (x *RunReportResponse) GetRun() *Run {
@@ -12884,7 +12977,7 @@ type RunResumeRequest struct {
 
 func (x *RunResumeRequest) Reset() {
 	*x = RunResumeRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[204]
+	mi := &file_docket_v1_docket_proto_msgTypes[205]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12896,7 +12989,7 @@ func (x *RunResumeRequest) String() string {
 func (*RunResumeRequest) ProtoMessage() {}
 
 func (x *RunResumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[204]
+	mi := &file_docket_v1_docket_proto_msgTypes[205]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12909,7 +13002,7 @@ func (x *RunResumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunResumeRequest.ProtoReflect.Descriptor instead.
 func (*RunResumeRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{204}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{205}
 }
 
 func (x *RunResumeRequest) GetRun() string {
@@ -12942,7 +13035,7 @@ type RunResumeResponse struct {
 
 func (x *RunResumeResponse) Reset() {
 	*x = RunResumeResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[205]
+	mi := &file_docket_v1_docket_proto_msgTypes[206]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12954,7 +13047,7 @@ func (x *RunResumeResponse) String() string {
 func (*RunResumeResponse) ProtoMessage() {}
 
 func (x *RunResumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[205]
+	mi := &file_docket_v1_docket_proto_msgTypes[206]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -12967,7 +13060,7 @@ func (x *RunResumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunResumeResponse.ProtoReflect.Descriptor instead.
 func (*RunResumeResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{205}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{206}
 }
 
 func (x *RunResumeResponse) GetRun() *Run {
@@ -12991,7 +13084,7 @@ type RunStartRequest struct {
 
 func (x *RunStartRequest) Reset() {
 	*x = RunStartRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[206]
+	mi := &file_docket_v1_docket_proto_msgTypes[207]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13003,7 +13096,7 @@ func (x *RunStartRequest) String() string {
 func (*RunStartRequest) ProtoMessage() {}
 
 func (x *RunStartRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[206]
+	mi := &file_docket_v1_docket_proto_msgTypes[207]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13016,7 +13109,7 @@ func (x *RunStartRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunStartRequest.ProtoReflect.Descriptor instead.
 func (*RunStartRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{206}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{207}
 }
 
 func (x *RunStartRequest) GetRequest() string {
@@ -13056,7 +13149,7 @@ type RunStartResponse struct {
 
 func (x *RunStartResponse) Reset() {
 	*x = RunStartResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[207]
+	mi := &file_docket_v1_docket_proto_msgTypes[208]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13068,7 +13161,7 @@ func (x *RunStartResponse) String() string {
 func (*RunStartResponse) ProtoMessage() {}
 
 func (x *RunStartResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[207]
+	mi := &file_docket_v1_docket_proto_msgTypes[208]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13081,7 +13174,7 @@ func (x *RunStartResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunStartResponse.ProtoReflect.Descriptor instead.
 func (*RunStartResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{207}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{208}
 }
 
 func (x *RunStartResponse) GetRun() *Run {
@@ -13103,7 +13196,7 @@ type RunStatusRequest struct {
 
 func (x *RunStatusRequest) Reset() {
 	*x = RunStatusRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[208]
+	mi := &file_docket_v1_docket_proto_msgTypes[209]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13115,7 +13208,7 @@ func (x *RunStatusRequest) String() string {
 func (*RunStatusRequest) ProtoMessage() {}
 
 func (x *RunStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[208]
+	mi := &file_docket_v1_docket_proto_msgTypes[209]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13128,7 +13221,7 @@ func (x *RunStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunStatusRequest.ProtoReflect.Descriptor instead.
 func (*RunStatusRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{208}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{209}
 }
 
 func (x *RunStatusRequest) GetRun() string {
@@ -13163,7 +13256,7 @@ type RunStatusResponse struct {
 
 func (x *RunStatusResponse) Reset() {
 	*x = RunStatusResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[209]
+	mi := &file_docket_v1_docket_proto_msgTypes[210]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13175,7 +13268,7 @@ func (x *RunStatusResponse) String() string {
 func (*RunStatusResponse) ProtoMessage() {}
 
 func (x *RunStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[209]
+	mi := &file_docket_v1_docket_proto_msgTypes[210]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13188,7 +13281,7 @@ func (x *RunStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunStatusResponse.ProtoReflect.Descriptor instead.
 func (*RunStatusResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{209}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{210}
 }
 
 func (x *RunStatusResponse) GetItems() []*Run {
@@ -13221,7 +13314,7 @@ type RunVerifyPinsRequest struct {
 
 func (x *RunVerifyPinsRequest) Reset() {
 	*x = RunVerifyPinsRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[210]
+	mi := &file_docket_v1_docket_proto_msgTypes[211]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13233,7 +13326,7 @@ func (x *RunVerifyPinsRequest) String() string {
 func (*RunVerifyPinsRequest) ProtoMessage() {}
 
 func (x *RunVerifyPinsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[210]
+	mi := &file_docket_v1_docket_proto_msgTypes[211]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13246,7 +13339,7 @@ func (x *RunVerifyPinsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunVerifyPinsRequest.ProtoReflect.Descriptor instead.
 func (*RunVerifyPinsRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{210}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{211}
 }
 
 func (x *RunVerifyPinsRequest) GetRun() string {
@@ -13267,7 +13360,7 @@ type RunVerifyPinsResponse struct {
 
 func (x *RunVerifyPinsResponse) Reset() {
 	*x = RunVerifyPinsResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[211]
+	mi := &file_docket_v1_docket_proto_msgTypes[212]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13279,7 +13372,7 @@ func (x *RunVerifyPinsResponse) String() string {
 func (*RunVerifyPinsResponse) ProtoMessage() {}
 
 func (x *RunVerifyPinsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[211]
+	mi := &file_docket_v1_docket_proto_msgTypes[212]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13292,7 +13385,7 @@ func (x *RunVerifyPinsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunVerifyPinsResponse.ProtoReflect.Descriptor instead.
 func (*RunVerifyPinsResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{211}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{212}
 }
 
 func (x *RunVerifyPinsResponse) GetRun() string {
@@ -13326,7 +13419,7 @@ type SchemaDeprecateRequest struct {
 
 func (x *SchemaDeprecateRequest) Reset() {
 	*x = SchemaDeprecateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[212]
+	mi := &file_docket_v1_docket_proto_msgTypes[213]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13338,7 +13431,7 @@ func (x *SchemaDeprecateRequest) String() string {
 func (*SchemaDeprecateRequest) ProtoMessage() {}
 
 func (x *SchemaDeprecateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[212]
+	mi := &file_docket_v1_docket_proto_msgTypes[213]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13351,7 +13444,7 @@ func (x *SchemaDeprecateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaDeprecateRequest.ProtoReflect.Descriptor instead.
 func (*SchemaDeprecateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{212}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{213}
 }
 
 func (x *SchemaDeprecateRequest) GetName() string {
@@ -13377,7 +13470,7 @@ type SchemaDeprecateResponse struct {
 
 func (x *SchemaDeprecateResponse) Reset() {
 	*x = SchemaDeprecateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[213]
+	mi := &file_docket_v1_docket_proto_msgTypes[214]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13389,7 +13482,7 @@ func (x *SchemaDeprecateResponse) String() string {
 func (*SchemaDeprecateResponse) ProtoMessage() {}
 
 func (x *SchemaDeprecateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[213]
+	mi := &file_docket_v1_docket_proto_msgTypes[214]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13402,7 +13495,7 @@ func (x *SchemaDeprecateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaDeprecateResponse.ProtoReflect.Descriptor instead.
 func (*SchemaDeprecateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{213}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{214}
 }
 
 func (x *SchemaDeprecateResponse) GetSchema() *Schema {
@@ -13423,7 +13516,7 @@ type SchemaListRequest struct {
 
 func (x *SchemaListRequest) Reset() {
 	*x = SchemaListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[214]
+	mi := &file_docket_v1_docket_proto_msgTypes[215]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13435,7 +13528,7 @@ func (x *SchemaListRequest) String() string {
 func (*SchemaListRequest) ProtoMessage() {}
 
 func (x *SchemaListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[214]
+	mi := &file_docket_v1_docket_proto_msgTypes[215]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13448,7 +13541,7 @@ func (x *SchemaListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaListRequest.ProtoReflect.Descriptor instead.
 func (*SchemaListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{214}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{215}
 }
 
 func (x *SchemaListRequest) GetName() string {
@@ -13483,7 +13576,7 @@ type SchemaListResponse struct {
 
 func (x *SchemaListResponse) Reset() {
 	*x = SchemaListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[215]
+	mi := &file_docket_v1_docket_proto_msgTypes[216]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13495,7 +13588,7 @@ func (x *SchemaListResponse) String() string {
 func (*SchemaListResponse) ProtoMessage() {}
 
 func (x *SchemaListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[215]
+	mi := &file_docket_v1_docket_proto_msgTypes[216]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13508,7 +13601,7 @@ func (x *SchemaListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaListResponse.ProtoReflect.Descriptor instead.
 func (*SchemaListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{215}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{216}
 }
 
 func (x *SchemaListResponse) GetItems() []*Schema {
@@ -13546,7 +13639,7 @@ type SchemaRegisterRequest struct {
 
 func (x *SchemaRegisterRequest) Reset() {
 	*x = SchemaRegisterRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[216]
+	mi := &file_docket_v1_docket_proto_msgTypes[217]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13558,7 +13651,7 @@ func (x *SchemaRegisterRequest) String() string {
 func (*SchemaRegisterRequest) ProtoMessage() {}
 
 func (x *SchemaRegisterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[216]
+	mi := &file_docket_v1_docket_proto_msgTypes[217]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13571,7 +13664,7 @@ func (x *SchemaRegisterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaRegisterRequest.ProtoReflect.Descriptor instead.
 func (*SchemaRegisterRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{216}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{217}
 }
 
 func (x *SchemaRegisterRequest) GetName() string {
@@ -13611,7 +13704,7 @@ type SchemaRegisterResponse struct {
 
 func (x *SchemaRegisterResponse) Reset() {
 	*x = SchemaRegisterResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[217]
+	mi := &file_docket_v1_docket_proto_msgTypes[218]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13623,7 +13716,7 @@ func (x *SchemaRegisterResponse) String() string {
 func (*SchemaRegisterResponse) ProtoMessage() {}
 
 func (x *SchemaRegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[217]
+	mi := &file_docket_v1_docket_proto_msgTypes[218]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13636,7 +13729,7 @@ func (x *SchemaRegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaRegisterResponse.ProtoReflect.Descriptor instead.
 func (*SchemaRegisterResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{217}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{218}
 }
 
 func (x *SchemaRegisterResponse) GetSchema() *Schema {
@@ -13657,7 +13750,7 @@ type SchemaShowRequest struct {
 
 func (x *SchemaShowRequest) Reset() {
 	*x = SchemaShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[218]
+	mi := &file_docket_v1_docket_proto_msgTypes[219]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13669,7 +13762,7 @@ func (x *SchemaShowRequest) String() string {
 func (*SchemaShowRequest) ProtoMessage() {}
 
 func (x *SchemaShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[218]
+	mi := &file_docket_v1_docket_proto_msgTypes[219]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13682,7 +13775,7 @@ func (x *SchemaShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaShowRequest.ProtoReflect.Descriptor instead.
 func (*SchemaShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{218}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{219}
 }
 
 func (x *SchemaShowRequest) GetName() string {
@@ -13715,7 +13808,7 @@ type SchemaShowResponse struct {
 
 func (x *SchemaShowResponse) Reset() {
 	*x = SchemaShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[219]
+	mi := &file_docket_v1_docket_proto_msgTypes[220]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13727,7 +13820,7 @@ func (x *SchemaShowResponse) String() string {
 func (*SchemaShowResponse) ProtoMessage() {}
 
 func (x *SchemaShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[219]
+	mi := &file_docket_v1_docket_proto_msgTypes[220]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13740,7 +13833,7 @@ func (x *SchemaShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SchemaShowResponse.ProtoReflect.Descriptor instead.
 func (*SchemaShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{219}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{220}
 }
 
 func (x *SchemaShowResponse) GetSchema() *Schema {
@@ -13758,7 +13851,7 @@ type StatsRequest struct {
 
 func (x *StatsRequest) Reset() {
 	*x = StatsRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[220]
+	mi := &file_docket_v1_docket_proto_msgTypes[221]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13770,7 +13863,7 @@ func (x *StatsRequest) String() string {
 func (*StatsRequest) ProtoMessage() {}
 
 func (x *StatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[220]
+	mi := &file_docket_v1_docket_proto_msgTypes[221]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13783,7 +13876,7 @@ func (x *StatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsRequest.ProtoReflect.Descriptor instead.
 func (*StatsRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{220}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{221}
 }
 
 type StatsResponse struct {
@@ -13799,7 +13892,7 @@ type StatsResponse struct {
 
 func (x *StatsResponse) Reset() {
 	*x = StatsResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[221]
+	mi := &file_docket_v1_docket_proto_msgTypes[222]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13811,7 +13904,7 @@ func (x *StatsResponse) String() string {
 func (*StatsResponse) ProtoMessage() {}
 
 func (x *StatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[221]
+	mi := &file_docket_v1_docket_proto_msgTypes[222]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13824,7 +13917,7 @@ func (x *StatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatsResponse.ProtoReflect.Descriptor instead.
 func (*StatsResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{221}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{222}
 }
 
 func (x *StatsResponse) GetTotal() int32 {
@@ -13874,7 +13967,7 @@ type StepAnnotateRequest struct {
 
 func (x *StepAnnotateRequest) Reset() {
 	*x = StepAnnotateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[222]
+	mi := &file_docket_v1_docket_proto_msgTypes[223]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13886,7 +13979,7 @@ func (x *StepAnnotateRequest) String() string {
 func (*StepAnnotateRequest) ProtoMessage() {}
 
 func (x *StepAnnotateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[222]
+	mi := &file_docket_v1_docket_proto_msgTypes[223]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13899,7 +13992,7 @@ func (x *StepAnnotateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepAnnotateRequest.ProtoReflect.Descriptor instead.
 func (*StepAnnotateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{222}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{223}
 }
 
 func (x *StepAnnotateRequest) GetStep() string {
@@ -13939,7 +14032,7 @@ type StepAnnotateResponse struct {
 
 func (x *StepAnnotateResponse) Reset() {
 	*x = StepAnnotateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[223]
+	mi := &file_docket_v1_docket_proto_msgTypes[224]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13951,7 +14044,7 @@ func (x *StepAnnotateResponse) String() string {
 func (*StepAnnotateResponse) ProtoMessage() {}
 
 func (x *StepAnnotateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[223]
+	mi := &file_docket_v1_docket_proto_msgTypes[224]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13964,7 +14057,7 @@ func (x *StepAnnotateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepAnnotateResponse.ProtoReflect.Descriptor instead.
 func (*StepAnnotateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{223}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{224}
 }
 
 func (x *StepAnnotateResponse) GetStep() *Step {
@@ -13988,7 +14081,7 @@ type StepApproveRequest struct {
 
 func (x *StepApproveRequest) Reset() {
 	*x = StepApproveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[224]
+	mi := &file_docket_v1_docket_proto_msgTypes[225]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14000,7 +14093,7 @@ func (x *StepApproveRequest) String() string {
 func (*StepApproveRequest) ProtoMessage() {}
 
 func (x *StepApproveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[224]
+	mi := &file_docket_v1_docket_proto_msgTypes[225]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14013,7 +14106,7 @@ func (x *StepApproveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepApproveRequest.ProtoReflect.Descriptor instead.
 func (*StepApproveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{224}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{225}
 }
 
 func (x *StepApproveRequest) GetStep() string {
@@ -14067,7 +14160,7 @@ type StepApproveResponse struct {
 
 func (x *StepApproveResponse) Reset() {
 	*x = StepApproveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[225]
+	mi := &file_docket_v1_docket_proto_msgTypes[226]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14079,7 +14172,7 @@ func (x *StepApproveResponse) String() string {
 func (*StepApproveResponse) ProtoMessage() {}
 
 func (x *StepApproveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[225]
+	mi := &file_docket_v1_docket_proto_msgTypes[226]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14092,7 +14185,7 @@ func (x *StepApproveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepApproveResponse.ProtoReflect.Descriptor instead.
 func (*StepApproveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{225}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{226}
 }
 
 func (x *StepApproveResponse) GetStep() *Step {
@@ -14112,7 +14205,7 @@ type StepArtifactRequest struct {
 
 func (x *StepArtifactRequest) Reset() {
 	*x = StepArtifactRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[226]
+	mi := &file_docket_v1_docket_proto_msgTypes[227]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14124,7 +14217,7 @@ func (x *StepArtifactRequest) String() string {
 func (*StepArtifactRequest) ProtoMessage() {}
 
 func (x *StepArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[226]
+	mi := &file_docket_v1_docket_proto_msgTypes[227]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14137,7 +14230,7 @@ func (x *StepArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepArtifactRequest.ProtoReflect.Descriptor instead.
 func (*StepArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{226}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{227}
 }
 
 func (x *StepArtifactRequest) GetArtifact() string {
@@ -14163,7 +14256,7 @@ type StepArtifactResponse struct {
 
 func (x *StepArtifactResponse) Reset() {
 	*x = StepArtifactResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[227]
+	mi := &file_docket_v1_docket_proto_msgTypes[228]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14175,7 +14268,7 @@ func (x *StepArtifactResponse) String() string {
 func (*StepArtifactResponse) ProtoMessage() {}
 
 func (x *StepArtifactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[227]
+	mi := &file_docket_v1_docket_proto_msgTypes[228]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14188,7 +14281,7 @@ func (x *StepArtifactResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepArtifactResponse.ProtoReflect.Descriptor instead.
 func (*StepArtifactResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{227}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{228}
 }
 
 func (x *StepArtifactResponse) GetArtifact() *Artifact {
@@ -14207,7 +14300,7 @@ type StepArtifactsRequest struct {
 
 func (x *StepArtifactsRequest) Reset() {
 	*x = StepArtifactsRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[228]
+	mi := &file_docket_v1_docket_proto_msgTypes[229]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14219,7 +14312,7 @@ func (x *StepArtifactsRequest) String() string {
 func (*StepArtifactsRequest) ProtoMessage() {}
 
 func (x *StepArtifactsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[228]
+	mi := &file_docket_v1_docket_proto_msgTypes[229]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14232,7 +14325,7 @@ func (x *StepArtifactsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepArtifactsRequest.ProtoReflect.Descriptor instead.
 func (*StepArtifactsRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{228}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{229}
 }
 
 func (x *StepArtifactsRequest) GetStep() string {
@@ -14255,7 +14348,7 @@ type StepArtifactsResponse struct {
 
 func (x *StepArtifactsResponse) Reset() {
 	*x = StepArtifactsResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[229]
+	mi := &file_docket_v1_docket_proto_msgTypes[230]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14267,7 +14360,7 @@ func (x *StepArtifactsResponse) String() string {
 func (*StepArtifactsResponse) ProtoMessage() {}
 
 func (x *StepArtifactsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[229]
+	mi := &file_docket_v1_docket_proto_msgTypes[230]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14280,7 +14373,7 @@ func (x *StepArtifactsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepArtifactsResponse.ProtoReflect.Descriptor instead.
 func (*StepArtifactsResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{229}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{230}
 }
 
 func (x *StepArtifactsResponse) GetItems() []*Artifact {
@@ -14324,7 +14417,7 @@ type StepClaimRequest struct {
 
 func (x *StepClaimRequest) Reset() {
 	*x = StepClaimRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[230]
+	mi := &file_docket_v1_docket_proto_msgTypes[231]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14336,7 +14429,7 @@ func (x *StepClaimRequest) String() string {
 func (*StepClaimRequest) ProtoMessage() {}
 
 func (x *StepClaimRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[230]
+	mi := &file_docket_v1_docket_proto_msgTypes[231]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14349,7 +14442,7 @@ func (x *StepClaimRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepClaimRequest.ProtoReflect.Descriptor instead.
 func (*StepClaimRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{230}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{231}
 }
 
 func (x *StepClaimRequest) GetStep() string {
@@ -14432,7 +14525,7 @@ type StepClaimResponse struct {
 
 func (x *StepClaimResponse) Reset() {
 	*x = StepClaimResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[231]
+	mi := &file_docket_v1_docket_proto_msgTypes[232]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14444,7 +14537,7 @@ func (x *StepClaimResponse) String() string {
 func (*StepClaimResponse) ProtoMessage() {}
 
 func (x *StepClaimResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[231]
+	mi := &file_docket_v1_docket_proto_msgTypes[232]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14457,7 +14550,7 @@ func (x *StepClaimResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepClaimResponse.ProtoReflect.Descriptor instead.
 func (*StepClaimResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{231}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{232}
 }
 
 func (x *StepClaimResponse) GetStep() string {
@@ -14542,7 +14635,7 @@ type StepCompleteRequest struct {
 
 func (x *StepCompleteRequest) Reset() {
 	*x = StepCompleteRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[232]
+	mi := &file_docket_v1_docket_proto_msgTypes[233]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14554,7 +14647,7 @@ func (x *StepCompleteRequest) String() string {
 func (*StepCompleteRequest) ProtoMessage() {}
 
 func (x *StepCompleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[232]
+	mi := &file_docket_v1_docket_proto_msgTypes[233]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14567,7 +14660,7 @@ func (x *StepCompleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepCompleteRequest.ProtoReflect.Descriptor instead.
 func (*StepCompleteRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{232}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{233}
 }
 
 func (x *StepCompleteRequest) GetStep() string {
@@ -14639,7 +14732,7 @@ type StepCompleteResponse struct {
 
 func (x *StepCompleteResponse) Reset() {
 	*x = StepCompleteResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[233]
+	mi := &file_docket_v1_docket_proto_msgTypes[234]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14651,7 +14744,7 @@ func (x *StepCompleteResponse) String() string {
 func (*StepCompleteResponse) ProtoMessage() {}
 
 func (x *StepCompleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[233]
+	mi := &file_docket_v1_docket_proto_msgTypes[234]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14664,7 +14757,7 @@ func (x *StepCompleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepCompleteResponse.ProtoReflect.Descriptor instead.
 func (*StepCompleteResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{233}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{234}
 }
 
 func (x *StepCompleteResponse) GetStep() *Step {
@@ -14699,7 +14792,7 @@ type StepContextRequest struct {
 
 func (x *StepContextRequest) Reset() {
 	*x = StepContextRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[234]
+	mi := &file_docket_v1_docket_proto_msgTypes[235]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14711,7 +14804,7 @@ func (x *StepContextRequest) String() string {
 func (*StepContextRequest) ProtoMessage() {}
 
 func (x *StepContextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[234]
+	mi := &file_docket_v1_docket_proto_msgTypes[235]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14724,7 +14817,7 @@ func (x *StepContextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepContextRequest.ProtoReflect.Descriptor instead.
 func (*StepContextRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{234}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{235}
 }
 
 func (x *StepContextRequest) GetStep() string {
@@ -14757,7 +14850,7 @@ type StepContextResponse struct {
 
 func (x *StepContextResponse) Reset() {
 	*x = StepContextResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[235]
+	mi := &file_docket_v1_docket_proto_msgTypes[236]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14769,7 +14862,7 @@ func (x *StepContextResponse) String() string {
 func (*StepContextResponse) ProtoMessage() {}
 
 func (x *StepContextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[235]
+	mi := &file_docket_v1_docket_proto_msgTypes[236]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14782,7 +14875,7 @@ func (x *StepContextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepContextResponse.ProtoReflect.Descriptor instead.
 func (*StepContextResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{235}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{236}
 }
 
 func (x *StepContextResponse) GetContext() *StepContextBundle {
@@ -14804,7 +14897,7 @@ type StepFailRequest struct {
 
 func (x *StepFailRequest) Reset() {
 	*x = StepFailRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[236]
+	mi := &file_docket_v1_docket_proto_msgTypes[237]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14816,7 +14909,7 @@ func (x *StepFailRequest) String() string {
 func (*StepFailRequest) ProtoMessage() {}
 
 func (x *StepFailRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[236]
+	mi := &file_docket_v1_docket_proto_msgTypes[237]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14829,7 +14922,7 @@ func (x *StepFailRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepFailRequest.ProtoReflect.Descriptor instead.
 func (*StepFailRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{236}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{237}
 }
 
 func (x *StepFailRequest) GetStep() string {
@@ -14869,7 +14962,7 @@ type StepFailResponse struct {
 
 func (x *StepFailResponse) Reset() {
 	*x = StepFailResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[237]
+	mi := &file_docket_v1_docket_proto_msgTypes[238]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14881,7 +14974,7 @@ func (x *StepFailResponse) String() string {
 func (*StepFailResponse) ProtoMessage() {}
 
 func (x *StepFailResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[237]
+	mi := &file_docket_v1_docket_proto_msgTypes[238]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14894,7 +14987,7 @@ func (x *StepFailResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepFailResponse.ProtoReflect.Descriptor instead.
 func (*StepFailResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{237}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{238}
 }
 
 func (x *StepFailResponse) GetStep() *Step {
@@ -14915,7 +15008,7 @@ type StepGatesRequest struct {
 
 func (x *StepGatesRequest) Reset() {
 	*x = StepGatesRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[238]
+	mi := &file_docket_v1_docket_proto_msgTypes[239]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14927,7 +15020,7 @@ func (x *StepGatesRequest) String() string {
 func (*StepGatesRequest) ProtoMessage() {}
 
 func (x *StepGatesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[238]
+	mi := &file_docket_v1_docket_proto_msgTypes[239]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14940,7 +15033,7 @@ func (x *StepGatesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepGatesRequest.ProtoReflect.Descriptor instead.
 func (*StepGatesRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{238}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{239}
 }
 
 func (x *StepGatesRequest) GetStep() string {
@@ -14975,7 +15068,7 @@ type StepGatesResponse struct {
 
 func (x *StepGatesResponse) Reset() {
 	*x = StepGatesResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[239]
+	mi := &file_docket_v1_docket_proto_msgTypes[240]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14987,7 +15080,7 @@ func (x *StepGatesResponse) String() string {
 func (*StepGatesResponse) ProtoMessage() {}
 
 func (x *StepGatesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[239]
+	mi := &file_docket_v1_docket_proto_msgTypes[240]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15000,7 +15093,7 @@ func (x *StepGatesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepGatesResponse.ProtoReflect.Descriptor instead.
 func (*StepGatesResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{239}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{240}
 }
 
 func (x *StepGatesResponse) GetItems() []*GateResult {
@@ -15034,7 +15127,7 @@ type StepHeartbeatRequest struct {
 
 func (x *StepHeartbeatRequest) Reset() {
 	*x = StepHeartbeatRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[240]
+	mi := &file_docket_v1_docket_proto_msgTypes[241]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15046,7 +15139,7 @@ func (x *StepHeartbeatRequest) String() string {
 func (*StepHeartbeatRequest) ProtoMessage() {}
 
 func (x *StepHeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[240]
+	mi := &file_docket_v1_docket_proto_msgTypes[241]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15059,7 +15152,7 @@ func (x *StepHeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepHeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*StepHeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{240}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{241}
 }
 
 func (x *StepHeartbeatRequest) GetStep() string {
@@ -15086,7 +15179,7 @@ type StepHeartbeatResponse struct {
 
 func (x *StepHeartbeatResponse) Reset() {
 	*x = StepHeartbeatResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[241]
+	mi := &file_docket_v1_docket_proto_msgTypes[242]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15098,7 +15191,7 @@ func (x *StepHeartbeatResponse) String() string {
 func (*StepHeartbeatResponse) ProtoMessage() {}
 
 func (x *StepHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[241]
+	mi := &file_docket_v1_docket_proto_msgTypes[242]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15111,7 +15204,7 @@ func (x *StepHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*StepHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{241}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{242}
 }
 
 func (x *StepHeartbeatResponse) GetStep() string {
@@ -15141,7 +15234,7 @@ type StepHoldRequest struct {
 
 func (x *StepHoldRequest) Reset() {
 	*x = StepHoldRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[242]
+	mi := &file_docket_v1_docket_proto_msgTypes[243]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15153,7 +15246,7 @@ func (x *StepHoldRequest) String() string {
 func (*StepHoldRequest) ProtoMessage() {}
 
 func (x *StepHoldRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[242]
+	mi := &file_docket_v1_docket_proto_msgTypes[243]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15166,7 +15259,7 @@ func (x *StepHoldRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepHoldRequest.ProtoReflect.Descriptor instead.
 func (*StepHoldRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{242}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{243}
 }
 
 func (x *StepHoldRequest) GetStep() string {
@@ -15213,7 +15306,7 @@ type StepHoldResponse struct {
 
 func (x *StepHoldResponse) Reset() {
 	*x = StepHoldResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[243]
+	mi := &file_docket_v1_docket_proto_msgTypes[244]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15225,7 +15318,7 @@ func (x *StepHoldResponse) String() string {
 func (*StepHoldResponse) ProtoMessage() {}
 
 func (x *StepHoldResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[243]
+	mi := &file_docket_v1_docket_proto_msgTypes[244]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15238,7 +15331,7 @@ func (x *StepHoldResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepHoldResponse.ProtoReflect.Descriptor instead.
 func (*StepHoldResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{243}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{244}
 }
 
 func (x *StepHoldResponse) GetStep() *Step {
@@ -15258,7 +15351,7 @@ type StepListRequest struct {
 
 func (x *StepListRequest) Reset() {
 	*x = StepListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[244]
+	mi := &file_docket_v1_docket_proto_msgTypes[245]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15270,7 +15363,7 @@ func (x *StepListRequest) String() string {
 func (*StepListRequest) ProtoMessage() {}
 
 func (x *StepListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[244]
+	mi := &file_docket_v1_docket_proto_msgTypes[245]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15283,7 +15376,7 @@ func (x *StepListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepListRequest.ProtoReflect.Descriptor instead.
 func (*StepListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{244}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{245}
 }
 
 func (x *StepListRequest) GetRun() string {
@@ -15311,7 +15404,7 @@ type StepListResponse struct {
 
 func (x *StepListResponse) Reset() {
 	*x = StepListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[245]
+	mi := &file_docket_v1_docket_proto_msgTypes[246]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15323,7 +15416,7 @@ func (x *StepListResponse) String() string {
 func (*StepListResponse) ProtoMessage() {}
 
 func (x *StepListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[245]
+	mi := &file_docket_v1_docket_proto_msgTypes[246]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15336,7 +15429,7 @@ func (x *StepListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepListResponse.ProtoReflect.Descriptor instead.
 func (*StepListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{245}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{246}
 }
 
 func (x *StepListResponse) GetItems() []*Step {
@@ -15371,7 +15464,7 @@ type StepReapRequest struct {
 
 func (x *StepReapRequest) Reset() {
 	*x = StepReapRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[246]
+	mi := &file_docket_v1_docket_proto_msgTypes[247]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15383,7 +15476,7 @@ func (x *StepReapRequest) String() string {
 func (*StepReapRequest) ProtoMessage() {}
 
 func (x *StepReapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[246]
+	mi := &file_docket_v1_docket_proto_msgTypes[247]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15396,7 +15489,7 @@ func (x *StepReapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepReapRequest.ProtoReflect.Descriptor instead.
 func (*StepReapRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{246}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{247}
 }
 
 func (x *StepReapRequest) GetStep() string {
@@ -15429,7 +15522,7 @@ type StepReapResponse struct {
 
 func (x *StepReapResponse) Reset() {
 	*x = StepReapResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[247]
+	mi := &file_docket_v1_docket_proto_msgTypes[248]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15441,7 +15534,7 @@ func (x *StepReapResponse) String() string {
 func (*StepReapResponse) ProtoMessage() {}
 
 func (x *StepReapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[247]
+	mi := &file_docket_v1_docket_proto_msgTypes[248]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15454,7 +15547,7 @@ func (x *StepReapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepReapResponse.ProtoReflect.Descriptor instead.
 func (*StepReapResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{247}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{248}
 }
 
 func (x *StepReapResponse) GetStep() *Step {
@@ -15477,7 +15570,7 @@ type StepRejectRequest struct {
 
 func (x *StepRejectRequest) Reset() {
 	*x = StepRejectRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[248]
+	mi := &file_docket_v1_docket_proto_msgTypes[249]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15489,7 +15582,7 @@ func (x *StepRejectRequest) String() string {
 func (*StepRejectRequest) ProtoMessage() {}
 
 func (x *StepRejectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[248]
+	mi := &file_docket_v1_docket_proto_msgTypes[249]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15502,7 +15595,7 @@ func (x *StepRejectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepRejectRequest.ProtoReflect.Descriptor instead.
 func (*StepRejectRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{248}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{249}
 }
 
 func (x *StepRejectRequest) GetStep() string {
@@ -15549,7 +15642,7 @@ type StepRejectResponse struct {
 
 func (x *StepRejectResponse) Reset() {
 	*x = StepRejectResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[249]
+	mi := &file_docket_v1_docket_proto_msgTypes[250]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15561,7 +15654,7 @@ func (x *StepRejectResponse) String() string {
 func (*StepRejectResponse) ProtoMessage() {}
 
 func (x *StepRejectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[249]
+	mi := &file_docket_v1_docket_proto_msgTypes[250]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15574,7 +15667,7 @@ func (x *StepRejectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepRejectResponse.ProtoReflect.Descriptor instead.
 func (*StepRejectResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{249}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{250}
 }
 
 func (x *StepRejectResponse) GetStep() *Step {
@@ -15595,7 +15688,7 @@ type StepRenderRequest struct {
 
 func (x *StepRenderRequest) Reset() {
 	*x = StepRenderRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[250]
+	mi := &file_docket_v1_docket_proto_msgTypes[251]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15607,7 +15700,7 @@ func (x *StepRenderRequest) String() string {
 func (*StepRenderRequest) ProtoMessage() {}
 
 func (x *StepRenderRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[250]
+	mi := &file_docket_v1_docket_proto_msgTypes[251]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15620,7 +15713,7 @@ func (x *StepRenderRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepRenderRequest.ProtoReflect.Descriptor instead.
 func (*StepRenderRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{250}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{251}
 }
 
 func (x *StepRenderRequest) GetStep() string {
@@ -15654,7 +15747,7 @@ type StepRenderResponse struct {
 
 func (x *StepRenderResponse) Reset() {
 	*x = StepRenderResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[251]
+	mi := &file_docket_v1_docket_proto_msgTypes[252]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15666,7 +15759,7 @@ func (x *StepRenderResponse) String() string {
 func (*StepRenderResponse) ProtoMessage() {}
 
 func (x *StepRenderResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[251]
+	mi := &file_docket_v1_docket_proto_msgTypes[252]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15679,7 +15772,7 @@ func (x *StepRenderResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepRenderResponse.ProtoReflect.Descriptor instead.
 func (*StepRenderResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{251}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{252}
 }
 
 func (x *StepRenderResponse) GetStep() string {
@@ -15713,7 +15806,7 @@ type StepResolveRequest struct {
 
 func (x *StepResolveRequest) Reset() {
 	*x = StepResolveRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[252]
+	mi := &file_docket_v1_docket_proto_msgTypes[253]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15725,7 +15818,7 @@ func (x *StepResolveRequest) String() string {
 func (*StepResolveRequest) ProtoMessage() {}
 
 func (x *StepResolveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[252]
+	mi := &file_docket_v1_docket_proto_msgTypes[253]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15738,7 +15831,7 @@ func (x *StepResolveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepResolveRequest.ProtoReflect.Descriptor instead.
 func (*StepResolveRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{252}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{253}
 }
 
 func (x *StepResolveRequest) GetStep() string {
@@ -15813,7 +15906,7 @@ type StepResolveResponse struct {
 
 func (x *StepResolveResponse) Reset() {
 	*x = StepResolveResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[253]
+	mi := &file_docket_v1_docket_proto_msgTypes[254]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15825,7 +15918,7 @@ func (x *StepResolveResponse) String() string {
 func (*StepResolveResponse) ProtoMessage() {}
 
 func (x *StepResolveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[253]
+	mi := &file_docket_v1_docket_proto_msgTypes[254]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15838,7 +15931,7 @@ func (x *StepResolveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepResolveResponse.ProtoReflect.Descriptor instead.
 func (*StepResolveResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{253}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{254}
 }
 
 func (x *StepResolveResponse) GetSteps() []*Step {
@@ -15857,7 +15950,7 @@ type StepShowRequest struct {
 
 func (x *StepShowRequest) Reset() {
 	*x = StepShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[254]
+	mi := &file_docket_v1_docket_proto_msgTypes[255]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15869,7 +15962,7 @@ func (x *StepShowRequest) String() string {
 func (*StepShowRequest) ProtoMessage() {}
 
 func (x *StepShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[254]
+	mi := &file_docket_v1_docket_proto_msgTypes[255]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15882,7 +15975,7 @@ func (x *StepShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepShowRequest.ProtoReflect.Descriptor instead.
 func (*StepShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{254}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{255}
 }
 
 func (x *StepShowRequest) GetSteps() []string {
@@ -15901,7 +15994,7 @@ type StepShowResponse struct {
 
 func (x *StepShowResponse) Reset() {
 	*x = StepShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[255]
+	mi := &file_docket_v1_docket_proto_msgTypes[256]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15913,7 +16006,7 @@ func (x *StepShowResponse) String() string {
 func (*StepShowResponse) ProtoMessage() {}
 
 func (x *StepShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[255]
+	mi := &file_docket_v1_docket_proto_msgTypes[256]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15926,7 +16019,7 @@ func (x *StepShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepShowResponse.ProtoReflect.Descriptor instead.
 func (*StepShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{255}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{256}
 }
 
 func (x *StepShowResponse) GetSteps() []*Step {
@@ -15947,7 +16040,7 @@ type VoteBackfillUsageRequest struct {
 
 func (x *VoteBackfillUsageRequest) Reset() {
 	*x = VoteBackfillUsageRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[256]
+	mi := &file_docket_v1_docket_proto_msgTypes[257]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15959,7 +16052,7 @@ func (x *VoteBackfillUsageRequest) String() string {
 func (*VoteBackfillUsageRequest) ProtoMessage() {}
 
 func (x *VoteBackfillUsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[256]
+	mi := &file_docket_v1_docket_proto_msgTypes[257]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15972,7 +16065,7 @@ func (x *VoteBackfillUsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteBackfillUsageRequest.ProtoReflect.Descriptor instead.
 func (*VoteBackfillUsageRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{256}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{257}
 }
 
 func (x *VoteBackfillUsageRequest) GetProposal() string {
@@ -16006,7 +16099,7 @@ type VoteBackfillUsageResponse struct {
 
 func (x *VoteBackfillUsageResponse) Reset() {
 	*x = VoteBackfillUsageResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[257]
+	mi := &file_docket_v1_docket_proto_msgTypes[258]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16018,7 +16111,7 @@ func (x *VoteBackfillUsageResponse) String() string {
 func (*VoteBackfillUsageResponse) ProtoMessage() {}
 
 func (x *VoteBackfillUsageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[257]
+	mi := &file_docket_v1_docket_proto_msgTypes[258]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16031,7 +16124,7 @@ func (x *VoteBackfillUsageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteBackfillUsageResponse.ProtoReflect.Descriptor instead.
 func (*VoteBackfillUsageResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{257}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{258}
 }
 
 func (x *VoteBackfillUsageResponse) GetRecorded() int32 {
@@ -16067,7 +16160,7 @@ type VoteCastRequest struct {
 
 func (x *VoteCastRequest) Reset() {
 	*x = VoteCastRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[258]
+	mi := &file_docket_v1_docket_proto_msgTypes[259]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16079,7 +16172,7 @@ func (x *VoteCastRequest) String() string {
 func (*VoteCastRequest) ProtoMessage() {}
 
 func (x *VoteCastRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[258]
+	mi := &file_docket_v1_docket_proto_msgTypes[259]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16092,7 +16185,7 @@ func (x *VoteCastRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCastRequest.ProtoReflect.Descriptor instead.
 func (*VoteCastRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{258}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{259}
 }
 
 func (x *VoteCastRequest) GetProposal() string {
@@ -16182,7 +16275,7 @@ type VoteCastResponse struct {
 
 func (x *VoteCastResponse) Reset() {
 	*x = VoteCastResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[259]
+	mi := &file_docket_v1_docket_proto_msgTypes[260]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16194,7 +16287,7 @@ func (x *VoteCastResponse) String() string {
 func (*VoteCastResponse) ProtoMessage() {}
 
 func (x *VoteCastResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[259]
+	mi := &file_docket_v1_docket_proto_msgTypes[260]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16207,7 +16300,7 @@ func (x *VoteCastResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCastResponse.ProtoReflect.Descriptor instead.
 func (*VoteCastResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{259}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{260}
 }
 
 func (x *VoteCastResponse) GetVote() *Vote {
@@ -16234,7 +16327,7 @@ type VoteCloseRequest struct {
 
 func (x *VoteCloseRequest) Reset() {
 	*x = VoteCloseRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[260]
+	mi := &file_docket_v1_docket_proto_msgTypes[261]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16246,7 +16339,7 @@ func (x *VoteCloseRequest) String() string {
 func (*VoteCloseRequest) ProtoMessage() {}
 
 func (x *VoteCloseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[260]
+	mi := &file_docket_v1_docket_proto_msgTypes[261]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16259,7 +16352,7 @@ func (x *VoteCloseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCloseRequest.ProtoReflect.Descriptor instead.
 func (*VoteCloseRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{260}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{261}
 }
 
 func (x *VoteCloseRequest) GetProposal() string {
@@ -16285,7 +16378,7 @@ type VoteCloseResponse struct {
 
 func (x *VoteCloseResponse) Reset() {
 	*x = VoteCloseResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[261]
+	mi := &file_docket_v1_docket_proto_msgTypes[262]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16297,7 +16390,7 @@ func (x *VoteCloseResponse) String() string {
 func (*VoteCloseResponse) ProtoMessage() {}
 
 func (x *VoteCloseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[261]
+	mi := &file_docket_v1_docket_proto_msgTypes[262]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16310,7 +16403,7 @@ func (x *VoteCloseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCloseResponse.ProtoReflect.Descriptor instead.
 func (*VoteCloseResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{261}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{262}
 }
 
 func (x *VoteCloseResponse) GetProposal() *Proposal {
@@ -16332,7 +16425,7 @@ type VoteCommitRequest struct {
 
 func (x *VoteCommitRequest) Reset() {
 	*x = VoteCommitRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[262]
+	mi := &file_docket_v1_docket_proto_msgTypes[263]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16344,7 +16437,7 @@ func (x *VoteCommitRequest) String() string {
 func (*VoteCommitRequest) ProtoMessage() {}
 
 func (x *VoteCommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[262]
+	mi := &file_docket_v1_docket_proto_msgTypes[263]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16357,7 +16450,7 @@ func (x *VoteCommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCommitRequest.ProtoReflect.Descriptor instead.
 func (*VoteCommitRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{262}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{263}
 }
 
 func (x *VoteCommitRequest) GetProposal() string {
@@ -16397,7 +16490,7 @@ type VoteCommitResponse struct {
 
 func (x *VoteCommitResponse) Reset() {
 	*x = VoteCommitResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[263]
+	mi := &file_docket_v1_docket_proto_msgTypes[264]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16409,7 +16502,7 @@ func (x *VoteCommitResponse) String() string {
 func (*VoteCommitResponse) ProtoMessage() {}
 
 func (x *VoteCommitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[263]
+	mi := &file_docket_v1_docket_proto_msgTypes[264]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16422,7 +16515,7 @@ func (x *VoteCommitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCommitResponse.ProtoReflect.Descriptor instead.
 func (*VoteCommitResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{263}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{264}
 }
 
 func (x *VoteCommitResponse) GetProposal() *Proposal {
@@ -16450,7 +16543,7 @@ type VoteCreateRequest struct {
 
 func (x *VoteCreateRequest) Reset() {
 	*x = VoteCreateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[264]
+	mi := &file_docket_v1_docket_proto_msgTypes[265]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16462,7 +16555,7 @@ func (x *VoteCreateRequest) String() string {
 func (*VoteCreateRequest) ProtoMessage() {}
 
 func (x *VoteCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[264]
+	mi := &file_docket_v1_docket_proto_msgTypes[265]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16475,7 +16568,7 @@ func (x *VoteCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCreateRequest.ProtoReflect.Descriptor instead.
 func (*VoteCreateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{264}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{265}
 }
 
 func (x *VoteCreateRequest) GetDescription() string {
@@ -16557,7 +16650,7 @@ type VoteCreateResponse struct {
 
 func (x *VoteCreateResponse) Reset() {
 	*x = VoteCreateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[265]
+	mi := &file_docket_v1_docket_proto_msgTypes[266]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16569,7 +16662,7 @@ func (x *VoteCreateResponse) String() string {
 func (*VoteCreateResponse) ProtoMessage() {}
 
 func (x *VoteCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[265]
+	mi := &file_docket_v1_docket_proto_msgTypes[266]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16582,7 +16675,7 @@ func (x *VoteCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteCreateResponse.ProtoReflect.Descriptor instead.
 func (*VoteCreateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{265}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{266}
 }
 
 func (x *VoteCreateResponse) GetProposal() *Proposal {
@@ -16602,7 +16695,7 @@ type VoteLinkRequest struct {
 
 func (x *VoteLinkRequest) Reset() {
 	*x = VoteLinkRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[266]
+	mi := &file_docket_v1_docket_proto_msgTypes[267]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16614,7 +16707,7 @@ func (x *VoteLinkRequest) String() string {
 func (*VoteLinkRequest) ProtoMessage() {}
 
 func (x *VoteLinkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[266]
+	mi := &file_docket_v1_docket_proto_msgTypes[267]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16627,7 +16720,7 @@ func (x *VoteLinkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteLinkRequest.ProtoReflect.Descriptor instead.
 func (*VoteLinkRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{266}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{267}
 }
 
 func (x *VoteLinkRequest) GetProposal() string {
@@ -16654,7 +16747,7 @@ type VoteLinkResponse struct {
 
 func (x *VoteLinkResponse) Reset() {
 	*x = VoteLinkResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[267]
+	mi := &file_docket_v1_docket_proto_msgTypes[268]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16666,7 +16759,7 @@ func (x *VoteLinkResponse) String() string {
 func (*VoteLinkResponse) ProtoMessage() {}
 
 func (x *VoteLinkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[267]
+	mi := &file_docket_v1_docket_proto_msgTypes[268]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16679,7 +16772,7 @@ func (x *VoteLinkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteLinkResponse.ProtoReflect.Descriptor instead.
 func (*VoteLinkResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{267}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{268}
 }
 
 func (x *VoteLinkResponse) GetProposal() string {
@@ -16709,7 +16802,7 @@ type VoteListRequest struct {
 
 func (x *VoteListRequest) Reset() {
 	*x = VoteListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[268]
+	mi := &file_docket_v1_docket_proto_msgTypes[269]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16721,7 +16814,7 @@ func (x *VoteListRequest) String() string {
 func (*VoteListRequest) ProtoMessage() {}
 
 func (x *VoteListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[268]
+	mi := &file_docket_v1_docket_proto_msgTypes[269]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16734,7 +16827,7 @@ func (x *VoteListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteListRequest.ProtoReflect.Descriptor instead.
 func (*VoteListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{268}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{269}
 }
 
 func (x *VoteListRequest) GetStatus() string {
@@ -16783,7 +16876,7 @@ type VoteListResponse struct {
 
 func (x *VoteListResponse) Reset() {
 	*x = VoteListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[269]
+	mi := &file_docket_v1_docket_proto_msgTypes[270]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16795,7 +16888,7 @@ func (x *VoteListResponse) String() string {
 func (*VoteListResponse) ProtoMessage() {}
 
 func (x *VoteListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[269]
+	mi := &file_docket_v1_docket_proto_msgTypes[270]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16808,7 +16901,7 @@ func (x *VoteListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteListResponse.ProtoReflect.Descriptor instead.
 func (*VoteListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{269}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{270}
 }
 
 func (x *VoteListResponse) GetItems() []*Proposal {
@@ -16841,7 +16934,7 @@ type VoteResultRequest struct {
 
 func (x *VoteResultRequest) Reset() {
 	*x = VoteResultRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[270]
+	mi := &file_docket_v1_docket_proto_msgTypes[271]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16853,7 +16946,7 @@ func (x *VoteResultRequest) String() string {
 func (*VoteResultRequest) ProtoMessage() {}
 
 func (x *VoteResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[270]
+	mi := &file_docket_v1_docket_proto_msgTypes[271]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16866,7 +16959,7 @@ func (x *VoteResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteResultRequest.ProtoReflect.Descriptor instead.
 func (*VoteResultRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{270}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{271}
 }
 
 func (x *VoteResultRequest) GetProposal() string {
@@ -16890,7 +16983,7 @@ type VoteResultResponse struct {
 
 func (x *VoteResultResponse) Reset() {
 	*x = VoteResultResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[271]
+	mi := &file_docket_v1_docket_proto_msgTypes[272]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16902,7 +16995,7 @@ func (x *VoteResultResponse) String() string {
 func (*VoteResultResponse) ProtoMessage() {}
 
 func (x *VoteResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[271]
+	mi := &file_docket_v1_docket_proto_msgTypes[272]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16915,7 +17008,7 @@ func (x *VoteResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteResultResponse.ProtoReflect.Descriptor instead.
 func (*VoteResultResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{271}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{272}
 }
 
 func (x *VoteResultResponse) GetProposal() string {
@@ -16969,7 +17062,7 @@ type VoteShowRequest struct {
 
 func (x *VoteShowRequest) Reset() {
 	*x = VoteShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[272]
+	mi := &file_docket_v1_docket_proto_msgTypes[273]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16981,7 +17074,7 @@ func (x *VoteShowRequest) String() string {
 func (*VoteShowRequest) ProtoMessage() {}
 
 func (x *VoteShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[272]
+	mi := &file_docket_v1_docket_proto_msgTypes[273]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16994,7 +17087,7 @@ func (x *VoteShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteShowRequest.ProtoReflect.Descriptor instead.
 func (*VoteShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{272}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{273}
 }
 
 func (x *VoteShowRequest) GetProposal() string {
@@ -17013,7 +17106,7 @@ type VoteShowResponse struct {
 
 func (x *VoteShowResponse) Reset() {
 	*x = VoteShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[273]
+	mi := &file_docket_v1_docket_proto_msgTypes[274]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17025,7 +17118,7 @@ func (x *VoteShowResponse) String() string {
 func (*VoteShowResponse) ProtoMessage() {}
 
 func (x *VoteShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[273]
+	mi := &file_docket_v1_docket_proto_msgTypes[274]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17038,7 +17131,7 @@ func (x *VoteShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteShowResponse.ProtoReflect.Descriptor instead.
 func (*VoteShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{273}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{274}
 }
 
 func (x *VoteShowResponse) GetProposal() *Proposal {
@@ -17058,7 +17151,7 @@ type VoteUnlinkRequest struct {
 
 func (x *VoteUnlinkRequest) Reset() {
 	*x = VoteUnlinkRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[274]
+	mi := &file_docket_v1_docket_proto_msgTypes[275]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17070,7 +17163,7 @@ func (x *VoteUnlinkRequest) String() string {
 func (*VoteUnlinkRequest) ProtoMessage() {}
 
 func (x *VoteUnlinkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[274]
+	mi := &file_docket_v1_docket_proto_msgTypes[275]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17083,7 +17176,7 @@ func (x *VoteUnlinkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteUnlinkRequest.ProtoReflect.Descriptor instead.
 func (*VoteUnlinkRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{274}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{275}
 }
 
 func (x *VoteUnlinkRequest) GetProposal() string {
@@ -17110,7 +17203,7 @@ type VoteUnlinkResponse struct {
 
 func (x *VoteUnlinkResponse) Reset() {
 	*x = VoteUnlinkResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[275]
+	mi := &file_docket_v1_docket_proto_msgTypes[276]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17122,7 +17215,7 @@ func (x *VoteUnlinkResponse) String() string {
 func (*VoteUnlinkResponse) ProtoMessage() {}
 
 func (x *VoteUnlinkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[275]
+	mi := &file_docket_v1_docket_proto_msgTypes[276]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17135,7 +17228,7 @@ func (x *VoteUnlinkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VoteUnlinkResponse.ProtoReflect.Descriptor instead.
 func (*VoteUnlinkResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{275}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{276}
 }
 
 func (x *VoteUnlinkResponse) GetProposal() string {
@@ -17162,7 +17255,7 @@ type WorkflowDeprecateRequest struct {
 
 func (x *WorkflowDeprecateRequest) Reset() {
 	*x = WorkflowDeprecateRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[276]
+	mi := &file_docket_v1_docket_proto_msgTypes[277]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17174,7 +17267,7 @@ func (x *WorkflowDeprecateRequest) String() string {
 func (*WorkflowDeprecateRequest) ProtoMessage() {}
 
 func (x *WorkflowDeprecateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[276]
+	mi := &file_docket_v1_docket_proto_msgTypes[277]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17187,7 +17280,7 @@ func (x *WorkflowDeprecateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowDeprecateRequest.ProtoReflect.Descriptor instead.
 func (*WorkflowDeprecateRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{276}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{277}
 }
 
 func (x *WorkflowDeprecateRequest) GetName() string {
@@ -17213,7 +17306,7 @@ type WorkflowDeprecateResponse struct {
 
 func (x *WorkflowDeprecateResponse) Reset() {
 	*x = WorkflowDeprecateResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[277]
+	mi := &file_docket_v1_docket_proto_msgTypes[278]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17225,7 +17318,7 @@ func (x *WorkflowDeprecateResponse) String() string {
 func (*WorkflowDeprecateResponse) ProtoMessage() {}
 
 func (x *WorkflowDeprecateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[277]
+	mi := &file_docket_v1_docket_proto_msgTypes[278]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17238,7 +17331,7 @@ func (x *WorkflowDeprecateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowDeprecateResponse.ProtoReflect.Descriptor instead.
 func (*WorkflowDeprecateResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{277}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{278}
 }
 
 func (x *WorkflowDeprecateResponse) GetWorkflow() *Workflow {
@@ -17261,7 +17354,7 @@ type WorkflowLintRequest struct {
 
 func (x *WorkflowLintRequest) Reset() {
 	*x = WorkflowLintRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[278]
+	mi := &file_docket_v1_docket_proto_msgTypes[279]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17273,7 +17366,7 @@ func (x *WorkflowLintRequest) String() string {
 func (*WorkflowLintRequest) ProtoMessage() {}
 
 func (x *WorkflowLintRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[278]
+	mi := &file_docket_v1_docket_proto_msgTypes[279]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17286,7 +17379,7 @@ func (x *WorkflowLintRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowLintRequest.ProtoReflect.Descriptor instead.
 func (*WorkflowLintRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{278}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{279}
 }
 
 func (x *WorkflowLintRequest) GetBody() string {
@@ -17321,7 +17414,7 @@ type LintFinding struct {
 
 func (x *LintFinding) Reset() {
 	*x = LintFinding{}
-	mi := &file_docket_v1_docket_proto_msgTypes[279]
+	mi := &file_docket_v1_docket_proto_msgTypes[280]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17333,7 +17426,7 @@ func (x *LintFinding) String() string {
 func (*LintFinding) ProtoMessage() {}
 
 func (x *LintFinding) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[279]
+	mi := &file_docket_v1_docket_proto_msgTypes[280]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17346,7 +17439,7 @@ func (x *LintFinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LintFinding.ProtoReflect.Descriptor instead.
 func (*LintFinding) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{279}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{280}
 }
 
 func (x *LintFinding) GetSeverity() string {
@@ -17380,7 +17473,7 @@ type WorkflowLintResponse struct {
 
 func (x *WorkflowLintResponse) Reset() {
 	*x = WorkflowLintResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[280]
+	mi := &file_docket_v1_docket_proto_msgTypes[281]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17392,7 +17485,7 @@ func (x *WorkflowLintResponse) String() string {
 func (*WorkflowLintResponse) ProtoMessage() {}
 
 func (x *WorkflowLintResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[280]
+	mi := &file_docket_v1_docket_proto_msgTypes[281]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17405,7 +17498,7 @@ func (x *WorkflowLintResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowLintResponse.ProtoReflect.Descriptor instead.
 func (*WorkflowLintResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{280}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{281}
 }
 
 func (x *WorkflowLintResponse) GetOk() bool {
@@ -17434,7 +17527,7 @@ type WorkflowListRequest struct {
 
 func (x *WorkflowListRequest) Reset() {
 	*x = WorkflowListRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[281]
+	mi := &file_docket_v1_docket_proto_msgTypes[282]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17446,7 +17539,7 @@ func (x *WorkflowListRequest) String() string {
 func (*WorkflowListRequest) ProtoMessage() {}
 
 func (x *WorkflowListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[281]
+	mi := &file_docket_v1_docket_proto_msgTypes[282]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17459,7 +17552,7 @@ func (x *WorkflowListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowListRequest.ProtoReflect.Descriptor instead.
 func (*WorkflowListRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{281}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{282}
 }
 
 func (x *WorkflowListRequest) GetName() string {
@@ -17501,7 +17594,7 @@ type WorkflowListResponse struct {
 
 func (x *WorkflowListResponse) Reset() {
 	*x = WorkflowListResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[282]
+	mi := &file_docket_v1_docket_proto_msgTypes[283]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17513,7 +17606,7 @@ func (x *WorkflowListResponse) String() string {
 func (*WorkflowListResponse) ProtoMessage() {}
 
 func (x *WorkflowListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[282]
+	mi := &file_docket_v1_docket_proto_msgTypes[283]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17526,7 +17619,7 @@ func (x *WorkflowListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowListResponse.ProtoReflect.Descriptor instead.
 func (*WorkflowListResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{282}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{283}
 }
 
 func (x *WorkflowListResponse) GetItems() []*Workflow {
@@ -17560,7 +17653,7 @@ type WorkflowRegisterRequest struct {
 
 func (x *WorkflowRegisterRequest) Reset() {
 	*x = WorkflowRegisterRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[283]
+	mi := &file_docket_v1_docket_proto_msgTypes[284]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17572,7 +17665,7 @@ func (x *WorkflowRegisterRequest) String() string {
 func (*WorkflowRegisterRequest) ProtoMessage() {}
 
 func (x *WorkflowRegisterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[283]
+	mi := &file_docket_v1_docket_proto_msgTypes[284]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17585,7 +17678,7 @@ func (x *WorkflowRegisterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowRegisterRequest.ProtoReflect.Descriptor instead.
 func (*WorkflowRegisterRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{283}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{284}
 }
 
 func (x *WorkflowRegisterRequest) GetBody() string {
@@ -17611,7 +17704,7 @@ type WorkflowRegisterResponse struct {
 
 func (x *WorkflowRegisterResponse) Reset() {
 	*x = WorkflowRegisterResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[284]
+	mi := &file_docket_v1_docket_proto_msgTypes[285]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17623,7 +17716,7 @@ func (x *WorkflowRegisterResponse) String() string {
 func (*WorkflowRegisterResponse) ProtoMessage() {}
 
 func (x *WorkflowRegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[284]
+	mi := &file_docket_v1_docket_proto_msgTypes[285]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17636,7 +17729,7 @@ func (x *WorkflowRegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowRegisterResponse.ProtoReflect.Descriptor instead.
 func (*WorkflowRegisterResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{284}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{285}
 }
 
 func (x *WorkflowRegisterResponse) GetWorkflow() *Workflow {
@@ -17657,7 +17750,7 @@ type WorkflowShowRequest struct {
 
 func (x *WorkflowShowRequest) Reset() {
 	*x = WorkflowShowRequest{}
-	mi := &file_docket_v1_docket_proto_msgTypes[285]
+	mi := &file_docket_v1_docket_proto_msgTypes[286]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17669,7 +17762,7 @@ func (x *WorkflowShowRequest) String() string {
 func (*WorkflowShowRequest) ProtoMessage() {}
 
 func (x *WorkflowShowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[285]
+	mi := &file_docket_v1_docket_proto_msgTypes[286]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17682,7 +17775,7 @@ func (x *WorkflowShowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowShowRequest.ProtoReflect.Descriptor instead.
 func (*WorkflowShowRequest) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{285}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{286}
 }
 
 func (x *WorkflowShowRequest) GetName() string {
@@ -17715,7 +17808,7 @@ type WorkflowShowResponse struct {
 
 func (x *WorkflowShowResponse) Reset() {
 	*x = WorkflowShowResponse{}
-	mi := &file_docket_v1_docket_proto_msgTypes[286]
+	mi := &file_docket_v1_docket_proto_msgTypes[287]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -17727,7 +17820,7 @@ func (x *WorkflowShowResponse) String() string {
 func (*WorkflowShowResponse) ProtoMessage() {}
 
 func (x *WorkflowShowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_docket_v1_docket_proto_msgTypes[286]
+	mi := &file_docket_v1_docket_proto_msgTypes[287]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -17740,7 +17833,7 @@ func (x *WorkflowShowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowShowResponse.ProtoReflect.Descriptor instead.
 func (*WorkflowShowResponse) Descriptor() ([]byte, []int) {
-	return file_docket_v1_docket_proto_rawDescGZIP(), []int{286}
+	return file_docket_v1_docket_proto_rawDescGZIP(), []int{287}
 }
 
 func (x *WorkflowShowResponse) GetWorkflow() *Workflow {
@@ -17769,7 +17862,7 @@ const file_docket_v1_docket_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x14\n" +
 	"\x05title\x18\x03 \x01(\tR\x05title\x12\x16\n" +
-	"\x06status\x18\x04 \x01(\tR\x06status\"\x86\x04\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\"\xab\x04\n" +
 	"\x05Issue\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tparent_id\x18\x02 \x01(\tR\bparentId\x12\x14\n" +
@@ -17793,7 +17886,8 @@ const file_docket_v1_docket_proto_rawDesc = "" +
 	"\n" +
 	"resolution\x18\x11 \x01(\tR\n" +
 	"resolution\x12\x12\n" +
-	"\x04size\x18\x12 \x01(\tR\x04size\"\x7f\n" +
+	"\x04size\x18\x12 \x01(\tR\x04size\x12#\n" +
+	"\rbody_snapshot\x18\x13 \x01(\tR\fbodySnapshot\"\x7f\n" +
 	"\aComment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x05R\x02id\x12\x19\n" +
 	"\bissue_id\x18\x02 \x01(\tR\aissueId\x12\x12\n" +
@@ -17946,13 +18040,14 @@ const file_docket_v1_docket_proto_rawDesc = "" +
 	"\x04body\x18\x04 \x01(\tR\x04body\x12!\n" +
 	"\fpayload_json\x18\x05 \x01(\tR\vpayloadJson\x12\x16\n" +
 	"\x06schema\x18\x06 \x01(\tR\x06schema\x12\"\n" +
-	"\rcreated_at_ms\x18\a \x01(\x03R\vcreatedAtMs\"\x89\x01\n" +
+	"\rcreated_at_ms\x18\a \x01(\x03R\vcreatedAtMs\"\xae\x01\n" +
 	"\fContextInput\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x1a\n" +
 	"\bartifact\x18\x03 \x01(\tR\bartifact\x12\x12\n" +
 	"\x04body\x18\x04 \x01(\tR\x04body\x12!\n" +
-	"\fpayload_json\x18\x05 \x01(\tR\vpayloadJson\"L\n" +
+	"\fpayload_json\x18\x05 \x01(\tR\vpayloadJson\x12#\n" +
+	"\rproducer_step\x18\x06 \x01(\tR\fproducerStep\"L\n" +
 	"\n" +
 	"ContextPin\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x16\n" +
@@ -17960,7 +18055,7 @@ const file_docket_v1_docket_proto_rawDesc = "" +
 	"\x04body\x18\x03 \x01(\tR\x04body\"3\n" +
 	"\tLoopEntry\x12\f\n" +
 	"\x01k\x18\x01 \x01(\x05R\x01k\x12\x18\n" +
-	"\arouting\x18\x02 \x01(\tR\arouting\"\xd2\x03\n" +
+	"\arouting\x18\x02 \x01(\tR\arouting\"\xc7\x04\n" +
 	"\x11StepContextBundle\x12&\n" +
 	"\x04step\x18\x01 \x01(\v2\x12.docket.v1.StepRowR\x04step\x12&\n" +
 	"\x05issue\x18\x02 \x01(\v2\x10.docket.v1.IssueR\x05issue\x12/\n" +
@@ -17977,7 +18072,12 @@ const file_docket_v1_docket_proto_rawDesc = "" +
 	" \x01(\tR\bdiffBase\x12\x1e\n" +
 	"\n" +
 	"resolution\x18\v \x01(\tR\n" +
-	"resolution\"\xa1\x01\n" +
+	"resolution\x12(\n" +
+	"\x05notes\x18\f \x03(\v2\x12.docket.v1.RunNoteR\x05notes\x12I\n" +
+	"\x11resolution_record\x18\r \x01(\v2\x1c.docket.v1.ContextResolutionR\x10resolutionRecord\"A\n" +
+	"\x11ContextResolution\x12\x18\n" +
+	"\arouting\x18\x01 \x01(\tR\arouting\x12\x12\n" +
+	"\x04note\x18\x02 \x01(\tR\x04note\"\xa1\x01\n" +
 	"\x05Event\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x10\n" +
@@ -19223,7 +19323,7 @@ func file_docket_v1_docket_proto_rawDescGZIP() []byte {
 	return file_docket_v1_docket_proto_rawDescData
 }
 
-var file_docket_v1_docket_proto_msgTypes = make([]protoimpl.MessageInfo, 287)
+var file_docket_v1_docket_proto_msgTypes = make([]protoimpl.MessageInfo, 288)
 var file_docket_v1_docket_proto_goTypes = []any{
 	(*ErrorDetail)(nil),                   // 0: docket.v1.ErrorDetail
 	(*Lease)(nil),                         // 1: docket.v1.Lease
@@ -19250,268 +19350,269 @@ var file_docket_v1_docket_proto_goTypes = []any{
 	(*ContextPin)(nil),                    // 22: docket.v1.ContextPin
 	(*LoopEntry)(nil),                     // 23: docket.v1.LoopEntry
 	(*StepContextBundle)(nil),             // 24: docket.v1.StepContextBundle
-	(*Event)(nil),                         // 25: docket.v1.Event
-	(*RunNote)(nil),                       // 26: docket.v1.RunNote
-	(*Manifest)(nil),                      // 27: docket.v1.Manifest
-	(*PinVerdict)(nil),                    // 28: docket.v1.PinVerdict
-	(*Finding)(nil),                       // 29: docket.v1.Finding
-	(*Proposal)(nil),                      // 30: docket.v1.Proposal
-	(*Vote)(nil),                          // 31: docket.v1.Vote
-	(*Schema)(nil),                        // 32: docket.v1.Schema
-	(*Workflow)(nil),                      // 33: docket.v1.Workflow
-	(*UsageRow)(nil),                      // 34: docket.v1.UsageRow
-	(*IssueFilter)(nil),                   // 35: docket.v1.IssueFilter
-	(*HandshakeRequest)(nil),              // 36: docket.v1.HandshakeRequest
-	(*HandshakeResponse)(nil),             // 37: docket.v1.HandshakeResponse
-	(*BoardRequest)(nil),                  // 38: docket.v1.BoardRequest
-	(*BoardColumn)(nil),                   // 39: docket.v1.BoardColumn
-	(*BoardResponse)(nil),                 // 40: docket.v1.BoardResponse
-	(*ConfigGetRequest)(nil),              // 41: docket.v1.ConfigGetRequest
-	(*ConfigValue)(nil),                   // 42: docket.v1.ConfigValue
-	(*ConfigGetResponse)(nil),             // 43: docket.v1.ConfigGetResponse
-	(*ConfigSetRequest)(nil),              // 44: docket.v1.ConfigSetRequest
-	(*ConfigSetResponse)(nil),             // 45: docket.v1.ConfigSetResponse
-	(*DispatchAbandonRequest)(nil),        // 46: docket.v1.DispatchAbandonRequest
-	(*DispatchAbandonResponse)(nil),       // 47: docket.v1.DispatchAbandonResponse
-	(*DispatchBackfillUsageRequest)(nil),  // 48: docket.v1.DispatchBackfillUsageRequest
-	(*DispatchBackfillUsageResponse)(nil), // 49: docket.v1.DispatchBackfillUsageResponse
-	(*DispatchCloseRequest)(nil),          // 50: docket.v1.DispatchCloseRequest
-	(*DispatchCloseResponse)(nil),         // 51: docket.v1.DispatchCloseResponse
-	(*DispatchExtendRequest)(nil),         // 52: docket.v1.DispatchExtendRequest
-	(*DispatchExtendResponse)(nil),        // 53: docket.v1.DispatchExtendResponse
-	(*DispatchOpenRequest)(nil),           // 54: docket.v1.DispatchOpenRequest
-	(*DispatchOpenResponse)(nil),          // 55: docket.v1.DispatchOpenResponse
-	(*DispatchVerifyRequest)(nil),         // 56: docket.v1.DispatchVerifyRequest
-	(*RowVerdict)(nil),                    // 57: docket.v1.RowVerdict
-	(*DispatchVerifyResponse)(nil),        // 58: docket.v1.DispatchVerifyResponse
-	(*DispatchWaiveTargetRequest)(nil),    // 59: docket.v1.DispatchWaiveTargetRequest
-	(*DispatchWaiveTargetResponse)(nil),   // 60: docket.v1.DispatchWaiveTargetResponse
-	(*DocCommentAddRequest)(nil),          // 61: docket.v1.DocCommentAddRequest
-	(*DocCommentAddResponse)(nil),         // 62: docket.v1.DocCommentAddResponse
-	(*DocCommentListRequest)(nil),         // 63: docket.v1.DocCommentListRequest
-	(*DocCommentListResponse)(nil),        // 64: docket.v1.DocCommentListResponse
-	(*DocCreateRequest)(nil),              // 65: docket.v1.DocCreateRequest
-	(*DocCreateResponse)(nil),             // 66: docket.v1.DocCreateResponse
-	(*DocDeleteRequest)(nil),              // 67: docket.v1.DocDeleteRequest
-	(*DocDeleteResponse)(nil),             // 68: docket.v1.DocDeleteResponse
-	(*DocEditRequest)(nil),                // 69: docket.v1.DocEditRequest
-	(*DocEditResponse)(nil),               // 70: docket.v1.DocEditResponse
-	(*DocLinkAddRequest)(nil),             // 71: docket.v1.DocLinkAddRequest
-	(*DocLinkAddResponse)(nil),            // 72: docket.v1.DocLinkAddResponse
-	(*DocLinkRemoveRequest)(nil),          // 73: docket.v1.DocLinkRemoveRequest
-	(*DocLinkRemoveResponse)(nil),         // 74: docket.v1.DocLinkRemoveResponse
-	(*DocListRequest)(nil),                // 75: docket.v1.DocListRequest
-	(*DocListResponse)(nil),               // 76: docket.v1.DocListResponse
-	(*DocShowRequest)(nil),                // 77: docket.v1.DocShowRequest
-	(*DocShowResponse)(nil),               // 78: docket.v1.DocShowResponse
-	(*DoctorRequest)(nil),                 // 79: docket.v1.DoctorRequest
-	(*DoctorCheck)(nil),                   // 80: docket.v1.DoctorCheck
-	(*DoctorResponse)(nil),                // 81: docket.v1.DoctorResponse
-	(*EventsListRequest)(nil),             // 82: docket.v1.EventsListRequest
-	(*EventsListResponse)(nil),            // 83: docket.v1.EventsListResponse
-	(*EventsPruneRequest)(nil),            // 84: docket.v1.EventsPruneRequest
-	(*EventsPruneResponse)(nil),           // 85: docket.v1.EventsPruneResponse
-	(*ExportRequest)(nil),                 // 86: docket.v1.ExportRequest
-	(*ExportResponse)(nil),                // 87: docket.v1.ExportResponse
-	(*ImportRequest)(nil),                 // 88: docket.v1.ImportRequest
-	(*ImportResponse)(nil),                // 89: docket.v1.ImportResponse
-	(*GateStatusRequest)(nil),             // 90: docket.v1.GateStatusRequest
-	(*GateStatusResponse)(nil),            // 91: docket.v1.GateStatusResponse
-	(*GuardDecision)(nil),                 // 92: docket.v1.GuardDecision
-	(*GuardGateRequest)(nil),              // 93: docket.v1.GuardGateRequest
-	(*GuardGateResponse)(nil),             // 94: docket.v1.GuardGateResponse
-	(*GuardRecordRequest)(nil),            // 95: docket.v1.GuardRecordRequest
-	(*GuardRecordResponse)(nil),           // 96: docket.v1.GuardRecordResponse
-	(*GuardSpawnRequest)(nil),             // 97: docket.v1.GuardSpawnRequest
-	(*GuardSpawnResponse)(nil),            // 98: docket.v1.GuardSpawnResponse
-	(*GuardStopRequest)(nil),              // 99: docket.v1.GuardStopRequest
-	(*GuardStopResponse)(nil),             // 100: docket.v1.GuardStopResponse
-	(*IssueClaimRequest)(nil),             // 101: docket.v1.IssueClaimRequest
-	(*IssueClaimResponse)(nil),            // 102: docket.v1.IssueClaimResponse
-	(*IssueCloseRequest)(nil),             // 103: docket.v1.IssueCloseRequest
-	(*IssueCloseResponse)(nil),            // 104: docket.v1.IssueCloseResponse
-	(*IssueCommentAddRequest)(nil),        // 105: docket.v1.IssueCommentAddRequest
-	(*IssueCommentAddResponse)(nil),       // 106: docket.v1.IssueCommentAddResponse
-	(*IssueCommentListRequest)(nil),       // 107: docket.v1.IssueCommentListRequest
-	(*IssueCommentListResponse)(nil),      // 108: docket.v1.IssueCommentListResponse
-	(*IssueCreateRequest)(nil),            // 109: docket.v1.IssueCreateRequest
-	(*IssueCreateResponse)(nil),           // 110: docket.v1.IssueCreateResponse
-	(*IssueDeleteRequest)(nil),            // 111: docket.v1.IssueDeleteRequest
-	(*IssueDeleteResponse)(nil),           // 112: docket.v1.IssueDeleteResponse
-	(*IssueEditRequest)(nil),              // 113: docket.v1.IssueEditRequest
-	(*IssueEditResponse)(nil),             // 114: docket.v1.IssueEditResponse
-	(*IssueFileAddRequest)(nil),           // 115: docket.v1.IssueFileAddRequest
-	(*IssueFileAddResponse)(nil),          // 116: docket.v1.IssueFileAddResponse
-	(*IssueFileListRequest)(nil),          // 117: docket.v1.IssueFileListRequest
-	(*IssueFileListResponse)(nil),         // 118: docket.v1.IssueFileListResponse
-	(*IssueFileRemoveRequest)(nil),        // 119: docket.v1.IssueFileRemoveRequest
-	(*IssueFileRemoveResponse)(nil),       // 120: docket.v1.IssueFileRemoveResponse
-	(*IssueGraphRequest)(nil),             // 121: docket.v1.IssueGraphRequest
-	(*GraphEdge)(nil),                     // 122: docket.v1.GraphEdge
-	(*IssueGraphResponse)(nil),            // 123: docket.v1.IssueGraphResponse
-	(*IssueHeartbeatRequest)(nil),         // 124: docket.v1.IssueHeartbeatRequest
-	(*IssueHeartbeatResponse)(nil),        // 125: docket.v1.IssueHeartbeatResponse
-	(*IssueLabelAddRequest)(nil),          // 126: docket.v1.IssueLabelAddRequest
-	(*IssueLabelAddResponse)(nil),         // 127: docket.v1.IssueLabelAddResponse
-	(*IssueLabelDeleteRequest)(nil),       // 128: docket.v1.IssueLabelDeleteRequest
-	(*IssueLabelDeleteResponse)(nil),      // 129: docket.v1.IssueLabelDeleteResponse
-	(*IssueLabelListRequest)(nil),         // 130: docket.v1.IssueLabelListRequest
-	(*IssueLabelListResponse)(nil),        // 131: docket.v1.IssueLabelListResponse
-	(*IssueLabelRmRequest)(nil),           // 132: docket.v1.IssueLabelRmRequest
-	(*IssueLabelRmResponse)(nil),          // 133: docket.v1.IssueLabelRmResponse
-	(*IssueLinkAddRequest)(nil),           // 134: docket.v1.IssueLinkAddRequest
-	(*IssueLinkAddResponse)(nil),          // 135: docket.v1.IssueLinkAddResponse
-	(*IssueLinkListRequest)(nil),          // 136: docket.v1.IssueLinkListRequest
-	(*IssueLinkListResponse)(nil),         // 137: docket.v1.IssueLinkListResponse
-	(*IssueLinkRemoveRequest)(nil),        // 138: docket.v1.IssueLinkRemoveRequest
-	(*IssueLinkRemoveResponse)(nil),       // 139: docket.v1.IssueLinkRemoveResponse
-	(*IssueListRequest)(nil),              // 140: docket.v1.IssueListRequest
-	(*IssueListResponse)(nil),             // 141: docket.v1.IssueListResponse
-	(*IssueLogRequest)(nil),               // 142: docket.v1.IssueLogRequest
-	(*IssueLogResponse)(nil),              // 143: docket.v1.IssueLogResponse
-	(*IssueMoveRequest)(nil),              // 144: docket.v1.IssueMoveRequest
-	(*IssueMoveResponse)(nil),             // 145: docket.v1.IssueMoveResponse
-	(*IssueReleaseRequest)(nil),           // 146: docket.v1.IssueReleaseRequest
-	(*IssueReleaseResponse)(nil),          // 147: docket.v1.IssueReleaseResponse
-	(*IssueReopenRequest)(nil),            // 148: docket.v1.IssueReopenRequest
-	(*IssueReopenResponse)(nil),           // 149: docket.v1.IssueReopenResponse
-	(*IssueShowRequest)(nil),              // 150: docket.v1.IssueShowRequest
-	(*IssueShowDetail)(nil),               // 151: docket.v1.IssueShowDetail
-	(*IssueShowResponse)(nil),             // 152: docket.v1.IssueShowResponse
-	(*NextRequest)(nil),                   // 153: docket.v1.NextRequest
-	(*NextResponse)(nil),                  // 154: docket.v1.NextResponse
-	(*PinShowRequest)(nil),                // 155: docket.v1.PinShowRequest
-	(*PinShowResponse)(nil),               // 156: docket.v1.PinShowResponse
-	(*PlanRequest)(nil),                   // 157: docket.v1.PlanRequest
-	(*PlanPhase)(nil),                     // 158: docket.v1.PlanPhase
-	(*PlanResponse)(nil),                  // 159: docket.v1.PlanResponse
-	(*PolicyResolveRequest)(nil),          // 160: docket.v1.PolicyResolveRequest
-	(*PolicyResolveResponse)(nil),         // 161: docket.v1.PolicyResolveResponse
-	(*ProjectDeleteRequest)(nil),          // 162: docket.v1.ProjectDeleteRequest
-	(*ProjectDeleteResponse)(nil),         // 163: docket.v1.ProjectDeleteResponse
-	(*ProjectListRequest)(nil),            // 164: docket.v1.ProjectListRequest
-	(*ProjectListResponse)(nil),           // 165: docket.v1.ProjectListResponse
-	(*ProjectSetPrefixRequest)(nil),       // 166: docket.v1.ProjectSetPrefixRequest
-	(*ProjectSetPrefixResponse)(nil),      // 167: docket.v1.ProjectSetPrefixResponse
-	(*RegistryAuditRequest)(nil),          // 168: docket.v1.RegistryAuditRequest
-	(*RegistryDrift)(nil),                 // 169: docket.v1.RegistryDrift
-	(*RegistryAuditResponse)(nil),         // 170: docket.v1.RegistryAuditResponse
-	(*ReportExecutorsRequest)(nil),        // 171: docket.v1.ReportExecutorsRequest
-	(*ExecutorRollup)(nil),                // 172: docket.v1.ExecutorRollup
-	(*ReportExecutorsResponse)(nil),       // 173: docket.v1.ReportExecutorsResponse
-	(*RunAbandonRequest)(nil),             // 174: docket.v1.RunAbandonRequest
-	(*RunAbandonResponse)(nil),            // 175: docket.v1.RunAbandonResponse
-	(*RunActivateRequest)(nil),            // 176: docket.v1.RunActivateRequest
-	(*RunActivateResponse)(nil),           // 177: docket.v1.RunActivateResponse
-	(*RunBudgetRequest)(nil),              // 178: docket.v1.RunBudgetRequest
-	(*RunBudgetResponse)(nil),             // 179: docket.v1.RunBudgetResponse
-	(*RunConductRequest)(nil),             // 180: docket.v1.RunConductRequest
-	(*RunConductResponse)(nil),            // 181: docket.v1.RunConductResponse
-	(*RunFactAddRequest)(nil),             // 182: docket.v1.RunFactAddRequest
-	(*RunFactAddResponse)(nil),            // 183: docket.v1.RunFactAddResponse
-	(*RunIssueAddRequest)(nil),            // 184: docket.v1.RunIssueAddRequest
-	(*RunIssueAddResponse)(nil),           // 185: docket.v1.RunIssueAddResponse
-	(*RunIssueRemoveRequest)(nil),         // 186: docket.v1.RunIssueRemoveRequest
-	(*RunIssueRemoveResponse)(nil),        // 187: docket.v1.RunIssueRemoveResponse
-	(*RunNoteAddRequest)(nil),             // 188: docket.v1.RunNoteAddRequest
-	(*RunNoteAddResponse)(nil),            // 189: docket.v1.RunNoteAddResponse
-	(*RunNoteListRequest)(nil),            // 190: docket.v1.RunNoteListRequest
-	(*RunNoteListResponse)(nil),           // 191: docket.v1.RunNoteListResponse
-	(*RunPauseRequest)(nil),               // 192: docket.v1.RunPauseRequest
-	(*RunPauseResponse)(nil),              // 193: docket.v1.RunPauseResponse
-	(*RunRefreshBodyRequest)(nil),         // 194: docket.v1.RunRefreshBodyRequest
-	(*RunRefreshBodyResponse)(nil),        // 195: docket.v1.RunRefreshBodyResponse
-	(*RunRefreshFilesRequest)(nil),        // 196: docket.v1.RunRefreshFilesRequest
-	(*RunRefreshFilesResponse)(nil),       // 197: docket.v1.RunRefreshFilesResponse
-	(*RunRefreshScopeRequest)(nil),        // 198: docket.v1.RunRefreshScopeRequest
-	(*RunRefreshScopeResponse)(nil),       // 199: docket.v1.RunRefreshScopeResponse
-	(*RunRepinRequest)(nil),               // 200: docket.v1.RunRepinRequest
-	(*RunRepinResponse)(nil),              // 201: docket.v1.RunRepinResponse
-	(*RunReportRequest)(nil),              // 202: docket.v1.RunReportRequest
-	(*RunReportResponse)(nil),             // 203: docket.v1.RunReportResponse
-	(*RunResumeRequest)(nil),              // 204: docket.v1.RunResumeRequest
-	(*RunResumeResponse)(nil),             // 205: docket.v1.RunResumeResponse
-	(*RunStartRequest)(nil),               // 206: docket.v1.RunStartRequest
-	(*RunStartResponse)(nil),              // 207: docket.v1.RunStartResponse
-	(*RunStatusRequest)(nil),              // 208: docket.v1.RunStatusRequest
-	(*RunStatusResponse)(nil),             // 209: docket.v1.RunStatusResponse
-	(*RunVerifyPinsRequest)(nil),          // 210: docket.v1.RunVerifyPinsRequest
-	(*RunVerifyPinsResponse)(nil),         // 211: docket.v1.RunVerifyPinsResponse
-	(*SchemaDeprecateRequest)(nil),        // 212: docket.v1.SchemaDeprecateRequest
-	(*SchemaDeprecateResponse)(nil),       // 213: docket.v1.SchemaDeprecateResponse
-	(*SchemaListRequest)(nil),             // 214: docket.v1.SchemaListRequest
-	(*SchemaListResponse)(nil),            // 215: docket.v1.SchemaListResponse
-	(*SchemaRegisterRequest)(nil),         // 216: docket.v1.SchemaRegisterRequest
-	(*SchemaRegisterResponse)(nil),        // 217: docket.v1.SchemaRegisterResponse
-	(*SchemaShowRequest)(nil),             // 218: docket.v1.SchemaShowRequest
-	(*SchemaShowResponse)(nil),            // 219: docket.v1.SchemaShowResponse
-	(*StatsRequest)(nil),                  // 220: docket.v1.StatsRequest
-	(*StatsResponse)(nil),                 // 221: docket.v1.StatsResponse
-	(*StepAnnotateRequest)(nil),           // 222: docket.v1.StepAnnotateRequest
-	(*StepAnnotateResponse)(nil),          // 223: docket.v1.StepAnnotateResponse
-	(*StepApproveRequest)(nil),            // 224: docket.v1.StepApproveRequest
-	(*StepApproveResponse)(nil),           // 225: docket.v1.StepApproveResponse
-	(*StepArtifactRequest)(nil),           // 226: docket.v1.StepArtifactRequest
-	(*StepArtifactResponse)(nil),          // 227: docket.v1.StepArtifactResponse
-	(*StepArtifactsRequest)(nil),          // 228: docket.v1.StepArtifactsRequest
-	(*StepArtifactsResponse)(nil),         // 229: docket.v1.StepArtifactsResponse
-	(*StepClaimRequest)(nil),              // 230: docket.v1.StepClaimRequest
-	(*StepClaimResponse)(nil),             // 231: docket.v1.StepClaimResponse
-	(*StepCompleteRequest)(nil),           // 232: docket.v1.StepCompleteRequest
-	(*StepCompleteResponse)(nil),          // 233: docket.v1.StepCompleteResponse
-	(*StepContextRequest)(nil),            // 234: docket.v1.StepContextRequest
-	(*StepContextResponse)(nil),           // 235: docket.v1.StepContextResponse
-	(*StepFailRequest)(nil),               // 236: docket.v1.StepFailRequest
-	(*StepFailResponse)(nil),              // 237: docket.v1.StepFailResponse
-	(*StepGatesRequest)(nil),              // 238: docket.v1.StepGatesRequest
-	(*StepGatesResponse)(nil),             // 239: docket.v1.StepGatesResponse
-	(*StepHeartbeatRequest)(nil),          // 240: docket.v1.StepHeartbeatRequest
-	(*StepHeartbeatResponse)(nil),         // 241: docket.v1.StepHeartbeatResponse
-	(*StepHoldRequest)(nil),               // 242: docket.v1.StepHoldRequest
-	(*StepHoldResponse)(nil),              // 243: docket.v1.StepHoldResponse
-	(*StepListRequest)(nil),               // 244: docket.v1.StepListRequest
-	(*StepListResponse)(nil),              // 245: docket.v1.StepListResponse
-	(*StepReapRequest)(nil),               // 246: docket.v1.StepReapRequest
-	(*StepReapResponse)(nil),              // 247: docket.v1.StepReapResponse
-	(*StepRejectRequest)(nil),             // 248: docket.v1.StepRejectRequest
-	(*StepRejectResponse)(nil),            // 249: docket.v1.StepRejectResponse
-	(*StepRenderRequest)(nil),             // 250: docket.v1.StepRenderRequest
-	(*StepRenderResponse)(nil),            // 251: docket.v1.StepRenderResponse
-	(*StepResolveRequest)(nil),            // 252: docket.v1.StepResolveRequest
-	(*StepResolveResponse)(nil),           // 253: docket.v1.StepResolveResponse
-	(*StepShowRequest)(nil),               // 254: docket.v1.StepShowRequest
-	(*StepShowResponse)(nil),              // 255: docket.v1.StepShowResponse
-	(*VoteBackfillUsageRequest)(nil),      // 256: docket.v1.VoteBackfillUsageRequest
-	(*VoteBackfillUsageResponse)(nil),     // 257: docket.v1.VoteBackfillUsageResponse
-	(*VoteCastRequest)(nil),               // 258: docket.v1.VoteCastRequest
-	(*VoteCastResponse)(nil),              // 259: docket.v1.VoteCastResponse
-	(*VoteCloseRequest)(nil),              // 260: docket.v1.VoteCloseRequest
-	(*VoteCloseResponse)(nil),             // 261: docket.v1.VoteCloseResponse
-	(*VoteCommitRequest)(nil),             // 262: docket.v1.VoteCommitRequest
-	(*VoteCommitResponse)(nil),            // 263: docket.v1.VoteCommitResponse
-	(*VoteCreateRequest)(nil),             // 264: docket.v1.VoteCreateRequest
-	(*VoteCreateResponse)(nil),            // 265: docket.v1.VoteCreateResponse
-	(*VoteLinkRequest)(nil),               // 266: docket.v1.VoteLinkRequest
-	(*VoteLinkResponse)(nil),              // 267: docket.v1.VoteLinkResponse
-	(*VoteListRequest)(nil),               // 268: docket.v1.VoteListRequest
-	(*VoteListResponse)(nil),              // 269: docket.v1.VoteListResponse
-	(*VoteResultRequest)(nil),             // 270: docket.v1.VoteResultRequest
-	(*VoteResultResponse)(nil),            // 271: docket.v1.VoteResultResponse
-	(*VoteShowRequest)(nil),               // 272: docket.v1.VoteShowRequest
-	(*VoteShowResponse)(nil),              // 273: docket.v1.VoteShowResponse
-	(*VoteUnlinkRequest)(nil),             // 274: docket.v1.VoteUnlinkRequest
-	(*VoteUnlinkResponse)(nil),            // 275: docket.v1.VoteUnlinkResponse
-	(*WorkflowDeprecateRequest)(nil),      // 276: docket.v1.WorkflowDeprecateRequest
-	(*WorkflowDeprecateResponse)(nil),     // 277: docket.v1.WorkflowDeprecateResponse
-	(*WorkflowLintRequest)(nil),           // 278: docket.v1.WorkflowLintRequest
-	(*LintFinding)(nil),                   // 279: docket.v1.LintFinding
-	(*WorkflowLintResponse)(nil),          // 280: docket.v1.WorkflowLintResponse
-	(*WorkflowListRequest)(nil),           // 281: docket.v1.WorkflowListRequest
-	(*WorkflowListResponse)(nil),          // 282: docket.v1.WorkflowListResponse
-	(*WorkflowRegisterRequest)(nil),       // 283: docket.v1.WorkflowRegisterRequest
-	(*WorkflowRegisterResponse)(nil),      // 284: docket.v1.WorkflowRegisterResponse
-	(*WorkflowShowRequest)(nil),           // 285: docket.v1.WorkflowShowRequest
-	(*WorkflowShowResponse)(nil),          // 286: docket.v1.WorkflowShowResponse
+	(*ContextResolution)(nil),             // 25: docket.v1.ContextResolution
+	(*Event)(nil),                         // 26: docket.v1.Event
+	(*RunNote)(nil),                       // 27: docket.v1.RunNote
+	(*Manifest)(nil),                      // 28: docket.v1.Manifest
+	(*PinVerdict)(nil),                    // 29: docket.v1.PinVerdict
+	(*Finding)(nil),                       // 30: docket.v1.Finding
+	(*Proposal)(nil),                      // 31: docket.v1.Proposal
+	(*Vote)(nil),                          // 32: docket.v1.Vote
+	(*Schema)(nil),                        // 33: docket.v1.Schema
+	(*Workflow)(nil),                      // 34: docket.v1.Workflow
+	(*UsageRow)(nil),                      // 35: docket.v1.UsageRow
+	(*IssueFilter)(nil),                   // 36: docket.v1.IssueFilter
+	(*HandshakeRequest)(nil),              // 37: docket.v1.HandshakeRequest
+	(*HandshakeResponse)(nil),             // 38: docket.v1.HandshakeResponse
+	(*BoardRequest)(nil),                  // 39: docket.v1.BoardRequest
+	(*BoardColumn)(nil),                   // 40: docket.v1.BoardColumn
+	(*BoardResponse)(nil),                 // 41: docket.v1.BoardResponse
+	(*ConfigGetRequest)(nil),              // 42: docket.v1.ConfigGetRequest
+	(*ConfigValue)(nil),                   // 43: docket.v1.ConfigValue
+	(*ConfigGetResponse)(nil),             // 44: docket.v1.ConfigGetResponse
+	(*ConfigSetRequest)(nil),              // 45: docket.v1.ConfigSetRequest
+	(*ConfigSetResponse)(nil),             // 46: docket.v1.ConfigSetResponse
+	(*DispatchAbandonRequest)(nil),        // 47: docket.v1.DispatchAbandonRequest
+	(*DispatchAbandonResponse)(nil),       // 48: docket.v1.DispatchAbandonResponse
+	(*DispatchBackfillUsageRequest)(nil),  // 49: docket.v1.DispatchBackfillUsageRequest
+	(*DispatchBackfillUsageResponse)(nil), // 50: docket.v1.DispatchBackfillUsageResponse
+	(*DispatchCloseRequest)(nil),          // 51: docket.v1.DispatchCloseRequest
+	(*DispatchCloseResponse)(nil),         // 52: docket.v1.DispatchCloseResponse
+	(*DispatchExtendRequest)(nil),         // 53: docket.v1.DispatchExtendRequest
+	(*DispatchExtendResponse)(nil),        // 54: docket.v1.DispatchExtendResponse
+	(*DispatchOpenRequest)(nil),           // 55: docket.v1.DispatchOpenRequest
+	(*DispatchOpenResponse)(nil),          // 56: docket.v1.DispatchOpenResponse
+	(*DispatchVerifyRequest)(nil),         // 57: docket.v1.DispatchVerifyRequest
+	(*RowVerdict)(nil),                    // 58: docket.v1.RowVerdict
+	(*DispatchVerifyResponse)(nil),        // 59: docket.v1.DispatchVerifyResponse
+	(*DispatchWaiveTargetRequest)(nil),    // 60: docket.v1.DispatchWaiveTargetRequest
+	(*DispatchWaiveTargetResponse)(nil),   // 61: docket.v1.DispatchWaiveTargetResponse
+	(*DocCommentAddRequest)(nil),          // 62: docket.v1.DocCommentAddRequest
+	(*DocCommentAddResponse)(nil),         // 63: docket.v1.DocCommentAddResponse
+	(*DocCommentListRequest)(nil),         // 64: docket.v1.DocCommentListRequest
+	(*DocCommentListResponse)(nil),        // 65: docket.v1.DocCommentListResponse
+	(*DocCreateRequest)(nil),              // 66: docket.v1.DocCreateRequest
+	(*DocCreateResponse)(nil),             // 67: docket.v1.DocCreateResponse
+	(*DocDeleteRequest)(nil),              // 68: docket.v1.DocDeleteRequest
+	(*DocDeleteResponse)(nil),             // 69: docket.v1.DocDeleteResponse
+	(*DocEditRequest)(nil),                // 70: docket.v1.DocEditRequest
+	(*DocEditResponse)(nil),               // 71: docket.v1.DocEditResponse
+	(*DocLinkAddRequest)(nil),             // 72: docket.v1.DocLinkAddRequest
+	(*DocLinkAddResponse)(nil),            // 73: docket.v1.DocLinkAddResponse
+	(*DocLinkRemoveRequest)(nil),          // 74: docket.v1.DocLinkRemoveRequest
+	(*DocLinkRemoveResponse)(nil),         // 75: docket.v1.DocLinkRemoveResponse
+	(*DocListRequest)(nil),                // 76: docket.v1.DocListRequest
+	(*DocListResponse)(nil),               // 77: docket.v1.DocListResponse
+	(*DocShowRequest)(nil),                // 78: docket.v1.DocShowRequest
+	(*DocShowResponse)(nil),               // 79: docket.v1.DocShowResponse
+	(*DoctorRequest)(nil),                 // 80: docket.v1.DoctorRequest
+	(*DoctorCheck)(nil),                   // 81: docket.v1.DoctorCheck
+	(*DoctorResponse)(nil),                // 82: docket.v1.DoctorResponse
+	(*EventsListRequest)(nil),             // 83: docket.v1.EventsListRequest
+	(*EventsListResponse)(nil),            // 84: docket.v1.EventsListResponse
+	(*EventsPruneRequest)(nil),            // 85: docket.v1.EventsPruneRequest
+	(*EventsPruneResponse)(nil),           // 86: docket.v1.EventsPruneResponse
+	(*ExportRequest)(nil),                 // 87: docket.v1.ExportRequest
+	(*ExportResponse)(nil),                // 88: docket.v1.ExportResponse
+	(*ImportRequest)(nil),                 // 89: docket.v1.ImportRequest
+	(*ImportResponse)(nil),                // 90: docket.v1.ImportResponse
+	(*GateStatusRequest)(nil),             // 91: docket.v1.GateStatusRequest
+	(*GateStatusResponse)(nil),            // 92: docket.v1.GateStatusResponse
+	(*GuardDecision)(nil),                 // 93: docket.v1.GuardDecision
+	(*GuardGateRequest)(nil),              // 94: docket.v1.GuardGateRequest
+	(*GuardGateResponse)(nil),             // 95: docket.v1.GuardGateResponse
+	(*GuardRecordRequest)(nil),            // 96: docket.v1.GuardRecordRequest
+	(*GuardRecordResponse)(nil),           // 97: docket.v1.GuardRecordResponse
+	(*GuardSpawnRequest)(nil),             // 98: docket.v1.GuardSpawnRequest
+	(*GuardSpawnResponse)(nil),            // 99: docket.v1.GuardSpawnResponse
+	(*GuardStopRequest)(nil),              // 100: docket.v1.GuardStopRequest
+	(*GuardStopResponse)(nil),             // 101: docket.v1.GuardStopResponse
+	(*IssueClaimRequest)(nil),             // 102: docket.v1.IssueClaimRequest
+	(*IssueClaimResponse)(nil),            // 103: docket.v1.IssueClaimResponse
+	(*IssueCloseRequest)(nil),             // 104: docket.v1.IssueCloseRequest
+	(*IssueCloseResponse)(nil),            // 105: docket.v1.IssueCloseResponse
+	(*IssueCommentAddRequest)(nil),        // 106: docket.v1.IssueCommentAddRequest
+	(*IssueCommentAddResponse)(nil),       // 107: docket.v1.IssueCommentAddResponse
+	(*IssueCommentListRequest)(nil),       // 108: docket.v1.IssueCommentListRequest
+	(*IssueCommentListResponse)(nil),      // 109: docket.v1.IssueCommentListResponse
+	(*IssueCreateRequest)(nil),            // 110: docket.v1.IssueCreateRequest
+	(*IssueCreateResponse)(nil),           // 111: docket.v1.IssueCreateResponse
+	(*IssueDeleteRequest)(nil),            // 112: docket.v1.IssueDeleteRequest
+	(*IssueDeleteResponse)(nil),           // 113: docket.v1.IssueDeleteResponse
+	(*IssueEditRequest)(nil),              // 114: docket.v1.IssueEditRequest
+	(*IssueEditResponse)(nil),             // 115: docket.v1.IssueEditResponse
+	(*IssueFileAddRequest)(nil),           // 116: docket.v1.IssueFileAddRequest
+	(*IssueFileAddResponse)(nil),          // 117: docket.v1.IssueFileAddResponse
+	(*IssueFileListRequest)(nil),          // 118: docket.v1.IssueFileListRequest
+	(*IssueFileListResponse)(nil),         // 119: docket.v1.IssueFileListResponse
+	(*IssueFileRemoveRequest)(nil),        // 120: docket.v1.IssueFileRemoveRequest
+	(*IssueFileRemoveResponse)(nil),       // 121: docket.v1.IssueFileRemoveResponse
+	(*IssueGraphRequest)(nil),             // 122: docket.v1.IssueGraphRequest
+	(*GraphEdge)(nil),                     // 123: docket.v1.GraphEdge
+	(*IssueGraphResponse)(nil),            // 124: docket.v1.IssueGraphResponse
+	(*IssueHeartbeatRequest)(nil),         // 125: docket.v1.IssueHeartbeatRequest
+	(*IssueHeartbeatResponse)(nil),        // 126: docket.v1.IssueHeartbeatResponse
+	(*IssueLabelAddRequest)(nil),          // 127: docket.v1.IssueLabelAddRequest
+	(*IssueLabelAddResponse)(nil),         // 128: docket.v1.IssueLabelAddResponse
+	(*IssueLabelDeleteRequest)(nil),       // 129: docket.v1.IssueLabelDeleteRequest
+	(*IssueLabelDeleteResponse)(nil),      // 130: docket.v1.IssueLabelDeleteResponse
+	(*IssueLabelListRequest)(nil),         // 131: docket.v1.IssueLabelListRequest
+	(*IssueLabelListResponse)(nil),        // 132: docket.v1.IssueLabelListResponse
+	(*IssueLabelRmRequest)(nil),           // 133: docket.v1.IssueLabelRmRequest
+	(*IssueLabelRmResponse)(nil),          // 134: docket.v1.IssueLabelRmResponse
+	(*IssueLinkAddRequest)(nil),           // 135: docket.v1.IssueLinkAddRequest
+	(*IssueLinkAddResponse)(nil),          // 136: docket.v1.IssueLinkAddResponse
+	(*IssueLinkListRequest)(nil),          // 137: docket.v1.IssueLinkListRequest
+	(*IssueLinkListResponse)(nil),         // 138: docket.v1.IssueLinkListResponse
+	(*IssueLinkRemoveRequest)(nil),        // 139: docket.v1.IssueLinkRemoveRequest
+	(*IssueLinkRemoveResponse)(nil),       // 140: docket.v1.IssueLinkRemoveResponse
+	(*IssueListRequest)(nil),              // 141: docket.v1.IssueListRequest
+	(*IssueListResponse)(nil),             // 142: docket.v1.IssueListResponse
+	(*IssueLogRequest)(nil),               // 143: docket.v1.IssueLogRequest
+	(*IssueLogResponse)(nil),              // 144: docket.v1.IssueLogResponse
+	(*IssueMoveRequest)(nil),              // 145: docket.v1.IssueMoveRequest
+	(*IssueMoveResponse)(nil),             // 146: docket.v1.IssueMoveResponse
+	(*IssueReleaseRequest)(nil),           // 147: docket.v1.IssueReleaseRequest
+	(*IssueReleaseResponse)(nil),          // 148: docket.v1.IssueReleaseResponse
+	(*IssueReopenRequest)(nil),            // 149: docket.v1.IssueReopenRequest
+	(*IssueReopenResponse)(nil),           // 150: docket.v1.IssueReopenResponse
+	(*IssueShowRequest)(nil),              // 151: docket.v1.IssueShowRequest
+	(*IssueShowDetail)(nil),               // 152: docket.v1.IssueShowDetail
+	(*IssueShowResponse)(nil),             // 153: docket.v1.IssueShowResponse
+	(*NextRequest)(nil),                   // 154: docket.v1.NextRequest
+	(*NextResponse)(nil),                  // 155: docket.v1.NextResponse
+	(*PinShowRequest)(nil),                // 156: docket.v1.PinShowRequest
+	(*PinShowResponse)(nil),               // 157: docket.v1.PinShowResponse
+	(*PlanRequest)(nil),                   // 158: docket.v1.PlanRequest
+	(*PlanPhase)(nil),                     // 159: docket.v1.PlanPhase
+	(*PlanResponse)(nil),                  // 160: docket.v1.PlanResponse
+	(*PolicyResolveRequest)(nil),          // 161: docket.v1.PolicyResolveRequest
+	(*PolicyResolveResponse)(nil),         // 162: docket.v1.PolicyResolveResponse
+	(*ProjectDeleteRequest)(nil),          // 163: docket.v1.ProjectDeleteRequest
+	(*ProjectDeleteResponse)(nil),         // 164: docket.v1.ProjectDeleteResponse
+	(*ProjectListRequest)(nil),            // 165: docket.v1.ProjectListRequest
+	(*ProjectListResponse)(nil),           // 166: docket.v1.ProjectListResponse
+	(*ProjectSetPrefixRequest)(nil),       // 167: docket.v1.ProjectSetPrefixRequest
+	(*ProjectSetPrefixResponse)(nil),      // 168: docket.v1.ProjectSetPrefixResponse
+	(*RegistryAuditRequest)(nil),          // 169: docket.v1.RegistryAuditRequest
+	(*RegistryDrift)(nil),                 // 170: docket.v1.RegistryDrift
+	(*RegistryAuditResponse)(nil),         // 171: docket.v1.RegistryAuditResponse
+	(*ReportExecutorsRequest)(nil),        // 172: docket.v1.ReportExecutorsRequest
+	(*ExecutorRollup)(nil),                // 173: docket.v1.ExecutorRollup
+	(*ReportExecutorsResponse)(nil),       // 174: docket.v1.ReportExecutorsResponse
+	(*RunAbandonRequest)(nil),             // 175: docket.v1.RunAbandonRequest
+	(*RunAbandonResponse)(nil),            // 176: docket.v1.RunAbandonResponse
+	(*RunActivateRequest)(nil),            // 177: docket.v1.RunActivateRequest
+	(*RunActivateResponse)(nil),           // 178: docket.v1.RunActivateResponse
+	(*RunBudgetRequest)(nil),              // 179: docket.v1.RunBudgetRequest
+	(*RunBudgetResponse)(nil),             // 180: docket.v1.RunBudgetResponse
+	(*RunConductRequest)(nil),             // 181: docket.v1.RunConductRequest
+	(*RunConductResponse)(nil),            // 182: docket.v1.RunConductResponse
+	(*RunFactAddRequest)(nil),             // 183: docket.v1.RunFactAddRequest
+	(*RunFactAddResponse)(nil),            // 184: docket.v1.RunFactAddResponse
+	(*RunIssueAddRequest)(nil),            // 185: docket.v1.RunIssueAddRequest
+	(*RunIssueAddResponse)(nil),           // 186: docket.v1.RunIssueAddResponse
+	(*RunIssueRemoveRequest)(nil),         // 187: docket.v1.RunIssueRemoveRequest
+	(*RunIssueRemoveResponse)(nil),        // 188: docket.v1.RunIssueRemoveResponse
+	(*RunNoteAddRequest)(nil),             // 189: docket.v1.RunNoteAddRequest
+	(*RunNoteAddResponse)(nil),            // 190: docket.v1.RunNoteAddResponse
+	(*RunNoteListRequest)(nil),            // 191: docket.v1.RunNoteListRequest
+	(*RunNoteListResponse)(nil),           // 192: docket.v1.RunNoteListResponse
+	(*RunPauseRequest)(nil),               // 193: docket.v1.RunPauseRequest
+	(*RunPauseResponse)(nil),              // 194: docket.v1.RunPauseResponse
+	(*RunRefreshBodyRequest)(nil),         // 195: docket.v1.RunRefreshBodyRequest
+	(*RunRefreshBodyResponse)(nil),        // 196: docket.v1.RunRefreshBodyResponse
+	(*RunRefreshFilesRequest)(nil),        // 197: docket.v1.RunRefreshFilesRequest
+	(*RunRefreshFilesResponse)(nil),       // 198: docket.v1.RunRefreshFilesResponse
+	(*RunRefreshScopeRequest)(nil),        // 199: docket.v1.RunRefreshScopeRequest
+	(*RunRefreshScopeResponse)(nil),       // 200: docket.v1.RunRefreshScopeResponse
+	(*RunRepinRequest)(nil),               // 201: docket.v1.RunRepinRequest
+	(*RunRepinResponse)(nil),              // 202: docket.v1.RunRepinResponse
+	(*RunReportRequest)(nil),              // 203: docket.v1.RunReportRequest
+	(*RunReportResponse)(nil),             // 204: docket.v1.RunReportResponse
+	(*RunResumeRequest)(nil),              // 205: docket.v1.RunResumeRequest
+	(*RunResumeResponse)(nil),             // 206: docket.v1.RunResumeResponse
+	(*RunStartRequest)(nil),               // 207: docket.v1.RunStartRequest
+	(*RunStartResponse)(nil),              // 208: docket.v1.RunStartResponse
+	(*RunStatusRequest)(nil),              // 209: docket.v1.RunStatusRequest
+	(*RunStatusResponse)(nil),             // 210: docket.v1.RunStatusResponse
+	(*RunVerifyPinsRequest)(nil),          // 211: docket.v1.RunVerifyPinsRequest
+	(*RunVerifyPinsResponse)(nil),         // 212: docket.v1.RunVerifyPinsResponse
+	(*SchemaDeprecateRequest)(nil),        // 213: docket.v1.SchemaDeprecateRequest
+	(*SchemaDeprecateResponse)(nil),       // 214: docket.v1.SchemaDeprecateResponse
+	(*SchemaListRequest)(nil),             // 215: docket.v1.SchemaListRequest
+	(*SchemaListResponse)(nil),            // 216: docket.v1.SchemaListResponse
+	(*SchemaRegisterRequest)(nil),         // 217: docket.v1.SchemaRegisterRequest
+	(*SchemaRegisterResponse)(nil),        // 218: docket.v1.SchemaRegisterResponse
+	(*SchemaShowRequest)(nil),             // 219: docket.v1.SchemaShowRequest
+	(*SchemaShowResponse)(nil),            // 220: docket.v1.SchemaShowResponse
+	(*StatsRequest)(nil),                  // 221: docket.v1.StatsRequest
+	(*StatsResponse)(nil),                 // 222: docket.v1.StatsResponse
+	(*StepAnnotateRequest)(nil),           // 223: docket.v1.StepAnnotateRequest
+	(*StepAnnotateResponse)(nil),          // 224: docket.v1.StepAnnotateResponse
+	(*StepApproveRequest)(nil),            // 225: docket.v1.StepApproveRequest
+	(*StepApproveResponse)(nil),           // 226: docket.v1.StepApproveResponse
+	(*StepArtifactRequest)(nil),           // 227: docket.v1.StepArtifactRequest
+	(*StepArtifactResponse)(nil),          // 228: docket.v1.StepArtifactResponse
+	(*StepArtifactsRequest)(nil),          // 229: docket.v1.StepArtifactsRequest
+	(*StepArtifactsResponse)(nil),         // 230: docket.v1.StepArtifactsResponse
+	(*StepClaimRequest)(nil),              // 231: docket.v1.StepClaimRequest
+	(*StepClaimResponse)(nil),             // 232: docket.v1.StepClaimResponse
+	(*StepCompleteRequest)(nil),           // 233: docket.v1.StepCompleteRequest
+	(*StepCompleteResponse)(nil),          // 234: docket.v1.StepCompleteResponse
+	(*StepContextRequest)(nil),            // 235: docket.v1.StepContextRequest
+	(*StepContextResponse)(nil),           // 236: docket.v1.StepContextResponse
+	(*StepFailRequest)(nil),               // 237: docket.v1.StepFailRequest
+	(*StepFailResponse)(nil),              // 238: docket.v1.StepFailResponse
+	(*StepGatesRequest)(nil),              // 239: docket.v1.StepGatesRequest
+	(*StepGatesResponse)(nil),             // 240: docket.v1.StepGatesResponse
+	(*StepHeartbeatRequest)(nil),          // 241: docket.v1.StepHeartbeatRequest
+	(*StepHeartbeatResponse)(nil),         // 242: docket.v1.StepHeartbeatResponse
+	(*StepHoldRequest)(nil),               // 243: docket.v1.StepHoldRequest
+	(*StepHoldResponse)(nil),              // 244: docket.v1.StepHoldResponse
+	(*StepListRequest)(nil),               // 245: docket.v1.StepListRequest
+	(*StepListResponse)(nil),              // 246: docket.v1.StepListResponse
+	(*StepReapRequest)(nil),               // 247: docket.v1.StepReapRequest
+	(*StepReapResponse)(nil),              // 248: docket.v1.StepReapResponse
+	(*StepRejectRequest)(nil),             // 249: docket.v1.StepRejectRequest
+	(*StepRejectResponse)(nil),            // 250: docket.v1.StepRejectResponse
+	(*StepRenderRequest)(nil),             // 251: docket.v1.StepRenderRequest
+	(*StepRenderResponse)(nil),            // 252: docket.v1.StepRenderResponse
+	(*StepResolveRequest)(nil),            // 253: docket.v1.StepResolveRequest
+	(*StepResolveResponse)(nil),           // 254: docket.v1.StepResolveResponse
+	(*StepShowRequest)(nil),               // 255: docket.v1.StepShowRequest
+	(*StepShowResponse)(nil),              // 256: docket.v1.StepShowResponse
+	(*VoteBackfillUsageRequest)(nil),      // 257: docket.v1.VoteBackfillUsageRequest
+	(*VoteBackfillUsageResponse)(nil),     // 258: docket.v1.VoteBackfillUsageResponse
+	(*VoteCastRequest)(nil),               // 259: docket.v1.VoteCastRequest
+	(*VoteCastResponse)(nil),              // 260: docket.v1.VoteCastResponse
+	(*VoteCloseRequest)(nil),              // 261: docket.v1.VoteCloseRequest
+	(*VoteCloseResponse)(nil),             // 262: docket.v1.VoteCloseResponse
+	(*VoteCommitRequest)(nil),             // 263: docket.v1.VoteCommitRequest
+	(*VoteCommitResponse)(nil),            // 264: docket.v1.VoteCommitResponse
+	(*VoteCreateRequest)(nil),             // 265: docket.v1.VoteCreateRequest
+	(*VoteCreateResponse)(nil),            // 266: docket.v1.VoteCreateResponse
+	(*VoteLinkRequest)(nil),               // 267: docket.v1.VoteLinkRequest
+	(*VoteLinkResponse)(nil),              // 268: docket.v1.VoteLinkResponse
+	(*VoteListRequest)(nil),               // 269: docket.v1.VoteListRequest
+	(*VoteListResponse)(nil),              // 270: docket.v1.VoteListResponse
+	(*VoteResultRequest)(nil),             // 271: docket.v1.VoteResultRequest
+	(*VoteResultResponse)(nil),            // 272: docket.v1.VoteResultResponse
+	(*VoteShowRequest)(nil),               // 273: docket.v1.VoteShowRequest
+	(*VoteShowResponse)(nil),              // 274: docket.v1.VoteShowResponse
+	(*VoteUnlinkRequest)(nil),             // 275: docket.v1.VoteUnlinkRequest
+	(*VoteUnlinkResponse)(nil),            // 276: docket.v1.VoteUnlinkResponse
+	(*WorkflowDeprecateRequest)(nil),      // 277: docket.v1.WorkflowDeprecateRequest
+	(*WorkflowDeprecateResponse)(nil),     // 278: docket.v1.WorkflowDeprecateResponse
+	(*WorkflowLintRequest)(nil),           // 279: docket.v1.WorkflowLintRequest
+	(*LintFinding)(nil),                   // 280: docket.v1.LintFinding
+	(*WorkflowLintResponse)(nil),          // 281: docket.v1.WorkflowLintResponse
+	(*WorkflowListRequest)(nil),           // 282: docket.v1.WorkflowListRequest
+	(*WorkflowListResponse)(nil),          // 283: docket.v1.WorkflowListResponse
+	(*WorkflowRegisterRequest)(nil),       // 284: docket.v1.WorkflowRegisterRequest
+	(*WorkflowRegisterResponse)(nil),      // 285: docket.v1.WorkflowRegisterResponse
+	(*WorkflowShowRequest)(nil),           // 286: docket.v1.WorkflowShowRequest
+	(*WorkflowShowResponse)(nil),          // 287: docket.v1.WorkflowShowResponse
 }
 var file_docket_v1_docket_proto_depIdxs = []int32{
 	3,   // 0: docket.v1.Issue.docs:type_name -> docket.v1.DocRef
@@ -19528,376 +19629,378 @@ var file_docket_v1_docket_proto_depIdxs = []int32{
 	22,  // 11: docket.v1.StepContextBundle.pins:type_name -> docket.v1.ContextPin
 	23,  // 12: docket.v1.StepContextBundle.loop_entry:type_name -> docket.v1.LoopEntry
 	19,  // 13: docket.v1.StepContextBundle.pre_gates:type_name -> docket.v1.GateResult
-	17,  // 14: docket.v1.Manifest.rows:type_name -> docket.v1.StepRow
-	31,  // 15: docket.v1.Proposal.votes:type_name -> docket.v1.Vote
-	29,  // 16: docket.v1.Vote.findings_json:type_name -> docket.v1.Finding
-	35,  // 17: docket.v1.BoardRequest.filter:type_name -> docket.v1.IssueFilter
-	4,   // 18: docket.v1.BoardColumn.issues:type_name -> docket.v1.Issue
-	39,  // 19: docket.v1.BoardResponse.columns:type_name -> docket.v1.BoardColumn
-	42,  // 20: docket.v1.ConfigGetResponse.values:type_name -> docket.v1.ConfigValue
-	42,  // 21: docket.v1.ConfigSetResponse.value:type_name -> docket.v1.ConfigValue
-	27,  // 22: docket.v1.DispatchAbandonResponse.manifest:type_name -> docket.v1.Manifest
-	34,  // 23: docket.v1.DispatchBackfillUsageRequest.rows:type_name -> docket.v1.UsageRow
-	34,  // 24: docket.v1.DispatchCloseRequest.backfill_rows:type_name -> docket.v1.UsageRow
-	27,  // 25: docket.v1.DispatchCloseResponse.manifest:type_name -> docket.v1.Manifest
-	27,  // 26: docket.v1.DispatchExtendResponse.manifest:type_name -> docket.v1.Manifest
-	17,  // 27: docket.v1.DispatchExtendResponse.added:type_name -> docket.v1.StepRow
-	27,  // 28: docket.v1.DispatchOpenResponse.manifest:type_name -> docket.v1.Manifest
-	28,  // 29: docket.v1.DispatchOpenResponse.pin_drift:type_name -> docket.v1.PinVerdict
-	17,  // 30: docket.v1.RowVerdict.manifest_row:type_name -> docket.v1.StepRow
-	17,  // 31: docket.v1.RowVerdict.current_row:type_name -> docket.v1.StepRow
-	57,  // 32: docket.v1.DispatchVerifyResponse.rows:type_name -> docket.v1.RowVerdict
-	11,  // 33: docket.v1.DocCommentAddResponse.comment:type_name -> docket.v1.DocComment
-	11,  // 34: docket.v1.DocCommentListResponse.items:type_name -> docket.v1.DocComment
-	9,   // 35: docket.v1.DocCreateResponse.doc:type_name -> docket.v1.Doc
-	9,   // 36: docket.v1.DocEditResponse.doc:type_name -> docket.v1.Doc
-	9,   // 37: docket.v1.DocListResponse.items:type_name -> docket.v1.Doc
-	9,   // 38: docket.v1.DocShowResponse.doc:type_name -> docket.v1.Doc
-	80,  // 39: docket.v1.DoctorResponse.checks:type_name -> docket.v1.DoctorCheck
-	25,  // 40: docket.v1.EventsListResponse.items:type_name -> docket.v1.Event
-	35,  // 41: docket.v1.ExportRequest.filter:type_name -> docket.v1.IssueFilter
-	92,  // 42: docket.v1.GuardGateResponse.decision:type_name -> docket.v1.GuardDecision
-	92,  // 43: docket.v1.GuardRecordResponse.decision:type_name -> docket.v1.GuardDecision
-	17,  // 44: docket.v1.GuardSpawnRequest.rows:type_name -> docket.v1.StepRow
-	92,  // 45: docket.v1.GuardSpawnResponse.decision:type_name -> docket.v1.GuardDecision
-	92,  // 46: docket.v1.GuardStopResponse.decision:type_name -> docket.v1.GuardDecision
-	4,   // 47: docket.v1.IssueCloseResponse.issue:type_name -> docket.v1.Issue
-	5,   // 48: docket.v1.IssueCommentAddResponse.comment:type_name -> docket.v1.Comment
-	5,   // 49: docket.v1.IssueCommentListResponse.items:type_name -> docket.v1.Comment
-	4,   // 50: docket.v1.IssueCreateResponse.issue:type_name -> docket.v1.Issue
-	4,   // 51: docket.v1.IssueEditResponse.issue:type_name -> docket.v1.Issue
-	4,   // 52: docket.v1.IssueGraphResponse.nodes:type_name -> docket.v1.Issue
-	122, // 53: docket.v1.IssueGraphResponse.edges:type_name -> docket.v1.GraphEdge
-	4,   // 54: docket.v1.IssueLabelAddResponse.issue:type_name -> docket.v1.Issue
-	7,   // 55: docket.v1.IssueLabelListResponse.items:type_name -> docket.v1.Label
-	4,   // 56: docket.v1.IssueLabelRmResponse.issue:type_name -> docket.v1.Issue
-	8,   // 57: docket.v1.IssueLinkAddResponse.relation:type_name -> docket.v1.Relation
-	8,   // 58: docket.v1.IssueLinkListResponse.items:type_name -> docket.v1.Relation
-	8,   // 59: docket.v1.IssueLinkRemoveResponse.relation:type_name -> docket.v1.Relation
-	35,  // 60: docket.v1.IssueListRequest.filter:type_name -> docket.v1.IssueFilter
-	4,   // 61: docket.v1.IssueListResponse.items:type_name -> docket.v1.Issue
-	6,   // 62: docket.v1.IssueLogResponse.items:type_name -> docket.v1.Activity
-	4,   // 63: docket.v1.IssueMoveResponse.issue:type_name -> docket.v1.Issue
-	4,   // 64: docket.v1.IssueReopenResponse.issue:type_name -> docket.v1.Issue
-	4,   // 65: docket.v1.IssueShowDetail.issue:type_name -> docket.v1.Issue
-	4,   // 66: docket.v1.IssueShowDetail.children:type_name -> docket.v1.Issue
-	8,   // 67: docket.v1.IssueShowDetail.relations:type_name -> docket.v1.Relation
-	5,   // 68: docket.v1.IssueShowDetail.comments:type_name -> docket.v1.Comment
-	15,  // 69: docket.v1.IssueShowDetail.disposition:type_name -> docket.v1.IssueRunDisposition
-	151, // 70: docket.v1.IssueShowResponse.issues:type_name -> docket.v1.IssueShowDetail
-	35,  // 71: docket.v1.NextRequest.filter:type_name -> docket.v1.IssueFilter
-	4,   // 72: docket.v1.NextResponse.issues:type_name -> docket.v1.Issue
-	17,  // 73: docket.v1.NextResponse.steps:type_name -> docket.v1.StepRow
-	35,  // 74: docket.v1.PlanRequest.filter:type_name -> docket.v1.IssueFilter
-	4,   // 75: docket.v1.PlanPhase.issues:type_name -> docket.v1.Issue
-	158, // 76: docket.v1.PlanResponse.phases:type_name -> docket.v1.PlanPhase
-	16,  // 77: docket.v1.PolicyResolveResponse.seats:type_name -> docket.v1.VoterAssignment
-	12,  // 78: docket.v1.ProjectDeleteResponse.project:type_name -> docket.v1.Project
-	12,  // 79: docket.v1.ProjectListResponse.items:type_name -> docket.v1.Project
-	12,  // 80: docket.v1.ProjectSetPrefixResponse.project:type_name -> docket.v1.Project
-	169, // 81: docket.v1.RegistryAuditResponse.drift:type_name -> docket.v1.RegistryDrift
-	172, // 82: docket.v1.ReportExecutorsResponse.executors:type_name -> docket.v1.ExecutorRollup
-	172, // 83: docket.v1.ReportExecutorsResponse.voters:type_name -> docket.v1.ExecutorRollup
-	13,  // 84: docket.v1.RunAbandonResponse.run:type_name -> docket.v1.Run
-	13,  // 85: docket.v1.RunActivateResponse.run:type_name -> docket.v1.Run
-	28,  // 86: docket.v1.RunActivateResponse.pins:type_name -> docket.v1.PinVerdict
-	25,  // 87: docket.v1.RunFactAddResponse.event:type_name -> docket.v1.Event
-	13,  // 88: docket.v1.RunIssueAddResponse.run:type_name -> docket.v1.Run
-	13,  // 89: docket.v1.RunIssueRemoveResponse.run:type_name -> docket.v1.Run
-	26,  // 90: docket.v1.RunNoteAddResponse.note:type_name -> docket.v1.RunNote
-	26,  // 91: docket.v1.RunNoteListResponse.items:type_name -> docket.v1.RunNote
-	13,  // 92: docket.v1.RunPauseResponse.run:type_name -> docket.v1.Run
-	28,  // 93: docket.v1.RunRepinResponse.repinned:type_name -> docket.v1.PinVerdict
-	13,  // 94: docket.v1.RunReportResponse.run:type_name -> docket.v1.Run
-	18,  // 95: docket.v1.RunReportResponse.steps:type_name -> docket.v1.Step
-	19,  // 96: docket.v1.RunReportResponse.gates:type_name -> docket.v1.GateResult
-	20,  // 97: docket.v1.RunReportResponse.artifacts:type_name -> docket.v1.Artifact
-	13,  // 98: docket.v1.RunResumeResponse.run:type_name -> docket.v1.Run
-	13,  // 99: docket.v1.RunStartResponse.run:type_name -> docket.v1.Run
-	13,  // 100: docket.v1.RunStatusResponse.items:type_name -> docket.v1.Run
-	28,  // 101: docket.v1.RunVerifyPinsResponse.pins:type_name -> docket.v1.PinVerdict
-	32,  // 102: docket.v1.SchemaDeprecateResponse.schema:type_name -> docket.v1.Schema
-	32,  // 103: docket.v1.SchemaListResponse.items:type_name -> docket.v1.Schema
-	32,  // 104: docket.v1.SchemaRegisterResponse.schema:type_name -> docket.v1.Schema
-	32,  // 105: docket.v1.SchemaShowResponse.schema:type_name -> docket.v1.Schema
-	14,  // 106: docket.v1.StatsResponse.by_status:type_name -> docket.v1.StatusCount
-	14,  // 107: docket.v1.StatsResponse.by_priority:type_name -> docket.v1.StatusCount
-	14,  // 108: docket.v1.StatsResponse.by_type:type_name -> docket.v1.StatusCount
-	14,  // 109: docket.v1.StatsResponse.by_label:type_name -> docket.v1.StatusCount
-	18,  // 110: docket.v1.StepAnnotateResponse.step:type_name -> docket.v1.Step
-	18,  // 111: docket.v1.StepApproveResponse.step:type_name -> docket.v1.Step
-	20,  // 112: docket.v1.StepArtifactResponse.artifact:type_name -> docket.v1.Artifact
-	20,  // 113: docket.v1.StepArtifactsResponse.items:type_name -> docket.v1.Artifact
-	24,  // 114: docket.v1.StepClaimResponse.context:type_name -> docket.v1.StepContextBundle
-	18,  // 115: docket.v1.StepCompleteResponse.step:type_name -> docket.v1.Step
-	19,  // 116: docket.v1.StepCompleteResponse.failed_gates:type_name -> docket.v1.GateResult
-	24,  // 117: docket.v1.StepContextResponse.context:type_name -> docket.v1.StepContextBundle
-	18,  // 118: docket.v1.StepFailResponse.step:type_name -> docket.v1.Step
-	19,  // 119: docket.v1.StepGatesResponse.items:type_name -> docket.v1.GateResult
-	18,  // 120: docket.v1.StepHoldResponse.step:type_name -> docket.v1.Step
-	18,  // 121: docket.v1.StepListResponse.items:type_name -> docket.v1.Step
-	18,  // 122: docket.v1.StepReapResponse.step:type_name -> docket.v1.Step
-	18,  // 123: docket.v1.StepRejectResponse.step:type_name -> docket.v1.Step
-	18,  // 124: docket.v1.StepResolveResponse.steps:type_name -> docket.v1.Step
-	18,  // 125: docket.v1.StepShowResponse.steps:type_name -> docket.v1.Step
-	34,  // 126: docket.v1.VoteBackfillUsageRequest.rows:type_name -> docket.v1.UsageRow
-	31,  // 127: docket.v1.VoteCastResponse.vote:type_name -> docket.v1.Vote
-	30,  // 128: docket.v1.VoteCastResponse.proposal:type_name -> docket.v1.Proposal
-	30,  // 129: docket.v1.VoteCloseResponse.proposal:type_name -> docket.v1.Proposal
-	30,  // 130: docket.v1.VoteCommitResponse.proposal:type_name -> docket.v1.Proposal
-	30,  // 131: docket.v1.VoteCreateResponse.proposal:type_name -> docket.v1.Proposal
-	30,  // 132: docket.v1.VoteListResponse.items:type_name -> docket.v1.Proposal
-	30,  // 133: docket.v1.VoteShowResponse.proposal:type_name -> docket.v1.Proposal
-	33,  // 134: docket.v1.WorkflowDeprecateResponse.workflow:type_name -> docket.v1.Workflow
-	279, // 135: docket.v1.WorkflowLintResponse.findings:type_name -> docket.v1.LintFinding
-	33,  // 136: docket.v1.WorkflowListResponse.items:type_name -> docket.v1.Workflow
-	33,  // 137: docket.v1.WorkflowRegisterResponse.workflow:type_name -> docket.v1.Workflow
-	33,  // 138: docket.v1.WorkflowShowResponse.workflow:type_name -> docket.v1.Workflow
-	36,  // 139: docket.v1.DocketService.Handshake:input_type -> docket.v1.HandshakeRequest
-	38,  // 140: docket.v1.DocketService.Board:input_type -> docket.v1.BoardRequest
-	41,  // 141: docket.v1.DocketService.ConfigGet:input_type -> docket.v1.ConfigGetRequest
-	44,  // 142: docket.v1.DocketService.ConfigSet:input_type -> docket.v1.ConfigSetRequest
-	46,  // 143: docket.v1.DocketService.DispatchAbandon:input_type -> docket.v1.DispatchAbandonRequest
-	48,  // 144: docket.v1.DocketService.DispatchBackfillUsage:input_type -> docket.v1.DispatchBackfillUsageRequest
-	50,  // 145: docket.v1.DocketService.DispatchClose:input_type -> docket.v1.DispatchCloseRequest
-	52,  // 146: docket.v1.DocketService.DispatchExtend:input_type -> docket.v1.DispatchExtendRequest
-	54,  // 147: docket.v1.DocketService.DispatchOpen:input_type -> docket.v1.DispatchOpenRequest
-	56,  // 148: docket.v1.DocketService.DispatchVerify:input_type -> docket.v1.DispatchVerifyRequest
-	59,  // 149: docket.v1.DocketService.DispatchWaiveTarget:input_type -> docket.v1.DispatchWaiveTargetRequest
-	61,  // 150: docket.v1.DocketService.DocCommentAdd:input_type -> docket.v1.DocCommentAddRequest
-	63,  // 151: docket.v1.DocketService.DocCommentList:input_type -> docket.v1.DocCommentListRequest
-	65,  // 152: docket.v1.DocketService.DocCreate:input_type -> docket.v1.DocCreateRequest
-	67,  // 153: docket.v1.DocketService.DocDelete:input_type -> docket.v1.DocDeleteRequest
-	69,  // 154: docket.v1.DocketService.DocEdit:input_type -> docket.v1.DocEditRequest
-	71,  // 155: docket.v1.DocketService.DocLinkAdd:input_type -> docket.v1.DocLinkAddRequest
-	73,  // 156: docket.v1.DocketService.DocLinkRemove:input_type -> docket.v1.DocLinkRemoveRequest
-	75,  // 157: docket.v1.DocketService.DocList:input_type -> docket.v1.DocListRequest
-	77,  // 158: docket.v1.DocketService.DocShow:input_type -> docket.v1.DocShowRequest
-	79,  // 159: docket.v1.DocketService.Doctor:input_type -> docket.v1.DoctorRequest
-	82,  // 160: docket.v1.DocketService.EventsList:input_type -> docket.v1.EventsListRequest
-	84,  // 161: docket.v1.DocketService.EventsPrune:input_type -> docket.v1.EventsPruneRequest
-	86,  // 162: docket.v1.DocketService.Export:input_type -> docket.v1.ExportRequest
-	90,  // 163: docket.v1.DocketService.GateStatus:input_type -> docket.v1.GateStatusRequest
-	93,  // 164: docket.v1.DocketService.GuardGate:input_type -> docket.v1.GuardGateRequest
-	95,  // 165: docket.v1.DocketService.GuardRecord:input_type -> docket.v1.GuardRecordRequest
-	97,  // 166: docket.v1.DocketService.GuardSpawn:input_type -> docket.v1.GuardSpawnRequest
-	99,  // 167: docket.v1.DocketService.GuardStop:input_type -> docket.v1.GuardStopRequest
-	88,  // 168: docket.v1.DocketService.Import:input_type -> docket.v1.ImportRequest
-	101, // 169: docket.v1.DocketService.IssueClaim:input_type -> docket.v1.IssueClaimRequest
-	103, // 170: docket.v1.DocketService.IssueClose:input_type -> docket.v1.IssueCloseRequest
-	105, // 171: docket.v1.DocketService.IssueCommentAdd:input_type -> docket.v1.IssueCommentAddRequest
-	107, // 172: docket.v1.DocketService.IssueCommentList:input_type -> docket.v1.IssueCommentListRequest
-	109, // 173: docket.v1.DocketService.IssueCreate:input_type -> docket.v1.IssueCreateRequest
-	111, // 174: docket.v1.DocketService.IssueDelete:input_type -> docket.v1.IssueDeleteRequest
-	113, // 175: docket.v1.DocketService.IssueEdit:input_type -> docket.v1.IssueEditRequest
-	115, // 176: docket.v1.DocketService.IssueFileAdd:input_type -> docket.v1.IssueFileAddRequest
-	117, // 177: docket.v1.DocketService.IssueFileList:input_type -> docket.v1.IssueFileListRequest
-	119, // 178: docket.v1.DocketService.IssueFileRemove:input_type -> docket.v1.IssueFileRemoveRequest
-	121, // 179: docket.v1.DocketService.IssueGraph:input_type -> docket.v1.IssueGraphRequest
-	124, // 180: docket.v1.DocketService.IssueHeartbeat:input_type -> docket.v1.IssueHeartbeatRequest
-	126, // 181: docket.v1.DocketService.IssueLabelAdd:input_type -> docket.v1.IssueLabelAddRequest
-	128, // 182: docket.v1.DocketService.IssueLabelDelete:input_type -> docket.v1.IssueLabelDeleteRequest
-	130, // 183: docket.v1.DocketService.IssueLabelList:input_type -> docket.v1.IssueLabelListRequest
-	132, // 184: docket.v1.DocketService.IssueLabelRm:input_type -> docket.v1.IssueLabelRmRequest
-	134, // 185: docket.v1.DocketService.IssueLinkAdd:input_type -> docket.v1.IssueLinkAddRequest
-	136, // 186: docket.v1.DocketService.IssueLinkList:input_type -> docket.v1.IssueLinkListRequest
-	138, // 187: docket.v1.DocketService.IssueLinkRemove:input_type -> docket.v1.IssueLinkRemoveRequest
-	140, // 188: docket.v1.DocketService.IssueList:input_type -> docket.v1.IssueListRequest
-	142, // 189: docket.v1.DocketService.IssueLog:input_type -> docket.v1.IssueLogRequest
-	144, // 190: docket.v1.DocketService.IssueMove:input_type -> docket.v1.IssueMoveRequest
-	146, // 191: docket.v1.DocketService.IssueRelease:input_type -> docket.v1.IssueReleaseRequest
-	148, // 192: docket.v1.DocketService.IssueReopen:input_type -> docket.v1.IssueReopenRequest
-	150, // 193: docket.v1.DocketService.IssueShow:input_type -> docket.v1.IssueShowRequest
-	153, // 194: docket.v1.DocketService.Next:input_type -> docket.v1.NextRequest
-	155, // 195: docket.v1.DocketService.PinShow:input_type -> docket.v1.PinShowRequest
-	157, // 196: docket.v1.DocketService.Plan:input_type -> docket.v1.PlanRequest
-	160, // 197: docket.v1.DocketService.PolicyResolve:input_type -> docket.v1.PolicyResolveRequest
-	162, // 198: docket.v1.DocketService.ProjectDelete:input_type -> docket.v1.ProjectDeleteRequest
-	164, // 199: docket.v1.DocketService.ProjectList:input_type -> docket.v1.ProjectListRequest
-	166, // 200: docket.v1.DocketService.ProjectSetPrefix:input_type -> docket.v1.ProjectSetPrefixRequest
-	168, // 201: docket.v1.DocketService.RegistryAudit:input_type -> docket.v1.RegistryAuditRequest
-	171, // 202: docket.v1.DocketService.ReportExecutors:input_type -> docket.v1.ReportExecutorsRequest
-	174, // 203: docket.v1.DocketService.RunAbandon:input_type -> docket.v1.RunAbandonRequest
-	176, // 204: docket.v1.DocketService.RunActivate:input_type -> docket.v1.RunActivateRequest
-	178, // 205: docket.v1.DocketService.RunBudget:input_type -> docket.v1.RunBudgetRequest
-	180, // 206: docket.v1.DocketService.RunConduct:input_type -> docket.v1.RunConductRequest
-	182, // 207: docket.v1.DocketService.RunFactAdd:input_type -> docket.v1.RunFactAddRequest
-	184, // 208: docket.v1.DocketService.RunIssueAdd:input_type -> docket.v1.RunIssueAddRequest
-	186, // 209: docket.v1.DocketService.RunIssueRemove:input_type -> docket.v1.RunIssueRemoveRequest
-	188, // 210: docket.v1.DocketService.RunNoteAdd:input_type -> docket.v1.RunNoteAddRequest
-	190, // 211: docket.v1.DocketService.RunNoteList:input_type -> docket.v1.RunNoteListRequest
-	192, // 212: docket.v1.DocketService.RunPause:input_type -> docket.v1.RunPauseRequest
-	194, // 213: docket.v1.DocketService.RunRefreshBody:input_type -> docket.v1.RunRefreshBodyRequest
-	196, // 214: docket.v1.DocketService.RunRefreshFiles:input_type -> docket.v1.RunRefreshFilesRequest
-	198, // 215: docket.v1.DocketService.RunRefreshScope:input_type -> docket.v1.RunRefreshScopeRequest
-	200, // 216: docket.v1.DocketService.RunRepin:input_type -> docket.v1.RunRepinRequest
-	202, // 217: docket.v1.DocketService.RunReport:input_type -> docket.v1.RunReportRequest
-	204, // 218: docket.v1.DocketService.RunResume:input_type -> docket.v1.RunResumeRequest
-	206, // 219: docket.v1.DocketService.RunStart:input_type -> docket.v1.RunStartRequest
-	208, // 220: docket.v1.DocketService.RunStatus:input_type -> docket.v1.RunStatusRequest
-	210, // 221: docket.v1.DocketService.RunVerifyPins:input_type -> docket.v1.RunVerifyPinsRequest
-	212, // 222: docket.v1.DocketService.SchemaDeprecate:input_type -> docket.v1.SchemaDeprecateRequest
-	214, // 223: docket.v1.DocketService.SchemaList:input_type -> docket.v1.SchemaListRequest
-	216, // 224: docket.v1.DocketService.SchemaRegister:input_type -> docket.v1.SchemaRegisterRequest
-	218, // 225: docket.v1.DocketService.SchemaShow:input_type -> docket.v1.SchemaShowRequest
-	220, // 226: docket.v1.DocketService.Stats:input_type -> docket.v1.StatsRequest
-	222, // 227: docket.v1.DocketService.StepAnnotate:input_type -> docket.v1.StepAnnotateRequest
-	224, // 228: docket.v1.DocketService.StepApprove:input_type -> docket.v1.StepApproveRequest
-	226, // 229: docket.v1.DocketService.StepArtifact:input_type -> docket.v1.StepArtifactRequest
-	228, // 230: docket.v1.DocketService.StepArtifacts:input_type -> docket.v1.StepArtifactsRequest
-	230, // 231: docket.v1.DocketService.StepClaim:input_type -> docket.v1.StepClaimRequest
-	232, // 232: docket.v1.DocketService.StepComplete:input_type -> docket.v1.StepCompleteRequest
-	234, // 233: docket.v1.DocketService.StepContext:input_type -> docket.v1.StepContextRequest
-	236, // 234: docket.v1.DocketService.StepFail:input_type -> docket.v1.StepFailRequest
-	238, // 235: docket.v1.DocketService.StepGates:input_type -> docket.v1.StepGatesRequest
-	240, // 236: docket.v1.DocketService.StepHeartbeat:input_type -> docket.v1.StepHeartbeatRequest
-	242, // 237: docket.v1.DocketService.StepHold:input_type -> docket.v1.StepHoldRequest
-	244, // 238: docket.v1.DocketService.StepList:input_type -> docket.v1.StepListRequest
-	246, // 239: docket.v1.DocketService.StepReap:input_type -> docket.v1.StepReapRequest
-	248, // 240: docket.v1.DocketService.StepReject:input_type -> docket.v1.StepRejectRequest
-	250, // 241: docket.v1.DocketService.StepRender:input_type -> docket.v1.StepRenderRequest
-	252, // 242: docket.v1.DocketService.StepResolve:input_type -> docket.v1.StepResolveRequest
-	254, // 243: docket.v1.DocketService.StepShow:input_type -> docket.v1.StepShowRequest
-	256, // 244: docket.v1.DocketService.VoteBackfillUsage:input_type -> docket.v1.VoteBackfillUsageRequest
-	258, // 245: docket.v1.DocketService.VoteCast:input_type -> docket.v1.VoteCastRequest
-	260, // 246: docket.v1.DocketService.VoteClose:input_type -> docket.v1.VoteCloseRequest
-	262, // 247: docket.v1.DocketService.VoteCommit:input_type -> docket.v1.VoteCommitRequest
-	264, // 248: docket.v1.DocketService.VoteCreate:input_type -> docket.v1.VoteCreateRequest
-	266, // 249: docket.v1.DocketService.VoteLink:input_type -> docket.v1.VoteLinkRequest
-	268, // 250: docket.v1.DocketService.VoteList:input_type -> docket.v1.VoteListRequest
-	270, // 251: docket.v1.DocketService.VoteResult:input_type -> docket.v1.VoteResultRequest
-	272, // 252: docket.v1.DocketService.VoteShow:input_type -> docket.v1.VoteShowRequest
-	274, // 253: docket.v1.DocketService.VoteUnlink:input_type -> docket.v1.VoteUnlinkRequest
-	276, // 254: docket.v1.DocketService.WorkflowDeprecate:input_type -> docket.v1.WorkflowDeprecateRequest
-	278, // 255: docket.v1.DocketService.WorkflowLint:input_type -> docket.v1.WorkflowLintRequest
-	281, // 256: docket.v1.DocketService.WorkflowList:input_type -> docket.v1.WorkflowListRequest
-	283, // 257: docket.v1.DocketService.WorkflowRegister:input_type -> docket.v1.WorkflowRegisterRequest
-	285, // 258: docket.v1.DocketService.WorkflowShow:input_type -> docket.v1.WorkflowShowRequest
-	37,  // 259: docket.v1.DocketService.Handshake:output_type -> docket.v1.HandshakeResponse
-	40,  // 260: docket.v1.DocketService.Board:output_type -> docket.v1.BoardResponse
-	43,  // 261: docket.v1.DocketService.ConfigGet:output_type -> docket.v1.ConfigGetResponse
-	45,  // 262: docket.v1.DocketService.ConfigSet:output_type -> docket.v1.ConfigSetResponse
-	47,  // 263: docket.v1.DocketService.DispatchAbandon:output_type -> docket.v1.DispatchAbandonResponse
-	49,  // 264: docket.v1.DocketService.DispatchBackfillUsage:output_type -> docket.v1.DispatchBackfillUsageResponse
-	51,  // 265: docket.v1.DocketService.DispatchClose:output_type -> docket.v1.DispatchCloseResponse
-	53,  // 266: docket.v1.DocketService.DispatchExtend:output_type -> docket.v1.DispatchExtendResponse
-	55,  // 267: docket.v1.DocketService.DispatchOpen:output_type -> docket.v1.DispatchOpenResponse
-	58,  // 268: docket.v1.DocketService.DispatchVerify:output_type -> docket.v1.DispatchVerifyResponse
-	60,  // 269: docket.v1.DocketService.DispatchWaiveTarget:output_type -> docket.v1.DispatchWaiveTargetResponse
-	62,  // 270: docket.v1.DocketService.DocCommentAdd:output_type -> docket.v1.DocCommentAddResponse
-	64,  // 271: docket.v1.DocketService.DocCommentList:output_type -> docket.v1.DocCommentListResponse
-	66,  // 272: docket.v1.DocketService.DocCreate:output_type -> docket.v1.DocCreateResponse
-	68,  // 273: docket.v1.DocketService.DocDelete:output_type -> docket.v1.DocDeleteResponse
-	70,  // 274: docket.v1.DocketService.DocEdit:output_type -> docket.v1.DocEditResponse
-	72,  // 275: docket.v1.DocketService.DocLinkAdd:output_type -> docket.v1.DocLinkAddResponse
-	74,  // 276: docket.v1.DocketService.DocLinkRemove:output_type -> docket.v1.DocLinkRemoveResponse
-	76,  // 277: docket.v1.DocketService.DocList:output_type -> docket.v1.DocListResponse
-	78,  // 278: docket.v1.DocketService.DocShow:output_type -> docket.v1.DocShowResponse
-	81,  // 279: docket.v1.DocketService.Doctor:output_type -> docket.v1.DoctorResponse
-	83,  // 280: docket.v1.DocketService.EventsList:output_type -> docket.v1.EventsListResponse
-	85,  // 281: docket.v1.DocketService.EventsPrune:output_type -> docket.v1.EventsPruneResponse
-	87,  // 282: docket.v1.DocketService.Export:output_type -> docket.v1.ExportResponse
-	91,  // 283: docket.v1.DocketService.GateStatus:output_type -> docket.v1.GateStatusResponse
-	94,  // 284: docket.v1.DocketService.GuardGate:output_type -> docket.v1.GuardGateResponse
-	96,  // 285: docket.v1.DocketService.GuardRecord:output_type -> docket.v1.GuardRecordResponse
-	98,  // 286: docket.v1.DocketService.GuardSpawn:output_type -> docket.v1.GuardSpawnResponse
-	100, // 287: docket.v1.DocketService.GuardStop:output_type -> docket.v1.GuardStopResponse
-	89,  // 288: docket.v1.DocketService.Import:output_type -> docket.v1.ImportResponse
-	102, // 289: docket.v1.DocketService.IssueClaim:output_type -> docket.v1.IssueClaimResponse
-	104, // 290: docket.v1.DocketService.IssueClose:output_type -> docket.v1.IssueCloseResponse
-	106, // 291: docket.v1.DocketService.IssueCommentAdd:output_type -> docket.v1.IssueCommentAddResponse
-	108, // 292: docket.v1.DocketService.IssueCommentList:output_type -> docket.v1.IssueCommentListResponse
-	110, // 293: docket.v1.DocketService.IssueCreate:output_type -> docket.v1.IssueCreateResponse
-	112, // 294: docket.v1.DocketService.IssueDelete:output_type -> docket.v1.IssueDeleteResponse
-	114, // 295: docket.v1.DocketService.IssueEdit:output_type -> docket.v1.IssueEditResponse
-	116, // 296: docket.v1.DocketService.IssueFileAdd:output_type -> docket.v1.IssueFileAddResponse
-	118, // 297: docket.v1.DocketService.IssueFileList:output_type -> docket.v1.IssueFileListResponse
-	120, // 298: docket.v1.DocketService.IssueFileRemove:output_type -> docket.v1.IssueFileRemoveResponse
-	123, // 299: docket.v1.DocketService.IssueGraph:output_type -> docket.v1.IssueGraphResponse
-	125, // 300: docket.v1.DocketService.IssueHeartbeat:output_type -> docket.v1.IssueHeartbeatResponse
-	127, // 301: docket.v1.DocketService.IssueLabelAdd:output_type -> docket.v1.IssueLabelAddResponse
-	129, // 302: docket.v1.DocketService.IssueLabelDelete:output_type -> docket.v1.IssueLabelDeleteResponse
-	131, // 303: docket.v1.DocketService.IssueLabelList:output_type -> docket.v1.IssueLabelListResponse
-	133, // 304: docket.v1.DocketService.IssueLabelRm:output_type -> docket.v1.IssueLabelRmResponse
-	135, // 305: docket.v1.DocketService.IssueLinkAdd:output_type -> docket.v1.IssueLinkAddResponse
-	137, // 306: docket.v1.DocketService.IssueLinkList:output_type -> docket.v1.IssueLinkListResponse
-	139, // 307: docket.v1.DocketService.IssueLinkRemove:output_type -> docket.v1.IssueLinkRemoveResponse
-	141, // 308: docket.v1.DocketService.IssueList:output_type -> docket.v1.IssueListResponse
-	143, // 309: docket.v1.DocketService.IssueLog:output_type -> docket.v1.IssueLogResponse
-	145, // 310: docket.v1.DocketService.IssueMove:output_type -> docket.v1.IssueMoveResponse
-	147, // 311: docket.v1.DocketService.IssueRelease:output_type -> docket.v1.IssueReleaseResponse
-	149, // 312: docket.v1.DocketService.IssueReopen:output_type -> docket.v1.IssueReopenResponse
-	152, // 313: docket.v1.DocketService.IssueShow:output_type -> docket.v1.IssueShowResponse
-	154, // 314: docket.v1.DocketService.Next:output_type -> docket.v1.NextResponse
-	156, // 315: docket.v1.DocketService.PinShow:output_type -> docket.v1.PinShowResponse
-	159, // 316: docket.v1.DocketService.Plan:output_type -> docket.v1.PlanResponse
-	161, // 317: docket.v1.DocketService.PolicyResolve:output_type -> docket.v1.PolicyResolveResponse
-	163, // 318: docket.v1.DocketService.ProjectDelete:output_type -> docket.v1.ProjectDeleteResponse
-	165, // 319: docket.v1.DocketService.ProjectList:output_type -> docket.v1.ProjectListResponse
-	167, // 320: docket.v1.DocketService.ProjectSetPrefix:output_type -> docket.v1.ProjectSetPrefixResponse
-	170, // 321: docket.v1.DocketService.RegistryAudit:output_type -> docket.v1.RegistryAuditResponse
-	173, // 322: docket.v1.DocketService.ReportExecutors:output_type -> docket.v1.ReportExecutorsResponse
-	175, // 323: docket.v1.DocketService.RunAbandon:output_type -> docket.v1.RunAbandonResponse
-	177, // 324: docket.v1.DocketService.RunActivate:output_type -> docket.v1.RunActivateResponse
-	179, // 325: docket.v1.DocketService.RunBudget:output_type -> docket.v1.RunBudgetResponse
-	181, // 326: docket.v1.DocketService.RunConduct:output_type -> docket.v1.RunConductResponse
-	183, // 327: docket.v1.DocketService.RunFactAdd:output_type -> docket.v1.RunFactAddResponse
-	185, // 328: docket.v1.DocketService.RunIssueAdd:output_type -> docket.v1.RunIssueAddResponse
-	187, // 329: docket.v1.DocketService.RunIssueRemove:output_type -> docket.v1.RunIssueRemoveResponse
-	189, // 330: docket.v1.DocketService.RunNoteAdd:output_type -> docket.v1.RunNoteAddResponse
-	191, // 331: docket.v1.DocketService.RunNoteList:output_type -> docket.v1.RunNoteListResponse
-	193, // 332: docket.v1.DocketService.RunPause:output_type -> docket.v1.RunPauseResponse
-	195, // 333: docket.v1.DocketService.RunRefreshBody:output_type -> docket.v1.RunRefreshBodyResponse
-	197, // 334: docket.v1.DocketService.RunRefreshFiles:output_type -> docket.v1.RunRefreshFilesResponse
-	199, // 335: docket.v1.DocketService.RunRefreshScope:output_type -> docket.v1.RunRefreshScopeResponse
-	201, // 336: docket.v1.DocketService.RunRepin:output_type -> docket.v1.RunRepinResponse
-	203, // 337: docket.v1.DocketService.RunReport:output_type -> docket.v1.RunReportResponse
-	205, // 338: docket.v1.DocketService.RunResume:output_type -> docket.v1.RunResumeResponse
-	207, // 339: docket.v1.DocketService.RunStart:output_type -> docket.v1.RunStartResponse
-	209, // 340: docket.v1.DocketService.RunStatus:output_type -> docket.v1.RunStatusResponse
-	211, // 341: docket.v1.DocketService.RunVerifyPins:output_type -> docket.v1.RunVerifyPinsResponse
-	213, // 342: docket.v1.DocketService.SchemaDeprecate:output_type -> docket.v1.SchemaDeprecateResponse
-	215, // 343: docket.v1.DocketService.SchemaList:output_type -> docket.v1.SchemaListResponse
-	217, // 344: docket.v1.DocketService.SchemaRegister:output_type -> docket.v1.SchemaRegisterResponse
-	219, // 345: docket.v1.DocketService.SchemaShow:output_type -> docket.v1.SchemaShowResponse
-	221, // 346: docket.v1.DocketService.Stats:output_type -> docket.v1.StatsResponse
-	223, // 347: docket.v1.DocketService.StepAnnotate:output_type -> docket.v1.StepAnnotateResponse
-	225, // 348: docket.v1.DocketService.StepApprove:output_type -> docket.v1.StepApproveResponse
-	227, // 349: docket.v1.DocketService.StepArtifact:output_type -> docket.v1.StepArtifactResponse
-	229, // 350: docket.v1.DocketService.StepArtifacts:output_type -> docket.v1.StepArtifactsResponse
-	231, // 351: docket.v1.DocketService.StepClaim:output_type -> docket.v1.StepClaimResponse
-	233, // 352: docket.v1.DocketService.StepComplete:output_type -> docket.v1.StepCompleteResponse
-	235, // 353: docket.v1.DocketService.StepContext:output_type -> docket.v1.StepContextResponse
-	237, // 354: docket.v1.DocketService.StepFail:output_type -> docket.v1.StepFailResponse
-	239, // 355: docket.v1.DocketService.StepGates:output_type -> docket.v1.StepGatesResponse
-	241, // 356: docket.v1.DocketService.StepHeartbeat:output_type -> docket.v1.StepHeartbeatResponse
-	243, // 357: docket.v1.DocketService.StepHold:output_type -> docket.v1.StepHoldResponse
-	245, // 358: docket.v1.DocketService.StepList:output_type -> docket.v1.StepListResponse
-	247, // 359: docket.v1.DocketService.StepReap:output_type -> docket.v1.StepReapResponse
-	249, // 360: docket.v1.DocketService.StepReject:output_type -> docket.v1.StepRejectResponse
-	251, // 361: docket.v1.DocketService.StepRender:output_type -> docket.v1.StepRenderResponse
-	253, // 362: docket.v1.DocketService.StepResolve:output_type -> docket.v1.StepResolveResponse
-	255, // 363: docket.v1.DocketService.StepShow:output_type -> docket.v1.StepShowResponse
-	257, // 364: docket.v1.DocketService.VoteBackfillUsage:output_type -> docket.v1.VoteBackfillUsageResponse
-	259, // 365: docket.v1.DocketService.VoteCast:output_type -> docket.v1.VoteCastResponse
-	261, // 366: docket.v1.DocketService.VoteClose:output_type -> docket.v1.VoteCloseResponse
-	263, // 367: docket.v1.DocketService.VoteCommit:output_type -> docket.v1.VoteCommitResponse
-	265, // 368: docket.v1.DocketService.VoteCreate:output_type -> docket.v1.VoteCreateResponse
-	267, // 369: docket.v1.DocketService.VoteLink:output_type -> docket.v1.VoteLinkResponse
-	269, // 370: docket.v1.DocketService.VoteList:output_type -> docket.v1.VoteListResponse
-	271, // 371: docket.v1.DocketService.VoteResult:output_type -> docket.v1.VoteResultResponse
-	273, // 372: docket.v1.DocketService.VoteShow:output_type -> docket.v1.VoteShowResponse
-	275, // 373: docket.v1.DocketService.VoteUnlink:output_type -> docket.v1.VoteUnlinkResponse
-	277, // 374: docket.v1.DocketService.WorkflowDeprecate:output_type -> docket.v1.WorkflowDeprecateResponse
-	280, // 375: docket.v1.DocketService.WorkflowLint:output_type -> docket.v1.WorkflowLintResponse
-	282, // 376: docket.v1.DocketService.WorkflowList:output_type -> docket.v1.WorkflowListResponse
-	284, // 377: docket.v1.DocketService.WorkflowRegister:output_type -> docket.v1.WorkflowRegisterResponse
-	286, // 378: docket.v1.DocketService.WorkflowShow:output_type -> docket.v1.WorkflowShowResponse
-	259, // [259:379] is the sub-list for method output_type
-	139, // [139:259] is the sub-list for method input_type
-	139, // [139:139] is the sub-list for extension type_name
-	139, // [139:139] is the sub-list for extension extendee
-	0,   // [0:139] is the sub-list for field type_name
+	27,  // 14: docket.v1.StepContextBundle.notes:type_name -> docket.v1.RunNote
+	25,  // 15: docket.v1.StepContextBundle.resolution_record:type_name -> docket.v1.ContextResolution
+	17,  // 16: docket.v1.Manifest.rows:type_name -> docket.v1.StepRow
+	32,  // 17: docket.v1.Proposal.votes:type_name -> docket.v1.Vote
+	30,  // 18: docket.v1.Vote.findings_json:type_name -> docket.v1.Finding
+	36,  // 19: docket.v1.BoardRequest.filter:type_name -> docket.v1.IssueFilter
+	4,   // 20: docket.v1.BoardColumn.issues:type_name -> docket.v1.Issue
+	40,  // 21: docket.v1.BoardResponse.columns:type_name -> docket.v1.BoardColumn
+	43,  // 22: docket.v1.ConfigGetResponse.values:type_name -> docket.v1.ConfigValue
+	43,  // 23: docket.v1.ConfigSetResponse.value:type_name -> docket.v1.ConfigValue
+	28,  // 24: docket.v1.DispatchAbandonResponse.manifest:type_name -> docket.v1.Manifest
+	35,  // 25: docket.v1.DispatchBackfillUsageRequest.rows:type_name -> docket.v1.UsageRow
+	35,  // 26: docket.v1.DispatchCloseRequest.backfill_rows:type_name -> docket.v1.UsageRow
+	28,  // 27: docket.v1.DispatchCloseResponse.manifest:type_name -> docket.v1.Manifest
+	28,  // 28: docket.v1.DispatchExtendResponse.manifest:type_name -> docket.v1.Manifest
+	17,  // 29: docket.v1.DispatchExtendResponse.added:type_name -> docket.v1.StepRow
+	28,  // 30: docket.v1.DispatchOpenResponse.manifest:type_name -> docket.v1.Manifest
+	29,  // 31: docket.v1.DispatchOpenResponse.pin_drift:type_name -> docket.v1.PinVerdict
+	17,  // 32: docket.v1.RowVerdict.manifest_row:type_name -> docket.v1.StepRow
+	17,  // 33: docket.v1.RowVerdict.current_row:type_name -> docket.v1.StepRow
+	58,  // 34: docket.v1.DispatchVerifyResponse.rows:type_name -> docket.v1.RowVerdict
+	11,  // 35: docket.v1.DocCommentAddResponse.comment:type_name -> docket.v1.DocComment
+	11,  // 36: docket.v1.DocCommentListResponse.items:type_name -> docket.v1.DocComment
+	9,   // 37: docket.v1.DocCreateResponse.doc:type_name -> docket.v1.Doc
+	9,   // 38: docket.v1.DocEditResponse.doc:type_name -> docket.v1.Doc
+	9,   // 39: docket.v1.DocListResponse.items:type_name -> docket.v1.Doc
+	9,   // 40: docket.v1.DocShowResponse.doc:type_name -> docket.v1.Doc
+	81,  // 41: docket.v1.DoctorResponse.checks:type_name -> docket.v1.DoctorCheck
+	26,  // 42: docket.v1.EventsListResponse.items:type_name -> docket.v1.Event
+	36,  // 43: docket.v1.ExportRequest.filter:type_name -> docket.v1.IssueFilter
+	93,  // 44: docket.v1.GuardGateResponse.decision:type_name -> docket.v1.GuardDecision
+	93,  // 45: docket.v1.GuardRecordResponse.decision:type_name -> docket.v1.GuardDecision
+	17,  // 46: docket.v1.GuardSpawnRequest.rows:type_name -> docket.v1.StepRow
+	93,  // 47: docket.v1.GuardSpawnResponse.decision:type_name -> docket.v1.GuardDecision
+	93,  // 48: docket.v1.GuardStopResponse.decision:type_name -> docket.v1.GuardDecision
+	4,   // 49: docket.v1.IssueCloseResponse.issue:type_name -> docket.v1.Issue
+	5,   // 50: docket.v1.IssueCommentAddResponse.comment:type_name -> docket.v1.Comment
+	5,   // 51: docket.v1.IssueCommentListResponse.items:type_name -> docket.v1.Comment
+	4,   // 52: docket.v1.IssueCreateResponse.issue:type_name -> docket.v1.Issue
+	4,   // 53: docket.v1.IssueEditResponse.issue:type_name -> docket.v1.Issue
+	4,   // 54: docket.v1.IssueGraphResponse.nodes:type_name -> docket.v1.Issue
+	123, // 55: docket.v1.IssueGraphResponse.edges:type_name -> docket.v1.GraphEdge
+	4,   // 56: docket.v1.IssueLabelAddResponse.issue:type_name -> docket.v1.Issue
+	7,   // 57: docket.v1.IssueLabelListResponse.items:type_name -> docket.v1.Label
+	4,   // 58: docket.v1.IssueLabelRmResponse.issue:type_name -> docket.v1.Issue
+	8,   // 59: docket.v1.IssueLinkAddResponse.relation:type_name -> docket.v1.Relation
+	8,   // 60: docket.v1.IssueLinkListResponse.items:type_name -> docket.v1.Relation
+	8,   // 61: docket.v1.IssueLinkRemoveResponse.relation:type_name -> docket.v1.Relation
+	36,  // 62: docket.v1.IssueListRequest.filter:type_name -> docket.v1.IssueFilter
+	4,   // 63: docket.v1.IssueListResponse.items:type_name -> docket.v1.Issue
+	6,   // 64: docket.v1.IssueLogResponse.items:type_name -> docket.v1.Activity
+	4,   // 65: docket.v1.IssueMoveResponse.issue:type_name -> docket.v1.Issue
+	4,   // 66: docket.v1.IssueReopenResponse.issue:type_name -> docket.v1.Issue
+	4,   // 67: docket.v1.IssueShowDetail.issue:type_name -> docket.v1.Issue
+	4,   // 68: docket.v1.IssueShowDetail.children:type_name -> docket.v1.Issue
+	8,   // 69: docket.v1.IssueShowDetail.relations:type_name -> docket.v1.Relation
+	5,   // 70: docket.v1.IssueShowDetail.comments:type_name -> docket.v1.Comment
+	15,  // 71: docket.v1.IssueShowDetail.disposition:type_name -> docket.v1.IssueRunDisposition
+	152, // 72: docket.v1.IssueShowResponse.issues:type_name -> docket.v1.IssueShowDetail
+	36,  // 73: docket.v1.NextRequest.filter:type_name -> docket.v1.IssueFilter
+	4,   // 74: docket.v1.NextResponse.issues:type_name -> docket.v1.Issue
+	17,  // 75: docket.v1.NextResponse.steps:type_name -> docket.v1.StepRow
+	36,  // 76: docket.v1.PlanRequest.filter:type_name -> docket.v1.IssueFilter
+	4,   // 77: docket.v1.PlanPhase.issues:type_name -> docket.v1.Issue
+	159, // 78: docket.v1.PlanResponse.phases:type_name -> docket.v1.PlanPhase
+	16,  // 79: docket.v1.PolicyResolveResponse.seats:type_name -> docket.v1.VoterAssignment
+	12,  // 80: docket.v1.ProjectDeleteResponse.project:type_name -> docket.v1.Project
+	12,  // 81: docket.v1.ProjectListResponse.items:type_name -> docket.v1.Project
+	12,  // 82: docket.v1.ProjectSetPrefixResponse.project:type_name -> docket.v1.Project
+	170, // 83: docket.v1.RegistryAuditResponse.drift:type_name -> docket.v1.RegistryDrift
+	173, // 84: docket.v1.ReportExecutorsResponse.executors:type_name -> docket.v1.ExecutorRollup
+	173, // 85: docket.v1.ReportExecutorsResponse.voters:type_name -> docket.v1.ExecutorRollup
+	13,  // 86: docket.v1.RunAbandonResponse.run:type_name -> docket.v1.Run
+	13,  // 87: docket.v1.RunActivateResponse.run:type_name -> docket.v1.Run
+	29,  // 88: docket.v1.RunActivateResponse.pins:type_name -> docket.v1.PinVerdict
+	26,  // 89: docket.v1.RunFactAddResponse.event:type_name -> docket.v1.Event
+	13,  // 90: docket.v1.RunIssueAddResponse.run:type_name -> docket.v1.Run
+	13,  // 91: docket.v1.RunIssueRemoveResponse.run:type_name -> docket.v1.Run
+	27,  // 92: docket.v1.RunNoteAddResponse.note:type_name -> docket.v1.RunNote
+	27,  // 93: docket.v1.RunNoteListResponse.items:type_name -> docket.v1.RunNote
+	13,  // 94: docket.v1.RunPauseResponse.run:type_name -> docket.v1.Run
+	29,  // 95: docket.v1.RunRepinResponse.repinned:type_name -> docket.v1.PinVerdict
+	13,  // 96: docket.v1.RunReportResponse.run:type_name -> docket.v1.Run
+	18,  // 97: docket.v1.RunReportResponse.steps:type_name -> docket.v1.Step
+	19,  // 98: docket.v1.RunReportResponse.gates:type_name -> docket.v1.GateResult
+	20,  // 99: docket.v1.RunReportResponse.artifacts:type_name -> docket.v1.Artifact
+	13,  // 100: docket.v1.RunResumeResponse.run:type_name -> docket.v1.Run
+	13,  // 101: docket.v1.RunStartResponse.run:type_name -> docket.v1.Run
+	13,  // 102: docket.v1.RunStatusResponse.items:type_name -> docket.v1.Run
+	29,  // 103: docket.v1.RunVerifyPinsResponse.pins:type_name -> docket.v1.PinVerdict
+	33,  // 104: docket.v1.SchemaDeprecateResponse.schema:type_name -> docket.v1.Schema
+	33,  // 105: docket.v1.SchemaListResponse.items:type_name -> docket.v1.Schema
+	33,  // 106: docket.v1.SchemaRegisterResponse.schema:type_name -> docket.v1.Schema
+	33,  // 107: docket.v1.SchemaShowResponse.schema:type_name -> docket.v1.Schema
+	14,  // 108: docket.v1.StatsResponse.by_status:type_name -> docket.v1.StatusCount
+	14,  // 109: docket.v1.StatsResponse.by_priority:type_name -> docket.v1.StatusCount
+	14,  // 110: docket.v1.StatsResponse.by_type:type_name -> docket.v1.StatusCount
+	14,  // 111: docket.v1.StatsResponse.by_label:type_name -> docket.v1.StatusCount
+	18,  // 112: docket.v1.StepAnnotateResponse.step:type_name -> docket.v1.Step
+	18,  // 113: docket.v1.StepApproveResponse.step:type_name -> docket.v1.Step
+	20,  // 114: docket.v1.StepArtifactResponse.artifact:type_name -> docket.v1.Artifact
+	20,  // 115: docket.v1.StepArtifactsResponse.items:type_name -> docket.v1.Artifact
+	24,  // 116: docket.v1.StepClaimResponse.context:type_name -> docket.v1.StepContextBundle
+	18,  // 117: docket.v1.StepCompleteResponse.step:type_name -> docket.v1.Step
+	19,  // 118: docket.v1.StepCompleteResponse.failed_gates:type_name -> docket.v1.GateResult
+	24,  // 119: docket.v1.StepContextResponse.context:type_name -> docket.v1.StepContextBundle
+	18,  // 120: docket.v1.StepFailResponse.step:type_name -> docket.v1.Step
+	19,  // 121: docket.v1.StepGatesResponse.items:type_name -> docket.v1.GateResult
+	18,  // 122: docket.v1.StepHoldResponse.step:type_name -> docket.v1.Step
+	18,  // 123: docket.v1.StepListResponse.items:type_name -> docket.v1.Step
+	18,  // 124: docket.v1.StepReapResponse.step:type_name -> docket.v1.Step
+	18,  // 125: docket.v1.StepRejectResponse.step:type_name -> docket.v1.Step
+	18,  // 126: docket.v1.StepResolveResponse.steps:type_name -> docket.v1.Step
+	18,  // 127: docket.v1.StepShowResponse.steps:type_name -> docket.v1.Step
+	35,  // 128: docket.v1.VoteBackfillUsageRequest.rows:type_name -> docket.v1.UsageRow
+	32,  // 129: docket.v1.VoteCastResponse.vote:type_name -> docket.v1.Vote
+	31,  // 130: docket.v1.VoteCastResponse.proposal:type_name -> docket.v1.Proposal
+	31,  // 131: docket.v1.VoteCloseResponse.proposal:type_name -> docket.v1.Proposal
+	31,  // 132: docket.v1.VoteCommitResponse.proposal:type_name -> docket.v1.Proposal
+	31,  // 133: docket.v1.VoteCreateResponse.proposal:type_name -> docket.v1.Proposal
+	31,  // 134: docket.v1.VoteListResponse.items:type_name -> docket.v1.Proposal
+	31,  // 135: docket.v1.VoteShowResponse.proposal:type_name -> docket.v1.Proposal
+	34,  // 136: docket.v1.WorkflowDeprecateResponse.workflow:type_name -> docket.v1.Workflow
+	280, // 137: docket.v1.WorkflowLintResponse.findings:type_name -> docket.v1.LintFinding
+	34,  // 138: docket.v1.WorkflowListResponse.items:type_name -> docket.v1.Workflow
+	34,  // 139: docket.v1.WorkflowRegisterResponse.workflow:type_name -> docket.v1.Workflow
+	34,  // 140: docket.v1.WorkflowShowResponse.workflow:type_name -> docket.v1.Workflow
+	37,  // 141: docket.v1.DocketService.Handshake:input_type -> docket.v1.HandshakeRequest
+	39,  // 142: docket.v1.DocketService.Board:input_type -> docket.v1.BoardRequest
+	42,  // 143: docket.v1.DocketService.ConfigGet:input_type -> docket.v1.ConfigGetRequest
+	45,  // 144: docket.v1.DocketService.ConfigSet:input_type -> docket.v1.ConfigSetRequest
+	47,  // 145: docket.v1.DocketService.DispatchAbandon:input_type -> docket.v1.DispatchAbandonRequest
+	49,  // 146: docket.v1.DocketService.DispatchBackfillUsage:input_type -> docket.v1.DispatchBackfillUsageRequest
+	51,  // 147: docket.v1.DocketService.DispatchClose:input_type -> docket.v1.DispatchCloseRequest
+	53,  // 148: docket.v1.DocketService.DispatchExtend:input_type -> docket.v1.DispatchExtendRequest
+	55,  // 149: docket.v1.DocketService.DispatchOpen:input_type -> docket.v1.DispatchOpenRequest
+	57,  // 150: docket.v1.DocketService.DispatchVerify:input_type -> docket.v1.DispatchVerifyRequest
+	60,  // 151: docket.v1.DocketService.DispatchWaiveTarget:input_type -> docket.v1.DispatchWaiveTargetRequest
+	62,  // 152: docket.v1.DocketService.DocCommentAdd:input_type -> docket.v1.DocCommentAddRequest
+	64,  // 153: docket.v1.DocketService.DocCommentList:input_type -> docket.v1.DocCommentListRequest
+	66,  // 154: docket.v1.DocketService.DocCreate:input_type -> docket.v1.DocCreateRequest
+	68,  // 155: docket.v1.DocketService.DocDelete:input_type -> docket.v1.DocDeleteRequest
+	70,  // 156: docket.v1.DocketService.DocEdit:input_type -> docket.v1.DocEditRequest
+	72,  // 157: docket.v1.DocketService.DocLinkAdd:input_type -> docket.v1.DocLinkAddRequest
+	74,  // 158: docket.v1.DocketService.DocLinkRemove:input_type -> docket.v1.DocLinkRemoveRequest
+	76,  // 159: docket.v1.DocketService.DocList:input_type -> docket.v1.DocListRequest
+	78,  // 160: docket.v1.DocketService.DocShow:input_type -> docket.v1.DocShowRequest
+	80,  // 161: docket.v1.DocketService.Doctor:input_type -> docket.v1.DoctorRequest
+	83,  // 162: docket.v1.DocketService.EventsList:input_type -> docket.v1.EventsListRequest
+	85,  // 163: docket.v1.DocketService.EventsPrune:input_type -> docket.v1.EventsPruneRequest
+	87,  // 164: docket.v1.DocketService.Export:input_type -> docket.v1.ExportRequest
+	91,  // 165: docket.v1.DocketService.GateStatus:input_type -> docket.v1.GateStatusRequest
+	94,  // 166: docket.v1.DocketService.GuardGate:input_type -> docket.v1.GuardGateRequest
+	96,  // 167: docket.v1.DocketService.GuardRecord:input_type -> docket.v1.GuardRecordRequest
+	98,  // 168: docket.v1.DocketService.GuardSpawn:input_type -> docket.v1.GuardSpawnRequest
+	100, // 169: docket.v1.DocketService.GuardStop:input_type -> docket.v1.GuardStopRequest
+	89,  // 170: docket.v1.DocketService.Import:input_type -> docket.v1.ImportRequest
+	102, // 171: docket.v1.DocketService.IssueClaim:input_type -> docket.v1.IssueClaimRequest
+	104, // 172: docket.v1.DocketService.IssueClose:input_type -> docket.v1.IssueCloseRequest
+	106, // 173: docket.v1.DocketService.IssueCommentAdd:input_type -> docket.v1.IssueCommentAddRequest
+	108, // 174: docket.v1.DocketService.IssueCommentList:input_type -> docket.v1.IssueCommentListRequest
+	110, // 175: docket.v1.DocketService.IssueCreate:input_type -> docket.v1.IssueCreateRequest
+	112, // 176: docket.v1.DocketService.IssueDelete:input_type -> docket.v1.IssueDeleteRequest
+	114, // 177: docket.v1.DocketService.IssueEdit:input_type -> docket.v1.IssueEditRequest
+	116, // 178: docket.v1.DocketService.IssueFileAdd:input_type -> docket.v1.IssueFileAddRequest
+	118, // 179: docket.v1.DocketService.IssueFileList:input_type -> docket.v1.IssueFileListRequest
+	120, // 180: docket.v1.DocketService.IssueFileRemove:input_type -> docket.v1.IssueFileRemoveRequest
+	122, // 181: docket.v1.DocketService.IssueGraph:input_type -> docket.v1.IssueGraphRequest
+	125, // 182: docket.v1.DocketService.IssueHeartbeat:input_type -> docket.v1.IssueHeartbeatRequest
+	127, // 183: docket.v1.DocketService.IssueLabelAdd:input_type -> docket.v1.IssueLabelAddRequest
+	129, // 184: docket.v1.DocketService.IssueLabelDelete:input_type -> docket.v1.IssueLabelDeleteRequest
+	131, // 185: docket.v1.DocketService.IssueLabelList:input_type -> docket.v1.IssueLabelListRequest
+	133, // 186: docket.v1.DocketService.IssueLabelRm:input_type -> docket.v1.IssueLabelRmRequest
+	135, // 187: docket.v1.DocketService.IssueLinkAdd:input_type -> docket.v1.IssueLinkAddRequest
+	137, // 188: docket.v1.DocketService.IssueLinkList:input_type -> docket.v1.IssueLinkListRequest
+	139, // 189: docket.v1.DocketService.IssueLinkRemove:input_type -> docket.v1.IssueLinkRemoveRequest
+	141, // 190: docket.v1.DocketService.IssueList:input_type -> docket.v1.IssueListRequest
+	143, // 191: docket.v1.DocketService.IssueLog:input_type -> docket.v1.IssueLogRequest
+	145, // 192: docket.v1.DocketService.IssueMove:input_type -> docket.v1.IssueMoveRequest
+	147, // 193: docket.v1.DocketService.IssueRelease:input_type -> docket.v1.IssueReleaseRequest
+	149, // 194: docket.v1.DocketService.IssueReopen:input_type -> docket.v1.IssueReopenRequest
+	151, // 195: docket.v1.DocketService.IssueShow:input_type -> docket.v1.IssueShowRequest
+	154, // 196: docket.v1.DocketService.Next:input_type -> docket.v1.NextRequest
+	156, // 197: docket.v1.DocketService.PinShow:input_type -> docket.v1.PinShowRequest
+	158, // 198: docket.v1.DocketService.Plan:input_type -> docket.v1.PlanRequest
+	161, // 199: docket.v1.DocketService.PolicyResolve:input_type -> docket.v1.PolicyResolveRequest
+	163, // 200: docket.v1.DocketService.ProjectDelete:input_type -> docket.v1.ProjectDeleteRequest
+	165, // 201: docket.v1.DocketService.ProjectList:input_type -> docket.v1.ProjectListRequest
+	167, // 202: docket.v1.DocketService.ProjectSetPrefix:input_type -> docket.v1.ProjectSetPrefixRequest
+	169, // 203: docket.v1.DocketService.RegistryAudit:input_type -> docket.v1.RegistryAuditRequest
+	172, // 204: docket.v1.DocketService.ReportExecutors:input_type -> docket.v1.ReportExecutorsRequest
+	175, // 205: docket.v1.DocketService.RunAbandon:input_type -> docket.v1.RunAbandonRequest
+	177, // 206: docket.v1.DocketService.RunActivate:input_type -> docket.v1.RunActivateRequest
+	179, // 207: docket.v1.DocketService.RunBudget:input_type -> docket.v1.RunBudgetRequest
+	181, // 208: docket.v1.DocketService.RunConduct:input_type -> docket.v1.RunConductRequest
+	183, // 209: docket.v1.DocketService.RunFactAdd:input_type -> docket.v1.RunFactAddRequest
+	185, // 210: docket.v1.DocketService.RunIssueAdd:input_type -> docket.v1.RunIssueAddRequest
+	187, // 211: docket.v1.DocketService.RunIssueRemove:input_type -> docket.v1.RunIssueRemoveRequest
+	189, // 212: docket.v1.DocketService.RunNoteAdd:input_type -> docket.v1.RunNoteAddRequest
+	191, // 213: docket.v1.DocketService.RunNoteList:input_type -> docket.v1.RunNoteListRequest
+	193, // 214: docket.v1.DocketService.RunPause:input_type -> docket.v1.RunPauseRequest
+	195, // 215: docket.v1.DocketService.RunRefreshBody:input_type -> docket.v1.RunRefreshBodyRequest
+	197, // 216: docket.v1.DocketService.RunRefreshFiles:input_type -> docket.v1.RunRefreshFilesRequest
+	199, // 217: docket.v1.DocketService.RunRefreshScope:input_type -> docket.v1.RunRefreshScopeRequest
+	201, // 218: docket.v1.DocketService.RunRepin:input_type -> docket.v1.RunRepinRequest
+	203, // 219: docket.v1.DocketService.RunReport:input_type -> docket.v1.RunReportRequest
+	205, // 220: docket.v1.DocketService.RunResume:input_type -> docket.v1.RunResumeRequest
+	207, // 221: docket.v1.DocketService.RunStart:input_type -> docket.v1.RunStartRequest
+	209, // 222: docket.v1.DocketService.RunStatus:input_type -> docket.v1.RunStatusRequest
+	211, // 223: docket.v1.DocketService.RunVerifyPins:input_type -> docket.v1.RunVerifyPinsRequest
+	213, // 224: docket.v1.DocketService.SchemaDeprecate:input_type -> docket.v1.SchemaDeprecateRequest
+	215, // 225: docket.v1.DocketService.SchemaList:input_type -> docket.v1.SchemaListRequest
+	217, // 226: docket.v1.DocketService.SchemaRegister:input_type -> docket.v1.SchemaRegisterRequest
+	219, // 227: docket.v1.DocketService.SchemaShow:input_type -> docket.v1.SchemaShowRequest
+	221, // 228: docket.v1.DocketService.Stats:input_type -> docket.v1.StatsRequest
+	223, // 229: docket.v1.DocketService.StepAnnotate:input_type -> docket.v1.StepAnnotateRequest
+	225, // 230: docket.v1.DocketService.StepApprove:input_type -> docket.v1.StepApproveRequest
+	227, // 231: docket.v1.DocketService.StepArtifact:input_type -> docket.v1.StepArtifactRequest
+	229, // 232: docket.v1.DocketService.StepArtifacts:input_type -> docket.v1.StepArtifactsRequest
+	231, // 233: docket.v1.DocketService.StepClaim:input_type -> docket.v1.StepClaimRequest
+	233, // 234: docket.v1.DocketService.StepComplete:input_type -> docket.v1.StepCompleteRequest
+	235, // 235: docket.v1.DocketService.StepContext:input_type -> docket.v1.StepContextRequest
+	237, // 236: docket.v1.DocketService.StepFail:input_type -> docket.v1.StepFailRequest
+	239, // 237: docket.v1.DocketService.StepGates:input_type -> docket.v1.StepGatesRequest
+	241, // 238: docket.v1.DocketService.StepHeartbeat:input_type -> docket.v1.StepHeartbeatRequest
+	243, // 239: docket.v1.DocketService.StepHold:input_type -> docket.v1.StepHoldRequest
+	245, // 240: docket.v1.DocketService.StepList:input_type -> docket.v1.StepListRequest
+	247, // 241: docket.v1.DocketService.StepReap:input_type -> docket.v1.StepReapRequest
+	249, // 242: docket.v1.DocketService.StepReject:input_type -> docket.v1.StepRejectRequest
+	251, // 243: docket.v1.DocketService.StepRender:input_type -> docket.v1.StepRenderRequest
+	253, // 244: docket.v1.DocketService.StepResolve:input_type -> docket.v1.StepResolveRequest
+	255, // 245: docket.v1.DocketService.StepShow:input_type -> docket.v1.StepShowRequest
+	257, // 246: docket.v1.DocketService.VoteBackfillUsage:input_type -> docket.v1.VoteBackfillUsageRequest
+	259, // 247: docket.v1.DocketService.VoteCast:input_type -> docket.v1.VoteCastRequest
+	261, // 248: docket.v1.DocketService.VoteClose:input_type -> docket.v1.VoteCloseRequest
+	263, // 249: docket.v1.DocketService.VoteCommit:input_type -> docket.v1.VoteCommitRequest
+	265, // 250: docket.v1.DocketService.VoteCreate:input_type -> docket.v1.VoteCreateRequest
+	267, // 251: docket.v1.DocketService.VoteLink:input_type -> docket.v1.VoteLinkRequest
+	269, // 252: docket.v1.DocketService.VoteList:input_type -> docket.v1.VoteListRequest
+	271, // 253: docket.v1.DocketService.VoteResult:input_type -> docket.v1.VoteResultRequest
+	273, // 254: docket.v1.DocketService.VoteShow:input_type -> docket.v1.VoteShowRequest
+	275, // 255: docket.v1.DocketService.VoteUnlink:input_type -> docket.v1.VoteUnlinkRequest
+	277, // 256: docket.v1.DocketService.WorkflowDeprecate:input_type -> docket.v1.WorkflowDeprecateRequest
+	279, // 257: docket.v1.DocketService.WorkflowLint:input_type -> docket.v1.WorkflowLintRequest
+	282, // 258: docket.v1.DocketService.WorkflowList:input_type -> docket.v1.WorkflowListRequest
+	284, // 259: docket.v1.DocketService.WorkflowRegister:input_type -> docket.v1.WorkflowRegisterRequest
+	286, // 260: docket.v1.DocketService.WorkflowShow:input_type -> docket.v1.WorkflowShowRequest
+	38,  // 261: docket.v1.DocketService.Handshake:output_type -> docket.v1.HandshakeResponse
+	41,  // 262: docket.v1.DocketService.Board:output_type -> docket.v1.BoardResponse
+	44,  // 263: docket.v1.DocketService.ConfigGet:output_type -> docket.v1.ConfigGetResponse
+	46,  // 264: docket.v1.DocketService.ConfigSet:output_type -> docket.v1.ConfigSetResponse
+	48,  // 265: docket.v1.DocketService.DispatchAbandon:output_type -> docket.v1.DispatchAbandonResponse
+	50,  // 266: docket.v1.DocketService.DispatchBackfillUsage:output_type -> docket.v1.DispatchBackfillUsageResponse
+	52,  // 267: docket.v1.DocketService.DispatchClose:output_type -> docket.v1.DispatchCloseResponse
+	54,  // 268: docket.v1.DocketService.DispatchExtend:output_type -> docket.v1.DispatchExtendResponse
+	56,  // 269: docket.v1.DocketService.DispatchOpen:output_type -> docket.v1.DispatchOpenResponse
+	59,  // 270: docket.v1.DocketService.DispatchVerify:output_type -> docket.v1.DispatchVerifyResponse
+	61,  // 271: docket.v1.DocketService.DispatchWaiveTarget:output_type -> docket.v1.DispatchWaiveTargetResponse
+	63,  // 272: docket.v1.DocketService.DocCommentAdd:output_type -> docket.v1.DocCommentAddResponse
+	65,  // 273: docket.v1.DocketService.DocCommentList:output_type -> docket.v1.DocCommentListResponse
+	67,  // 274: docket.v1.DocketService.DocCreate:output_type -> docket.v1.DocCreateResponse
+	69,  // 275: docket.v1.DocketService.DocDelete:output_type -> docket.v1.DocDeleteResponse
+	71,  // 276: docket.v1.DocketService.DocEdit:output_type -> docket.v1.DocEditResponse
+	73,  // 277: docket.v1.DocketService.DocLinkAdd:output_type -> docket.v1.DocLinkAddResponse
+	75,  // 278: docket.v1.DocketService.DocLinkRemove:output_type -> docket.v1.DocLinkRemoveResponse
+	77,  // 279: docket.v1.DocketService.DocList:output_type -> docket.v1.DocListResponse
+	79,  // 280: docket.v1.DocketService.DocShow:output_type -> docket.v1.DocShowResponse
+	82,  // 281: docket.v1.DocketService.Doctor:output_type -> docket.v1.DoctorResponse
+	84,  // 282: docket.v1.DocketService.EventsList:output_type -> docket.v1.EventsListResponse
+	86,  // 283: docket.v1.DocketService.EventsPrune:output_type -> docket.v1.EventsPruneResponse
+	88,  // 284: docket.v1.DocketService.Export:output_type -> docket.v1.ExportResponse
+	92,  // 285: docket.v1.DocketService.GateStatus:output_type -> docket.v1.GateStatusResponse
+	95,  // 286: docket.v1.DocketService.GuardGate:output_type -> docket.v1.GuardGateResponse
+	97,  // 287: docket.v1.DocketService.GuardRecord:output_type -> docket.v1.GuardRecordResponse
+	99,  // 288: docket.v1.DocketService.GuardSpawn:output_type -> docket.v1.GuardSpawnResponse
+	101, // 289: docket.v1.DocketService.GuardStop:output_type -> docket.v1.GuardStopResponse
+	90,  // 290: docket.v1.DocketService.Import:output_type -> docket.v1.ImportResponse
+	103, // 291: docket.v1.DocketService.IssueClaim:output_type -> docket.v1.IssueClaimResponse
+	105, // 292: docket.v1.DocketService.IssueClose:output_type -> docket.v1.IssueCloseResponse
+	107, // 293: docket.v1.DocketService.IssueCommentAdd:output_type -> docket.v1.IssueCommentAddResponse
+	109, // 294: docket.v1.DocketService.IssueCommentList:output_type -> docket.v1.IssueCommentListResponse
+	111, // 295: docket.v1.DocketService.IssueCreate:output_type -> docket.v1.IssueCreateResponse
+	113, // 296: docket.v1.DocketService.IssueDelete:output_type -> docket.v1.IssueDeleteResponse
+	115, // 297: docket.v1.DocketService.IssueEdit:output_type -> docket.v1.IssueEditResponse
+	117, // 298: docket.v1.DocketService.IssueFileAdd:output_type -> docket.v1.IssueFileAddResponse
+	119, // 299: docket.v1.DocketService.IssueFileList:output_type -> docket.v1.IssueFileListResponse
+	121, // 300: docket.v1.DocketService.IssueFileRemove:output_type -> docket.v1.IssueFileRemoveResponse
+	124, // 301: docket.v1.DocketService.IssueGraph:output_type -> docket.v1.IssueGraphResponse
+	126, // 302: docket.v1.DocketService.IssueHeartbeat:output_type -> docket.v1.IssueHeartbeatResponse
+	128, // 303: docket.v1.DocketService.IssueLabelAdd:output_type -> docket.v1.IssueLabelAddResponse
+	130, // 304: docket.v1.DocketService.IssueLabelDelete:output_type -> docket.v1.IssueLabelDeleteResponse
+	132, // 305: docket.v1.DocketService.IssueLabelList:output_type -> docket.v1.IssueLabelListResponse
+	134, // 306: docket.v1.DocketService.IssueLabelRm:output_type -> docket.v1.IssueLabelRmResponse
+	136, // 307: docket.v1.DocketService.IssueLinkAdd:output_type -> docket.v1.IssueLinkAddResponse
+	138, // 308: docket.v1.DocketService.IssueLinkList:output_type -> docket.v1.IssueLinkListResponse
+	140, // 309: docket.v1.DocketService.IssueLinkRemove:output_type -> docket.v1.IssueLinkRemoveResponse
+	142, // 310: docket.v1.DocketService.IssueList:output_type -> docket.v1.IssueListResponse
+	144, // 311: docket.v1.DocketService.IssueLog:output_type -> docket.v1.IssueLogResponse
+	146, // 312: docket.v1.DocketService.IssueMove:output_type -> docket.v1.IssueMoveResponse
+	148, // 313: docket.v1.DocketService.IssueRelease:output_type -> docket.v1.IssueReleaseResponse
+	150, // 314: docket.v1.DocketService.IssueReopen:output_type -> docket.v1.IssueReopenResponse
+	153, // 315: docket.v1.DocketService.IssueShow:output_type -> docket.v1.IssueShowResponse
+	155, // 316: docket.v1.DocketService.Next:output_type -> docket.v1.NextResponse
+	157, // 317: docket.v1.DocketService.PinShow:output_type -> docket.v1.PinShowResponse
+	160, // 318: docket.v1.DocketService.Plan:output_type -> docket.v1.PlanResponse
+	162, // 319: docket.v1.DocketService.PolicyResolve:output_type -> docket.v1.PolicyResolveResponse
+	164, // 320: docket.v1.DocketService.ProjectDelete:output_type -> docket.v1.ProjectDeleteResponse
+	166, // 321: docket.v1.DocketService.ProjectList:output_type -> docket.v1.ProjectListResponse
+	168, // 322: docket.v1.DocketService.ProjectSetPrefix:output_type -> docket.v1.ProjectSetPrefixResponse
+	171, // 323: docket.v1.DocketService.RegistryAudit:output_type -> docket.v1.RegistryAuditResponse
+	174, // 324: docket.v1.DocketService.ReportExecutors:output_type -> docket.v1.ReportExecutorsResponse
+	176, // 325: docket.v1.DocketService.RunAbandon:output_type -> docket.v1.RunAbandonResponse
+	178, // 326: docket.v1.DocketService.RunActivate:output_type -> docket.v1.RunActivateResponse
+	180, // 327: docket.v1.DocketService.RunBudget:output_type -> docket.v1.RunBudgetResponse
+	182, // 328: docket.v1.DocketService.RunConduct:output_type -> docket.v1.RunConductResponse
+	184, // 329: docket.v1.DocketService.RunFactAdd:output_type -> docket.v1.RunFactAddResponse
+	186, // 330: docket.v1.DocketService.RunIssueAdd:output_type -> docket.v1.RunIssueAddResponse
+	188, // 331: docket.v1.DocketService.RunIssueRemove:output_type -> docket.v1.RunIssueRemoveResponse
+	190, // 332: docket.v1.DocketService.RunNoteAdd:output_type -> docket.v1.RunNoteAddResponse
+	192, // 333: docket.v1.DocketService.RunNoteList:output_type -> docket.v1.RunNoteListResponse
+	194, // 334: docket.v1.DocketService.RunPause:output_type -> docket.v1.RunPauseResponse
+	196, // 335: docket.v1.DocketService.RunRefreshBody:output_type -> docket.v1.RunRefreshBodyResponse
+	198, // 336: docket.v1.DocketService.RunRefreshFiles:output_type -> docket.v1.RunRefreshFilesResponse
+	200, // 337: docket.v1.DocketService.RunRefreshScope:output_type -> docket.v1.RunRefreshScopeResponse
+	202, // 338: docket.v1.DocketService.RunRepin:output_type -> docket.v1.RunRepinResponse
+	204, // 339: docket.v1.DocketService.RunReport:output_type -> docket.v1.RunReportResponse
+	206, // 340: docket.v1.DocketService.RunResume:output_type -> docket.v1.RunResumeResponse
+	208, // 341: docket.v1.DocketService.RunStart:output_type -> docket.v1.RunStartResponse
+	210, // 342: docket.v1.DocketService.RunStatus:output_type -> docket.v1.RunStatusResponse
+	212, // 343: docket.v1.DocketService.RunVerifyPins:output_type -> docket.v1.RunVerifyPinsResponse
+	214, // 344: docket.v1.DocketService.SchemaDeprecate:output_type -> docket.v1.SchemaDeprecateResponse
+	216, // 345: docket.v1.DocketService.SchemaList:output_type -> docket.v1.SchemaListResponse
+	218, // 346: docket.v1.DocketService.SchemaRegister:output_type -> docket.v1.SchemaRegisterResponse
+	220, // 347: docket.v1.DocketService.SchemaShow:output_type -> docket.v1.SchemaShowResponse
+	222, // 348: docket.v1.DocketService.Stats:output_type -> docket.v1.StatsResponse
+	224, // 349: docket.v1.DocketService.StepAnnotate:output_type -> docket.v1.StepAnnotateResponse
+	226, // 350: docket.v1.DocketService.StepApprove:output_type -> docket.v1.StepApproveResponse
+	228, // 351: docket.v1.DocketService.StepArtifact:output_type -> docket.v1.StepArtifactResponse
+	230, // 352: docket.v1.DocketService.StepArtifacts:output_type -> docket.v1.StepArtifactsResponse
+	232, // 353: docket.v1.DocketService.StepClaim:output_type -> docket.v1.StepClaimResponse
+	234, // 354: docket.v1.DocketService.StepComplete:output_type -> docket.v1.StepCompleteResponse
+	236, // 355: docket.v1.DocketService.StepContext:output_type -> docket.v1.StepContextResponse
+	238, // 356: docket.v1.DocketService.StepFail:output_type -> docket.v1.StepFailResponse
+	240, // 357: docket.v1.DocketService.StepGates:output_type -> docket.v1.StepGatesResponse
+	242, // 358: docket.v1.DocketService.StepHeartbeat:output_type -> docket.v1.StepHeartbeatResponse
+	244, // 359: docket.v1.DocketService.StepHold:output_type -> docket.v1.StepHoldResponse
+	246, // 360: docket.v1.DocketService.StepList:output_type -> docket.v1.StepListResponse
+	248, // 361: docket.v1.DocketService.StepReap:output_type -> docket.v1.StepReapResponse
+	250, // 362: docket.v1.DocketService.StepReject:output_type -> docket.v1.StepRejectResponse
+	252, // 363: docket.v1.DocketService.StepRender:output_type -> docket.v1.StepRenderResponse
+	254, // 364: docket.v1.DocketService.StepResolve:output_type -> docket.v1.StepResolveResponse
+	256, // 365: docket.v1.DocketService.StepShow:output_type -> docket.v1.StepShowResponse
+	258, // 366: docket.v1.DocketService.VoteBackfillUsage:output_type -> docket.v1.VoteBackfillUsageResponse
+	260, // 367: docket.v1.DocketService.VoteCast:output_type -> docket.v1.VoteCastResponse
+	262, // 368: docket.v1.DocketService.VoteClose:output_type -> docket.v1.VoteCloseResponse
+	264, // 369: docket.v1.DocketService.VoteCommit:output_type -> docket.v1.VoteCommitResponse
+	266, // 370: docket.v1.DocketService.VoteCreate:output_type -> docket.v1.VoteCreateResponse
+	268, // 371: docket.v1.DocketService.VoteLink:output_type -> docket.v1.VoteLinkResponse
+	270, // 372: docket.v1.DocketService.VoteList:output_type -> docket.v1.VoteListResponse
+	272, // 373: docket.v1.DocketService.VoteResult:output_type -> docket.v1.VoteResultResponse
+	274, // 374: docket.v1.DocketService.VoteShow:output_type -> docket.v1.VoteShowResponse
+	276, // 375: docket.v1.DocketService.VoteUnlink:output_type -> docket.v1.VoteUnlinkResponse
+	278, // 376: docket.v1.DocketService.WorkflowDeprecate:output_type -> docket.v1.WorkflowDeprecateResponse
+	281, // 377: docket.v1.DocketService.WorkflowLint:output_type -> docket.v1.WorkflowLintResponse
+	283, // 378: docket.v1.DocketService.WorkflowList:output_type -> docket.v1.WorkflowListResponse
+	285, // 379: docket.v1.DocketService.WorkflowRegister:output_type -> docket.v1.WorkflowRegisterResponse
+	287, // 380: docket.v1.DocketService.WorkflowShow:output_type -> docket.v1.WorkflowShowResponse
+	261, // [261:381] is the sub-list for method output_type
+	141, // [141:261] is the sub-list for method input_type
+	141, // [141:141] is the sub-list for extension type_name
+	141, // [141:141] is the sub-list for extension extendee
+	0,   // [0:141] is the sub-list for field type_name
 }
 
 func init() { file_docket_v1_docket_proto_init() }
@@ -19906,26 +20009,26 @@ func file_docket_v1_docket_proto_init() {
 		return
 	}
 	file_docket_v1_docket_proto_msgTypes[13].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[30].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[69].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[77].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[101].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[113].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[124].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[178].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[206].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[218].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[230].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[264].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[271].OneofWrappers = []any{}
-	file_docket_v1_docket_proto_msgTypes[285].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[31].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[70].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[78].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[102].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[114].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[125].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[179].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[207].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[219].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[231].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[265].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[272].OneofWrappers = []any{}
+	file_docket_v1_docket_proto_msgTypes[286].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_docket_v1_docket_proto_rawDesc), len(file_docket_v1_docket_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   287,
+			NumMessages:   288,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
