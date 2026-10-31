@@ -13,6 +13,7 @@ import (
 func TestStoreContract(t *testing.T) {
 	t.Run("PinContentRoundTrips", testPinContentRoundTrips)
 	t.Run("EventWatermarkAndGap", testEventWatermarkAndGap)
+	t.Run("RaiseEventLowWatermark", testRaiseEventLowWatermark)
 }
 
 // testPinContentRoundTrips inserts a pin with its file's bytes and reads the

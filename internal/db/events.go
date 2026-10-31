@@ -136,12 +136,14 @@ func CountEventsHeldByRetentionTx(tx *sql.Tx, sel EventPruneSelection, cutoffMS 
 
 // RaiseEventLowWatermarkTx moves the watermark up to just below the lowest
 // surviving seq. It never lowers it, and leaves it alone when no event
-// survives.
+// survives: the comparison is NULL over an empty log, so no row updates. The
+// comparison sits in WHERE because SQLite's two-argument MAX and PostgreSQL's
+// GREATEST have no common spelling.
 func RaiseEventLowWatermarkTx(tx *sql.Tx) error {
 	if _, err := tx.Exec(
 		`UPDATE event_low_watermark
-		    SET seq = MAX(seq, (SELECT MIN(seq) - 1 FROM events))
-		  WHERE id = 1 AND EXISTS (SELECT 1 FROM events)`,
+		    SET seq = (SELECT MIN(seq) - 1 FROM events)
+		  WHERE id = 1 AND (SELECT MIN(seq) - 1 FROM events) > seq`,
 	); err != nil {
 		return fmt.Errorf("raising the event low watermark: %w", err)
 	}
