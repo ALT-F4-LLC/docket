@@ -19,10 +19,19 @@ func NewHandler(svc docketv1connect.DocketServiceHandler, logger *slog.Logger) (
 	return docketv1connect.NewDocketServiceHandler(svc, handlerOptions(logger))
 }
 
-// handlerOptions configure every daemon handler: the strict protojson codec.
-// Connect handlers already accept protojson, so only its validation is added.
+// requestMaxBytes caps one request message, measured after decompression.
+// It is 8 MiB: room for a step completion carrying a db.ArtifactMaxBytes
+// artifact even at protojson's worst-case escaping.
+const requestMaxBytes = 8 << 20
+
+// handlerOptions configure every daemon handler: the request size cap, which
+// Connect enforces before decoding, and the strict protojson codec. Connect
+// handlers already accept protojson, so only its validation is added.
 func handlerOptions(logger *slog.Logger) connect.HandlerOption {
-	return connect.WithInterceptors(strictValidation(logger))
+	return connect.WithHandlerOptions(
+		connect.WithReadMaxBytes(requestMaxBytes),
+		connect.WithInterceptors(strictValidation(logger)),
+	)
 }
 
 // NewClient returns a client for the daemon at baseURL that speaks the strict
