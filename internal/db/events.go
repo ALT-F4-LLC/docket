@@ -10,7 +10,8 @@ import (
 )
 
 // The event-log queries behind `events list`, `events prune`, the report's
-// actor rollup, and `run status`'s activation head. Each runs inside the
+// actor rollup, `run status`'s activation head, and the engine's event and
+// run-fact recorders. Each runs inside the
 // caller's transaction; the event writer and the meaning of each kind live in
 // internal/engine.
 
@@ -336,4 +337,114 @@ func LatestEventDataTx(tx *sql.Tx, runID int, kind string) (data string, found b
 			kind, model.FormatRunID(runID), err)
 	}
 	return data, true, nil
+}
+
+// StepIDByInstanceTx resolves a run's step by its `name@k#i` instance. A
+// nonzero issueID narrows the lookup: steps are unique per (run, issue,
+// instance), not per (run, instance). found is false when no step matches.
+func StepIDByInstanceTx(tx *sql.Tx, runID, issueID int, instance string) (id int, found bool, err error) {
+	query := `SELECT id FROM steps WHERE run_id = ? AND instance = ?`
+	args := []any{runID, instance}
+	if issueID != 0 {
+		query += ` AND issue_id = ?`
+		args = append(args, issueID)
+	}
+	err = tx.QueryRow(query, args...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolving step %s of %s: %w", instance, model.FormatRunID(runID), err)
+	}
+	return id, true, nil
+}
+
+// NewEvent is one event row to insert. A zero RunID, StepID, or IssueID
+// stores NULL.
+type NewEvent struct {
+	AtMS    int64
+	Kind    string
+	RunID   int
+	StepID  int
+	IssueID int
+	// Data is the JSON payload, stored verbatim.
+	Data string
+}
+
+// InsertEventTx appends e to the event log; the store assigns its seq.
+func InsertEventTx(tx *sql.Tx, e NewEvent) error {
+	if _, err := tx.Exec(
+		`INSERT INTO events (at_ms, kind, run_id, step_id, issue_id, data)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		e.AtMS, e.Kind, nullableInt(e.RunID), nullableInt(e.StepID), nullableInt(e.IssueID), e.Data,
+	); err != nil {
+		return fmt.Errorf("inserting a %s event: %w", e.Kind, err)
+	}
+	return nil
+}
+
+// LastEventAtMSTx returns the at_ms of the newest event by seq. found is
+// false when the log is empty.
+func LastEventAtMSTx(tx *sql.Tx) (atMS int64, found bool, err error) {
+	err = tx.QueryRow(`SELECT at_ms FROM events ORDER BY seq DESC LIMIT 1`).Scan(&atMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("reading the last event's timestamp: %w", err)
+	}
+	return atMS, true, nil
+}
+
+// MaxEventSeqTx returns the highest event seq. found is false when the log is
+// empty.
+func MaxEventSeqTx(tx *sql.Tx) (seq int64, found bool, err error) {
+	var highest sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&highest); err != nil {
+		return 0, false, fmt.Errorf("reading the highest event seq: %w", err)
+	}
+	return highest.Int64, highest.Valid, nil
+}
+
+// ChainDeferralQuery names the conductor-filed deferral one
+// ConductorChainDeferralTx looks for. The kinds and cause are the engine's.
+type ChainDeferralQuery struct {
+	RunID  int
+	StepID int
+	// DeferredKind is the deferral event kind; Cause is its `$.cause`.
+	DeferredKind string
+	Cause        string
+	// DispatchClosedKind is the kind of the event a dispatch close writes,
+	// whose `$.dispatch` names the dispatch as `DISPATCH-<id>`.
+	DispatchClosedKind string
+}
+
+// ConductorChainDeferralTx returns the first q.DeferredKind event for the step
+// with cause q.Cause and no `$.source` (the conductor files it; the engine's
+// carries a source) recorded after the close event of the run's most recently
+// closed dispatch. With no dispatch closed, the window covers the whole log.
+// found is false when no event matches.
+func ConductorChainDeferralTx(tx *sql.Tx, q ChainDeferralQuery) (seq int64, data string, found bool, err error) {
+	err = tx.QueryRow(
+		`SELECT seq, data FROM events
+		  WHERE run_id = ? AND step_id = ? AND kind = ?
+		    AND json_extract(data, '$.cause') = ?
+		    AND json_extract(data, '$.source') IS NULL
+		    AND seq > COALESCE((
+		        SELECT MAX(seq) FROM events
+		         WHERE run_id = ? AND kind = ?
+		           AND json_extract(data, '$.dispatch') = (
+		               SELECT 'DISPATCH-' || id FROM dispatches
+		                WHERE run_id = ? AND status = ?
+		                ORDER BY closed_at_ms DESC, id DESC LIMIT 1)), 0)
+		  ORDER BY seq LIMIT 1`,
+		q.RunID, q.StepID, q.DeferredKind, q.Cause,
+		q.RunID, q.DispatchClosedKind, q.RunID, DispatchClosed).Scan(&seq, &data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, fmt.Errorf("reading the conductor's chain deferral: %w", err)
+	}
+	return seq, data, true, nil
 }

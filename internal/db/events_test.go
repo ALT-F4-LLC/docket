@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -387,4 +388,194 @@ func TestEventQueriesLatestEventData(t *testing.T) {
 	if err != nil || found || data != "" {
 		t.Errorf("a run with no such event = (%q, %v, %v), want (\"\", false, nil)", data, found, err)
 	}
+}
+
+func TestEventQueriesStepIDByInstance(t *testing.T) {
+	db := newIdemDB(t)
+	runID, stepID := seedRunAndStep(t, db)
+	var issueID, workflowID int
+	testsupport.Must(t, db.QueryRow(`SELECT issue_id, workflow_id FROM steps WHERE id = ?`, stepID).
+		Scan(&issueID, &workflowID), "reading the seeded step")
+	// A second issue in the same run with the same instance: only the issue
+	// tells the two steps apart.
+	res, err := db.Exec(`INSERT INTO issues (title, status, priority, kind, created_at, updated_at)
+		VALUES ('second', 'todo', 'none', 'task', 1, 1)`)
+	testsupport.Must(t, err, "seeding an issue: %v", err)
+	otherIssue, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO steps (run_id, issue_id, workflow_id, step_name, ordinal,
+		instance, kind, status, attempt, created_at_ms, updated_at_ms, row_version)
+		VALUES (?, ?, ?, 'implement', 0, 'implement@0', 'executor', 'pending', 0, 1, 1, 1)`,
+		runID, otherIssue, workflowID)
+	testsupport.Must(t, err, "seeding a step: %v", err)
+	otherStep, _ := res.LastInsertId()
+	tx := beginEventTx(t, db)
+
+	cases := []struct {
+		name      string
+		runID     int
+		issueID   int
+		instance  string
+		wantID    int
+		wantFound bool
+	}{
+		{"the first issue's step", runID, issueID, "implement@0", stepID, true},
+		{"the second issue's step", runID, int(otherIssue), "implement@0", int(otherStep), true},
+		{"no issue narrowing", runID, 0, "implement@0", stepID, true},
+		{"an instance with no row", runID, issueID, "review@0", 0, false},
+		{"an issue with no such step", runID, 999, "implement@0", 0, false},
+		{"a missing run", 999, issueID, "implement@0", 0, false},
+	}
+	for _, c := range cases {
+		id, found, err := StepIDByInstanceTx(tx, c.runID, c.issueID, c.instance)
+		testsupport.Must(t, err, "%s: %v", c.name, err)
+		if id != c.wantID || found != c.wantFound {
+			t.Errorf("%s: (%d, %v), want (%d, %v)", c.name, id, found, c.wantID, c.wantFound)
+		}
+	}
+}
+
+func TestEventQueriesInsertEvent(t *testing.T) {
+	db := newIdemDB(t)
+	runID, stepID := seedRunAndStep(t, db)
+	var issueID int
+	testsupport.Must(t, db.QueryRow(`SELECT issue_id FROM steps WHERE id = ?`, stepID).Scan(&issueID),
+		"reading the seeded step")
+	tx := beginEventTx(t, db)
+
+	testsupport.Must(t, InsertEventTx(tx, NewEvent{
+		AtMS: 42, Kind: "step-claimed", RunID: runID, StepID: stepID, IssueID: issueID,
+		Data: `{"instance":"implement@0"}`,
+	}), "inserting a step event")
+	testsupport.Must(t, InsertEventTx(tx, NewEvent{AtMS: 43, Kind: "trust-added", Data: `{}`}),
+		"inserting a store-level event")
+
+	rows, err := tx.Query(`SELECT seq, at_ms, kind, run_id, step_id, issue_id, data FROM events ORDER BY seq`)
+	testsupport.Must(t, err, "reading events: %v", err)
+	type stored struct {
+		seq, atMS        int64
+		kind, data       string
+		run, step, issue sql.NullInt64
+	}
+	var got []stored
+	for rows.Next() {
+		var s stored
+		testsupport.Must(t, rows.Scan(&s.seq, &s.atMS, &s.kind, &s.run, &s.step, &s.issue, &s.data),
+			"scanning an event")
+		got = append(got, s)
+	}
+	testsupport.Must(t, rows.Err(), "reading events")
+	id := func(n int) sql.NullInt64 { return sql.NullInt64{Int64: int64(n), Valid: true} }
+	want := []stored{
+		{seq: 1, atMS: 42, kind: "step-claimed", data: `{"instance":"implement@0"}`,
+			run: id(runID), step: id(stepID), issue: id(issueID)},
+		{seq: 2, atMS: 43, kind: "trust-added", data: `{}`},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("stored events = %+v, want %+v (zero ids stored as NULL)", got, want)
+	}
+}
+
+func TestEventQueriesLastEventAtMS(t *testing.T) {
+	empty := newIdemDB(t)
+	tx := beginEventTx(t, empty)
+	atMS, found, err := LastEventAtMSTx(tx)
+	if err != nil || found || atMS != 0 {
+		t.Errorf("an empty log = (%d, %v, %v), want (0, false, nil)", atMS, found, err)
+	}
+
+	log := seedEventLog(t)
+	// The newest event by seq carries an older stamp than seq 5: the read
+	// follows seq, not the largest at_ms.
+	seedEvent(t, log.db, 50, "step-claimed", log.runA, `{}`)
+	tx = beginEventTx(t, log.db)
+	atMS, found, err = LastEventAtMSTx(tx)
+	testsupport.Must(t, err, "LastEventAtMSTx: %v", err)
+	if !found || atMS != 50 {
+		t.Errorf("last at_ms = (%d, %v), want (50, true): the newest seq's stamp", atMS, found)
+	}
+}
+
+func TestEventQueriesMaxEventSeq(t *testing.T) {
+	empty := newIdemDB(t)
+	tx := beginEventTx(t, empty)
+	seq, found, err := MaxEventSeqTx(tx)
+	if err != nil || found || seq != 0 {
+		t.Errorf("an empty log = (%d, %v, %v), want (0, false, nil)", seq, found, err)
+	}
+
+	log := seedEventLog(t)
+	tx = beginEventTx(t, log.db)
+	seq, found, err = MaxEventSeqTx(tx)
+	testsupport.Must(t, err, "MaxEventSeqTx: %v", err)
+	if !found || seq != 5 {
+		t.Errorf("max seq = (%d, %v), want (5, true)", seq, found)
+	}
+}
+
+func TestEventQueriesConductorChainDeferral(t *testing.T) {
+	db := newIdemDB(t)
+	runID, stepID := seedRunAndStep(t, db)
+	tx := beginEventTx(t, db)
+
+	insert := func(kind string, step int, data string) int64 {
+		t.Helper()
+		testsupport.Must(t, InsertEventTx(tx, NewEvent{AtMS: 1, Kind: kind, RunID: runID, StepID: step, Data: data}),
+			"seeding a %s event", kind)
+		var seq int64
+		testsupport.Must(t, tx.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&seq), "reading the seeded seq")
+		return seq
+	}
+	query := ChainDeferralQuery{
+		RunID: runID, StepID: stepID, DeferredKind: "step-deferred",
+		Cause: "chain", DispatchClosedKind: "dispatch-closed",
+	}
+	read := func(name string, q ChainDeferralQuery, wantSeq int64, wantData string, wantFound bool) {
+		t.Helper()
+		seq, data, found, err := ConductorChainDeferralTx(tx, q)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if seq != wantSeq || data != wantData || found != wantFound {
+			t.Errorf("%s: (%d, %q, %v), want (%d, %q, %v)",
+				name, seq, data, found, wantSeq, wantData, wantFound)
+		}
+	}
+
+	read("no deferral filed", query, 0, "", false)
+
+	insert("step-deferred", stepID, `{"cause":"chain","source":"engine"}`)
+	insert("step-deferred", stepID, `{"cause":"budget"}`)
+	insert("step-claimed", stepID, `{"cause":"chain"}`)
+	read("only engine, budget, and other-kind events", query, 0, "", false)
+
+	early := `{"cause":"chain","reason":"early"}`
+	earlySeq := insert("step-deferred", stepID, early)
+	insert("step-deferred", stepID, `{"cause":"chain","reason":"second"}`)
+	read("no dispatch closed", query, earlySeq, early, true)
+
+	// An open dispatch, and a close event naming a dispatch that is not the
+	// run's latest closed one, leave the window where it was.
+	_, err := tx.Exec(`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, created_at_ms)
+		VALUES (?, 'open', 0, 1, 1)`, runID)
+	testsupport.Must(t, err, "seeding an open dispatch: %v", err)
+	insert("dispatch-closed", 0, `{"dispatch":"DISPATCH-999"}`)
+	read("a close of an unknown dispatch", query, earlySeq, early, true)
+
+	res, err := tx.Exec(`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, closed_at_ms, created_at_ms)
+		VALUES (?, ?, 0, 1, 10, 1)`, runID, DispatchClosed)
+	testsupport.Must(t, err, "seeding a closed dispatch: %v", err)
+	dispatchID, _ := res.LastInsertId()
+	insert("dispatch-closed", 0, fmt.Sprintf(`{"dispatch":"DISPATCH-%d"}`, dispatchID))
+	read("every deferral predates the close", query, 0, "", false)
+
+	late := `{"cause":"chain","reason":"late"}`
+	insert("step-deferred", stepID, `{"cause":"chain","source":"engine"}`)
+	lateSeq := insert("step-deferred", stepID, late)
+	insert("step-deferred", stepID, `{"cause":"chain","reason":"later"}`)
+	read("after the close", query, lateSeq, late, true)
+
+	other := query
+	other.StepID = stepID + 100
+	read("another step", other, 0, "", false)
+	other = query
+	other.RunID = runID + 100
+	read("another run", other, 0, "", false)
 }
