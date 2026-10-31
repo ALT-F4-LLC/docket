@@ -9,11 +9,6 @@
 # It deliberately checks nothing else. `tests` runs the test suite, `genericity`
 # scans the core surface, `secret-scan` looks for credentials — each is its own
 # gate so one failure surfaces as one failure.
-#
-# go1.26.9 rather than `go`: that is the binary this toolchain provides under
-# the name the other gates already use (see ac-commands.sh), and a gate naming
-# a command the environment lacks records "unmatched" and teaches nobody
-# anything.
 
 set -euo pipefail
 

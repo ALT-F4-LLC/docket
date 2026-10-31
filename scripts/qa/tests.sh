@@ -11,9 +11,6 @@
 # .github/workflows/ci.yaml), while this gate is the unit/integration suite the
 # `go-test` CI job runs. Running qa.sh here would make one failure surface twice
 # and would serialize every gate behind a multi-minute harness.
-#
-# go1.26.9 rather than `go`: the name the other gates already use
-# (see ac-commands.sh, build.sh).
 
 set -euo pipefail
 
@@ -27,9 +24,9 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || echo "$(dirname "${BASH_SOURC
 # (RUN-135: 13-16 write steps at once on 18 CPUs, load average 32-56), against
 # the former 30m (1800s) timeout. 60m leaves headroom over that range. The
 # durable fix is DKT-3748's host-scoped class caps, which bound concurrent runs.
-echo "=== tests: go1.26.9 test -timeout 60m ./... ==="
+echo "=== tests: go test -timeout 60m ./... ==="
 
-if ! go1.26.9 test -timeout 60m ./... 2>&1; then
+if ! go test -timeout 60m ./... 2>&1; then
   cat >&2 <<'EOF'
 
 tests FAILED: at least one package's tests did not pass.
