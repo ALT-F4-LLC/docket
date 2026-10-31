@@ -224,6 +224,38 @@ func TestStoreOnBeginReadSnapshotReturnsWhileATxIsOpen(t *testing.T) {
 	testsupport.Must(t, err, "rolling back the snapshot: %v", err)
 }
 
+func TestLegacyAliases(t *testing.T) {
+	const key = db.KeyVoteHoldVoters
+	var conn LegacyDB = openMigratedDB(t)
+
+	var committed LegacyTx
+	committed, err := conn.Begin()
+	testsupport.Must(t, err, "opening the transaction to commit: %v", err)
+	_, err = db.SetConfigTx(committed, 0, key, "bob")
+	testsupport.Must(t, err, "writing inside the transaction to commit: %v", err)
+	err = committed.Commit()
+	testsupport.Must(t, err, "Commit on a LegacyTx: %v", err)
+
+	var rolledBack LegacyTx
+	rolledBack, err = conn.Begin()
+	testsupport.Must(t, err, "opening the transaction to roll back: %v", err)
+	_, err = db.SetConfigTx(rolledBack, 0, key, "carol")
+	testsupport.Must(t, err, "writing inside the transaction to roll back: %v", err)
+	err = rolledBack.Rollback()
+	testsupport.Must(t, err, "Rollback on a LegacyTx: %v", err)
+
+	sqlTx, err := conn.Begin()
+	testsupport.Must(t, err, "opening the read transaction: %v", err)
+	var snapshot LegacyReadTx = sqlTx
+	entry, err := db.GetConfigTx(snapshot, 0, key)
+	testsupport.Must(t, err, "reading through a LegacyReadTx: %v", err)
+	err = snapshot.Rollback()
+	testsupport.Must(t, err, "Rollback on a LegacyReadTx: %v", err)
+	if entry.Value != "bob" {
+		t.Fatalf("%s = %q, want %q committed through a LegacyTx and not %q rolled back", key, entry.Value, "bob", "carol")
+	}
+}
+
 func TestSQLTxRejectsATxThatIsNotSQLite(t *testing.T) {
 	type otherTx struct{ ReadTx }
 

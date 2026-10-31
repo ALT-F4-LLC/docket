@@ -10,6 +10,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 )
 
+// LegacyDB, LegacyTx and LegacyReadTx name the raw database/sql handles that
+// code not yet moved onto Store, Tx and ReadTx still passes around. They are
+// aliases, so a *sql.DB or *sql.Tx is assignable to them in either direction
+// and keeps its methods; LegacyReadTx marks a *sql.Tx used only for reads.
+type (
+	LegacyDB     = *sql.DB
+	LegacyTx     = *sql.Tx
+	LegacyReadTx = *sql.Tx
+)
+
 // borrowedStore is a sqliteStore over a *sql.DB the caller owns, so Close
 // leaves that handle open.
 type borrowedStore struct {
