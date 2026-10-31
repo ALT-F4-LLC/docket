@@ -67,6 +67,43 @@ cleanup() {
     /tmp/docket-qa-alt /tmp/docket-qa-bin 2>/dev/null || true
 }
 
+# await_detached_saga DOCKET_PATH waits for the saga a recording handed off.
+#
+# A record of a step with completion gates returns once its artifact commits,
+# saying `running detached: STEP-N`; a `step resume` child runs the gates,
+# routing, and the run's lifecycle drive afterwards. A check that reads the
+# step, its gate results, or the next ready set must see what that child did,
+# so every runner waits here before handing back.
+#
+# The child is done when its saga lockfile is gone (it removes it on release,
+# after the lifecycle drive) and the step has left the `recorded` window that
+# precedes the child taking that lock: its stage is cleared or held, or its
+# status is no longer `gated`. A saga that never settles is bounded and noted
+# on CMD_STDERR, so the check reading it fails with the reason.
+await_detached_saga() {
+  local dp="$1" step id lock state waited=0
+  step=$(printf '%s' "$CMD_STDOUT" | grep -o 'running detached: STEP-[0-9]*' | head -1 || true)
+  step="${step##* }"
+  [ -n "$step" ] || return 0
+  id="${step#STEP-}"
+  lock="$dp/saga-$step.lock"
+  while [ "$waited" -lt 1200 ]; do
+    state=$(sqlite3 "$dp/issues.db" \
+      "SELECT status || '|' || COALESCE(saga_stage,'') FROM steps WHERE id=$id;" 2>/dev/null || true)
+    if [ ! -e "$lock" ]; then
+      case "$state" in
+        "gated|" | "gated|held") return 0 ;;
+        "gated|"*) ;;
+        *) return 0 ;;
+      esac
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  CMD_STDERR="${CMD_STDERR:+$CMD_STDERR
+}detached saga for $step did not settle within 120s (status|stage = $state)"
+}
+
 # Run a command, capture stdout, stderr, and exit code.
 # Sets: CMD_STDOUT, CMD_STDERR, CMD_EXIT
 run() {
@@ -84,6 +121,7 @@ run() {
   if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
     qa_wait_detached
   fi
+  await_detached_saga "$DOCKET_PATH"
 }
 
 # qa_wait_detached waits for the detached saga a `step complete` launched.
@@ -152,6 +190,7 @@ run_stdin() {
   if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
     qa_wait_detached
   fi
+  await_detached_saga "$DOCKET_PATH"
 }
 
 # The conductor capability (DKT-2465): the seven operator verbs — step
@@ -192,6 +231,7 @@ run_env() {
   if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
     qa_wait_detached
   fi
+  await_detached_saga "$dp"
 }
 
 # Record a check result. Usage: check SECTION ID PASS|FAIL [details]
