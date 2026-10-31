@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // Transport is the listener a request reached the daemon through. The zero
@@ -27,8 +27,8 @@ const (
 // a run never returns to unbound: every write of its capability hash stores a
 // freshly minted one.
 func ConductRun(conn *sql.DB, runID int, via Transport, opts engine.ConductOptions) (*engine.ConductResult, error) {
-	switch hash, err := db.RunConductorHash(conn, runID); {
-	case errors.Is(err, db.ErrRunNotFound):
+	switch hash, err := store.StoreOn(conn).RunConductorHash(runID); {
+	case errors.Is(err, store.ErrRunNotFound):
 		// engine.ConductRun reports the missing run as NOT_FOUND.
 	case err != nil:
 		return nil, err
