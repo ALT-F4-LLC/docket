@@ -1551,3 +1551,359 @@ func HydrateLabels(db *sql.DB, issues []*model.Issue) error {
 	}
 	return rows.Err()
 }
+
+// The issue reads and writes internal/engine's activation, scheduler,
+// linked-input, and mid-run-edit paths run. The Tx helpers run inside the
+// caller's transaction; none returns sql.ErrNoRows or a sql.Null* value.
+
+// ActivationIssueTx reads the fields activation binds, snapshots, and
+// promotes on: id, title, description, status, priority, kind, size, and
+// version. Every other field is left zero. A missing issue is ErrNotFound.
+func ActivationIssueTx(tx *sql.Tx, id int) (*model.Issue, error) {
+	var (
+		issue       model.Issue
+		description sql.NullString
+	)
+	err := tx.QueryRow(
+		`SELECT id, title, description, status, priority, kind, size, version
+		   FROM issues WHERE id = ?`, id,
+	).Scan(
+		&issue.ID, &issue.Title, &description, &issue.Status, &issue.Priority,
+		&issue.Kind, &issue.Size, &issue.Version,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading issue %d: %w", id, err)
+	}
+	issue.Description = description.String
+	return &issue, nil
+}
+
+// IssueLabelsTx is GetIssueLabels inside a transaction: the issue's label
+// names, sorted. An issue with no labels, or no row, has none.
+func IssueLabelsTx(tx *sql.Tx, issueID int) ([]string, error) {
+	rows, err := tx.Query(
+		`SELECT l.name FROM labels l
+		   JOIN issue_labels il ON il.label_id = l.id
+		  WHERE il.issue_id = ? ORDER BY l.name`, issueID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reading labels for issue %d: %w", issueID, err)
+	}
+	return scanRows(rows, "labels", func(r *sql.Rows) (string, error) {
+		var name string
+		if err := r.Scan(&name); err != nil {
+			return "", fmt.Errorf("reading label: %w", err)
+		}
+		return name, nil
+	})
+}
+
+// WorkGraphRelationsTx reads the `blocks` and `depends_on` relations whose
+// source and target are both in issueIDs, in relation id order.
+func WorkGraphRelationsTx(tx *sql.Tx, issueIDs []int) ([]model.Relation, error) {
+	if len(issueIDs) == 0 {
+		return nil, nil
+	}
+	ids := make([]any, 0, 2*len(issueIDs))
+	for range 2 {
+		for _, id := range issueIDs {
+			ids = append(ids, id)
+		}
+	}
+	in := makePlaceholders(len(issueIDs))
+	rows, err := tx.Query(
+		`SELECT source_issue_id, target_issue_id, relation_type
+		   FROM issue_relations
+		  WHERE relation_type IN ('blocks', 'depends_on')
+		    AND source_issue_id IN (`+in+`)
+		    AND target_issue_id IN (`+in+`)
+		  ORDER BY id`, ids...)
+	if err != nil {
+		return nil, fmt.Errorf("reading work-graph relations: %w", err)
+	}
+	return scanRows(rows, "work-graph relations", func(r *sql.Rows) (model.Relation, error) {
+		var rel model.Relation
+		if err := r.Scan(&rel.SourceIssueID, &rel.TargetIssueID, &rel.RelationType); err != nil {
+			return model.Relation{}, fmt.Errorf("reading relation: %w", err)
+		}
+		return rel, nil
+	})
+}
+
+// MoveIssueStatusTx moves an issue from one status to another and records the
+// change in the activity log, stamping both with nowMS as RFC3339 text and
+// bumping the CAS version. The `status = from` guard is the concurrency
+// check: moved is false, and nothing is written, when the issue is missing or
+// no longer at from.
+func MoveIssueStatusTx(tx *sql.Tx, issueID int, from, to model.Status, nowMS int64) (moved bool, err error) {
+	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
+	res, err := tx.Exec(
+		`UPDATE issues SET status = ?, updated_at = ?, version = version + 1
+		  WHERE id = ? AND status = ?`,
+		string(to), now, issueID, string(from),
+	)
+	if err != nil {
+		return false, fmt.Errorf("moving issue %d to %s: %w", issueID, to, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("moving issue %d to %s: %w", issueID, to, err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
+		 VALUES (?, 'status', ?, ?, '', ?)`,
+		issueID, string(from), string(to), now,
+	); err != nil {
+		return false, fmt.Errorf("recording the move of issue %d to %s: %w", issueID, to, err)
+	}
+	return true, nil
+}
+
+// SetRunActiveTx marks a run active at nowMS. A first activation also stamps
+// activated_at_ms; a reactivation keeps the original stamp, which records when
+// the run's pins were taken. A missing run is ErrRunNotFound.
+func SetRunActiveTx(tx *sql.Tx, runID int, reactivation bool, nowMS int64) error {
+	query := `UPDATE runs SET status = ?, updated_at_ms = ?, row_version = row_version + 1`
+	args := []any{string(model.RunActive), nowMS}
+	if !reactivation {
+		query += `, activated_at_ms = ?`
+		args = append(args, nowMS)
+	}
+	query += ` WHERE id = ?`
+	args = append(args, runID)
+
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		return fmt.Errorf("activating run %d: %w", runID, err)
+	}
+	if err := requireAffected(res); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrRunNotFound
+		}
+		return fmt.Errorf("activating run %d: %w", runID, err)
+	}
+	return nil
+}
+
+// IssueSchedulingFactsTx reads the live priority and stored scope JSON the
+// scheduler decides on; scope is "" when none is declared. A missing issue is
+// ErrNotFound.
+func IssueSchedulingFactsTx(tx *sql.Tx, issueID int) (priority model.Priority, scope string, err error) {
+	var stored sql.NullString
+	err = tx.QueryRow(
+		`SELECT priority, scope_globs FROM issues WHERE id = ?`, issueID,
+	).Scan(&priority, &stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("reading scheduling facts for issue %d: %w", issueID, err)
+	}
+	return priority, stored.String, nil
+}
+
+// IssueDependenciesDoneTx reports whether every issue this one `depends_on`
+// is done. An issue with no such relation, or no row, has none outstanding.
+func IssueDependenciesDoneTx(tx *sql.Tx, issueID int) (bool, error) {
+	var open int
+	err := tx.QueryRow(
+		`SELECT COUNT(*)
+		   FROM issue_relations r
+		   JOIN issues i ON i.id = r.target_issue_id
+		  WHERE r.source_issue_id = ? AND r.relation_type = 'depends_on'
+		    AND i.status != ?`,
+		issueID, string(model.StatusDone),
+	).Scan(&open)
+	if err != nil {
+		return false, fmt.Errorf("reading dependencies for issue %d: %w", issueID, err)
+	}
+	return open == 0, nil
+}
+
+// ForeignHoldingStepsTx lists the claimed and running steps of every other
+// live run in the same project, in step id order. Each Step carries only ID,
+// IssueID, and Status.
+func ForeignHoldingStepsTx(tx *sql.Tx, projectID, runID int) ([]*Step, error) {
+	rows, err := tx.Query(
+		`SELECT s.id, s.issue_id, s.status
+		   FROM steps s
+		   JOIN runs r ON r.id = s.run_id
+		  WHERE s.run_id != ? AND s.status IN (?, ?)
+		    AND r.status NOT IN (?, ?)
+		    AND r.project_id = ?
+		  ORDER BY s.id`,
+		runID, StepClaimed, StepRunning,
+		string(model.RunDone), string(model.RunAbandoned),
+		DefaultProjectIDOr(projectID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reading steps holding scope elsewhere: %w", err)
+	}
+	return scanRows(rows, "steps holding scope elsewhere", func(r *sql.Rows) (*Step, error) {
+		var s Step
+		if err := r.Scan(&s.ID, &s.IssueID, &s.Status); err != nil {
+			return nil, fmt.Errorf("reading a foreign step: %w", err)
+		}
+		return &s, nil
+	})
+}
+
+// RelationTargetsTx lists, ascending, the issues sourceID reaches through
+// relations of type rt.
+func RelationTargetsTx(tx *sql.Tx, sourceID int, rt model.RelationType) ([]int, error) {
+	return relatedIssueIDsTx(tx,
+		`SELECT target_issue_id FROM issue_relations
+		  WHERE source_issue_id = ? AND relation_type = ? ORDER BY target_issue_id`,
+		sourceID, rt)
+}
+
+// RelationSourcesTx lists, ascending, the issues that reach targetID through
+// relations of type rt.
+func RelationSourcesTx(tx *sql.Tx, targetID int, rt model.RelationType) ([]int, error) {
+	return relatedIssueIDsTx(tx,
+		`SELECT source_issue_id FROM issue_relations
+		  WHERE target_issue_id = ? AND relation_type = ? ORDER BY source_issue_id`,
+		targetID, rt)
+}
+
+func relatedIssueIDsTx(tx *sql.Tx, query string, issueID int, rt model.RelationType) ([]int, error) {
+	rows, err := tx.Query(query, issueID, string(rt))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s relations of issue %d: %w", rt, issueID, err)
+	}
+	return scanRows(rows, "relations", func(r *sql.Rows) (int, error) {
+		var id int
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("reading %s relations of issue %d: %w", rt, issueID, err)
+		}
+		return id, nil
+	})
+}
+
+// LatestRecordedArtifactIDTx returns the highest-id artifact of kind produced
+// by any step of issueID, in any run, whose step recorded its work (done or
+// superseded). found is false when the issue holds no such artifact.
+func LatestRecordedArtifactIDTx(tx *sql.Tx, issueID int, kind string) (id int, found bool, err error) {
+	err = tx.QueryRow(
+		`SELECT a.id FROM artifacts a
+		   JOIN steps s ON s.id = a.step_id
+		  WHERE s.issue_id = ? AND a.kind = ? AND s.status IN (?, ?)
+		  ORDER BY a.id DESC LIMIT 1`,
+		issueID, kind, StepDone, StepSuperseded,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolving the latest %q artifact of issue %d: %w", kind, issueID, err)
+	}
+	return id, true, nil
+}
+
+// PinnedArtifact is an artifact as a linked input renders it: its content and
+// the step that produced it.
+type PinnedArtifact struct {
+	Kind    string
+	Body    string
+	Payload string
+	// ProducerIssueID and ProducerInstance name the producing step's issue
+	// and instance. Both are zero when the artifact has no step or the step
+	// has no issue.
+	ProducerIssueID  int
+	ProducerInstance string
+}
+
+// PinnedArtifactTx reads one artifact by id with its producer. A missing
+// artifact is ErrNotFound.
+func PinnedArtifactTx(tx *sql.Tx, id int) (PinnedArtifact, error) {
+	var (
+		a        PinnedArtifact
+		payload  sql.NullString
+		instance sql.NullString
+		issueID  sql.NullInt64
+	)
+	err := tx.QueryRow(
+		`SELECT a.kind, a.body, a.payload, s.instance, s.issue_id
+		   FROM artifacts a
+		   LEFT JOIN steps s ON s.id = a.step_id
+		  WHERE a.id = ?`, id,
+	).Scan(&a.Kind, &a.Body, &payload, &instance, &issueID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PinnedArtifact{}, ErrNotFound
+	}
+	if err != nil {
+		return PinnedArtifact{}, fmt.Errorf("reading artifact %d: %w", id, err)
+	}
+	a.Payload = payload.String
+	if instance.Valid && issueID.Valid {
+		a.ProducerIssueID = int(issueID.Int64)
+		a.ProducerInstance = instance.String
+	}
+	return a, nil
+}
+
+// IssueDescription reads an issue's live description, "" when it has none.
+// A missing issue is ErrNotFound.
+func IssueDescription(db *sql.DB, issueID int) (string, error) {
+	var description sql.NullString
+	err := db.QueryRow(`SELECT description FROM issues WHERE id = ?`, issueID).Scan(&description)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the description of issue %d: %w", issueID, err)
+	}
+	return description.String, nil
+}
+
+// FrozenIssueBinding is one run's activation snapshot of an issue.
+type FrozenIssueBinding struct {
+	RunID         int
+	IssueSnapshot string
+	BodySnapshot  string
+	// LiveSteps counts the issue's steps in the run that are not terminal
+	// (StepTerminal).
+	LiveSteps int
+}
+
+// FrozenIssueBindings lists, in run id order, each binding of issueID into a
+// run that is neither done nor abandoned, has snapshotted the issue, and still
+// holds at least one non-terminal step for it: the runs whose remaining
+// packets render the frozen snapshot rather than a later edit.
+//
+// The rows are drained before returning, so a caller on the engine's
+// single-connection pool may query again.
+func FrozenIssueBindings(db *sql.DB, issueID int) ([]FrozenIssueBinding, error) {
+	rows, err := db.Query(
+		`SELECT ri.run_id, ri.issue_snapshot, COALESCE(ri.body_snapshot, ''), COUNT(s.id)
+		   FROM run_issues ri
+		   JOIN runs r ON r.id = ri.run_id
+		   LEFT JOIN steps s
+		     ON s.run_id = ri.run_id AND s.issue_id = ri.issue_id
+		    AND s.status NOT IN (?, ?, ?, ?)
+		  WHERE ri.issue_id = ?
+		    AND ri.issue_snapshot IS NOT NULL AND ri.issue_snapshot != ''
+		    AND r.status NOT IN (?, ?)
+		  GROUP BY ri.run_id, ri.issue_snapshot, ri.body_snapshot
+		 HAVING COUNT(s.id) > 0
+		  ORDER BY ri.run_id`,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+		issueID, string(model.RunDone), string(model.RunAbandoned),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reading the frozen bindings of issue %d: %w", issueID, err)
+	}
+	return scanRows(rows, "frozen bindings", func(r *sql.Rows) (FrozenIssueBinding, error) {
+		var b FrozenIssueBinding
+		if err := r.Scan(&b.RunID, &b.IssueSnapshot, &b.BodySnapshot, &b.LiveSteps); err != nil {
+			return FrozenIssueBinding{}, fmt.Errorf("reading a frozen binding: %w", err)
+		}
+		return b, nil
+	})
+}
