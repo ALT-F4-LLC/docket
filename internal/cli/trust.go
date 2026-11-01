@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -722,8 +721,6 @@ func trustCmdError(err error) error {
 		return cmdErr(err, output.ErrConflict)
 	case errors.Is(err, trust.ErrIntegrity), errors.Is(err, trust.ErrParse):
 		return cmdErr(err, output.ErrValidation)
-	case errors.Is(err, sql.ErrNoRows):
-		return cmdErr(err, output.ErrNotFound)
 	case errors.Is(err, errTrustUnrecorded):
 		// The request was well-formed and what failed is this repo's event log:
 		// on an add the store is untouched, on a rm the removal has already

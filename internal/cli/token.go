@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -79,7 +78,7 @@ func optionalToken(stdin io.Reader) string {
 // capability existed. The look here is advisory: the authoritative check runs
 // inside the verb's own transaction, and a run bound after this read refuses
 // the empty token there rather than being ruled on without one.
-func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
+func conductorToken(conn store.LegacyDB, runID int, stdin io.Reader) string {
 	hash, err := store.StoreOn(conn).RunConductorHash(runID)
 	if err != nil || hash == "" {
 		return ""
@@ -90,7 +89,7 @@ func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
 // stepConductorToken is conductorToken for a verb addressed by STEP-N: the
 // step's run is what the capability is bound to. A step that does not exist
 // yields "" and leaves the NOT_FOUND to the engine, which owns that refusal.
-func stepConductorToken(conn *sql.DB, stepID int, stdin io.Reader) string {
+func stepConductorToken(conn store.LegacyDB, stepID int, stdin io.Reader) string {
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return ""

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -96,7 +95,7 @@ func notFound(err error, label string) error {
 // carrying label when the issue does not exist, and a generic ErrGeneral wrap
 // for anything else. label matches whatever text each call site already
 // passed to notFound, so error text is unchanged at every site.
-func getIssueOrErr(conn *sql.DB, id int, label string) (*model.Issue, error) {
+func getIssueOrErr(conn store.LegacyDB, id int, label string) (*model.Issue, error) {
 	issue, err := store.StoreOn(conn).GetIssue(id)
 	if err != nil {
 		if e := notFound(err, label); e != nil {
@@ -110,7 +109,7 @@ func getIssueOrErr(conn *sql.DB, id int, label string) (*model.Issue, error) {
 // projectLabel renders a project for a refusal message: the row's name when it
 // has one, always with the numeric id — names are display-only, so the id is
 // what an operator can act on (`docket project list` speaks both).
-func projectLabel(conn *sql.DB, id int) string {
+func projectLabel(conn store.LegacyDB, id int) string {
 	if p, err := store.StoreOn(conn).GetProject(id); err == nil && p.Name != "" {
 		return fmt.Sprintf("project %q (id %d)", p.Name, p.ID)
 	}
@@ -131,7 +130,7 @@ func projectLabel(conn *sql.DB, id int) string {
 // created in) — the comparison is issue-to-issue, never against the invoking
 // cwd, so editing another project's issue by id still reparents freely within
 // that issue's own project.
-func resolveParentIssue(conn *sql.DB, ref string, childProjectID int) (*model.Issue, error) {
+func resolveParentIssue(conn store.LegacyDB, ref string, childProjectID int) (*model.Issue, error) {
 	pid, err := model.ParseID(ref)
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("invalid parent ID: %w", err), output.ErrValidation)
@@ -171,7 +170,7 @@ func parseRunFlag(ref string) (int, error) {
 // silent drop when the caller just supplied -l (DKT-240). Every command that
 // renders a refetched issue as its result payload runs this first, so what is
 // echoed back is what is stored.
-func hydrateIssueAssociations(conn *sql.DB, issue *model.Issue) error {
+func hydrateIssueAssociations(conn store.LegacyDB, issue *model.Issue) error {
 	st := store.StoreOn(conn)
 
 	labels, err := st.GetIssueLabels(issue.ID)

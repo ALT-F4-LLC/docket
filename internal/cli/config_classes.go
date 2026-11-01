@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -42,7 +41,7 @@ import (
 // interpretation the engine itself acts on, so a class this reports is a class
 // that can actually appear in the column. Re-parsing the source would be a
 // second interpretation, and the one that disagreed would be this one.
-func declaredClasses(conn *sql.DB, projectID int) ([]string, error) {
+func declaredClasses(conn store.LegacyDB, projectID int) ([]string, error) {
 	workflows, _, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{
 		ProjectID: projectID,
 	})
@@ -97,7 +96,7 @@ func declaredClasses(conn *sql.DB, projectID int) ([]string, error) {
 // It is also silent when the project has NO registered workflows: there is
 // nothing to disagree with, and a warning naming an empty list would be noise
 // on a fresh project's very first configuration.
-func leaseTTLClassWarning(conn *sql.DB, projectID int, key string) string {
+func leaseTTLClassWarning(conn store.LegacyDB, projectID int, key string) string {
 	class, ok := strings.CutPrefix(key, store.KeyLeaseTTLPrefix)
 	if !ok || class == "" || key == store.KeyLeaseTTLDefault {
 		return ""
