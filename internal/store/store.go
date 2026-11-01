@@ -20,6 +20,12 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
+// Row types returned by the engine issue queries, aliased as in aliases.go.
+type (
+	FrozenIssueBinding = db.FrozenIssueBinding
+	PinnedArtifact     = db.PinnedArtifact
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -67,6 +73,7 @@ type Store interface {
 	EnsureProject(identity, name string, nowMS int64) (int, error)
 	EnsureProjectCreated(identity, name string, nowMS int64) (int, bool, error)
 	EventsRetain() (time.Duration, error)
+	FrozenIssueBindings(issueID int) ([]db.FrozenIssueBinding, error)
 	GateOverrideGrantsForRun(runID int) ([]db.GateOverrideGrant, error)
 	GateResultsForStep(stepID int) ([]db.GateResultRow, error)
 	GateRollup(runID int) ([]db.VerdictCount, error)
@@ -112,6 +119,7 @@ type Store interface {
 	InsertSchema(schema *model.Schema, nowMS int64) (stored *model.Schema, created bool, err error)
 	InsertWorkflow(wf *model.Workflow, nowMS int64) (stored *model.Workflow, created bool, err error)
 	IsDescendant(issueID, potentialDescendantID int) (bool, error)
+	IssueDeclaration(issueID int) (description, scope string, err error)
 	IssueExists(issueID int) (bool, error)
 	IssueOwnerPrefix(issueID int) (string, error)
 	IssueProjectID(issueID int) (int, error)
@@ -205,6 +213,7 @@ type ReadTx interface {
 	// Rollback ends the transaction without committing.
 	Rollback() error
 
+	ActivationIssueTx(id int) (*model.Issue, error)
 	AutoRegisterEnabledTx(projectID int) (bool, error)
 	BudgetDefaultTx(projectID int) (float64, error)
 	BudgetUnitTx(projectID int) (string, error)
@@ -216,6 +225,7 @@ type ReadTx interface {
 	DispatchTTLTx(projectID int) (time.Duration, error)
 	EventKindCountsTx(runID int) (map[string]int, error)
 	EventLowWatermarkTx() (int64, error)
+	ForeignHoldingStepsTx(projectID, runID int) ([]*db.Step, error)
 	GateResultsForStepTx(stepID int) ([]db.GateResultRow, error)
 	GetArtifactTx(id int) (*db.Artifact, error)
 	GetConfigTx(projectID int, key string) (db.ConfigEntry, error)
@@ -227,9 +237,13 @@ type ReadTx interface {
 	GetRunTx(id int) (*model.Run, error)
 	GetSchemaTx(projectID int, name string, version int) (*model.Schema, error)
 	GetStepTx(id int) (*db.Step, error)
+	IssueDependenciesDoneTx(issueID int) (bool, error)
+	IssueLabelsTx(issueID int) ([]string, error)
+	IssueSchedulingFactsTx(issueID int) (priority model.Priority, scope string, err error)
 	IssueScopeGlobsTx(issueID int) (string, error)
 	IssueStatusResolutionTx(issueID int) (model.Status, string, error)
 	LatestEventDataTx(runID int, kind string) (data string, found bool, err error)
+	LatestRecordedArtifactIDTx(issueID int, kind string) (id int, found bool, err error)
 	ListDispatchRowsTx(dispatchID int) ([]db.DispatchRow, error)
 	ListEventsTx(f db.EventFilter, limit, tail int) ([]db.EventRow, error)
 	ListIssueStepsTx(runID, issueID int) ([]*db.Step, error)
@@ -244,9 +258,12 @@ type ReadTx interface {
 	LoopGrantsTx(runID, issueID int) (int, error)
 	NextActionOrdinalTx(stepID int, action string) (int, error)
 	OpenDispatchTx(runID int) (*db.Dispatch, error)
+	PinnedArtifactTx(id int) (db.PinnedArtifact, error)
 	PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error)
 	ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error)
 	RegisteredVoteRulesTx(projectID int) ([]string, error)
+	RelationSourcesTx(targetID int, rt model.RelationType) ([]int, error)
+	RelationTargetsTx(sourceID int, rt model.RelationType) ([]int, error)
 	ReportedUsageTx(runID int, unit string) (float64, error)
 	RunBudgetFactsTx(runID int) (db.RunBudgetFacts, error)
 	RunConductorHashTx(id int) (string, error)
@@ -257,6 +274,7 @@ type ReadTx interface {
 	UsageBudgetUnitTx(projectID int) (string, error)
 	VoteRuleExistsTx(projectID int, rule string) (bool, error)
 	VoteRuleSetElsewhereTx(projectID int, rule string) (projects int, value string, err error)
+	WorkGraphRelationsTx(issueIDs []int) ([]model.Relation, error)
 }
 
 // Tx is a write transaction: the read surface plus every write.
@@ -325,6 +343,7 @@ type Tx interface {
 	MarkStepAttemptFailedTx(id int, nowMS int64) error
 	MarkStepClaimReapedTx(id int, nowMS int64) error
 	MarkStepUsageRecordedTx(stepID int) error
+	MoveIssueStatusTx(issueID int, from, to model.Status, nowMS int64) (moved bool, err error)
 	RaiseEventLowWatermarkTx() error
 	ReapStepTx(id int, nowMS int64) error
 	RefreshClaimLeaseTx(id int, tokenHash string, ttlMS, nowMS int64) (bool, error)
@@ -334,6 +353,7 @@ type Tx interface {
 	RetireStepTokenTx(id int) error
 	SetConfigTx(projectID int, key, value string) (prior string, err error)
 	SetIssueResolutionTx(issueID int, resolution string) error
+	SetRunActiveTx(runID int, reactivation bool, nowMS int64) error
 	SetRunBudgetTx(runID int, budget float64, ifVersion *int, nowMS int64) error
 	SetRunConductorHashTx(id int, hash string) error
 	SetRunIssueBodyTx(runID, issueID int, body, sha string) error

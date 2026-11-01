@@ -215,6 +215,10 @@ func (s *sqliteStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.writer)
 }
 
+func (s *sqliteStore) FrozenIssueBindings(issueID int) ([]db.FrozenIssueBinding, error) {
+	return db.FrozenIssueBindings(s.writer, issueID)
+}
+
 func (s *sqliteStore) GateOverrideGrantsForRun(runID int) ([]db.GateOverrideGrant, error) {
 	return db.GateOverrideGrantsForRun(s.writer, runID)
 }
@@ -393,6 +397,10 @@ func (s *sqliteStore) InsertWorkflow(wf *model.Workflow, nowMS int64) (*model.Wo
 
 func (s *sqliteStore) IsDescendant(issueID, potentialDescendantID int) (bool, error) {
 	return db.IsDescendant(s.writer, issueID, potentialDescendantID)
+}
+
+func (s *sqliteStore) IssueDeclaration(issueID int) (string, string, error) {
+	return db.IssueDeclaration(s.writer, issueID)
 }
 
 func (s *sqliteStore) IssueExists(issueID int) (bool, error) {
@@ -735,6 +743,10 @@ func (s *sqliteStore) WorkflowVersionsFor(projectID int, names []string) ([]db.W
 	return db.WorkflowVersionsFor(s.writer, projectID, names)
 }
 
+func (t *sqliteTx) ActivationIssueTx(id int) (*model.Issue, error) {
+	return db.ActivationIssueTx(t.tx, id)
+}
+
 func (t *sqliteTx) AutoRegisterEnabledTx(projectID int) (bool, error) {
 	return db.AutoRegisterEnabledTx(t.tx, projectID)
 }
@@ -777,6 +789,10 @@ func (t *sqliteTx) EventKindCountsTx(runID int) (map[string]int, error) {
 
 func (t *sqliteTx) EventLowWatermarkTx() (int64, error) {
 	return db.EventLowWatermarkTx(t.tx)
+}
+
+func (t *sqliteTx) ForeignHoldingStepsTx(projectID, runID int) ([]*db.Step, error) {
+	return db.ForeignHoldingStepsTx(t.tx, projectID, runID)
 }
 
 func (t *sqliteTx) GateResultsForStepTx(stepID int) ([]db.GateResultRow, error) {
@@ -823,6 +839,18 @@ func (t *sqliteTx) GetStepTx(id int) (*db.Step, error) {
 	return db.GetStepTx(t.tx, id)
 }
 
+func (t *sqliteTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
+	return db.IssueDependenciesDoneTx(t.tx, issueID)
+}
+
+func (t *sqliteTx) IssueLabelsTx(issueID int) ([]string, error) {
+	return db.IssueLabelsTx(t.tx, issueID)
+}
+
+func (t *sqliteTx) IssueSchedulingFactsTx(issueID int) (model.Priority, string, error) {
+	return db.IssueSchedulingFactsTx(t.tx, issueID)
+}
+
 func (t *sqliteTx) IssueScopeGlobsTx(issueID int) (string, error) {
 	return db.IssueScopeGlobsTx(t.tx, issueID)
 }
@@ -833,6 +861,10 @@ func (t *sqliteTx) IssueStatusResolutionTx(issueID int) (model.Status, string, e
 
 func (t *sqliteTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
 	return db.LatestEventDataTx(t.tx, runID, kind)
+}
+
+func (t *sqliteTx) LatestRecordedArtifactIDTx(issueID int, kind string) (int, bool, error) {
+	return db.LatestRecordedArtifactIDTx(t.tx, issueID, kind)
 }
 
 func (t *sqliteTx) ListDispatchRowsTx(dispatchID int) ([]db.DispatchRow, error) {
@@ -891,6 +923,10 @@ func (t *sqliteTx) OpenDispatchTx(runID int) (*db.Dispatch, error) {
 	return db.OpenDispatchTx(t.tx, runID)
 }
 
+func (t *sqliteTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
+	return db.PinnedArtifactTx(t.tx, id)
+}
+
 func (t *sqliteTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error) {
 	return db.PrunableEventRunsTx(t.tx, sel)
 }
@@ -901,6 +937,14 @@ func (t *sqliteTx) ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, 
 
 func (t *sqliteTx) RegisteredVoteRulesTx(projectID int) ([]string, error) {
 	return db.RegisteredVoteRulesTx(t.tx, projectID)
+}
+
+func (t *sqliteTx) RelationSourcesTx(targetID int, rt model.RelationType) ([]int, error) {
+	return db.RelationSourcesTx(t.tx, targetID, rt)
+}
+
+func (t *sqliteTx) RelationTargetsTx(sourceID int, rt model.RelationType) ([]int, error) {
+	return db.RelationTargetsTx(t.tx, sourceID, rt)
 }
 
 func (t *sqliteTx) ReportedUsageTx(runID int, unit string) (float64, error) {
@@ -941,6 +985,10 @@ func (t *sqliteTx) VoteRuleExistsTx(projectID int, rule string) (bool, error) {
 
 func (t *sqliteTx) VoteRuleSetElsewhereTx(projectID int, rule string) (int, string, error) {
 	return db.VoteRuleSetElsewhereTx(t.tx, projectID, rule)
+}
+
+func (t *sqliteTx) WorkGraphRelationsTx(issueIDs []int) ([]model.Relation, error) {
+	return db.WorkGraphRelationsTx(t.tx, issueIDs)
 }
 
 func (t *sqliteTx) AckReapTx(runID int, seq int64, ackedBy string, nowMS int64) (db.AckReapResult, error) {
@@ -1179,6 +1227,10 @@ func (t *sqliteTx) MarkStepUsageRecordedTx(stepID int) error {
 	return db.MarkStepUsageRecordedTx(t.tx, stepID)
 }
 
+func (t *sqliteTx) MoveIssueStatusTx(issueID int, from, to model.Status, nowMS int64) (bool, error) {
+	return db.MoveIssueStatusTx(t.tx, issueID, from, to, nowMS)
+}
+
 func (t *sqliteTx) RaiseEventLowWatermarkTx() error {
 	return db.RaiseEventLowWatermarkTx(t.tx)
 }
@@ -1213,6 +1265,10 @@ func (t *sqliteTx) SetConfigTx(projectID int, key, value string) (string, error)
 
 func (t *sqliteTx) SetIssueResolutionTx(issueID int, resolution string) error {
 	return db.SetIssueResolutionTx(t.tx, issueID, resolution)
+}
+
+func (t *sqliteTx) SetRunActiveTx(runID int, reactivation bool, nowMS int64) error {
+	return db.SetRunActiveTx(t.tx, runID, reactivation, nowMS)
 }
 
 func (t *sqliteTx) SetRunBudgetTx(runID int, budget float64, ifVersion *int, nowMS int64) error {

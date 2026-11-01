@@ -249,6 +249,10 @@ func (s *pgStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.db)
 }
 
+func (s *pgStore) FrozenIssueBindings(issueID int) ([]db.FrozenIssueBinding, error) {
+	return db.FrozenIssueBindings(s.db, issueID)
+}
+
 func (s *pgStore) GateOverrideGrantsForRun(runID int) ([]db.GateOverrideGrant, error) {
 	return db.GateOverrideGrantsForRun(s.db, runID)
 }
@@ -427,6 +431,10 @@ func (s *pgStore) InsertWorkflow(wf *model.Workflow, nowMS int64) (*model.Workfl
 
 func (s *pgStore) IsDescendant(issueID, potentialDescendantID int) (bool, error) {
 	return db.IsDescendant(s.db, issueID, potentialDescendantID)
+}
+
+func (s *pgStore) IssueDeclaration(issueID int) (string, string, error) {
+	return db.IssueDeclaration(s.db, issueID)
 }
 
 func (s *pgStore) IssueExists(issueID int) (bool, error) {
@@ -769,6 +777,10 @@ func (s *pgStore) WorkflowVersionsFor(projectID int, names []string) ([]db.Workf
 	return db.WorkflowVersionsFor(s.db, projectID, names)
 }
 
+func (t *pgTx) ActivationIssueTx(id int) (*model.Issue, error) {
+	return db.ActivationIssueTx(t.tx, id)
+}
+
 func (t *pgTx) AutoRegisterEnabledTx(projectID int) (bool, error) {
 	return db.AutoRegisterEnabledTx(t.tx, projectID)
 }
@@ -807,6 +819,10 @@ func (t *pgTx) DispatchTTLTx(projectID int) (time.Duration, error) {
 
 func (t *pgTx) EventKindCountsTx(runID int) (map[string]int, error) {
 	return db.EventKindCountsTx(t.tx, runID)
+}
+
+func (t *pgTx) ForeignHoldingStepsTx(projectID, runID int) ([]*db.Step, error) {
+	return db.ForeignHoldingStepsTx(t.tx, projectID, runID)
 }
 
 func (t *pgTx) GateResultsForStepTx(stepID int) ([]db.GateResultRow, error) {
@@ -853,6 +869,18 @@ func (t *pgTx) GetStepTx(id int) (*db.Step, error) {
 	return db.GetStepTx(t.tx, id)
 }
 
+func (t *pgTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
+	return db.IssueDependenciesDoneTx(t.tx, issueID)
+}
+
+func (t *pgTx) IssueLabelsTx(issueID int) ([]string, error) {
+	return db.IssueLabelsTx(t.tx, issueID)
+}
+
+func (t *pgTx) IssueSchedulingFactsTx(issueID int) (model.Priority, string, error) {
+	return db.IssueSchedulingFactsTx(t.tx, issueID)
+}
+
 func (t *pgTx) IssueScopeGlobsTx(issueID int) (string, error) {
 	return db.IssueScopeGlobsTx(t.tx, issueID)
 }
@@ -863,6 +891,10 @@ func (t *pgTx) IssueStatusResolutionTx(issueID int) (model.Status, string, error
 
 func (t *pgTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
 	return db.LatestEventDataTx(t.tx, runID, kind)
+}
+
+func (t *pgTx) LatestRecordedArtifactIDTx(issueID int, kind string) (int, bool, error) {
+	return db.LatestRecordedArtifactIDTx(t.tx, issueID, kind)
 }
 
 func (t *pgTx) ListDispatchRowsTx(dispatchID int) ([]db.DispatchRow, error) {
@@ -921,6 +953,10 @@ func (t *pgTx) OpenDispatchTx(runID int) (*db.Dispatch, error) {
 	return db.OpenDispatchTx(t.tx, runID)
 }
 
+func (t *pgTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
+	return db.PinnedArtifactTx(t.tx, id)
+}
+
 func (t *pgTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error) {
 	return db.PrunableEventRunsTx(t.tx, sel)
 }
@@ -931,6 +967,14 @@ func (t *pgTx) ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, erro
 
 func (t *pgTx) RegisteredVoteRulesTx(projectID int) ([]string, error) {
 	return db.RegisteredVoteRulesTx(t.tx, projectID)
+}
+
+func (t *pgTx) RelationSourcesTx(targetID int, rt model.RelationType) ([]int, error) {
+	return db.RelationSourcesTx(t.tx, targetID, rt)
+}
+
+func (t *pgTx) RelationTargetsTx(sourceID int, rt model.RelationType) ([]int, error) {
+	return db.RelationTargetsTx(t.tx, sourceID, rt)
 }
 
 func (t *pgTx) ReportedUsageTx(runID int, unit string) (float64, error) {
@@ -971,6 +1015,10 @@ func (t *pgTx) VoteRuleExistsTx(projectID int, rule string) (bool, error) {
 
 func (t *pgTx) VoteRuleSetElsewhereTx(projectID int, rule string) (int, string, error) {
 	return db.VoteRuleSetElsewhereTx(t.tx, projectID, rule)
+}
+
+func (t *pgTx) WorkGraphRelationsTx(issueIDs []int) ([]model.Relation, error) {
+	return db.WorkGraphRelationsTx(t.tx, issueIDs)
 }
 
 func (t *pgTx) AckReapTx(runID int, seq int64, ackedBy string, nowMS int64) (db.AckReapResult, error) {
@@ -1219,6 +1267,10 @@ func (t *pgTx) MarkStepUsageRecordedTx(stepID int) error {
 	return db.MarkStepUsageRecordedTx(t.tx, stepID)
 }
 
+func (t *pgTx) MoveIssueStatusTx(issueID int, from, to model.Status, nowMS int64) (bool, error) {
+	return db.MoveIssueStatusTx(t.tx, issueID, from, to, nowMS)
+}
+
 func (t *pgTx) RaiseEventLowWatermarkTx() error {
 	return db.RaiseEventLowWatermarkTx(t.tx)
 }
@@ -1253,6 +1305,10 @@ func (t *pgTx) SetConfigTx(projectID int, key, value string) (string, error) {
 
 func (t *pgTx) SetIssueResolutionTx(issueID int, resolution string) error {
 	return db.SetIssueResolutionTx(t.tx, issueID, resolution)
+}
+
+func (t *pgTx) SetRunActiveTx(runID int, reactivation bool, nowMS int64) error {
+	return db.SetRunActiveTx(t.tx, runID, reactivation, nowMS)
 }
 
 func (t *pgTx) SetRunBudgetTx(runID int, budget float64, ifVersion *int, nowMS int64) error {
