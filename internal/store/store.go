@@ -26,6 +26,13 @@ type (
 	PinnedArtifact     = db.PinnedArtifact
 )
 
+// The event and run-fact query inputs, aliased as in aliases.go so callers
+// can build them without importing internal/db.
+type (
+	NewEvent           = db.NewEvent
+	ChainDeferralQuery = db.ChainDeferralQuery
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
