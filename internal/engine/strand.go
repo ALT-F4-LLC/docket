@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -87,7 +86,12 @@ func reapAckRunOf(key string) (int, bool) {
 // They are outside the run's machinery and their author decides when they end;
 // closing them because a run happened to finish would be the engine disposing
 // of a question nobody asked it to hold.
-func closeRunProposalsTx(tx *sql.Tx, runID int, reason string) (int, error) {
+//
+// It takes a transaction rather than a pool handle because internal/db caps
+// the pool at ONE connection, and both callers hold an open transaction when
+// they reach it. A pool read from there deadlocks permanently rather than
+// failing.
+func closeRunProposalsTx(tx store.LegacyTx, runID int, reason string) (int, error) {
 	stx := store.TxOn(tx)
 	keys, err := stx.LookupIdempotencyKeysTx(
 		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
@@ -116,7 +120,7 @@ func closeRunProposalsTx(tx *sql.Tx, runID int, reason string) (int, error) {
 // A missing ballot is NOT an error and not a warning. Most reaps are
 // acknowledged with no panel ever convened, so "no proposal under this key" is
 // the ordinary case rather than a problem to report.
-func closeReapAckProposalTx(tx *sql.Tx, runID int, seq int64) error {
+func closeReapAckProposalTx(tx store.LegacyTx, runID int, seq int64) error {
 	stx := store.TxOn(tx)
 	id, found, err := stx.LookupIdempotencyKeyTx(
 		store.ScopeVoteCreate, ReapAckProposalKey(runID, seq))
@@ -143,7 +147,7 @@ func closeReapAckProposalTx(tx *sql.Tx, runID int, seq int64) error {
 // A step with no proposal is the ordinary case and reports nothing — the sweep
 // covers every kind of step, and only vote steps ever open one.
 func closeStepProposalTx(
-	tx *sql.Tx, runID, issueID int, instance, reason string,
+	tx store.LegacyTx, runID, issueID int, instance, reason string,
 ) error {
 	stx := store.TxOn(tx)
 	id, found, err := stx.LookupIdempotencyKeyTx(
@@ -176,9 +180,3 @@ func abandonedProposalReason(runID int, reason string) string {
 	}
 	return out
 }
-
-// compile-time note: closeRunProposalsTx takes *sql.Tx rather than *sql.DB
-// because internal/db caps the pool at ONE connection, and both callers hold an
-// open transaction when they reach it. A pool read from there deadlocks
-// permanently rather than failing.
-var _ = (*sql.DB)(nil)

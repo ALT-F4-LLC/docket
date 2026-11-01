@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -145,7 +144,7 @@ func (r *PinReport) Sound() bool {
 // The tree is the RUN's: refs resolve against runConfigRoots, so a run whose
 // pins live under its checkout's `.docket/config` verifies the same from any
 // cwd, including one outside every git checkout.
-func VerifyPins(conn *sql.DB, runID int) (*PinReport, error) {
+func VerifyPins(conn store.LegacyDB, runID int) (*PinReport, error) {
 	report, err := verifyPinsClosedIn(conn, runID, runConfigRoots(conn, runID))
 	if err != nil {
 		return nil, err
@@ -176,7 +175,7 @@ func VerifyPins(conn *sql.DB, runID int) (*PinReport, error) {
 // shared verbatim with the additions repin computes when it adopts bytes
 // (DKT-805): one computation, so the verb that detects the hole and the verb
 // that closes it can never name different refs.
-func verifyPinsClosedIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
+func verifyPinsClosedIn(conn store.LegacyDB, runID int, roots []string) (*PinReport, error) {
 	report, err := verifyPinsIn(conn, runID, roots)
 	if err != nil {
 		return nil, err
@@ -205,7 +204,7 @@ func verifyPinsClosedIn(conn *sql.DB, runID int, roots []string) (*PinReport, er
 // seam resolvePacketFiles takes for the same reason: the resolution order is
 // the thing under test, and a check that could only run against the process's
 // real config directories could not be tested at all.
-func verifyPinsIn(conn *sql.DB, runID int, roots []string) (*PinReport, error) {
+func verifyPinsIn(conn store.LegacyDB, runID int, roots []string) (*PinReport, error) {
 	st := store.StoreOn(conn)
 	pins, err := st.ListPins(runID)
 	if err != nil {

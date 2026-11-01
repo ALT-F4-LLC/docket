@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"slices"
 	"strings"
@@ -42,7 +41,7 @@ import (
 // A refusal is a VALIDATION_ERROR, raised BEFORE the transaction opens, so a
 // refused cast writes no vote row. The db sentinels (ErrNotFound, ErrConflict)
 // come back unwrapped from the tally, as they always did.
-func CastVote(conn *sql.DB, vote *model.Vote) (*store.CastVoteResult, error) {
+func CastVote(conn store.LegacyDB, vote *model.Vote) (*store.CastVoteResult, error) {
 	// DKT-3290: a verdict that carries concerns carries its rationale. A seat
 	// whose summary file write was refused passed `--summary ""`, and the gate
 	// recorded an approve-with-concerns with nothing saying what concerned it.
@@ -98,7 +97,7 @@ type castPolicy struct {
 // names the run, the issue and the instance; the step row names the pinned
 // workflow; the workflow's stored `parsed` form names the step. Nothing is
 // re-parsed from TOML and nothing is read from engine config.
-func castPolicyOf(conn *sql.DB, proposalID int) (castPolicy, error) {
+func castPolicyOf(conn store.LegacyDB, proposalID int) (castPolicy, error) {
 	st := store.StoreOn(conn)
 	key, found, err := st.IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {

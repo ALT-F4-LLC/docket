@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -59,7 +58,7 @@ import (
 // here means the definition arrived without passing register-time validation
 // (a restored database), and the park is the honest answer.
 func evaluateVoteThreshold(
-	conn *sql.DB, step *store.Step, spec *workflow.Step, proposalID int,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step, proposalID int,
 	status model.ProposalStatus,
 ) (ThresholdResult, error) {
 	votes, err := store.StoreOn(conn).GetProposalVotes(proposalID)
@@ -102,7 +101,7 @@ func evaluateVoteThreshold(
 //
 // Both reads are pooled, so this is called from OUTSIDE routeVoteStep's
 // transaction, like every other read there.
-func dissentHold(conn *sql.DB, proposalID int) (string, error) {
+func dissentHold(conn store.LegacyDB, proposalID int) (string, error) {
 	st := store.StoreOn(conn)
 	proposal, err := st.GetProposal(proposalID)
 	if err != nil {
@@ -184,7 +183,7 @@ func voteCastPayloads(votes []*model.Vote) []map[string]any {
 // resolved past before the tally closed the ballot — contributes the sealed
 // projection: who cast and how many, nothing of what (DKT-2447).
 func resolveVoteRecords(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, stepName string,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, stepName string,
 ) ([]ContextInput, error) {
 	var candidates []*store.Step
 	best := -1

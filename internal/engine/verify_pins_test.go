@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
@@ -21,7 +21,7 @@ import (
 // an hour later every step that DID read it was unclaimable.
 
 // pinAFile records a file pin on a run, exactly as activation does.
-func pinAFile(t *testing.T, conn *sql.DB, runID int, root, ref, body string) string {
+func pinAFile(t *testing.T, conn store.LegacyDB, runID int, root, ref, body string) string {
 	t.Helper()
 	path := filepath.Join(root, ref)
 	testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o755), "mkdir")
@@ -192,7 +192,7 @@ func TestVerifyPinsIsDeterministic(t *testing.T) {
 // gateScriptFixture builds a repo whose gate scripts a run's gates execute and
 // swaps in a trust store whose entries name them three ways: a relative argv,
 // an absolute argv under the exec root, and a build tool naming no script.
-func gateScriptFixture(t *testing.T) (repo string, conn *sql.DB, runID int) {
+func gateScriptFixture(t *testing.T) (repo string, conn store.LegacyDB, runID int) {
 	t.Helper()
 	conn = mustDB(t)
 	repo, err := filepath.EvalSymlinks(t.TempDir())
@@ -231,7 +231,7 @@ func gateScriptFixture(t *testing.T) (repo string, conn *sql.DB, runID int) {
 	return repo, conn, run.ID
 }
 
-func filePinFor(t *testing.T, conn *sql.DB, runID int, ref string) (db.Pin, bool) {
+func filePinFor(t *testing.T, conn store.LegacyDB, runID int, ref string) (db.Pin, bool) {
 	t.Helper()
 	pins, err := db.ListPins(conn, runID)
 	testsupport.Must(t, err, "ListPins: %v", err)
@@ -334,7 +334,7 @@ func TestVerifyPinsReportsUnpinnedGates(t *testing.T) {
 // gateReportWith builds the verify-pins report for a run the way VerifyPins
 // does, with the trust loader and the invoking exec root supplied.
 func gateReportWith(
-	t *testing.T, conn *sql.DB, runID int,
+	t *testing.T, conn store.LegacyDB, runID int,
 	load func() (*trust.Store, error), invokingRoot string,
 ) *PinReport {
 	t.Helper()
@@ -347,7 +347,7 @@ func gateReportWith(
 
 // setRunProjectIdentity records identity on the project that owns runID, the
 // row `run start` binds a run to.
-func setRunProjectIdentity(t *testing.T, conn *sql.DB, runID int, identity string) {
+func setRunProjectIdentity(t *testing.T, conn store.LegacyDB, runID int, identity string) {
 	t.Helper()
 	_, err := conn.Exec(`UPDATE projects SET identity = ?
 		WHERE id = (SELECT project_id FROM runs WHERE id = ?)`, identity, runID)
@@ -729,7 +729,7 @@ func onGlobalStore(t *testing.T, cwd string) {
 // file under checkout/.docket/config, then leaves the process in a non-git
 // directory on the global store. Neither invoking root (HOME's, the cwd's)
 // holds the pinned ref, so only the run's recorded exec root resolves it.
-func unanchoredRunFixture(t *testing.T) (conn *sql.DB, runID int, repoConfig string) {
+func unanchoredRunFixture(t *testing.T) (conn store.LegacyDB, runID int, repoConfig string) {
 	t.Helper()
 	elsewhere := t.TempDir()
 	checkout, err := filepath.EvalSymlinks(t.TempDir())
@@ -822,7 +822,7 @@ func TestVerifyPinsFallsBackToTheInvokingRootsWithNoRecordedExecRoot(t *testing.
 // ---------------------------------------------------------------------------
 
 // recordedSteps is the run's steps, requiring at least n of them.
-func recordedSteps(t *testing.T, conn *sql.DB, runID, n int) []*db.Step {
+func recordedSteps(t *testing.T, conn store.LegacyDB, runID, n int) []*db.Step {
 	t.Helper()
 	steps, err := db.ListRunSteps(conn, runID)
 	testsupport.Must(t, err, "ListRunSteps: %v", err)
@@ -834,7 +834,7 @@ func recordedSteps(t *testing.T, conn *sql.DB, runID, n int) []*db.Step {
 
 // recordWorkRoot sets the work root a step recorded, the column
 // `step record --worktree` writes.
-func recordWorkRoot(t *testing.T, conn *sql.DB, step *db.Step, root string) {
+func recordWorkRoot(t *testing.T, conn store.LegacyDB, step *db.Step, root string) {
 	t.Helper()
 	_, err := conn.Exec(`UPDATE steps SET work_root = ? WHERE id = ?`, root, step.ID)
 	testsupport.Must(t, err, "recording the work root of %s: %v", step.Ref(), err)
@@ -1010,7 +1010,7 @@ func TestVerifyPinsDoesNotDuplicateStepWorktreeRows(t *testing.T) {
 // two declared gates each name a relative, pinned script. It returns the
 // trust loader that matches those entries.
 func pinHygieneAsTheTestsGate(
-	t *testing.T, conn *sql.DB, runID int, a string,
+	t *testing.T, conn store.LegacyDB, runID int, a string,
 ) func() (*trust.Store, error) {
 	t.Helper()
 	entry := func(name string, argv ...string) trust.Entry {
@@ -1193,7 +1193,7 @@ func acCommandsAsWired(t *testing.T) func() (*trust.Store, error) {
 
 // recordGateRuns stores gate results for a step as the gate runner records
 // them; RunID and StepID are filled from step.
-func recordGateRuns(t *testing.T, conn *sql.DB, step *db.Step, rows ...db.GateResultRow) {
+func recordGateRuns(t *testing.T, conn store.LegacyDB, step *db.Step, rows ...db.GateResultRow) {
 	t.Helper()
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "Begin: %v", err)
