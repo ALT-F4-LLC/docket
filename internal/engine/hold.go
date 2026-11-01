@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,7 +36,7 @@ type HoldOptions struct {
 
 // HoldStep parks one pending step `waiting-human` with park class `held`, and
 // records one `step-held` event carrying the reason and the actor.
-func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
+func HoldStep(conn store.LegacyDB, stepID int, opts HoldOptions) error {
 	reason, err := holdReason(opts, "step hold")
 	if err != nil {
 		return err
@@ -88,7 +87,7 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 // pending step to hold, so a hold never reads as covering work it did not
 // stop. The held steps leave the next dispatch's rows and are listed under the
 // manifest's `held`; each releases through `step resolve --as retry`.
-func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error) {
+func HoldIssue(conn store.LegacyDB, runID, issueID int, opts HoldOptions) ([]int, error) {
 	reason, err := holdReason(opts, "run hold-issue")
 	if err != nil {
 		return nil, err
@@ -162,7 +161,7 @@ func holdReason(opts HoldOptions, verb string) (string, error) {
 
 // requireHoldableRunTx refuses a hold under a terminal run: a parked step
 // there could never be resolved back into work.
-func requireHoldableRunTx(tx *sql.Tx, runID int) error {
+func requireHoldableRunTx(tx store.LegacyTx, runID int) error {
 	run, err := store.TxOn(tx).GetRunTx(runID)
 	if err != nil {
 		return err
@@ -175,7 +174,7 @@ func requireHoldableRunTx(tx *sql.Tx, runID int) error {
 }
 
 // holdPendingTx parks one pending step and records its step-held event.
-func holdPendingTx(tx *sql.Tx, step *store.Step, reason, via string, opts HoldOptions) error {
+func holdPendingTx(tx store.LegacyTx, step *store.Step, reason, via string, opts HoldOptions) error {
 	if err := store.TxOn(tx).SetStepRoutingWithParkReasonTx(step.ID, "hold", reason,
 		store.StepWaitingHuman, store.ParkClassHeld, reason, opts.NowMS); err != nil {
 		return err
@@ -201,7 +200,7 @@ type HeldStep struct {
 }
 
 // HeldSteps lists the run's held steps in step order. A pure read.
-func HeldSteps(conn *sql.DB, runID int) ([]HeldStep, error) {
+func HeldSteps(conn store.LegacyDB, runID int) ([]HeldStep, error) {
 	return (&runReads{conn: conn, runID: runID}).heldSteps()
 }
 

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -82,7 +81,7 @@ type RunNote struct {
 // `by` says who wrote the note and from where, and the event records it as
 // `actor` and `cwd`, as every ruling does. A note with either field empty is
 // refused as a validation error before anything is written.
-func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+func AddRunNote(conn store.LegacyDB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
 	under, err := ParseRunNoteAuthority(under.Kind)
 	if err != nil {
 		return nil, err
@@ -189,7 +188,7 @@ func ParseRunNoteAuthority(kind string) (Authority, error) {
 }
 
 // ListRunNotes returns a run's notes in the order they render.
-func ListRunNotes(conn *sql.DB, runID int) ([]RunNote, error) {
+func ListRunNotes(conn store.LegacyDB, runID int) ([]RunNote, error) {
 	st := store.StoreOn(conn)
 	if _, err := st.GetRun(runID); err != nil {
 		if errors.Is(err, store.ErrRunNotFound) {

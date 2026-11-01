@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -154,7 +153,7 @@ type DecideOptions struct {
 // could approve the very gate its own commit is guarded on. The record
 // carries WHO ruled and from where (DKT-2450) — the same two claim-level
 // fields a trust grant carries, on the event.
-func (e *Engine) DecideStepWith(conn *sql.DB, stepID int, opts DecideOptions) error {
+func (e *Engine) DecideStepWith(conn store.LegacyDB, stepID int, opts DecideOptions) error {
 	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
 	verb := "step approve"
 	if !approve {
@@ -398,7 +397,7 @@ type ResolveOutcome struct {
 // skipped under the operator who had chosen override-pass precisely to reach
 // it).
 func (e *Engine) ResolveStepWith(
-	conn *sql.DB, stepID int, opts ResolveOptions,
+	conn store.LegacyDB, stepID int, opts ResolveOptions,
 ) (*ResolveOutcome, error) {
 	out := &ResolveOutcome{}
 	if err := e.resolveStep(conn, stepID, opts, out); err != nil {
@@ -408,7 +407,7 @@ func (e *Engine) ResolveStepWith(
 }
 
 func (e *Engine) resolveStep(
-	conn *sql.DB, stepID int, opts ResolveOptions, out *ResolveOutcome,
+	conn store.LegacyDB, stepID int, opts ResolveOptions, out *ResolveOutcome,
 ) error {
 	as, note, nowMS := opts.As, opts.Note, opts.NowMS
 	batch, dropInterposed := opts.Batch, opts.DropInterposed
@@ -1032,7 +1031,7 @@ func (e *Engine) resolveStep(
 // precedes does not change, so it is independent of ResolveStepWith and safe to
 // call and print before that call commits anything — the operator sees the
 // blast radius of what they are about to approve.
-func OverridePassSkipsInterposedTargets(conn *sql.DB, stepID int) []string {
+func OverridePassSkipsInterposedTargets(conn store.LegacyDB, stepID int) []string {
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return nil
@@ -1093,7 +1092,7 @@ func overridePassInterposedWarning(instance string, spec *workflow.Step) string 
 //
 // Validated BEFORE the transaction opens, same as stage zero's C5 ordering: a
 // refusal costs the caller nothing and consumes no attempt.
-func (e *Engine) FailStep(conn *sql.DB, stepID int, token, note, metadata string, nowMS int64) error {
+func (e *Engine) FailStep(conn store.LegacyDB, stepID int, token, note, metadata string, nowMS int64) error {
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -1355,7 +1354,7 @@ func loopBoundParkReason(loop *LoopOutcome) string {
 
 // commit closes the transaction when the preceding step succeeded, so a branch
 // whose last action is one fallible write does not need a three-line tail.
-func commit(tx *sql.Tx, err error) error {
+func commit(tx store.LegacyTx, err error) error {
 	if err != nil {
 		return err
 	}
@@ -1365,7 +1364,7 @@ func commit(tx *sql.Tx, err error) error {
 // HeartbeatStep extends a live lease held by token. It does not touch
 // `attempt`: a heartbeat is not a new claim.
 func HeartbeatStep(
-	conn *sql.DB, stepID int, token string, nowMS int64,
+	conn store.LegacyDB, stepID int, token string, nowMS int64,
 ) (*model.Lease, error) {
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if errors.Is(err, store.ErrStepNotFound) {

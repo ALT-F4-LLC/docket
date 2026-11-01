@@ -600,13 +600,21 @@ func TestFailRequiresTheToken(t *testing.T) {
 	e := testEngine()
 
 	id := stepIDByInstance(t, conn, "implement@0")
-	_, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
+	claim, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
 	testsupport.Must(t, err, "claim: %v", err)
 
 	err = e.FailStep(conn, id, "not-the-token", "", "", nowMS)
 	if !errors.Is(err, db.ErrNotHolder) {
 		t.Errorf("fail with a wrong token = %v, want ErrNotHolder", err)
 	}
+
+	// The pool holds one connection, so a refused fail that left its
+	// transaction open would block every later write on this database.
+	if inUse := conn.Stats().InUse; inUse != 0 {
+		t.Fatalf("connections in use after a refused fail = %d, want 0", inUse)
+	}
+	err = e.FailStep(conn, id, claim.Token, "gave up", "", nowMS)
+	testsupport.Must(t, err, "fail by the holder after a refused fail: %v", err)
 }
 
 // TestAttemptCountsClaimsNotClaimsPlusFailures is E-8's regression spine — the
