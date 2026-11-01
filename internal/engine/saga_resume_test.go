@@ -343,7 +343,7 @@ func TestResumeChecksDeclaredFilesUnderTheGateSpawnRoot(t *testing.T) {
 		})
 		runner.LoadStore = sandboxTrust(t, trust.Entry{
 			Name: "build", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
-			Repo: mustResolve(repo), ReRunnable: true,
+			Repo: mustResolve(identity), ReRunnable: true,
 			DeclaredFiles: []trust.DeclaredFile{{Path: declaredFilePath, SHA256: trustHashOf(pinned)}},
 		})
 		e = testEngine()
@@ -399,6 +399,70 @@ func TestResumeChecksDeclaredFilesUnderTheGateSpawnRoot(t *testing.T) {
 		writeDeclaredFile(t, identity, "rewritten\n")
 		entry, reason := resume(t, e, &db.Step{})
 		wantRerun(t, entry, reason)
+	})
+}
+
+// TestInterruptedGateResolvesTrustThroughTheRunnerIdentityInAWorktree: in a
+// worktree checkout the exec root (the worktree) and the trust identity (the
+// worktree-stable project path) differ, and trust entries bind to the identity.
+// The resume decision for an interrupted gate looks the entry up through the
+// identity the gate runner uses, so a bound entry is found and its re_runnable
+// flag decides the outcome. An entry bound only to the worktree path does not
+// match, exactly as it would not match on the normal gate path.
+func TestInterruptedGateResolvesTrustThroughTheRunnerIdentityInAWorktree(t *testing.T) {
+	argv := []string{"/usr/bin/true"}
+	setup := func(t *testing.T, boundTo func(worktree, project string) string, reRunnable bool) *Engine {
+		t.Helper()
+		worktree, project := t.TempDir(), t.TempDir()
+		runner := NewExecRunner(RepoPaths{
+			ExecRoot: worktree, Identity: project,
+			LockPath: filepath.Join(worktree, ".docket", "tree.lock"),
+		})
+		runner.LoadStore = sandboxTrust(t, trust.Entry{
+			Name: "tests", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+			Repo: mustResolve(boundTo(worktree, project)), ReRunnable: reRunnable,
+		})
+		e := testEngine()
+		e.Gates = runner
+		return e
+	}
+	toProject := func(_, project string) string { return project }
+	toWorktree := func(worktree, _ string) string { return worktree }
+	resume := func(t *testing.T, e *Engine) (*trust.Entry, string) {
+		t.Helper()
+		entry, reason, err := e.reRunnableEntryFor(workflow.Gate{Name: "tests"}, &db.Step{})
+		testsupport.Must(t, err, "reRunnableEntryFor: %v", err)
+		return entry, reason
+	}
+
+	t.Run("entry bound to the identity, not re-runnable, parks as interrupted", func(t *testing.T) {
+		entry, reason := resume(t, setup(t, toProject, false))
+		if entry == nil {
+			t.Errorf("no entry returned; the identity-bound entry must resolve (reason %q)", reason)
+		}
+		if strings.Contains(reason, "no trust entry") || strings.Contains(reason, "no longer trusted") {
+			t.Errorf("park reason reports a missing entry for an entry that exists: %q", reason)
+		}
+		if !strings.Contains(reason, "not marked re-runnable") {
+			t.Errorf("park reason does not name the real cause (interrupted, not re-runnable): %q", reason)
+		}
+	})
+
+	t.Run("entry bound to the identity, re-runnable, re-runs", func(t *testing.T) {
+		entry, reason := resume(t, setup(t, toProject, true))
+		if entry == nil || !entry.ReRunnable || reason != "" {
+			t.Errorf("entry %+v reason %q, want the re-runnable entry and no reason", entry, reason)
+		}
+	})
+
+	t.Run("entry bound only to the worktree path does not match", func(t *testing.T) {
+		entry, reason := resume(t, setup(t, toWorktree, true))
+		if entry != nil {
+			t.Errorf("entry %+v, want none: the gate runner never matches the worktree path", entry)
+		}
+		if !strings.Contains(reason, "no trust entry for this repo") {
+			t.Errorf("park reason = %q, want the missing-entry reason", reason)
+		}
 	})
 }
 
