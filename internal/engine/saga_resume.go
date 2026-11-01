@@ -129,7 +129,10 @@ func (e *Engine) reRunnableEntryFor(
 			"gate %q was interrupted after it started, and the trust store could not be read: %v",
 			gate.Name, err), nil
 	}
-	identity, err := trust.RepoIdentity(runner.RepoRoot)
+	// The identity trust entries bind to, resolved as the gate runner resolves
+	// it (gate_exec.go): the worktree-stable project path, never the exec root.
+	// Keying on RepoRoot would miss every entry in a worktree checkout.
+	identity, err := trust.RepoIdentity(runner.Identity)
 	if err != nil {
 		return nil, fmt.Sprintf(
 			"gate %q was interrupted after it started, and the repo path could not be resolved: %v",
