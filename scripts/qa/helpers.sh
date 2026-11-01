@@ -136,11 +136,13 @@ run() {
 # so the match is anchored on that path, in both its as-given and
 # symlink-resolved spellings. A saga another suite or a personal docket is
 # running never holds this one up, and this one's child is never mistaken
-# for it. Without pgrep there is no signal at all, and the checks that follow
-# would read mid-flight state as a result: that is a loud failure, not a
-# silent pass. Bounded by QA_DETACHED_WAIT_S (default 30): a child that has
-# not exited by then is reported and the wait fails, so a hung saga is never
-# confused with a finished one. Either failure returns 1, which under the
+# for it. Only pgrep's exit 1 (no match) means the child is gone. Without
+# pgrep, or with one that exits above 1 because it cannot read the process
+# list, there is no signal at all, and the checks that follow would read
+# mid-flight state as a result: that is a loud failure, not a silent pass.
+# Bounded by QA_DETACHED_WAIT_S (default 30): a child that has not exited by
+# then is reported and the wait fails, so a hung saga is never confused with
+# a finished one. Each failure returns 1, which under the
 # suite's `set -e` ends the run at that step rather than letting every later
 # check fail for a reason it cannot name.
 qa_wait_detached() {
@@ -148,7 +150,7 @@ qa_wait_detached() {
     printf "FATAL: pgrep is required to wait for the detached saga a step complete launched\n" >&2
     return 1
   fi
-  local dir base as_given resolved pattern i
+  local dir base as_given resolved pattern i rc err
   dir=$(dirname -- "$DOCKET")
   base=$(basename -- "$DOCKET")
   as_given="$(cd "$dir" && pwd)/$base"
@@ -157,9 +159,16 @@ qa_wait_detached() {
   resolved=$(readlink -f -- "$DOCKET" 2>/dev/null) || resolved="$(cd "$dir" && pwd -P)/$base"
   pattern="^($(qa_regex_escape "$as_given")|$(qa_regex_escape "$resolved")) step resume STEP-"
   for ((i = 0; i < ${QA_DETACHED_WAIT_S:-30} * 10; i++)); do
-    if ! pgrep -f -- "$pattern" >/dev/null 2>&1; then
-      return 0
-    fi
+    rc=0
+    err=$(pgrep -f -- "$pattern" 2>&1 >/dev/null) || rc=$?
+    case "$rc" in
+      0) ;;
+      1) return 0 ;;
+      *)
+        printf "FATAL: pgrep exited %s, so the detached saga cannot be waited for: %s\n" "$rc" "$err" >&2
+        return 1
+        ;;
+    esac
     sleep 0.1
   done
   printf "qa_wait_detached: the detached step resume child of %s is still running after %ss (QA_DETACHED_WAIT_S)\n" \
