@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 
 	"github.com/ALT-F4-LLC/docket/internal/schema"
@@ -17,7 +16,7 @@ import (
 // at the verb: a repo whose definitions declare no payload cannot tell v9 from
 // v8 here.
 func validateDeclaredPayload(
-	conn *sql.DB,
+	conn store.LegacyDB,
 	step *store.Step,
 	spec *workflow.Step,
 	payload []byte,
@@ -81,7 +80,7 @@ func validateDeclaredPayload(
 // registry someone edited underneath a run, which cannot happen through any verb
 // — `name@version` is frozen — and the refusal says so rather than validating
 // against bytes the run never agreed to.
-func pinnedSchema(conn *sql.DB, runID int, ref string) (*schema.Registered, error) {
+func pinnedSchema(conn store.LegacyDB, runID int, ref string) (*schema.Registered, error) {
 	st := store.StoreOn(conn)
 	pins, err := st.ListPins(runID)
 	if err != nil {

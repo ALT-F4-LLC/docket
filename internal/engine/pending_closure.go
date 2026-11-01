@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -103,7 +102,7 @@ func normalizePinRef(ref string) string {
 
 // pendingPacketClosure computes the refs a run's non-terminal work can still
 // read, each mapped to what reaches it.
-func pendingPacketClosure(conn *sql.DB, runID int, roots []string) (pendingClosure, error) {
+func pendingPacketClosure(conn store.LegacyDB, runID int, roots []string) (pendingClosure, error) {
 	st := store.StoreOn(conn)
 	steps, err := st.ListRunSteps(runID)
 	if err != nil {

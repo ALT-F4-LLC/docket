@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"database/sql"
-
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
@@ -25,7 +23,7 @@ import (
 // verbatim rather than degrading to dormancy: a policy that cannot be read
 // is not the same fact as a repo that never had one, and conflating them
 // would route real rows against a policy nobody verified.
-func policyForRun(conn *sql.DB, runID int) (*policyDoc, error) {
+func policyForRun(conn store.LegacyDB, runID int) (*policyDoc, error) {
 	pins, err := store.StoreOn(conn).ListPins(runID)
 	if err != nil {
 		return nil, err
@@ -98,7 +96,7 @@ func (p *runPolicy) load() (*policyDoc, error) {
 // EVERY SEAT RESOLVES OR THE CALL FAILS. A caller building a judge panel needs
 // the whole roster, and returning the seats that happened to resolve would
 // seat a panel nobody chose while hiding which seat the policy has no row for.
-func ResolveSeats(conn *sql.DB, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
+func ResolveSeats(conn store.LegacyDB, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
 	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
