@@ -33,6 +33,11 @@ func main() {
 		log.Fatalf("failed to get gopls: %v", err)
 	}
 
+	govulncheck, err := ctx.FetchArtifactAlias("govulncheck:1.9.0")
+	if err != nil {
+		log.Fatalf("failed to get govulncheck: %v", err)
+	}
+
 	protoc, err := artifact.Protoc(ctx)
 	if err != nil {
 		log.Fatalf("failed to get protoc: %v", err)
@@ -80,6 +85,7 @@ func main() {
 			gobin,
 			goimports,
 			gopls,
+			govulncheck,
 			protoc,
 			protocGenGo,
 			protocGenGoGRPC,
