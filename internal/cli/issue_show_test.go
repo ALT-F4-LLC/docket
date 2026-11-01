@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"sort"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -136,7 +136,7 @@ func TestIssueShowJSON_DocsArrayShapeAndOrder(t *testing.T) {
 	}
 }
 
-func createProposal(t *testing.T, conn store.LegacyDB, description, status string) int {
+func createProposal(t *testing.T, conn *sql.DB, description, status string) int {
 	t.Helper()
 	id, err := db.CreateProposal(conn, &model.Proposal{
 		Description:    description,
@@ -151,7 +151,7 @@ func createProposal(t *testing.T, conn store.LegacyDB, description, status strin
 	return id
 }
 
-func linkProposalIssue(t *testing.T, conn store.LegacyDB, proposalID, issueID int) {
+func linkProposalIssue(t *testing.T, conn *sql.DB, proposalID, issueID int) {
 	t.Helper()
 	if err := db.LinkProposalIssue(conn, proposalID, issueID); err != nil {
 		t.Fatalf("LinkProposalIssue(%d,%d): %v", proposalID, issueID, err)
@@ -346,7 +346,7 @@ func TestIssueShowJSON_DocsEmptyIsArray(t *testing.T) {
 
 // showScopeData runs `issue show` at the given JSON version and returns the
 // decoded `.data` object.
-func showScopeData(t *testing.T, conn store.LegacyDB, issueID int, version output.JSONVersion) map[string]json.RawMessage {
+func showScopeData(t *testing.T, conn *sql.DB, issueID int, version output.JSONVersion) map[string]json.RawMessage {
 	t.Helper()
 
 	buf := &bytes.Buffer{}
@@ -505,7 +505,7 @@ func TestIssueShow_MultipleIDsRefusesUnknownID(t *testing.T) {
 // and a fixture that activated a run and drove it to a park would be testing
 // activation. The payload is the shape engine.AbandonIssueInRun marshals, and
 // internal/engine's own tests cover that the two agree.
-func abandonInRun(t *testing.T, conn store.LegacyDB, issueID int, reason string, atMS int64) int {
+func abandonInRun(t *testing.T, conn *sql.DB, issueID int, reason string, atMS int64) int {
 	t.Helper()
 	run, err := db.InsertRun(conn, 0, "a run", 0, atMS)
 	testsupport.Must(t, err, "InsertRun: %v", err)
