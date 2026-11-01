@@ -872,28 +872,30 @@ func TestIssueQueriesPinnedArtifactTx(t *testing.T) {
 	}
 }
 
-func TestIssueQueriesIssueDescription(t *testing.T) {
+func TestIssueQueriesIssueDeclaration(t *testing.T) {
 	s := newIssueQueryStore(t)
 	id, err := CreateIssue(s.db, &model.Issue{
 		Title: "described", Description: "the live body", Status: model.StatusTodo,
 		Priority: model.PriorityMedium, Kind: model.IssueKindTask,
 	}, nil, nil)
 	testsupport.Must(t, err, "CreateIssue: %v", err)
+	mustExec(t, s.db, `UPDATE issues SET scope_globs = ? WHERE id = ?`, `["internal/**"]`, id)
 	bare := s.issue(t, "bare", model.StatusTodo)
-	mustExec(t, s.db, `UPDATE issues SET description = NULL WHERE id = ?`, bare)
+	mustExec(t, s.db, `UPDATE issues SET description = NULL, scope_globs = NULL WHERE id = ?`, bare)
 
-	got, err := IssueDescription(s.db, id)
-	testsupport.Must(t, err, "IssueDescription: %v", err)
-	if got != "the live body" {
-		t.Errorf("IssueDescription = %q, want %q", got, "the live body")
+	description, scope, err := IssueDeclaration(s.db, id)
+	testsupport.Must(t, err, "IssueDeclaration: %v", err)
+	if description != "the live body" || scope != `["internal/**"]` {
+		t.Errorf("IssueDeclaration = (%q, %q), want (%q, %q)",
+			description, scope, "the live body", `["internal/**"]`)
 	}
-	got, err = IssueDescription(s.db, bare)
-	testsupport.Must(t, err, "IssueDescription(NULL): %v", err)
-	if got != "" {
-		t.Errorf("IssueDescription(NULL) = %q, want \"\"", got)
+	description, scope, err = IssueDeclaration(s.db, bare)
+	testsupport.Must(t, err, "IssueDeclaration(NULL): %v", err)
+	if description != "" || scope != "" {
+		t.Errorf("IssueDeclaration(NULL) = (%q, %q), want (\"\", \"\")", description, scope)
 	}
 
-	if _, err := IssueDescription(s.db, 999); !errors.Is(err, ErrNotFound) {
+	if _, _, err := IssueDeclaration(s.db, 999); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing issue: err = %v, want ErrNotFound", err)
 	}
 }
@@ -954,5 +956,35 @@ func TestIssueQueriesFrozenIssueBindings(t *testing.T) {
 		if len(got) != 0 {
 			t.Errorf("%s: FrozenIssueBindings = %+v, want none", name, got)
 		}
+	}
+}
+
+// TestIssueQueriesFrozenIssueBindingsLiveStepsFollowStepTerminal keeps the
+// helper's SQL status list and StepTerminal from drifting: one step in each
+// persisted status, and LiveSteps must count exactly the non-terminal ones.
+func TestIssueQueriesFrozenIssueBindingsLiveStepsFollowStepTerminal(t *testing.T) {
+	s := newIssueQueryStore(t)
+	issue := s.issue(t, "subject", model.StatusInProgress)
+	run := seedEventRun(t, s.db, model.RunActive, 1)
+	testsupport.Must(t, AddRunIssue(s.db, run, issue), "AddRunIssue")
+	mustExec(t, s.db,
+		`UPDATE run_issues SET issue_snapshot = '{}' WHERE run_id = ? AND issue_id = ?`, run, issue)
+
+	persisted := []string{
+		StepPending, StepClaimed, StepRunning, StepGated, StepDone,
+		StepWaitingHuman, StepSkipped, StepSuperseded, StepFailedRouted,
+	}
+	wantLive := 0
+	for _, status := range persisted {
+		s.step(t, run, issue, status+"@0", status)
+		if !StepTerminal(status) {
+			wantLive++
+		}
+	}
+
+	got, err := FrozenIssueBindings(s.db, issue)
+	testsupport.Must(t, err, "FrozenIssueBindings: %v", err)
+	if len(got) != 1 || got[0].LiveSteps != wantLive {
+		t.Errorf("FrozenIssueBindings = %+v, want one binding with LiveSteps %d", got, wantLive)
 	}
 }

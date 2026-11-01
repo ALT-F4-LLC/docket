@@ -1848,18 +1848,21 @@ func PinnedArtifactTx(tx *sql.Tx, id int) (PinnedArtifact, error) {
 	return a, nil
 }
 
-// IssueDescription reads an issue's live description, "" when it has none.
-// A missing issue is ErrNotFound.
-func IssueDescription(db *sql.DB, issueID int) (string, error) {
-	var description sql.NullString
-	err := db.QueryRow(`SELECT description FROM issues WHERE id = ?`, issueID).Scan(&description)
+// IssueDeclaration reads the two live fields an edit can change under a frozen
+// activation snapshot: the description and the stored scope JSON. Each is ""
+// when unset. A missing issue is ErrNotFound.
+func IssueDeclaration(db *sql.DB, issueID int) (description, scope string, err error) {
+	var storedDescription, storedScope sql.NullString
+	err = db.QueryRow(
+		`SELECT description, scope_globs FROM issues WHERE id = ?`, issueID,
+	).Scan(&storedDescription, &storedScope)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+		return "", "", ErrNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("reading the description of issue %d: %w", issueID, err)
+		return "", "", fmt.Errorf("reading the declaration of issue %d: %w", issueID, err)
 	}
-	return description.String, nil
+	return storedDescription.String, storedScope.String, nil
 }
 
 // FrozenIssueBinding is one run's activation snapshot of an issue.
