@@ -91,3 +91,57 @@ func TestHostedEntrypointAnswersHandshake(t *testing.T) {
 		t.Fatal("Handshake succeeded after the daemon shut down")
 	}
 }
+
+// TestHostedEntrypointClientWindow: the hosted entrypoint enforces the
+// config's inclusive client window over HTTPS, admitting both bounds and
+// refusing a major on either side as INCOMPATIBLE.
+func TestHostedEntrypointClientWindow(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	certFile, keyFile, roots := testKeyPair(t)
+	secret := testSecret(t)
+	writeDaemonConfigWindow(t, xdg, certFile, keyFile, secret, 2, 4)
+	logger := slog.New(slog.DiscardHandler)
+
+	srv, err := ListenHosted(loadDaemonConfig(t), logger)
+	if err != nil {
+		t.Fatalf("ListenHosted: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := srv.ServeUntil(ctx, 5*time.Second); err != nil {
+			t.Errorf("ServeUntil: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	_, port, err := net.SplitHostPort(srv.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
+	t.Cleanup(transport.CloseIdleConnections)
+	httpClient := &http.Client{Timeout: 5 * time.Second, Transport: bearerTransport{secret: secret, next: transport}}
+	client := api.NewClient(httpClient, "https://127.0.0.1:"+port, logger)
+
+	cases := []struct {
+		name  string
+		major uint32
+		want  output.ErrorCode
+	}{
+		{"below min", 1, output.ErrIncompatible},
+		{"min", 2, ""},
+		{"max", 4, ""},
+		{"above max", 5, output.ErrIncompatible},
+	}
+	for _, tc := range cases {
+		if got := handshakeAs(t, client, tc.major); got != tc.want {
+			t.Errorf("%s: client API major %d against window [2, 4]: code = %q, want %q", tc.name, tc.major, got, tc.want)
+		}
+	}
+}
