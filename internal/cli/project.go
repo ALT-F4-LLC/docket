@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -247,7 +246,7 @@ issues with 'docket issue move --project'.`,
 // Name and prefix match case-insensitively — a prefix is displayed uppercase and
 // typed however it is typed — but an EXACT match wins outright, so two rows
 // differing only in case each still resolve by their own spelling.
-func resolveProjectRef(conn *sql.DB, ref string) (*model.Project, error) {
+func resolveProjectRef(conn store.LegacyDB, ref string) (*model.Project, error) {
 	projects, err := store.StoreOn(conn).ListProjects()
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)

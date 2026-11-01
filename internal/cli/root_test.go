@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/api"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // mapResolver answers lookups from a fixed table and fails any host it does
@@ -337,5 +339,40 @@ func TestCommandSetupSetsDaemonVersion(t *testing.T) {
 
 	if api.DaemonVersion != build {
 		t.Errorf("api.DaemonVersion = %q after command setup, want the cli build %q", api.DaemonVersion, build)
+	}
+}
+
+// TestPersistentPostRunClosesHandles: the root hook's teardown closes both the
+// command's database handle and the id-owner reader handle it opened.
+func TestPersistentPostRunClosesHandles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "docket.db")
+	conn, err := store.OpenSQLiteDB(path)
+	if err != nil {
+		t.Fatalf("OpenSQLiteDB: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := conn.Ping(); err != nil {
+		t.Fatalf("root handle Ping before teardown: %v", err)
+	}
+	readerDB, err := store.OpenSQLiteReaderDB(path)
+	if err != nil {
+		t.Fatalf("OpenSQLiteReaderDB: %v", err)
+	}
+	t.Cleanup(func() { readerDB.Close() })
+
+	ctx := context.WithValue(context.Background(), dbKey, conn)
+	ctx = context.WithValue(ctx, readerDBKey, readerDB)
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+
+	if err := rootCmd.PersistentPostRunE(cmd, nil); err != nil {
+		t.Fatalf("PersistentPostRunE: %v", err)
+	}
+
+	const closed = "sql: database is closed"
+	for name, handle := range map[string]store.LegacyDB{"root": conn, "reader": readerDB} {
+		if err := handle.Ping(); err == nil || err.Error() != closed {
+			t.Errorf("%s handle Ping after teardown = %v, want %q", name, err, closed)
+		}
 	}
 }

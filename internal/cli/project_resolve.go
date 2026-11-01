@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,7 +145,7 @@ func commandPath(cmd *cobra.Command) string {
 // resolveInvocationProject answers "which project is this?" and registers one
 // only when both parts of the rule above hold.
 func resolveInvocationProject(
-	cmd *cobra.Command, conn *sql.DB, cfg *config.Config,
+	cmd *cobra.Command, conn store.LegacyDB, cfg *config.Config,
 ) (int, error) {
 	// An empty identity is the documented pre-v12 fallback and predates the
 	// dimension entirely: it means "this store is not multi-tenant", and the

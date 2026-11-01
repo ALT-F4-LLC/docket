@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -355,10 +354,10 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-		if readerDB, ok := cmd.Context().Value(readerDBKey).(*sql.DB); ok && readerDB != nil {
+		if readerDB, ok := cmd.Context().Value(readerDBKey).(store.LegacyDB); ok && readerDB != nil {
 			readerDB.Close()
 		}
-		conn, ok := cmd.Context().Value(dbKey).(*sql.DB)
+		conn, ok := cmd.Context().Value(dbKey).(store.LegacyDB)
 		if ok && conn != nil {
 			return conn.Close()
 		}
@@ -588,8 +587,8 @@ func getCfg(cmd *cobra.Command) *config.Config {
 	return cfg
 }
 
-func getDB(cmd *cobra.Command) *sql.DB {
-	conn, _ := cmd.Context().Value(dbKey).(*sql.DB)
+func getDB(cmd *cobra.Command) store.LegacyDB {
+	conn, _ := cmd.Context().Value(dbKey).(store.LegacyDB)
 	if conn == nil {
 		panic("bug: getDB called on a command with no database connection (missing PersistentPreRunE guard?)")
 	}

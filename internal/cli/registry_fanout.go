@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -143,7 +142,7 @@ func addProjectReadFlag(cmd *cobra.Command, action string) {
 // through resolveProjectRef, the same function the writing verbs use, so an
 // unknown ref fails with the same error here as there — and a project whose
 // checkout is missing from this machine can still be read by prefix.
-func resolveReadProject(cmd *cobra.Command, conn *sql.DB) (int, error) {
+func resolveReadProject(cmd *cobra.Command, conn store.LegacyDB) (int, error) {
 	ref, _ := cmd.Flags().GetString("project")
 	if ref = strings.TrimSpace(ref); ref == "" {
 		return getProjectID(cmd), nil
@@ -168,7 +167,7 @@ func resolveReadProject(cmd *cobra.Command, conn *sql.DB) (int, error) {
 // caller constructing a command directly (every unit test in this package)
 // never runs.
 func resolveRegistryTargets(
-	cmd *cobra.Command, conn *sql.DB,
+	cmd *cobra.Command, conn store.LegacyDB,
 ) (targets []*model.Project, fannedOut bool, err error) {
 	ref, _ := cmd.Flags().GetString("project")
 	ref = strings.TrimSpace(ref)
@@ -202,7 +201,7 @@ func resolveRegistryTargets(
 
 // allRegistryProjects is every project in the store, the --all-projects
 // target set shared by the writing verbs and `workflow lint`.
-func allRegistryProjects(conn *sql.DB) ([]*model.Project, error) {
+func allRegistryProjects(conn store.LegacyDB) ([]*model.Project, error) {
 	projects, err := store.StoreOn(conn).ListProjects()
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
