@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -140,7 +139,7 @@ func workflowRow(
 // registering there anyway would store a definition guaranteed to fail at
 // activation — the exact failure this validation exists to move forward in time.
 func validateWorkflowEnvironment(
-	conn *sql.DB, def *workflow.Definition, projectID int,
+	conn store.LegacyDB, def *workflow.Definition, projectID int,
 ) error {
 	st := store.StoreOn(conn)
 	if err := workflow.ValidateVoteRules(def, voteRuleResolver{st, projectID}); err != nil {
@@ -158,7 +157,7 @@ func validateWorkflowEnvironment(
 // first conflict would leave the operator to work out by hand which projects
 // the sweep had reached.
 func registerWorkflowAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
 	def *workflow.Definition, src []byte, path string, targets []*model.Project,
 ) error {
 	parsed, err := workflow.Canonical(def)
