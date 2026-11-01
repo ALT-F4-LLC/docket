@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -73,7 +72,7 @@ func scopeGlobsJSON(cmd *cobra.Command) (string, error) {
 // applyScope writes an issue's scope when `--scope` was given, and leaves the
 // column untouched otherwise — an `issue edit --title X` must not clear a scope
 // the operator declared earlier.
-func applyScope(cmd *cobra.Command, conn *sql.DB, issueID int) error {
+func applyScope(cmd *cobra.Command, conn store.LegacyDB, issueID int) error {
 	if !cmd.Flags().Changed(scopeFlag) {
 		return nil
 	}

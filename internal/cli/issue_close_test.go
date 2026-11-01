@@ -2,12 +2,12 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -65,7 +65,7 @@ func TestTokenForCloseReadsStdinUnderLiveLease(t *testing.T) {
 
 // seedAbandoned records the resolution `abandon-issue` leaves on an issue,
 // through the same write the engine uses.
-func seedAbandoned(t *testing.T, conn *sql.DB, id int) {
+func seedAbandoned(t *testing.T, conn store.LegacyDB, id int) {
 	t.Helper()
 	tx, err := conn.Begin()
 	testsupport.Must(t, err, "begin: %v", err)
@@ -76,7 +76,7 @@ func seedAbandoned(t *testing.T, conn *sql.DB, id int) {
 
 // runIssueVerb drives a real, package-global issue command with flags set as
 // the binary would parse them, restoring each flag (Changed included) after.
-func runIssueVerb(t *testing.T, conn *sql.DB, cmd *cobra.Command, args []string, flags map[string]string) {
+func runIssueVerb(t *testing.T, conn store.LegacyDB, cmd *cobra.Command, args []string, flags map[string]string) {
 	t.Helper()
 	cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
 	for name, value := range flags {
@@ -97,7 +97,7 @@ func runIssueVerb(t *testing.T, conn *sql.DB, cmd *cobra.Command, args []string,
 	testsupport.Must(t, err, "issue %s %v: %v", cmd.Name(), args, err)
 }
 
-func issueState(t *testing.T, conn *sql.DB, id int) *model.Issue {
+func issueState(t *testing.T, conn store.LegacyDB, id int) *model.Issue {
 	t.Helper()
 	issue, err := db.GetIssue(conn, id)
 	testsupport.Must(t, err, "GetIssue: %v", err)

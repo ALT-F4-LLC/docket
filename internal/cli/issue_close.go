@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -89,7 +88,7 @@ var closeCmd = &cobra.Command{
 // all. The look here is advisory: the authoritative lease check runs inside
 // the update transaction, where a lease claimed after this read still
 // refuses the empty token instead of being evicted.
-func tokenForClose(conn *sql.DB, id int, stdin io.Reader) string {
+func tokenForClose(conn store.LegacyDB, id int, stdin io.Reader) string {
 	lease, err := store.StoreOn(conn).GetIssueLease(id)
 	if err != nil || !lease.Live(model.NowMS()) {
 		return ""
