@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -142,7 +141,7 @@ func describeDeprecateFailure(err error, ref string) error {
 // single-project behavior, per project, which is the criterion — a sweep must
 // not turn one project's refusal into another's silence.
 func deprecateWorkflowAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
 	ref, name string, version int, restore bool, targets []*model.Project,
 ) error {
 	operation := "workflow deprecate"

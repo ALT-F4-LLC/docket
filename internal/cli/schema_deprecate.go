@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -124,7 +123,7 @@ func runSchemaDeprecate(cmd *cobra.Command, args []string, w *output.Writer) err
 // acceptable here because a workflow registered between the two is refused by
 // its own V25a check the moment the retirement lands — the race resolves to the
 // same refusal either way, only attributed to the other command.
-func deprecateSchemaIn(conn *sql.DB, projectID int, name string, version int) (*model.Schema, error) {
+func deprecateSchemaIn(conn store.LegacyDB, projectID int, name string, version int) (*model.Schema, error) {
 	referencing, err := engine.WorkflowsReferencingSchema(conn, projectID, name, version)
 	if err != nil {
 		return nil, err
@@ -159,7 +158,7 @@ func describeSchemaDeprecateFailure(err error, ref string) error {
 // (already-deprecated is a CONFLICT), and in-use is a per-project refusal that
 // never cancels a neighbor's retirement.
 func deprecateSchemaAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
 	ref, name string, version int, restore bool, targets []*model.Project,
 ) error {
 	operation := "schema deprecate"

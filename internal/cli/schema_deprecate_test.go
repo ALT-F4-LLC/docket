@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -35,7 +35,7 @@ payload = "findings@1"
 `
 
 // deprecateSchema runs the verb on a bare command against the ambient project.
-func deprecateSchema(t *testing.T, conn *sql.DB, ref string, restore bool) error {
+func deprecateSchema(t *testing.T, conn store.LegacyDB, ref string, restore bool) error {
 	t.Helper()
 	cmd := fanoutCmd(conn, "", false)
 	if restore {

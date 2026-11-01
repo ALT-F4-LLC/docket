@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -144,7 +143,7 @@ func schemaRow(
 // stopping at the first conflict would leave the operator to work out by hand
 // which projects it had reached.
 func registerSchemaAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
 	name string, version int, path string, src []byte, ordered string,
 	targets []*model.Project,
 ) error {

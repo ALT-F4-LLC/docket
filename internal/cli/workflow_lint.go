@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -120,7 +119,7 @@ func (e *lintConflictError) Unwrap() error { return store.ErrWorkflowConflict }
 // lintVerdict is one project's answer: the environment checks, then what a
 // real register there would do (`new` or `unchanged`), or the refusal.
 func lintVerdict(
-	conn *sql.DB, def *workflow.Definition, src []byte, projectID int,
+	conn store.LegacyDB, def *workflow.Definition, src []byte, projectID int,
 ) (string, error) {
 	if err := validateWorkflowEnvironment(conn, def, projectID); err != nil {
 		return "", err
@@ -173,7 +172,7 @@ func lintVerdict(
 // project is judged on its own and a refusal in one never hides another's
 // verdict; the process exits non-zero when any project would refuse.
 func lintAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
+	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
 	def *workflow.Definition, src []byte,
 ) error {
 	targets, err := allRegistryProjects(conn)

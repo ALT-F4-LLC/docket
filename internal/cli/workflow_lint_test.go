@@ -1,13 +1,13 @@
 package cli
 
 import (
-	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -16,7 +16,7 @@ import (
 
 // lintSource writes src to a temp file and lints it, returning the JSON the verb
 // printed and the error.
-func lintSource(t *testing.T, conn *sql.DB, src string) (string, error) {
+func lintSource(t *testing.T, conn store.LegacyDB, src string) (string, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "wf.toml")
 	err := os.WriteFile(path, []byte(src), 0o644)
@@ -27,7 +27,7 @@ func lintSource(t *testing.T, conn *sql.DB, src string) (string, error) {
 	return buf.String(), err
 }
 
-func countWorkflows(t *testing.T, conn *sql.DB) int {
+func countWorkflows(t *testing.T, conn store.LegacyDB) int {
 	t.Helper()
 	var n int
 	err := conn.QueryRow(`SELECT COUNT(*) FROM workflows`).Scan(&n)
