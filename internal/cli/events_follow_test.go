@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/daemon"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -40,7 +40,7 @@ import (
 // writer will accept: `events.run_id` is nullable and a trust grant legitimately
 // has none. The feed under test is repo-wide, so what these
 // rows MEAN does not matter — only that they are events with ascending seqs.
-func followTrustEvent(t *testing.T, conn *sql.DB, name string) {
+func followTrustEvent(t *testing.T, conn store.LegacyDB, name string) {
 	t.Helper()
 	sum := sha256.Sum256([]byte(name))
 	err := engine.RecordTrustEvent(
@@ -123,7 +123,7 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func followOpts(conn *sql.DB, stdout, stderr *syncBuffer) followOptions {
+func followOpts(conn store.LegacyDB, stdout, stderr *syncBuffer) followOptions {
 	return followOptions{
 		conn:        conn,
 		stream:      openEventStream(conn, eventHeadWake{conn: conn, every: 5 * time.Millisecond}),
@@ -738,7 +738,7 @@ func TestEventsListFollowChecksForAppendsOnTheIntervalFlag(t *testing.T) {
 	fake := &fakeEventStream{frames: []daemon.StreamFrame{streamedEvent(101), streamedEvent(205)}}
 	var notifiers []daemon.AppendNotifier
 	saved := openEventStream
-	openEventStream = func(_ *sql.DB, notify daemon.AppendNotifier) eventStream {
+	openEventStream = func(_ store.LegacyDB, notify daemon.AppendNotifier) eventStream {
 		notifiers = append(notifiers, notify)
 		return fake.stream
 	}
@@ -801,7 +801,7 @@ func TestEventsListWatchPollsWithoutTheStream(t *testing.T) {
 
 	fake := &fakeEventStream{frames: []daemon.StreamFrame{streamedEvent(999)}}
 	saved := openEventStream
-	openEventStream = func(*sql.DB, daemon.AppendNotifier) eventStream { return fake.stream }
+	openEventStream = func(store.LegacyDB, daemon.AppendNotifier) eventStream { return fake.stream }
 	t.Cleanup(func() { openEventStream = saved })
 
 	stdout := pipeStdout(t)
@@ -845,7 +845,7 @@ func TestEventsListWatchPollsWithoutTheStream(t *testing.T) {
 // eventsListTestCmd is a command under ctx carrying `events list`'s flags and
 // the root flags it reads, with values set. It fails when `events list`
 // declares a flag this copy lacks, so the copy cannot drift from init().
-func eventsListTestCmd(t *testing.T, ctx context.Context, conn *sql.DB,
+func eventsListTestCmd(t *testing.T, ctx context.Context, conn store.LegacyDB,
 	values map[string]string) *cobra.Command {
 	t.Helper()
 	cmd := cmdWithDB(conn)
@@ -919,7 +919,7 @@ func TestFollowWritesNothing(t *testing.T) {
 }
 
 // tableCounts snapshots every table's row count.
-func tableCounts(t *testing.T, conn *sql.DB) map[string]int {
+func tableCounts(t *testing.T, conn store.LegacyDB) map[string]int {
 	t.Helper()
 	rows, err := conn.Query(
 		`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)

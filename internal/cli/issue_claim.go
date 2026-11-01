@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 	"time"
 
@@ -148,7 +147,7 @@ itself.`,
 
 // resolveTTL returns the lease TTL: an explicit --ttl wins, else the effective
 // per-class configuration (which falls back to lease.ttl.default).
-func resolveTTL(cmd *cobra.Command, conn *sql.DB, class string) (time.Duration, error) {
+func resolveTTL(cmd *cobra.Command, conn store.LegacyDB, class string) (time.Duration, error) {
 	if cmd.Flags().Changed("ttl") {
 		ttl, err := cmd.Flags().GetDuration("ttl")
 		if err != nil {

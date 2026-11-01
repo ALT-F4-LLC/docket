@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -171,7 +170,7 @@ func validateExportData(export *model.ExportData) []string {
 // Source ids already taken in the store are remapped rather than skipped —
 // see remapExportForImport. Returns counts of imported, skipped, and
 // remapped entities.
-func doImport(conn *sql.DB, export *model.ExportData, replace bool, projectID int) (*importResult, error) {
+func doImport(conn store.LegacyDB, export *model.ExportData, replace bool, projectID int) (*importResult, error) {
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("beginning transaction: %w", err)

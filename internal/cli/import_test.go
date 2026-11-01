@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -22,7 +22,7 @@ import (
 // buildExport reads a whole database into an export document, the way the
 // export command does — through the same table, so a collection the command
 // would carry can never be one this helper leaves behind.
-func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
+func buildExport(t *testing.T, conn store.LegacyDB) *model.ExportData {
 	t.Helper()
 
 	export := &model.ExportData{
@@ -329,7 +329,7 @@ func TestDoImportReplaceClearsThenImports(t *testing.T) {
 	}
 }
 
-func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Status, parentID int) int {
+func createChildIssue(t *testing.T, conn store.LegacyDB, title string, status model.Status, parentID int) int {
 	t.Helper()
 	id, err := db.CreateIssue(conn, &model.Issue{
 		Title:    title,
@@ -344,7 +344,7 @@ func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Sta
 	return id
 }
 
-func runFilteredExport(t *testing.T, conn *sql.DB, statuses []string) *model.ExportData {
+func runFilteredExport(t *testing.T, conn store.LegacyDB, statuses []string) *model.ExportData {
 	t.Helper()
 
 	cmd := &cobra.Command{}
@@ -575,7 +575,7 @@ func TestFilteredExportReplaceImportRollsBackOnFailure(t *testing.T) {
 // fixture: a collection that is empty on both sides round-trips perfectly by
 // doing nothing at all, which is exactly the outcome a dropped collection
 // produces.
-func seedEveryCollection(t *testing.T, conn *sql.DB) {
+func seedEveryCollection(t *testing.T, conn store.LegacyDB) {
 	t.Helper()
 
 	parentID := createIssue(t, conn, "parent issue", model.StatusInProgress, model.PriorityMedium)
@@ -673,7 +673,7 @@ func TestRoundTripPreservesEveryCollection(t *testing.T) {
 // command under test carries the SAME --merge/--replace/--yes registration a
 // real invocation parses; a case that stopped registering --yes would fail
 // here with "unknown flag: --yes" instead of silently testing nothing.
-func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, replace, yes bool) error {
+func runImportCmd(t *testing.T, conn store.LegacyDB, filePath string, jsonMode bool, replace, yes bool) error {
 	t.Helper()
 
 	cmd := newImportCmd()
@@ -712,7 +712,7 @@ func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, re
 // its export to a temp file, returning the file's path. The name says both
 // halves because TestImportReplaceProceedsWithYesInJSONMode asserts on the
 // seeded issue's title, not only on the file it produces.
-func seedAndWriteExportFile(t *testing.T, conn *sql.DB) string {
+func seedAndWriteExportFile(t *testing.T, conn store.LegacyDB) string {
 	t.Helper()
 
 	createIssue(t, conn, "seed issue", model.StatusTodo, model.PriorityMedium)

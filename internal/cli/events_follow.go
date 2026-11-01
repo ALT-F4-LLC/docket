@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/daemon"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -40,7 +40,7 @@ type eventStream func(ctx context.Context, q engine.EventQuery,
 //
 // The daemon API has no stream procedure, so the CLI runs the stream
 // in-process; this is the CLI's one use of internal/daemon's stream.
-var openEventStream = func(conn *sql.DB, notify daemon.AppendNotifier) eventStream {
+var openEventStream = func(conn store.LegacyDB, notify daemon.AppendNotifier) eventStream {
 	return func(ctx context.Context, q engine.EventQuery,
 		send func(daemon.StreamFrame) error) error {
 		return daemon.StreamEvents(ctx, conn, notify, q, send)
@@ -56,7 +56,7 @@ var openEventStream = func(conn *sql.DB, notify daemon.AppendNotifier) eventStre
 // of its own, so a prune moves the newest seq too. A failed check rings, so
 // the stream's own read reports a store that stopped answering.
 type eventHeadWake struct {
-	conn  *sql.DB
+	conn  store.LegacyDB
 	every time.Duration
 }
 
@@ -92,7 +92,7 @@ func (w eventHeadWake) Subscribe() (<-chan struct{}, func()) {
 }
 
 // newestEventSeq reads the highest event seq, 0 for an empty log.
-func newestEventSeq(conn *sql.DB) (int64, error) {
+func newestEventSeq(conn store.LegacyDB) (int64, error) {
 	var seq int64
 	if err := conn.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM events`).Scan(&seq); err != nil {
 		return 0, fmt.Errorf("reading the newest event seq: %w", err)
@@ -170,7 +170,7 @@ func runEventsFollow(cmd *cobra.Command) error {
 // *cobra.Command so tests can drive it directly with a chosen stream.
 type followOptions struct {
 	// conn serves the one opening read that resolves `--tail`.
-	conn   *sql.DB
+	conn   store.LegacyDB
 	stream eventStream
 	// retryEvery is the wait before a failed stream is reopened.
 	retryEvery  time.Duration
@@ -263,7 +263,7 @@ func followEvents(ctx context.Context, opts followOptions) error {
 // newest N once, and the stream starts just below the oldest of them so it
 // delivers those N and then everything after; the stream itself has no
 // tail. An empty feed leaves the cursor at Since.
-func followStartCursor(conn *sql.DB, q engine.EventQuery) (int64, error) {
+func followStartCursor(conn store.LegacyDB, q engine.EventQuery) (int64, error) {
 	if q.Tail == 0 {
 		return q.Since, nil
 	}
