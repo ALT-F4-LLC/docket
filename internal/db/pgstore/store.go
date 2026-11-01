@@ -797,6 +797,10 @@ func (t *pgTx) ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOverrid
 	return db.ClassMaxOverridesTx(t.tx, projectID)
 }
 
+func (t *pgTx) ConductorChainDeferralTx(q db.ChainDeferralQuery) (int64, string, bool, error) {
+	return db.ConductorChainDeferralTx(t.tx, q)
+}
+
 func (t *pgTx) CountEventsHeldByRetentionTx(sel db.EventPruneSelection, cutoffMS int64) (int, error) {
 	return db.CountEventsHeldByRetentionTx(t.tx, sel, cutoffMS)
 }
@@ -889,6 +893,10 @@ func (t *pgTx) IssueStatusResolutionTx(issueID int) (model.Status, string, error
 	return db.IssueStatusResolutionTx(t.tx, issueID)
 }
 
+func (t *pgTx) LastEventAtMSTx() (int64, bool, error) {
+	return db.LastEventAtMSTx(t.tx)
+}
+
 func (t *pgTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
 	return db.LatestEventDataTx(t.tx, runID, kind)
 }
@@ -945,6 +953,10 @@ func (t *pgTx) LoopGrantsTx(runID, issueID int) (int, error) {
 	return db.LoopGrantsTx(t.tx, runID, issueID)
 }
 
+func (t *pgTx) MaxEventSeqTx() (int64, bool, error) {
+	return db.MaxEventSeqTx(t.tx)
+}
+
 func (t *pgTx) NextActionOrdinalTx(stepID int, action string) (int, error) {
 	return db.NextActionOrdinalTx(t.tx, stepID, action)
 }
@@ -999,6 +1011,10 @@ func (t *pgTx) RunPauseOriginTx(id int) (model.RunPauseOrigin, error) {
 
 func (t *pgTx) RunProjectIDTx(runID int) (int, error) {
 	return db.RunProjectIDTx(t.tx, runID)
+}
+
+func (t *pgTx) StepIDByInstanceTx(runID, issueID int, instance string) (int, bool, error) {
+	return db.StepIDByInstanceTx(t.tx, runID, issueID, instance)
 }
 
 func (t *pgTx) UnacknowledgedReapsTx(runID int) ([]db.ReapAck, error) {
@@ -1148,6 +1164,10 @@ func (t *pgTx) InsertDocWithID(doc *model.Doc) (bool, error) {
 
 func (t *pgTx) InsertEngineComment(issueID int, body string, nowMS int64) (int, error) {
 	return db.InsertEngineComment(t.tx, issueID, body, nowMS)
+}
+
+func (t *pgTx) InsertEventTx(e db.NewEvent) error {
+	return db.InsertEventTx(t.tx, e)
 }
 
 func (t *pgTx) InsertFenceTx(f db.RunFence) error {

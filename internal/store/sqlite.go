@@ -763,6 +763,10 @@ func (t *sqliteTx) ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOve
 	return db.ClassMaxOverridesTx(t.tx, projectID)
 }
 
+func (t *sqliteTx) ConductorChainDeferralTx(q db.ChainDeferralQuery) (int64, string, bool, error) {
+	return db.ConductorChainDeferralTx(t.tx, q)
+}
+
 func (t *sqliteTx) CountEventsHeldByRetentionTx(sel db.EventPruneSelection, cutoffMS int64) (int, error) {
 	return db.CountEventsHeldByRetentionTx(t.tx, sel, cutoffMS)
 }
@@ -859,6 +863,10 @@ func (t *sqliteTx) IssueStatusResolutionTx(issueID int) (model.Status, string, e
 	return db.IssueStatusResolutionTx(t.tx, issueID)
 }
 
+func (t *sqliteTx) LastEventAtMSTx() (int64, bool, error) {
+	return db.LastEventAtMSTx(t.tx)
+}
+
 func (t *sqliteTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
 	return db.LatestEventDataTx(t.tx, runID, kind)
 }
@@ -915,6 +923,10 @@ func (t *sqliteTx) LoopGrantsTx(runID, issueID int) (int, error) {
 	return db.LoopGrantsTx(t.tx, runID, issueID)
 }
 
+func (t *sqliteTx) MaxEventSeqTx() (int64, bool, error) {
+	return db.MaxEventSeqTx(t.tx)
+}
+
 func (t *sqliteTx) NextActionOrdinalTx(stepID int, action string) (int, error) {
 	return db.NextActionOrdinalTx(t.tx, stepID, action)
 }
@@ -969,6 +981,10 @@ func (t *sqliteTx) RunPauseOriginTx(id int) (model.RunPauseOrigin, error) {
 
 func (t *sqliteTx) RunProjectIDTx(runID int) (int, error) {
 	return db.RunProjectIDTx(t.tx, runID)
+}
+
+func (t *sqliteTx) StepIDByInstanceTx(runID, issueID int, instance string) (int, bool, error) {
+	return db.StepIDByInstanceTx(t.tx, runID, issueID, instance)
 }
 
 func (t *sqliteTx) UnacknowledgedReapsTx(runID int) ([]db.ReapAck, error) {
@@ -1113,6 +1129,10 @@ func (t *sqliteTx) InsertDocWithID(doc *model.Doc) (bool, error) {
 
 func (t *sqliteTx) InsertEngineComment(issueID int, body string, nowMS int64) (int, error) {
 	return db.InsertEngineComment(t.tx, issueID, body, nowMS)
+}
+
+func (t *sqliteTx) InsertEventTx(e db.NewEvent) error {
+	return db.InsertEventTx(t.tx, e)
 }
 
 func (t *sqliteTx) InsertFenceTx(f db.RunFence) error {
