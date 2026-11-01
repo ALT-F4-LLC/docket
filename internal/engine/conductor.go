@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -51,7 +50,7 @@ import (
 var ErrNotConductor = errors.New("not the run's conductor")
 
 // authorizeConductorTx is the check inside a verb's own transaction.
-func authorizeConductorTx(tx *sql.Tx, runID int, token, verb string) error {
+func authorizeConductorTx(tx store.LegacyReadTx, runID int, token, verb string) error {
 	hash, err := store.TxOn(tx).RunConductorHashTx(runID)
 	if err != nil {
 		return err
@@ -64,7 +63,7 @@ func authorizeConductorTx(tx *sql.Tx, runID int, token, verb string) error {
 // resolve). It runs after the step is loaded and before any of those paths
 // writes; a `run conduct` racing it can only retire a token the ruling was
 // about to use, which is the rotation doing its job.
-func authorizeConductor(conn *sql.DB, runID int, token, verb string) error {
+func authorizeConductor(conn store.LegacyDB, runID int, token, verb string) error {
 	hash, err := store.StoreOn(conn).RunConductorHash(runID)
 	if err != nil {
 		return err
@@ -74,7 +73,7 @@ func authorizeConductor(conn *sql.DB, runID int, token, verb string) error {
 
 // AuthorizeConductor is authorizeConductor for a CLI verb whose write lives
 // outside the engine (`vote commit`): the verb runs it before writing.
-func AuthorizeConductor(conn *sql.DB, runID int, token, verb string) error {
+func AuthorizeConductor(conn store.LegacyDB, runID int, token, verb string) error {
 	return authorizeConductor(conn, runID, token, verb)
 }
 
@@ -160,7 +159,7 @@ type ConductResult struct {
 // minted on a done run would be a capability for verbs that all refuse it
 // anyway. A planning run is conductable — `run abandon` applies to one — and
 // its first activation then keeps the capability rather than minting a second.
-func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, error) {
+func ConductRun(conn store.LegacyDB, runID int, opts ConductOptions) (*ConductResult, error) {
 	if err := opts.By.require("run conduct"); err != nil {
 		return nil, err
 	}
@@ -217,7 +216,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 // no-op on a run already bound — one conducted while still planning keeps the
 // capability its conductor holds. Returns the token, or "" when nothing was
 // minted.
-func mintConductorTx(tx *sql.Tx, runID int) (string, error) {
+func mintConductorTx(tx store.LegacyTx, runID int) (string, error) {
 	st := store.TxOn(tx)
 	standing, err := st.RunConductorHashTx(runID)
 	if err != nil {

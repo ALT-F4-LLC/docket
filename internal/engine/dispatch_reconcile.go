@@ -1,10 +1,10 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // One-verb wave reconcile (DKT-580).
@@ -114,7 +114,7 @@ type ReconcileOutcome struct {
 // closing quietly over it is exactly the silent lie this verb exists to make
 // harder.
 func (e *Engine) ReconcileDispatch(
-	conn *sql.DB, runID int, rows []BackfillRow, source string,
+	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
 	onDuplicate string, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*ReconcileOutcome, error) {
 	out := &ReconcileOutcome{Run: model.FormatRunID(runID)}

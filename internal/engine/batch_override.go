@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"slices"
 	"strconv"
@@ -167,7 +166,7 @@ func joinGrantIDs(ids []int) string {
 // reads on the pooled connection because the routing stage calls it before its
 // transaction opens, exactly as gateVerdict reads.
 func batchOverrideCover(
-	conn *sql.DB, step *store.Step, spec *workflow.Step,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step,
 ) (*batchCover, error) {
 	st := store.StoreOn(conn)
 	grants, err := st.GateOverrideGrantsForRun(step.RunID)

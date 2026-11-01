@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -35,7 +34,7 @@ import (
 // not a proof. A write to a key outside the vote-rule family records nothing,
 // and a refused write (unknown key, invalid value) records nothing because it
 // wrote nothing.
-func SetConfig(conn *sql.DB, projectID int, key, value, changedBy string) error {
+func SetConfig(conn store.LegacyDB, projectID int, key, value, changedBy string) error {
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("storing config %s: %w", key, err)
@@ -72,7 +71,7 @@ type configChange struct {
 
 // recordConfigChange writes the event in the caller's transaction — the
 // write's own, so the record and the change land together.
-func recordConfigChange(tx *sql.Tx, projectID int, key, prior, value, changedBy string) error {
+func recordConfigChange(tx store.LegacyTx, projectID int, key, prior, value, changedBy string) error {
 	scope := "project"
 	if projectID == 0 {
 		scope = "global"
