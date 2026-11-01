@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,7 +49,7 @@ type RefreshedFiles struct {
 // add|remove` is ungated, so without the check an executor could change its own
 // issue's attachments and then make that change reach its own packets.
 func RefreshIssueFilesInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedFiles, error) {
 	if strings.TrimSpace(reason) == "" {

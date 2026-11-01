@@ -1,12 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // Scratch-tree reconstruction for pre-gates (DKT-254).
@@ -107,7 +108,7 @@ func holdScratchLock(dir string) (*os.File, error) {
 // comes from the sha it asked for, not from git's stderr — an operator needs to
 // know WHICH tree could not be built, and git's message about a detached HEAD
 // would bury it.
-func reconstructTarget(conn *sql.DB, runID int, sha string) scratchTree {
+func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 	if sha == "" {
 		return scratchTree{}
 	}
@@ -186,7 +187,7 @@ type gateTreeCache struct {
 // the same (runID, sha) and replacing it otherwise, with the release the
 // caller owes: a no-op for a cached tree (the cache releases it), the tree's
 // own release when there is no cache.
-func (c *gateTreeCache) checkout(conn *sql.DB, runID int, sha string) (scratchTree, func()) {
+func (c *gateTreeCache) checkout(conn store.LegacyDB, runID int, sha string) (scratchTree, func()) {
 	if c == nil {
 		tree := reconstructTarget(conn, runID, sha)
 		return tree, tree.release
@@ -391,7 +392,7 @@ func probeLiveLock(path string) (lock *os.File, live bool) {
 // is the subject, and a reconstruction of its last commit would silently
 // measure a tree the worker has moved past.
 func bindablePreGateRoot(
-	conn *sql.DB, runID int, sha, worktree string,
+	conn store.LegacyDB, runID int, sha, worktree string,
 ) (dir string, scratch scratchTree) {
 	if worktree != "" {
 		if info, err := os.Stat(worktree); err == nil && info.IsDir() {

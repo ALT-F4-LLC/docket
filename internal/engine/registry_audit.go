@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"sort"
@@ -300,7 +299,7 @@ type RegistryAuditOptions struct {
 // scan — and can word them for an operator. A report that silently classified
 // against an empty index would name every registration in the store.
 func AuditRegistries(
-	conn *sql.DB, index *CorpusIndex, opts RegistryAuditOptions,
+	conn store.LegacyDB, index *CorpusIndex, opts RegistryAuditOptions,
 ) (*RegistryAudit, error) {
 	st := store.StoreOn(conn)
 	projects, err := st.ListProjects()
