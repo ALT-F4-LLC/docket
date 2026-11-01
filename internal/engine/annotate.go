@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -31,7 +30,7 @@ import (
 // metadata lands with its record (`step complete --metadata`), under its
 // holder's token, and a side channel into an in-flight record would bypass
 // exactly that authorization.
-func AnnotateStep(conn *sql.DB, stepID int, metadata string, nowMS int64) (*store.Step, error) {
+func AnnotateStep(conn store.LegacyDB, stepID int, metadata string, nowMS int64) (*store.Step, error) {
 	if metadata == "" {
 		return nil, validationErr("--metadata is required; an annotation with no content records nothing")
 	}

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -71,7 +70,7 @@ import (
 // not fire. It returns the rows it skipped, so a caller holding a loaded
 // snapshot (resolveQuorumMisses) can mirror the change into it.
 func propagateAfterFiredSkips(
-	tx *sql.Tx, runID, issueID int, def *workflow.Definition, nowMS int64,
+	tx store.LegacyTx, runID, issueID int, def *workflow.Definition, nowMS int64,
 ) ([]*store.Step, error) {
 	if !declaresAfterFired(def) {
 		return nil, nil

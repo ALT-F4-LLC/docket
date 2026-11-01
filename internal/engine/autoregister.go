@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,7 +322,7 @@ func instanceConfigRoots() []string {
 // checkout it started in, so a reader asking about that run from anywhere
 // else, such as a non-git directory or another checkout, must look there. A
 // run with no recorded exec root falls back to the invoking process's roots.
-func runConfigRoots(conn *sql.DB, runID int) []string {
+func runConfigRoots(conn store.LegacyDB, runID int) []string {
 	cfg := *resolvePaths()
 	cfg.ExecRoot = runExecRoot(conn, runID)
 	return configRootsOf(&cfg)
@@ -397,7 +396,7 @@ func crossRootConflictErr(first, second, name string, version int) error {
 // "AUTO" VARIANT WITH LOOSER RULES, because a looser rule here is a rule that
 // only applies to definitions nobody typed a command for, which is exactly
 // backwards.
-func registerScanTx(tx *sql.Tx, projectID int, scan *configScan, nowMS int64) ([]Registration, error) {
+func registerScanTx(tx store.LegacyTx, projectID int, scan *configScan, nowMS int64) ([]Registration, error) {
 	if scan == nil || len(scan.paths) == 0 {
 		return nil, nil
 	}
@@ -500,7 +499,7 @@ func configIdentity(path string, src []byte) (kind, name string, version int, ok
 // same ParsePayloadRef grammar validates it. A file that does not follow the
 // convention is refused by name rather than registered under a guessed identity.
 func registerConfigSchemaTx(
-	tx *sql.Tx, projectID int, path string, src []byte, nowMS int64,
+	tx store.LegacyTx, projectID int, path string, src []byte, nowMS int64,
 ) (Registration, error) {
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	name, version, err := workflow.ParsePayloadRef(base)
@@ -546,7 +545,7 @@ func registerConfigSchemaTx(
 // which is where `workflow register` reads it from too — a workflow declares its
 // identity in its body, so the filename is provenance rather than a key.
 func registerConfigWorkflowTx(
-	tx *sql.Tx, projectID int, path string, src []byte, nowMS int64,
+	tx store.LegacyTx, projectID int, path string, src []byte, nowMS int64,
 ) (Registration, error) {
 	def, err := workflow.Parse(src)
 	if err != nil {
@@ -723,14 +722,15 @@ func filePin(root, path string) (store.Pin, error) {
 	if rel, ok := configRelativeRef([]string{root}, path); ok {
 		ref = rel
 	}
-	return store.Pin{
+	pin := store.Pin{
 		Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256(src),
-		Content: sql.NullString{String: string(src), Valid: true},
 		// Carried in memory for the closure-size arithmetic. The
 		// bytes are already in hand for the hash, so the size is free here and
 		// would cost a second read at expansion.
 		Bytes: len(src),
-	}, nil
+	}
+	pin.Content.String, pin.Content.Valid = string(src), true
+	return pin, nil
 }
 
 // sortPins puts the pin rows in a total order by ref, so two activations over

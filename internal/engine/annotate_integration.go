@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,7 +120,7 @@ const ResolutionIntegratedSHA = "integrated-sha"
 // resolve); an engine with no ancestry seam wired; an unanswerable ancestry
 // question; and a sha that is not an ancestor of the shared checkout's HEAD.
 func (e *Engine) AnnotateIntegration(
-	conn *sql.DB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
+	conn store.LegacyDB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
 ) (*IntegrationAnnotation, error) {
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if !fullCommitSHA.MatchString(sha) {
@@ -361,7 +360,7 @@ func integrationMetadata(sha, metadata string) (string, error) {
 // `--worktree` re-pin both write (applyIssueDiffRepin), minus that re-pin's
 // worktree rewrite: the resolved commit lives on the shared branch, and the
 // step's declared worktree stays what its executor recorded.
-func recordIntegrationRepinTx(tx *sql.Tx, step *store.Step, repin *IssueDiffRepin, nowMS int64) error {
+func recordIntegrationRepinTx(tx store.LegacyTx, step *store.Step, repin *IssueDiffRepin, nowMS int64) error {
 	supersedes := repin.supersededID
 	id, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: ArtifactKindIssueDiff,
