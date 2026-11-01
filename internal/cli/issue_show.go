@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -294,7 +293,7 @@ is calling that getter on the id string.`,
 // every hydrated collection showResult carries. It is the single-id body
 // runIssueShow calls once per argument, so batch and single-id show stay
 // byte-identical per issue.
-func fetchIssueDetail(conn *sql.DB, source string) (*model.Issue, showResult, error) {
+func fetchIssueDetail(conn store.LegacyDB, source string) (*model.Issue, showResult, error) {
 	id, err := issueArg(source)
 	if err != nil {
 		return nil, showResult{}, err

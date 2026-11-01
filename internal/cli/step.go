@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,7 +81,7 @@ func stepArg(arg string) (int, error) {
 // one or the other of those anyway — leaving three separate `getWriter` /
 // `getDB` calls at each site would be its own small duplication.
 func tokenedStep(cmd *cobra.Command, args []string) (
-	w *output.Writer, conn *sql.DB, id int, token string, err error,
+	w *output.Writer, conn store.LegacyDB, id int, token string, err error,
 ) {
 	w = getWriter(cmd)
 	conn = getDB(cmd)
@@ -816,7 +815,7 @@ did: priority none, kind task, no labels.`,
 //
 // A record whose gates all passed prints exactly the line it always has.
 func emitRecordState(
-	w *output.Writer, conn *sql.DB, id int, gapIssues []string,
+	w *output.Writer, conn store.LegacyDB, id int, gapIssues []string,
 ) error {
 	failed, err := engine.FailedGates(conn, id)
 	if err != nil {
@@ -844,7 +843,7 @@ func emitRecordState(
 // advisory rides beside it: a machine consumer gets the same fact as the human
 // one instead of having to run `step gates` to learn it.
 func emitRecordGateFailure(
-	w *output.Writer, conn *sql.DB, id int,
+	w *output.Writer, conn store.LegacyDB, id int,
 	failed []engine.FailedGate, gapIssues []string,
 ) error {
 	view, err := engine.LoadStepView(conn, id, model.NowMS())
@@ -1965,7 +1964,7 @@ func artifactArg(arg string) (int, error) {
 
 // emitStepState re-reads a step after a mutation and reports its new effective
 // status, so every mutating verb answers in the same shape.
-func emitStepState(w *output.Writer, conn *sql.DB, id int, verb string) error {
+func emitStepState(w *output.Writer, conn store.LegacyDB, id int, verb string) error {
 	return emitStepStateAdvised(w, conn, id, verb, nil)
 }
 
@@ -1989,7 +1988,7 @@ type resolvedStepPayload struct {
 // design — and a `stale_targets` field beside the row in the JSON envelope.
 // A nil advisory emits exactly the bytes emitStepState always has.
 func emitStepStateAdvised(
-	w *output.Writer, conn *sql.DB, id int, verb string, stale []engine.StaleTarget,
+	w *output.Writer, conn store.LegacyDB, id int, verb string, stale []engine.StaleTarget,
 ) error {
 	return emitResolvedState(w, conn, id, verb, stale, nil)
 }
@@ -2000,7 +1999,7 @@ func emitStepStateAdvised(
 // the envelope as `issue_diff_repin` in JSON mode. nil for every resolution
 // that did not re-pin, which emits exactly the bytes it always has.
 func emitResolvedState(
-	w *output.Writer, conn *sql.DB, id int, verb string,
+	w *output.Writer, conn store.LegacyDB, id int, verb string,
 	stale []engine.StaleTarget, repin *engine.IssueDiffRepin,
 ) error {
 	view, err := engine.LoadStepView(conn, id, model.NowMS())

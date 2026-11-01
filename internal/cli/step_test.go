@@ -1,8 +1,8 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -12,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -158,7 +159,7 @@ func TestStepErrMapsEngineCodes(t *testing.T) {
 // TestStepErrDoesNotSwallowUnknownErrors pins the default: something with no
 // mapping must still reach the envelope as an error, not as success.
 func TestStepErrDoesNotSwallowUnknownErrors(t *testing.T) {
-	err := stepErr(sql.ErrTxDone, "step STEP-1")
+	err := stepErr(errors.New("an error no mapping names"), "step STEP-1")
 	if err == nil {
 		t.Fatal("an unmapped error vanished")
 	}
@@ -308,7 +309,7 @@ func TestStepRecordIsCompleteAlias(t *testing.T) {
 
 // recordFixture activates a run and returns the connection and the executor
 // step every case here records against.
-func recordFixture(t *testing.T, conn *sql.DB) int {
+func recordFixture(t *testing.T, conn store.LegacyDB) int {
 	t.Helper()
 	activatedRunForNext(t, conn)
 	var id int
@@ -320,7 +321,7 @@ func recordFixture(t *testing.T, conn *sql.DB) int {
 // seedGateRows records gate results against a step and sets the status the
 // routing would have left it in — the state the printer reads.
 func seedGateRows(
-	t *testing.T, conn *sql.DB, stepID int, status string, rows ...db.GateResultRow,
+	t *testing.T, conn store.LegacyDB, stepID int, status string, rows ...db.GateResultRow,
 ) {
 	t.Helper()
 	step, err := db.GetStep(conn, stepID)
