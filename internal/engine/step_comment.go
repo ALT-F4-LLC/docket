@@ -7,8 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // IssueCommentArtifactKind is the auxiliary kind a step may record beside its
@@ -37,7 +37,7 @@ const (
 
 // validateStepComments refuses an unusable comment set before the transaction
 // opens, so a refusal spends nothing.
-func validateStepComments(step *db.Step, comments [][]byte) error {
+func validateStepComments(step *store.Step, comments [][]byte) error {
 	if len(comments) == 0 {
 		return nil
 	}
@@ -154,12 +154,12 @@ func stepCommentKey(artifactID int) string {
 // this same transaction, in a scope no verb accepts a caller's key for, so a
 // key already recorded is never legitimate: it refuses the recording rather
 // than letting the artifact record with its comment skipped.
-func postStepCommentTx(tx *sql.Tx, step *db.Step, artifactID int, body []byte) error {
-	_, inserted, err := db.CreateCommentIdempotentTx(tx, &model.Comment{
+func postStepCommentTx(tx *sql.Tx, step *store.Step, artifactID int, body []byte) error {
+	_, inserted, err := store.CreateCommentIdempotentTx(tx, &model.Comment{
 		IssueID: step.IssueID,
 		Body:    string(body),
 		Author:  model.FormatStepID(step.ID),
-	}, db.ScopeStepComment, stepCommentKey(artifactID))
+	}, store.ScopeStepComment, stepCommentKey(artifactID))
 	if err != nil {
 		return fmt.Errorf("posting the comment %s recorded: %w", step.Instance, err)
 	}

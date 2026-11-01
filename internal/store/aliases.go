@@ -188,25 +188,28 @@ const (
 	EngineAuthor             = db.EngineAuthor
 	IssueResolutionAbandoned = db.IssueResolutionAbandoned
 	ScopeVoteCreate          = db.ScopeVoteCreate
+	ScopeStepComment         = db.ScopeStepComment
 )
 
 const (
-	ClassMaxAuto          = db.ClassMaxAuto
-	KeyAutoRegister       = db.KeyAutoRegister
-	KeyBudgetDefault      = db.KeyBudgetDefault
-	KeyBudgetUnit         = db.KeyBudgetUnit
-	KeyClassMaxPrefix     = db.KeyClassMaxPrefix
-	KeyContextErrorBytes  = db.KeyContextErrorBytes
-	KeyContextWarnBytes   = db.KeyContextWarnBytes
-	KeyEventsRetain       = db.KeyEventsRetain
-	KeyLeaseTTLDefault    = db.KeyLeaseTTLDefault
-	KeyLeaseTTLPrefix     = db.KeyLeaseTTLPrefix
-	KeyUsageBudgetDefault = db.KeyUsageBudgetDefault
-	KeyUsageBudgetUnit    = db.KeyUsageBudgetUnit
-	KeyVoteHoldCost       = db.KeyVoteHoldCost
-	KeyVoteHoldRule       = db.KeyVoteHoldRule
-	KeyVoteHoldVoters     = db.KeyVoteHoldVoters
-	KeyVoteRulePrefix     = db.KeyVoteRulePrefix
+	ClassMaxAuto              = db.ClassMaxAuto
+	KeyAutoRegister           = db.KeyAutoRegister
+	KeyBudgetDefault          = db.KeyBudgetDefault
+	KeyBudgetUnit             = db.KeyBudgetUnit
+	KeyClassMaxPrefix         = db.KeyClassMaxPrefix
+	KeyContextErrorBytes      = db.KeyContextErrorBytes
+	KeyContextWarnBytes       = db.KeyContextWarnBytes
+	KeyEventsRetain           = db.KeyEventsRetain
+	KeyLeaseTTLDefault        = db.KeyLeaseTTLDefault
+	KeyLeaseTTLPrefix         = db.KeyLeaseTTLPrefix
+	KeyRoutingSecurityLabel   = db.KeyRoutingSecurityLabel
+	KeyRoutingSecurityLexicon = db.KeyRoutingSecurityLexicon
+	KeyUsageBudgetDefault     = db.KeyUsageBudgetDefault
+	KeyUsageBudgetUnit        = db.KeyUsageBudgetUnit
+	KeyVoteHoldCost           = db.KeyVoteHoldCost
+	KeyVoteHoldRule           = db.KeyVoteHoldRule
+	KeyVoteHoldVoters         = db.KeyVoteHoldVoters
+	KeyVoteRulePrefix         = db.KeyVoteRulePrefix
 )
 
 const (

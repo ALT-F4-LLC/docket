@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -161,8 +161,8 @@ func (e *Engine) IntegrateSteps(
 func (e *Engine) planIntegration(
 	conn *sql.DB, id int, token string, defsByRun map[int]map[int]*workflow.Definition,
 ) (integratePlan, error) {
-	step, err := db.GetStep(conn, id)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(id)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return integratePlan{}, notFoundErr(err, "step %s not found", model.FormatStepID(id))
 	}
 	if err != nil {
@@ -171,7 +171,7 @@ func (e *Engine) planIntegration(
 	if err := authorizeConductor(conn, step.RunID, token, "step integrate"); err != nil {
 		return integratePlan{}, err
 	}
-	if step.Status != db.StepDone {
+	if step.Status != store.StepDone {
 		return integratePlan{}, conflictErr(
 			"step %s is %s; only a done step's work is integrated", step.Instance, step.Status)
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
 // LegacyDB, LegacyTx and LegacyReadTx name the raw database/sql handles that
@@ -127,4 +128,17 @@ func unwrapSQLiteTx(tx ReadTx) (*sql.Tx, error) {
 		return nil, errors.Join(errors.New("store: StoreOn opened a transaction that is not SQLite"), tx.Rollback())
 	}
 	return sqlTx, nil
+}
+
+// CreateCommentIdempotentTx and StatusReachedAt forward to the internal/db
+// helpers of the same name, which take a raw handle; their contracts are
+// documented there. They are functions rather than func-typed variables so no
+// importer can reassign them.
+
+func CreateCommentIdempotentTx(tx LegacyTx, comment *model.Comment, scope, idempotencyKey string) (int, bool, error) {
+	return db.CreateCommentIdempotentTx(tx, comment, scope, idempotencyKey)
+}
+
+func StatusReachedAt(conn LegacyDB, ids []int, status string) (map[int]time.Time, error) {
+	return db.StatusReachedAt(conn, ids, status)
 }

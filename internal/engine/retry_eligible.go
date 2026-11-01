@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // RetryEligible is a step parked gap-only whose issue's depends_on or blocks
@@ -38,20 +38,20 @@ type runReads struct {
 	conn  *sql.DB
 	runID int
 
-	steps     []*db.Step
+	steps     []*store.Step
 	stepsRead bool
 	relations []model.Relation
 	relsRead  bool
 }
 
 // runReadsFromSteps shares a step list a caller already loaded.
-func runReadsFromSteps(conn *sql.DB, runID int, steps []*db.Step) *runReads {
+func runReadsFromSteps(conn *sql.DB, runID int, steps []*store.Step) *runReads {
 	return &runReads{conn: conn, runID: runID, steps: steps, stepsRead: true}
 }
 
-func (r *runReads) runSteps() ([]*db.Step, error) {
+func (r *runReads) runSteps() ([]*store.Step, error) {
 	if !r.stepsRead {
-		steps, err := db.ListRunSteps(r.conn, r.runID)
+		steps, err := store.StoreOn(r.conn).ListRunSteps(r.runID)
 		if err != nil {
 			return nil, fmt.Errorf("listing run steps: %w", err)
 		}
@@ -62,7 +62,7 @@ func (r *runReads) runSteps() ([]*db.Step, error) {
 
 func (r *runReads) directionalRelations() ([]model.Relation, error) {
 	if !r.relsRead {
-		relations, err := db.GetAllDirectionalRelations(r.conn)
+		relations, err := store.StoreOn(r.conn).GetAllDirectionalRelations()
 		if err != nil {
 			return nil, fmt.Errorf("reading relations: %w", err)
 		}
@@ -103,9 +103,9 @@ func (r *runReads) retryEligibleParks() ([]RetryEligible, error) {
 	if err != nil {
 		return nil, err
 	}
-	var parked []*db.Step
+	var parked []*store.Step
 	for _, s := range steps {
-		if s.Status == db.StepWaitingHuman && s.ParkClass == db.ParkClassGapOnly {
+		if s.Status == store.StepWaitingHuman && s.ParkClass == store.ParkClassGapOnly {
 			parked = append(parked, s)
 		}
 	}
@@ -130,14 +130,14 @@ func (r *runReads) retryEligibleParks() ([]RetryEligible, error) {
 	for id := range need {
 		ids = append(ids, id)
 	}
-	issues, err := db.GetIssuesByIDs(conn, ids)
+	issues, err := store.StoreOn(conn).GetIssuesByIDs(ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading prerequisite issues: %w", err)
 	}
 	// When each prerequisite became done. Its updated_at moves on any later
 	// edit (a comment, a label), which is not the prerequisite changing; it is
 	// the fallback only for an issue whose close the log never saw.
-	doneAt, err := db.StatusReachedAt(conn, ids, string(model.StatusDone))
+	doneAt, err := store.StatusReachedAt(conn, ids, string(model.StatusDone))
 	if err != nil {
 		return nil, fmt.Errorf("reading when prerequisites closed: %w", err)
 	}

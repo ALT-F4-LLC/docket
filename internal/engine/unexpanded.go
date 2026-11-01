@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // maxBlockerChains bounds how many blocker chains one unexpanded issue lists.
@@ -44,7 +44,7 @@ func UnexpandedIssues(conn *sql.DB, runID int) ([]UnexpandedIssue, error) {
 
 func (r *runReads) unexpandedIssues() ([]UnexpandedIssue, error) {
 	conn, runID := r.conn, r.runID
-	roster, err := db.ListRunIssues(conn, runID)
+	roster, err := store.StoreOn(conn).ListRunIssues(runID)
 	if err != nil {
 		return nil, fmt.Errorf("listing run issues: %w", err)
 	}
@@ -92,7 +92,7 @@ func (r *runReads) unexpandedIssues() ([]UnexpandedIssue, error) {
 	for id := range need {
 		ids = append(ids, id)
 	}
-	issues, err := db.GetIssuesByIDs(conn, ids)
+	issues, err := store.StoreOn(conn).GetIssuesByIDs(ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading blocker issues: %w", err)
 	}

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // THE SECURITY-ROUTING LINT (DKT-4275).
@@ -92,20 +92,20 @@ type RoutingWarning struct {
 // buildRoutingWarningsTx lints the run's bound issues. It reads only the
 // activation snapshots, so it sees the run as the dry run computed it.
 func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning, RoutingLintReport, error) {
-	label, err := db.GetConfigTx(tx, projectID, db.KeyRoutingSecurityLabel)
+	label, err := store.TxOn(tx).GetConfigTx(projectID, store.KeyRoutingSecurityLabel)
 	if err != nil {
 		return nil, RoutingLintReport{}, err
 	}
 	if label.Value == "" {
 		return nil, RoutingLintReport{}, nil
 	}
-	lexicon, err := db.GetConfigTx(tx, projectID, db.KeyRoutingSecurityLexicon)
+	lexicon, err := store.TxOn(tx).GetConfigTx(projectID, store.KeyRoutingSecurityLexicon)
 	if err != nil {
 		return nil, RoutingLintReport{}, err
 	}
-	terms := db.SplitNameList(lexicon.Value)
+	terms := store.SplitNameList(lexicon.Value)
 
-	runIssues, err := db.ListRunIssuesTx(tx, runID)
+	runIssues, err := store.TxOn(tx).ListRunIssuesTx(runID)
 	if err != nil {
 		return nil, RoutingLintReport{}, err
 	}

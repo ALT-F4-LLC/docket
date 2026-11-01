@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // UNFILED SEAT CONDITIONS AT DISPATCH CLOSE (DKT-4263).
@@ -178,7 +178,7 @@ func conditionsWaiverText(waived []UnfiledCondition, reason string) string {
 func recordConditionsWaiverTx(tx *sql.Tx, runID int, waiver ConditionsWaiver, waived []UnfiledCondition, nowMS int64) error {
 	text := conditionsWaiverText(waived, waiver.Reason)
 	under := Authority{Kind: AuthorityConductor}
-	id, err := db.InsertRunNoteTx(tx, db.RunNote{
+	id, err := store.TxOn(tx).InsertRunNoteTx(store.RunNote{
 		RunID: runID, Text: text, Authority: under.Kind, CreatedAtMS: nowMS,
 	})
 	if err != nil {

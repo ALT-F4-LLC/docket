@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // REFRESHING AN ISSUE UNDER AN OPEN DISPATCH (DKT-4267).
@@ -34,8 +34,8 @@ import (
 // refresh event: the dispatch id and the instances re-rendered. It returns nil
 // when no dispatch is open, or the issue has no row in it.
 func refreshUnderDispatchTx(tx *sql.Tx, runID, issueID int) (map[string]any, error) {
-	open, err := db.OpenDispatchTx(tx, runID)
-	if errors.Is(err, db.ErrNoOpenDispatch) {
+	open, err := store.TxOn(tx).OpenDispatchTx(runID)
+	if errors.Is(err, store.ErrNoOpenDispatch) {
 		return nil, nil
 	}
 	if err != nil {

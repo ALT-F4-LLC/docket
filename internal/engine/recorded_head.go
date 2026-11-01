@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -105,7 +105,7 @@ func resolvedDir(path string) string {
 // swallows a read error as "no record", the refusal direction for its
 // callers; a stage that would fall back to the live worktree on "no record"
 // uses recordedHeadOfErr and propagates the error instead.
-func recordedHeadOf(conn rowQuerier, step *db.Step) (recordedHead, bool) {
+func recordedHeadOf(conn rowQuerier, step *store.Step) (recordedHead, bool) {
 	rec, ok, err := recordedHeadOfErr(conn, step)
 	return rec, ok && err == nil
 }
@@ -114,7 +114,7 @@ func recordedHeadOf(conn rowQuerier, step *db.Step) (recordedHead, bool) {
 // absence of a record: ok is false only when no row exists or the newest row
 // is cleared or names another worktree, and any other failure to read the
 // row is returned, so a caller retries rather than measures a different tree.
-func recordedHeadOfErr(conn rowQuerier, step *db.Step) (recordedHead, bool, error) {
+func recordedHeadOfErr(conn rowQuerier, step *store.Step) (recordedHead, bool, error) {
 	var payload sql.NullString
 	err := conn.QueryRow(
 		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
@@ -155,7 +155,7 @@ func worktreeClean(dir string) bool {
 // none reproduces it, a cleared record (an empty head) that supersedes any
 // earlier one: recordedHeadOf reads the newest row and honors only a head.
 func insertRecordedHeadTx(
-	tx *sql.Tx, step *db.Step, rec recordedHead, have bool, worktree string, nowMS int64,
+	tx *sql.Tx, step *store.Step, rec recordedHead, have bool, worktree string, nowMS int64,
 ) error {
 	if !have {
 		rec = recordedHead{Worktree: worktree}
@@ -164,7 +164,7 @@ func insertRecordedHeadTx(
 	if err != nil {
 		return err
 	}
-	_, err = db.InsertArtifactTx(tx, db.Artifact{
+	_, err = store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: RecordedHeadArtifactKind,
 		Body: rec.Head, Payload: string(payload),
 		SHA256: workflow.SHA256([]byte(rec.Head)),
@@ -190,7 +190,7 @@ func commitInRepo(dir, sha string) bool {
 // record when it has one. A re-claimed step that records without a worktree
 // keeps its earlier work_root, so the first attempt's head would otherwise
 // stand for the second attempt.
-func clearRecordedHeadIfAnyTx(tx *sql.Tx, step *db.Step, nowMS int64) error {
+func clearRecordedHeadIfAnyTx(tx *sql.Tx, step *store.Step, nowMS int64) error {
 	if step.WorkRoot == "" {
 		return nil
 	}
