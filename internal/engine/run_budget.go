@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -66,7 +65,7 @@ type RunBudget struct {
 // always carried and the one `budgetSnapshot.unlimited()` enforces. Raising
 // and lowering are the same operation — the verb exists to "raise/lower a
 // live cap", and a verb that refused to lower would be a verb that half exists.
-func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+func SetRunBudget(conn store.LegacyDB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
 	if budget < 0 {
 		return nil, validationErr(
 			"--set must be >= 0, got %g (0 means unlimited)", budget)
@@ -206,7 +205,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 }
 
 // GetRunBudget is the read form.
-func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
+func GetRunBudget(conn store.LegacyDB, runID int) (*RunBudget, error) {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the budget: %w", err)
@@ -230,7 +229,7 @@ func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
 // read by anything that decides — and this verb's whole purpose is to
 // inform a decision about the number enforcement will compare, so it must show
 // the number enforcement will compare.
-func runBudgetTx(tx *sql.Tx, runID int) (*RunBudget, error) {
+func runBudgetTx(tx store.LegacyTx, runID int) (*RunBudget, error) {
 	st := store.TxOn(tx)
 	run, err := st.GetRunTx(runID)
 	if err != nil {

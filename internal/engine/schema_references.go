@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -27,7 +26,7 @@ import (
 // reads — rather than re-parsed from the recorded TOML, so what is checked is
 // what would run.
 func WorkflowsReferencingSchema(
-	conn *sql.DB, projectID int, name string, version int,
+	conn store.LegacyDB, projectID int, name string, version int,
 ) ([]string, error) {
 	workflows, _, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{
 		ProjectID: projectID, ExcludeDeprecated: true,

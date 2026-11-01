@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"sort"
 	"strings"
@@ -35,7 +34,7 @@ type schemaReference struct {
 // A referenced schema whose root `type` excludes "array", or whose stored body
 // no longer compiles, is refused the same way.
 func schemaPinsFor(
-	tx *sql.Tx,
+	tx store.LegacyTx,
 	projectID int,
 	runID int,
 	runIssues []*store.RunIssue,

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -121,7 +120,7 @@ type RenderResult struct {
 //
 // `templatePath` is `--template F`, or "" for the shipped default.
 func RenderStep(
-	conn *sql.DB, stepID int, templatePath string, nowMS int64,
+	conn store.LegacyDB, stepID int, templatePath string, nowMS int64,
 ) (*RenderResult, error) {
 	return RenderStepAs(conn, stepID, templatePath, "", nowMS)
 }
@@ -149,7 +148,7 @@ func RenderStep(
 // lands on the rendered step row's `executor`, so the packet's `target:`
 // line names who the work is actually for.
 func RenderStepAs(
-	conn *sql.DB, stepID int, templatePath, executor string, nowMS int64,
+	conn store.LegacyDB, stepID int, templatePath, executor string, nowMS int64,
 ) (*RenderResult, error) {
 	bundle, err := ReadContext(conn, stepID, nowMS)
 	if err != nil {
@@ -263,7 +262,7 @@ func RenderStepAs(
 // two sibling pin reads above already propagate; a packet rendered over an
 // unreadable pin set would carry a contract line missing for a reason nothing
 // reports.
-func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) {
+func payloadRequiredKeys(conn store.LegacyDB, runID int, ref string) ([]string, error) {
 	if ref == "" {
 		return nil, nil
 	}
@@ -298,7 +297,7 @@ func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) 
 // re-register with differing bytes and an `--if-version` mismatch, so
 // the taxonomy stays consistent and no new code is introduced.
 func templateSource(
-	conn *sql.DB, runID int, path string,
+	conn store.LegacyDB, runID int, path string,
 ) (source, name string, pinned bool, err error) {
 	if path == "" {
 		// The embedded default ships in the binary, so there is no file to
