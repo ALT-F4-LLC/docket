@@ -2,7 +2,6 @@ package engine
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -733,7 +732,7 @@ func stepCopyVerdicts(gate string, scripts []pinnedRelativeScript, roots []stepW
 // gate results of steps whose work root is gone, and the trust store; it
 // writes nothing.
 func verifyGateScripts(
-	conn *sql.DB, runID int, report *PinReport,
+	conn store.LegacyDB, runID int, report *PinReport,
 	loadStore func() (*trust.Store, error), invokingRoot string,
 ) error {
 	defs, err := StepDefinitions(conn, runID)

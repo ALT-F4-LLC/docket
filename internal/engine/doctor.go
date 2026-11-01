@@ -2,7 +2,6 @@ package engine
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io/fs"
@@ -91,7 +90,7 @@ type DoctorOptions struct {
 // Doctor runs all seven checks and reports one row each, without
 // short-circuiting on an early failure (AC1): a conductor deciding whether to
 // attach needs every answer in one call, not the first one that went wrong.
-func Doctor(conn *sql.DB, opts DoctorOptions) *DoctorReport {
+func Doctor(conn store.LegacyDB, opts DoctorOptions) *DoctorReport {
 	checks := []DoctorCheck{
 		checkDoctorSeat(opts.Cwd),
 		checkDoctorStore(opts.DBPath),
@@ -187,7 +186,7 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 // registers on first write, so `clean` must not read true here. Bound is OK
 // and names the row. On a single-tenant store (Identity "") the default row
 // is the whole store, and the check reports that rather than "unbound".
-func checkDoctorProject(conn *sql.DB, projectID int, identity string) DoctorCheck {
+func checkDoctorProject(conn store.LegacyDB, projectID int, identity string) DoctorCheck {
 	const check = "project"
 	if projectID == store.UnregisteredProjectID {
 		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: fmt.Sprintf(
@@ -386,7 +385,7 @@ func doctorDirExists(path string) bool {
 // explicit: SKIP, which doctorDisposition then reads as not-clean — a
 // conductor who forgot --run is told so rather than shown a clean report that
 // silently checked six things instead of seven.
-func checkDoctorPins(conn *sql.DB, runID int) DoctorCheck {
+func checkDoctorPins(conn store.LegacyDB, runID int) DoctorCheck {
 	const check = "pins"
 	if runID == 0 {
 		return DoctorCheck{Check: check, Verdict: DoctorSkip, Detail: "no --run given"}

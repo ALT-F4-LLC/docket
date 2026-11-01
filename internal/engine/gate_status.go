@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -78,7 +77,7 @@ type GateStatusResult struct {
 // stepID must name a `type="human"` or `type="vote"` step — the same
 // restriction `guard gate` applies, because every other step kind has no
 // decision to report status for.
-func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error) {
+func GateStatus(conn store.LegacyDB, stepID int, nowMS int64) (*GateStatusResult, error) {
 	view, err := LoadStepView(conn, stepID, nowMS)
 	if err != nil {
 		return nil, err
