@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -25,7 +25,7 @@ import (
 
 // registerVoteRule sets a rule's two config keys, which is what makes it exist
 // (a rule exists iff vote.rule.<name>.threshold is set).
-func registerVoteRule(t *testing.T, conn *sql.DB, name, threshold, criticality string) {
+func registerVoteRule(t *testing.T, conn store.LegacyDB, name, threshold, criticality string) {
 	t.Helper()
 	err := db.SetConfig(conn, 0, db.VoteRuleThresholdKey(name), threshold)
 	testsupport.Must(t, err, "setting the rule threshold: %v", err)
@@ -361,7 +361,7 @@ func TestVoteProposalReplayIgnoresTriageEvidence(t *testing.T) {
 
 // openedTriagePanel drives the triage fixture until triage@0 has opened its
 // proposal, and returns the panel, its pinned spec, and that proposal's id.
-func openedTriagePanel(t *testing.T) (*sql.DB, *db.Step, *workflow.Step, int) {
+func openedTriagePanel(t *testing.T) (store.LegacyDB, *db.Step, *workflow.Step, int) {
 	t.Helper()
 	conn, run, _ := triageRun(t, "retry", "abandon-issue")
 	panel := mustStep(t, conn, "triage@0")
@@ -382,7 +382,7 @@ func openedTriagePanel(t *testing.T) (*sql.DB, *db.Step, *workflow.Step, int) {
 // changeTriageEvidence rewrites the triaged step's gate output so the
 // Rationale a replay rebuilds differs from the one the proposal was opened
 // with, and fails the test if it does not.
-func changeTriageEvidence(t *testing.T, conn *sql.DB, panel *db.Step, output string) {
+func changeTriageEvidence(t *testing.T, conn store.LegacyDB, panel *db.Step, output string) {
 	t.Helper()
 	before, err := triageEvidence(conn, panel)
 	testsupport.Must(t, err, "triageEvidence: %v", err)
@@ -462,7 +462,7 @@ func TestVoteOutcomeMapsStatusToVerdict(t *testing.T) {
 // It builds its own definition rather than using the committed fixture, which
 // declares no vote step: adding one there would change every other test's
 // topology to serve this file.
-func seedVoteStep(t *testing.T, conn *sql.DB) (*db.Step, *workflow.Step) {
+func seedVoteStep(t *testing.T, conn store.LegacyDB) (*db.Step, *workflow.Step) {
 	t.Helper()
 
 	res, err := conn.Exec(
@@ -495,7 +495,7 @@ func seedVoteStep(t *testing.T, conn *sql.DB) (*db.Step, *workflow.Step) {
 // step at the SAME instance string, is exactly the shape that collided under
 // the old run-only idempotency key.
 func seedVoteStepInRun(
-	t *testing.T, conn *sql.DB, runID, wfID int64, instance string,
+	t *testing.T, conn store.LegacyDB, runID, wfID int64, instance string,
 ) *db.Step {
 	t.Helper()
 

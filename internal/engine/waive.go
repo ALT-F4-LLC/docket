@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
@@ -56,7 +55,7 @@ var waiverSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 // A waiver is a conductor ruling: on a run bound to a conductor capability,
 // token must be that capability, checked inside the writing transaction.
 func (e *Engine) WaiveStaleTargets(
-	conn *sql.DB, runID int, instances []string, targetSHA, note string, by Attribution,
+	conn store.LegacyDB, runID int, instances []string, targetSHA, note string, by Attribution,
 	token string, nowMS int64,
 ) ([]WaivedTarget, error) {
 	if len(instances) == 0 {

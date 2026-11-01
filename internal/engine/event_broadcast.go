@@ -1,8 +1,9 @@
 package engine
 
 import (
-	"database/sql"
 	"sync"
+
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // EventBroadcast is the in-process notice that events were appended. Open
@@ -48,7 +49,7 @@ func (b *EventBroadcast) Publish() {
 
 // appendBroadcast is the process's one append notice. The package owns it
 // rather than Engine because most writers are package functions over a
-// *sql.DB that never see an Engine; only commitWrite publishes on it.
+// store.LegacyDB that never see an Engine; only commitWrite publishes on it.
 var appendBroadcast EventBroadcast
 
 // AppendBroadcast returns the broadcast that rings after every engine write
@@ -64,7 +65,7 @@ func AppendBroadcast() *EventBroadcast {
 // when it is durable; a rollback or a failed commit publishes nothing. A
 // commit that appended no event still publishes: a wake carries no data and
 // subscribers re-read the store, so an empty wake costs one read.
-func commitWrite(tx *sql.Tx) error {
+func commitWrite(tx store.LegacyTx) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
