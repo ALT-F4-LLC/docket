@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,13 +166,13 @@ type RepinOptions struct {
 
 // RepinRun re-pins a run's drifted pins to what their refs resolve to now,
 // presenting token as the run's conductor capability.
-func RepinRun(conn *sql.DB, runID int, reason, token string, nowMS int64) (*RepinOutcome, error) {
+func RepinRun(conn store.LegacyDB, runID int, reason, token string, nowMS int64) (*RepinOutcome, error) {
 	return RepinRunWith(conn, runID, RepinOptions{Reason: reason, Token: token}, nowMS)
 }
 
 // RepinRunWith is RepinRun with the DKT-582 dispositions.
 func RepinRunWith(
-	conn *sql.DB, runID int, opts RepinOptions, nowMS int64,
+	conn store.LegacyDB, runID int, opts RepinOptions, nowMS int64,
 ) (*RepinOutcome, error) {
 	return repinRunOptsIn(conn, runID, opts, nowMS, instanceConfigRoots())
 }
@@ -182,14 +181,14 @@ func RepinRunWith(
 // verifyPinsIn takes, for the same reason: which file a ref resolves to is the
 // thing under test.
 func repinRunIn(
-	conn *sql.DB, runID int, reason, token string, nowMS int64, roots []string,
+	conn store.LegacyDB, runID int, reason, token string, nowMS int64, roots []string,
 ) (*RepinOutcome, error) {
 	return repinRunOptsIn(conn, runID, RepinOptions{Reason: reason, Token: token}, nowMS, roots)
 }
 
 // repinRunOptsIn is repinRunIn with dispositions.
 func repinRunOptsIn(
-	conn *sql.DB, runID int, opts RepinOptions, nowMS int64, roots []string,
+	conn store.LegacyDB, runID int, opts RepinOptions, nowMS int64, roots []string,
 ) (*RepinOutcome, error) {
 	reason := opts.Reason
 	// The status gate runs BEFORE the disk walk so a repin of a finished run
@@ -396,7 +395,8 @@ func repinRunOptsIn(
 
 	// The guards re-run against the transaction's snapshot: everything below
 	// holds at the moment the agreement moves, not merely when the verb began.
-	fresh, err := store.TxOn(tx).GetRunTx(runID)
+	st := store.TxOn(tx)
+	fresh, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -418,14 +418,11 @@ func repinRunOptsIn(
 		// back, instead of overwriting an agreement this verb never inspected.
 		// The stored bytes are the OLD agreement's, so they are cleared with it:
 		// the repinned ref reads its adopted bytes from disk, as an added one does.
-		res, err := tx.Exec(
-			`UPDATE pins SET sha256 = ?, content = NULL WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
-			c.NewSHA256, runID, c.Kind, c.Ref, c.OldSHA256,
-		)
+		n, err := st.RepinPinTx(runID, c.Kind, c.Ref, c.OldSHA256, c.NewSHA256)
 		if err != nil {
-			return nil, fmt.Errorf("repinning %s %s: %w", c.Kind, c.Ref, err)
+			return nil, err
 		}
-		if n, err := res.RowsAffected(); err == nil && n == 0 {
+		if n == 0 {
 			return nil, conflictErr(
 				"%s %s changed while repinning %s; re-run `docket run verify-pins %s` and retry",
 				c.Kind, c.Ref, fresh.Ref(), fresh.Ref())
@@ -457,14 +454,11 @@ func repinRunOptsIn(
 		// a pin that moved between the disk walk and this write is an agreement
 		// this verb never inspected, and retiring it blind would be exactly the
 		// silent removal the opt-in gate exists to prevent.
-		res, err := tx.Exec(
-			`DELETE FROM pins WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
-			runID, d.Kind, d.Ref, d.OldSHA256,
-		)
+		n, err := st.DropPinTx(runID, d.Kind, d.Ref, d.OldSHA256)
 		if err != nil {
-			return nil, fmt.Errorf("dropping %s %s: %w", d.Kind, d.Ref, err)
+			return nil, err
 		}
-		if n, err := res.RowsAffected(); err == nil && n == 0 {
+		if n == 0 {
 			return nil, conflictErr(
 				"%s %s changed while repinning %s; re-run `docket run verify-pins %s` and retry",
 				d.Kind, d.Ref, fresh.Ref(), fresh.Ref())
@@ -501,14 +495,13 @@ func repinRunOptsIn(
 		// the collision a visible CONFLICT rather than either a constraint
 		// error or a silent adoption of a hash this verb never inspected —
 		// the same discipline the UPDATE's compare-and-swap enforces.
-		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256) VALUES (?, ?, ?, ?)`,
-			runID, a.Kind, a.Ref, a.NewSHA256,
-		)
+		n, err := st.AddPinTx(store.Pin{
+			RunID: runID, Kind: a.Kind, Ref: a.Ref, SHA256: a.NewSHA256,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("pinning %s %s: %w", a.Kind, a.Ref, err)
+			return nil, err
 		}
-		if n, err := res.RowsAffected(); err == nil && n == 0 {
+		if n == 0 {
 			return nil, conflictErr(
 				"%s %s changed while repinning %s; re-run `docket run verify-pins %s` and retry",
 				a.Kind, a.Ref, fresh.Ref(), fresh.Ref())
@@ -615,7 +608,7 @@ func repinStatusGuard(run *model.Run) error {
 
 // repinQuiescenceGuard is the transaction-side half of the provenance rule: the
 // agreement may move only when no step could consume both sides of it.
-func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
+func repinQuiescenceGuard(tx store.LegacyTx, run *model.Run, nowMS int64) error {
 	runID, runRef := run.ID, run.Ref()
 	// In-flight executors first, because theirs is the sharper refusal: a
 	// claimed step's packet was rendered under the old agreement, and its later
@@ -697,15 +690,11 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 	// run-status guard usually implies this, but the rollup that retires a
 	// finished run runs lazily — this is the direct form of "completed steps'
 	// pins are never rewritten", asked of the steps themselves.
-	var remaining int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM steps
-		  WHERE run_id = ? AND status NOT IN (?, ?, ?, ?)`,
-		runID, store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-	).Scan(&remaining); err != nil {
-		return fmt.Errorf("counting %s's remaining steps: %w", runRef, err)
+	rollup, err := st.RunStepRollupTx(runID)
+	if err != nil {
+		return err
 	}
-	if remaining == 0 {
+	if rollup.Unfinished == 0 {
 		return conflictErr(
 			"every step of %s is terminal; its pins are referenced only by "+
 				"completed steps' history now, and repinning them would rewrite "+
@@ -728,7 +717,7 @@ func repinQuiescenceGuard(tx *sql.Tx, run *model.Run, nowMS int64) error {
 // per-pin verdict to render here — it is the verb's answer, not a drift line —
 // so this advisory keeps to the pins and keeps to a hash-per-pin of work on
 // every `run status`.
-func PinDrift(conn *sql.DB, runID int) ([]PinVerdict, error) {
+func PinDrift(conn store.LegacyDB, runID int) ([]PinVerdict, error) {
 	report, err := verifyPinsIn(conn, runID, runConfigRoots(conn, runID))
 	if err != nil {
 		return nil, err
@@ -747,7 +736,7 @@ func PinDrift(conn *sql.DB, runID int) ([]PinVerdict, error) {
 // advisory computation must not turn a committed answer into an error. The
 // authoritative surfaces — `verify-pins`, and the CONFLICT every pinned read
 // raises — do not run through this.
-func pinDriftAdvisory(conn *sql.DB, runID int) []PinVerdict {
+func pinDriftAdvisory(conn store.LegacyDB, runID int) []PinVerdict {
 	drift, err := PinDrift(conn, runID)
 	if err != nil {
 		return nil

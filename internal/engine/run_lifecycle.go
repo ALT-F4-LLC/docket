@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,7 +83,7 @@ var lifecycleEvents = map[model.RunStatus]string{
 // checkout could park or end the run it was working in. The check is inside
 // the transaction, after the run is found and before its status is inspected,
 // so a caller without the capability learns only that the run exists.
-func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error) {
+func MoveRunWith(conn store.LegacyDB, opts MoveRunOptions) (*model.Run, []string, error) {
 	runID, verb, to, from, reason, nowMS :=
 		opts.RunID, opts.Verb, opts.To, opts.From, opts.Reason, opts.NowMS
 	kind, ok := lifecycleEvents[to]
@@ -222,24 +221,8 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 // walks it has no business running. Naming what was recorded turns "debris
 // standing in five repos with no surface reporting it" into a listed set, and
 // the relay's own sweep remains the authority for the rest.
-func recordedWorktreesTx(tx *sql.Tx, runID, issueID int) ([]string, error) {
-	query := `SELECT DISTINCT work_root FROM steps
-	           WHERE run_id = ? AND work_root != '' ORDER BY work_root`
-	args := []any{runID}
-	if issueID != 0 {
-		query = `SELECT DISTINCT work_root FROM steps
-		          WHERE run_id = ? AND issue_id = ? AND work_root != ''
-		          ORDER BY work_root`
-		args = append(args, issueID)
-	}
-	rows, err := tx.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("collecting recorded worktrees: %w", err)
-	}
-	return scanTxRows(rows, func(r *sql.Rows) (string, error) {
-		var w string
-		return w, r.Scan(&w)
-	})
+func recordedWorktreesTx(tx store.LegacyTx, runID, issueID int) ([]string, error) {
+	return store.TxOn(tx).RunWorktreesTx(runID, issueID)
 }
 
 // AbandonIssueOutcome reports what AbandonIssueInRun did.
@@ -288,7 +271,7 @@ type AbandonIssueOptions struct {
 // It requires the run's conductor capability exactly as the whole-run abandon
 // does (DKT-2465): the per-issue disposition ends a lane's work the same way,
 // and an executor must not be able to end a sibling's.
-func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+func AbandonIssueInRunWith(conn store.LegacyDB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
 	runID, issueID, reason, nowMS := opts.RunID, opts.IssueID, opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {
@@ -314,34 +297,16 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 			orStatusList([]model.RunStatus{model.RunActive, model.RunWaitingHuman}))
 	}
 
-	var inRun int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM run_issues WHERE run_id = ? AND issue_id = ?`,
-		runID, issueID).Scan(&inRun); err != nil {
-		return nil, fmt.Errorf("checking run membership: %w", err)
+	inRun, err := st.RunHasIssueTx(runID, issueID)
+	if err != nil {
+		return nil, err
 	}
-	if inRun == 0 {
+	if !inRun {
 		return nil, notFoundErr(store.ErrNotFound, "issue %s is not part of run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 
-	rows, err := tx.Query(
-		`SELECT id, instance FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
-		  ORDER BY id`,
-		runID, issueID,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted)
-	if err != nil {
-		return nil, fmt.Errorf("collecting the issue's remaining steps: %w", err)
-	}
-	type stepRef struct {
-		id       int
-		instance string
-	}
-	remaining, err := scanTxRows(rows, func(r *sql.Rows) (stepRef, error) {
-		var s stepRef
-		return s, r.Scan(&s.id, &s.instance)
-	})
+	remaining, err := st.IssueUnfinishedStepsTx(runID, issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -351,20 +316,13 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 
-	if _, err := tx.Exec(
-		`UPDATE steps
-		    SET status = ?, updated_at_ms = ?, recorded_at_ms = ?,
-		        row_version = row_version + 1
-		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)`,
-		store.StepFailedRouted, nowMS, nowMS, runID, issueID,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-	); err != nil {
-		return nil, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
+	if _, err := st.FailRouteIssueStepsTx(runID, issueID, nowMS); err != nil {
+		return nil, err
 	}
 
 	instances := make([]string, 0, len(remaining))
 	for _, s := range remaining {
-		instances = append(instances, s.instance)
+		instances = append(instances, s.Instance)
 	}
 	// The issue's recorded worktrees, named at the same stop (DKT-116) — the
 	// stopped work's checkouts have no later close to sweep them.
@@ -443,9 +401,16 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 	}, nil
 }
 
+// rowCursor is the iteration half of a query result, as *sql.Rows provides it.
+type rowCursor interface {
+	Next() bool
+	Err() error
+	Close() error
+}
+
 // scanTxRows is scanRows' shape for this package: drain, close, and surface
 // the iteration error once.
-func scanTxRows[T any](rows *sql.Rows, scan func(*sql.Rows) (T, error)) ([]T, error) {
+func scanTxRows[R rowCursor, T any](rows R, scan func(R) (T, error)) ([]T, error) {
 	defer rows.Close()
 	var out []T
 	for rows.Next() {

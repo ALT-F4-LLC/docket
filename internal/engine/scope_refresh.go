@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,7 +120,7 @@ var refreshBlockingStepStatuses = []string{
 // `issue edit --scope` is ungated, so without this check an executor could
 // widen its own issue and then make that widen reach its own packets.
 func RefreshIssueScopeInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedScope, error) {
 	if strings.TrimSpace(reason) == "" {
@@ -296,24 +295,11 @@ func (e *refreshAllTerminalError) Error() string {
 // *refreshAllTerminalError). A caller rewords either through errors.As, so an
 // operator is told what actually moved; one that does not still refuses.
 func refreshableSteps(
-	tx *sql.Tx, runID, issueID int, runRef string,
+	tx store.LegacyTx, runID, issueID int, runRef string,
 ) ([]string, error) {
-	rows, err := tx.Query(
-		`SELECT instance, status FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
-		  ORDER BY id`,
-		runID, issueID,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted)
+	remaining, err := store.TxOn(tx).IssueUnfinishedStepsTx(runID, issueID)
 	if err != nil {
-		return nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
-	}
-	type liveStep struct{ instance, status string }
-	remaining, err := scanTxRows(rows, func(r *sql.Rows) (liveStep, error) {
-		var s liveStep
-		return s, r.Scan(&s.instance, &s.status)
-	})
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("in %s: %w", runRef, err)
 	}
 
 	blocking := make(map[string]bool, len(refreshBlockingStepStatuses))
@@ -322,11 +308,11 @@ func refreshableSteps(
 	}
 	var instances, straddled []string
 	for _, s := range remaining {
-		if blocking[s.status] {
-			straddled = append(straddled, fmt.Sprintf("%s (%s)", s.instance, s.status))
+		if blocking[s.Status] {
+			straddled = append(straddled, fmt.Sprintf("%s (%s)", s.Instance, s.Status))
 			continue
 		}
-		instances = append(instances, s.instance)
+		instances = append(instances, s.Instance)
 	}
 	issue := model.FormatID(issueID)
 	if len(straddled) > 0 {
@@ -346,7 +332,7 @@ func quiescenceErr(cause error) *Error {
 // runIssueTx loads one `run_issues` row, distinguishing "not in this run" from
 // a read failure — the membership check `run abandon --issue` makes, returning
 // the row because the caller needs its snapshot.
-func runIssueTx(tx *sql.Tx, runID, issueID int) (*store.RunIssue, error) {
+func runIssueTx(tx store.LegacyTx, runID, issueID int) (*store.RunIssue, error) {
 	all, err := store.TxOn(tx).ListRunIssuesTx(runID)
 	if err != nil {
 		return nil, err
@@ -364,7 +350,7 @@ func runIssueTx(tx *sql.Tx, runID, issueID int) (*store.RunIssue, error) {
 // value written is the value that was read — a widen landing between a
 // standalone read and the UPDATE would otherwise be reported as the `to` of an
 // event that wrote something else.
-func liveIssueScopeTx(tx *sql.Tx, issueID int) ([]string, error) {
+func liveIssueScopeTx(tx store.LegacyTx, issueID int) ([]string, error) {
 	stored, err := store.TxOn(tx).IssueScopeGlobsTx(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the live scope for %s: %w",

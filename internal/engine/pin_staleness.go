@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -112,7 +111,7 @@ const (
 // permanently. Nothing here needs the snapshot — a pin set and a registry head
 // read a moment early are the same two numbers.
 func pinnedWorkflowStaleness(
-	conn *sql.DB, projectID, runID int,
+	conn store.LegacyDB, projectID, runID int,
 ) ([]PinnedWorkflowStaleness, error) {
 	st := store.StoreOn(conn)
 	pins, err := st.ListPins(runID)
@@ -202,42 +201,23 @@ func pinnedWorkflowStaleness(
 // between them — reachable only with a frozen clock, and harmless where it is:
 // no step can have executed inside a zero-length interval, so no step's epoch
 // moves, only the count of boundaries.
-func runPinEpochsTx(tx *sql.Tx, runID int) ([]PinEpoch, error) {
-	rows, err := tx.Query(
-		`SELECT seq, at_ms, kind, data FROM events
-		  WHERE run_id = ? AND kind IN (?, ?) ORDER BY seq`,
-		runID, EventRunActivated, EventRunRepinned)
+func runPinEpochsTx(tx store.LegacyReadTx, runID int) ([]PinEpoch, error) {
+	events, err := store.TxOn(tx).RunEventsTx(runID, EventRunActivated, EventRunRepinned)
 	if err != nil {
 		return nil, fmt.Errorf("reading the run's pin history: %w", err)
-	}
-	type eventRow struct {
-		seq  int64
-		atMS int64
-		kind string
-		data string
-	}
-	events, err := scanTxRows(rows, func(r *sql.Rows) (eventRow, error) {
-		var e eventRow
-		if err := r.Scan(&e.seq, &e.atMS, &e.kind, &e.data); err != nil {
-			return eventRow{}, fmt.Errorf("reading a pin-history event: %w", err)
-		}
-		return e, nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	activation := PinEpoch{Epoch: 1, Origin: PinEpochActivation}
 	var epochs []PinEpoch
 	for _, e := range events {
-		if e.kind == EventRunActivated {
+		if e.Kind == EventRunActivated {
 			// THE FIRST activation. A re-activation writes a second one, and it
 			// is not a boundary: RA2 INHERITS the pin set, and the only rows a
 			// re-activation writes are `INSERT OR IGNORE` additions for refs the
 			// run did not hold — no existing pin's bytes move, so no completed
 			// step's provenance changes.
 			if activation.FromSeq == 0 {
-				activation.FromSeq, activation.AtMS = e.seq, e.atMS
+				activation.FromSeq, activation.AtMS = e.Seq, e.AtMS
 			}
 			continue
 		}
@@ -245,7 +225,7 @@ func runPinEpochsTx(tx *sql.Tx, runID int) ([]PinEpoch, error) {
 			RepinChange
 			Reason string `json:"reason"`
 		}
-		if err := json.Unmarshal([]byte(e.data), &payload); err != nil {
+		if err := json.Unmarshal([]byte(e.Data), &payload); err != nil {
 			// Core's own payload, but a malformed one costs the CHANGE LINE and
 			// not the boundary: that this run repinned here is the event's
 			// existence, and a report that refused over an unparseable row would
@@ -256,15 +236,15 @@ func runPinEpochsTx(tx *sql.Tx, runID int) ([]PinEpoch, error) {
 			}{}
 		}
 		last := len(epochs) - 1
-		if last >= 0 && epochs[last].AtMS == e.atMS &&
-			e.seq == epochs[last].FromSeq+int64(len(epochs[last].Changes)) {
+		if last >= 0 && epochs[last].AtMS == e.AtMS &&
+			e.Seq == epochs[last].FromSeq+int64(len(epochs[last].Changes)) {
 			epochs[last].Changes = append(epochs[last].Changes, payload.RepinChange)
 			continue
 		}
 		epochs = append(epochs, PinEpoch{
 			Epoch:   len(epochs) + 2, // epoch 1 is activation
-			FromSeq: e.seq,
-			AtMS:    e.atMS,
+			FromSeq: e.Seq,
+			AtMS:    e.AtMS,
 			Origin:  PinEpochRepin,
 			Reason:  payload.Reason,
 			Changes: []RepinChange{payload.RepinChange},
@@ -309,34 +289,20 @@ var stepEpochAnchorKinds = map[string]bool{
 // The LAST anchor wins. A step claimed, reaped, and re-claimed after a repin
 // consumed the NEW bytes, and the attempt that was thrown away is not the one
 // the report is describing.
-func stepPinEpochsTx(tx *sql.Tx, runID int, epochs []PinEpoch) (map[int]int, error) {
+func stepPinEpochsTx(tx store.LegacyReadTx, runID int, epochs []PinEpoch) (map[int]int, error) {
 	if len(epochs) < 2 {
 		return nil, nil
 	}
-	rows, err := tx.Query(
-		`SELECT step_id, kind, seq FROM events
-		  WHERE run_id = ? AND step_id IS NOT NULL ORDER BY seq`, runID)
+	events, err := store.TxOn(tx).RunStepEventSeqsTx(runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the run's step events: %w", err)
 	}
-	defer rows.Close()
 
 	anchors := make(map[int]int64)
-	for rows.Next() {
-		var (
-			stepID int
-			kind   string
-			seq    int64
-		)
-		if err := rows.Scan(&stepID, &kind, &seq); err != nil {
-			return nil, fmt.Errorf("reading a step event: %w", err)
+	for _, e := range events {
+		if stepEpochAnchorKinds[e.Kind] && e.Seq > anchors[e.StepID] {
+			anchors[e.StepID] = e.Seq
 		}
-		if stepEpochAnchorKinds[kind] && seq > anchors[stepID] {
-			anchors[stepID] = seq
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading the run's step events: %w", err)
 	}
 
 	out := make(map[int]int, len(anchors))
@@ -382,7 +348,7 @@ func stepReportsAnEpoch(status string) bool {
 // permanent deadlock, and the annotation then describes the same instant as the
 // statuses beside it.
 func annotatePinEpochs(
-	tx *sql.Tx, runID int, attempts []StepAttempt,
+	tx store.LegacyReadTx, runID int, attempts []StepAttempt,
 ) ([]PinEpoch, error) {
 	epochs, err := runPinEpochsTx(tx, runID)
 	if err != nil {
