@@ -470,6 +470,10 @@ func (s *pgStore) IssueStepRuns(issueID int) ([]int, error) {
 	return db.IssueStepRuns(s.db, issueID)
 }
 
+func (s *pgStore) LatestIssueEvent(issueID int, kind string) (db.IssueEvent, bool, error) {
+	return db.LatestIssueEvent(s.db, issueID, kind)
+}
+
 func (s *pgStore) LeaseTTL(projectID int, class string) (time.Duration, error) {
 	return db.LeaseTTL(s.db, projectID, class)
 }
@@ -722,6 +726,10 @@ func (s *pgStore) RunConductorHash(id int) (string, error) {
 	return db.RunConductorHash(s.db, id)
 }
 
+func (s *pgStore) RunEventSpanMS(runID int, kinds ...string) (int64, int64, bool, error) {
+	return db.RunEventSpanMS(s.db, runID, kinds...)
+}
+
 func (s *pgStore) RunFenceCommands(runID, issueID int, tag string) ([]db.FenceCommand, bool, error) {
 	return db.RunFenceCommands(s.db, runID, issueID, tag)
 }
@@ -732,6 +740,14 @@ func (s *pgStore) RunIssueSnapshot(runID, issueID int) (string, error) {
 
 func (s *pgStore) RunProjectID(runID int) (int, error) {
 	return db.RunProjectID(s.db, runID)
+}
+
+func (s *pgStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error) {
+	return db.RunStepEvents(s.db, runID, kinds...)
+}
+
+func (s *pgStore) RunStepProducers(runID int) ([]db.StepProducer, error) {
+	return db.RunStepProducers(s.db, runID)
 }
 
 func (s *pgStore) SchemaVersion() (int, error) {
@@ -1152,8 +1168,16 @@ func (t *pgTx) RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (f
 	return floor, nil
 }
 
+func (t *pgTx) RunEventDataTx(runID int, kinds ...string) ([]string, error) {
+	return db.RunEventDataTx(t.tx, runID, kinds...)
+}
+
 func (t *pgTx) RunEverDispatchedTx(runID int) (bool, error) {
 	return db.RunEverDispatchedTx(t.tx, runID)
+}
+
+func (t *pgTx) RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error) {
+	return db.RunIssueEventsTx(t.tx, runID, kind)
 }
 
 func (t *pgTx) RunPauseOriginTx(id int) (model.RunPauseOrigin, error) {
@@ -1166,6 +1190,10 @@ func (t *pgTx) RunProjectIDTx(runID int) (int, error) {
 
 func (t *pgTx) RunStatusTx(runID int) (model.RunStatus, error) {
 	return db.RunStatusTx(t.tx, runID)
+}
+
+func (t *pgTx) RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, error) {
+	return db.RunStepEventsTx(t.tx, runID, kinds...)
 }
 
 func (t *pgTx) RunStepRollupTx(runID int) (db.RunStepRollup, error) {

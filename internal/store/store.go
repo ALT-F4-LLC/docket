@@ -53,6 +53,14 @@ type (
 	FirstRecorderAfterQuery = db.FirstRecorderAfterQuery
 )
 
+// The report and ledger query rows, aliased as in aliases.go so callers can
+// read them without importing internal/db.
+type (
+	IssueEvent   = db.IssueEvent
+	StepEvent    = db.StepEvent
+	StepProducer = db.StepProducer
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -155,6 +163,7 @@ type Store interface {
 	IssueProjectID(issueID int) (int, error)
 	IssueScopeGlobs(issueID int) (string, error)
 	IssueStepRuns(issueID int) ([]int, error)
+	LatestIssueEvent(issueID int, kind string) (event db.IssueEvent, found bool, err error)
 	LeaseTTL(projectID int, class string) (time.Duration, error)
 	LinkDocIssue(docID, issueID int) error
 	LinkProposalIssue(proposalID, issueID int) error
@@ -218,9 +227,12 @@ type Store interface {
 	RestoreWorkflow(projectID int, name string, version int) (*model.Workflow, error)
 	RunBudgetFactsFor(runID int) (db.RunBudgetFacts, error)
 	RunConductorHash(id int) (string, error)
+	RunEventSpanMS(runID int, kinds ...string) (first, last int64, found bool, err error)
 	RunFenceCommands(runID, issueID int, tag string) (commands []db.FenceCommand, found bool, err error)
 	RunIssueSnapshot(runID, issueID int) (string, error)
 	RunProjectID(runID int) (int, error)
+	RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error)
+	RunStepProducers(runID int) ([]db.StepProducer, error)
 	SchemaVersion() (int, error)
 	SetConfig(projectID int, key, value string) error
 	SetIssueFiles(issueID int, filePaths []string, changedBy string) error
@@ -326,10 +338,13 @@ type ReadTx interface {
 	RunBudgetFactsTx(runID int) (db.RunBudgetFacts, error)
 	RunConductorHashTx(id int) (string, error)
 	RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (float64, error)
+	RunEventDataTx(runID int, kinds ...string) ([]string, error)
 	RunEverDispatchedTx(runID int) (bool, error)
+	RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error)
 	RunPauseOriginTx(id int) (model.RunPauseOrigin, error)
 	RunProjectIDTx(runID int) (int, error)
 	RunStatusTx(runID int) (model.RunStatus, error)
+	RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, error)
 	RunStepRollupTx(runID int) (db.RunStepRollup, error)
 	StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error)
 	StepByInstanceTx(runID, issueID int, instance string) (db.StepInstanceRef, error)

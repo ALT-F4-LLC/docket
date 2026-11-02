@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -312,6 +313,77 @@ func TestPgStoreRunCostFloorTx(t *testing.T) {
 	if err != nil || floor != 10.5 {
 		t.Errorf("the floor = (%v, %v), want (10.5, nil): 2.5 carried + 1 and 4 declared + 3 open vote",
 			floor, err)
+	}
+}
+
+// TestPgStoreReportAndLedgerQueries runs the report and ledger event reads,
+// whose helper SQL the PostgreSQL store shares, against a seeded run: the
+// jsonb data scans back as text, a runless event reads run 0, and an
+// unrouted or absent step reads routing "". Payloads are written in jsonb's
+// canonical text so they read back unchanged. It skips without
+// DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreReportAndLedgerQueries(t *testing.T) {
+	f := newSagaFixture(t)
+	implement := f.add(db.StepRow{StepName: "implement", Executor: "claude", Status: db.StepDone})
+	review := f.add(db.StepRow{StepName: "review", Status: db.StepDone})
+	elsewhere := f.add(db.StepRow{RunID: f.otherRun, StepName: "implement", Executor: "codex", Status: db.StepDone})
+	testsupport.Must(t, f.tx.SetStepRoutingTx(review, "advance", "approved", db.StepDone, "", 1), "SetStepRoutingTx")
+	for _, e := range []db.NewEvent{
+		{AtMS: 10, Kind: "step-claimed", RunID: f.run, StepID: implement, Data: `{"n": 1}`},
+		{AtMS: 20, Kind: "step-recorded", RunID: f.run, StepID: review, Data: `{"n": 2}`},
+		{AtMS: 30, Kind: "step-claimed", RunID: f.run, Data: `{"n": 3}`},
+		{AtMS: 40, Kind: "issue-done", RunID: f.run, StepID: review, IssueID: f.issue, Data: `{"n": 4}`},
+		{AtMS: 50, Kind: "step-claimed", RunID: f.otherRun, StepID: elsewhere, Data: `{"n": 5}`},
+		{AtMS: 60, Kind: "issue-done", IssueID: f.issue, Data: `{"n": 6}`},
+	} {
+		testsupport.Must(t, f.tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+	testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+	wantStepEvents := []db.StepEvent{
+		{StepID: implement, Kind: "step-claimed", Data: `{"n": 1}`},
+		{StepID: review, Kind: "step-recorded", Data: `{"n": 2}`},
+	}
+	if got, err := f.st.RunStepEvents(f.run, "step-claimed", "step-recorded"); err != nil || !reflect.DeepEqual(got, wantStepEvents) {
+		t.Errorf("RunStepEvents = (%+v, %v), want (%+v, nil)", got, err, wantStepEvents)
+	}
+	wantProducers := []db.StepProducer{
+		{StepID: implement, Instance: "implement@0", Executor: "claude", IssueID: f.issue},
+		{StepID: review, Instance: "review@0", IssueID: f.issue},
+	}
+	if got, err := f.st.RunStepProducers(f.run); err != nil || !reflect.DeepEqual(got, wantProducers) {
+		t.Errorf("RunStepProducers = (%+v, %v), want (%+v, nil)", got, err, wantProducers)
+	}
+	if first, last, found, err := f.st.RunEventSpanMS(f.run, "step-claimed", "issue-done"); err != nil || !found || first != 10 || last != 40 {
+		t.Errorf("RunEventSpanMS = (%d, %d, %v, %v), want (10, 40, true, nil)", first, last, found, err)
+	}
+	if first, last, found, err := f.st.RunEventSpanMS(f.otherRun, "issue-done"); err != nil || found || first != 0 || last != 0 {
+		t.Errorf("RunEventSpanMS of a kind the run never logged = (%d, %d, %v, %v), want (0, 0, false, nil)",
+			first, last, found, err)
+	}
+	wantLatest := db.IssueEvent{IssueID: f.issue, AtMS: 60, Data: `{"n": 6}`}
+	if got, found, err := f.st.LatestIssueEvent(f.issue, "issue-done"); err != nil || !found || got != wantLatest {
+		t.Errorf("LatestIssueEvent = (%+v, %v, %v), want (%+v, true, nil)", got, found, err, wantLatest)
+	}
+	if got, found, err := f.st.LatestIssueEvent(f.issue, "issue-abandoned"); err != nil || found || got != (db.IssueEvent{}) {
+		t.Errorf("LatestIssueEvent of a kind never logged = (%+v, %v, %v), want (zero, false, nil)", got, found, err)
+	}
+
+	snap, err := f.st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if got, err := snap.RunStepEventsTx(f.run, "step-claimed", "step-recorded"); err != nil || !reflect.DeepEqual(got, wantStepEvents) {
+		t.Errorf("RunStepEventsTx = (%+v, %v), want (%+v, nil)", got, err, wantStepEvents)
+	}
+	wantData := []string{`{"n": 1}`, `{"n": 3}`}
+	if got, err := snap.RunEventDataTx(f.run, "step-claimed"); err != nil || !reflect.DeepEqual(got, wantData) {
+		t.Errorf("RunEventDataTx = (%q, %v), want (%q, nil)", got, err, wantData)
+	}
+	wantIssueEvents := []db.IssueEvent{
+		{IssueID: f.issue, RunID: f.run, AtMS: 40, Data: `{"n": 4}`, StepRouting: "advance: approved"},
+	}
+	if got, err := snap.RunIssueEventsTx(f.run, "issue-done"); err != nil || !reflect.DeepEqual(got, wantIssueEvents) {
+		t.Errorf("RunIssueEventsTx = (%+v, %v), want (%+v, nil)", got, err, wantIssueEvents)
 	}
 }
 

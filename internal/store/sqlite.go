@@ -435,6 +435,10 @@ func (s *sqliteStore) IssueStepRuns(issueID int) ([]int, error) {
 	return db.IssueStepRuns(s.writer, issueID)
 }
 
+func (s *sqliteStore) LatestIssueEvent(issueID int, kind string) (db.IssueEvent, bool, error) {
+	return db.LatestIssueEvent(s.writer, issueID, kind)
+}
+
 func (s *sqliteStore) LeaseTTL(projectID int, class string) (time.Duration, error) {
 	return db.LeaseTTL(s.writer, projectID, class)
 }
@@ -687,6 +691,10 @@ func (s *sqliteStore) RunConductorHash(id int) (string, error) {
 	return db.RunConductorHash(s.writer, id)
 }
 
+func (s *sqliteStore) RunEventSpanMS(runID int, kinds ...string) (int64, int64, bool, error) {
+	return db.RunEventSpanMS(s.writer, runID, kinds...)
+}
+
 func (s *sqliteStore) RunFenceCommands(runID, issueID int, tag string) ([]db.FenceCommand, bool, error) {
 	return db.RunFenceCommands(s.writer, runID, issueID, tag)
 }
@@ -697,6 +705,14 @@ func (s *sqliteStore) RunIssueSnapshot(runID, issueID int) (string, error) {
 
 func (s *sqliteStore) RunProjectID(runID int) (int, error) {
 	return db.RunProjectID(s.writer, runID)
+}
+
+func (s *sqliteStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error) {
+	return db.RunStepEvents(s.writer, runID, kinds...)
+}
+
+func (s *sqliteStore) RunStepProducers(runID int) ([]db.StepProducer, error) {
+	return db.RunStepProducers(s.writer, runID)
 }
 
 func (s *sqliteStore) SchemaVersion() (int, error) {
@@ -1087,8 +1103,16 @@ func (t *sqliteTx) RunCostFloorTx(runID int, claimEventKind, voteStepKind string
 	return db.RunCostFloorTx(t.tx, runID, claimEventKind, voteStepKind)
 }
 
+func (t *sqliteTx) RunEventDataTx(runID int, kinds ...string) ([]string, error) {
+	return db.RunEventDataTx(t.tx, runID, kinds...)
+}
+
 func (t *sqliteTx) RunEverDispatchedTx(runID int) (bool, error) {
 	return db.RunEverDispatchedTx(t.tx, runID)
+}
+
+func (t *sqliteTx) RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error) {
+	return db.RunIssueEventsTx(t.tx, runID, kind)
 }
 
 func (t *sqliteTx) RunPauseOriginTx(id int) (model.RunPauseOrigin, error) {
@@ -1101,6 +1125,10 @@ func (t *sqliteTx) RunProjectIDTx(runID int) (int, error) {
 
 func (t *sqliteTx) RunStatusTx(runID int) (model.RunStatus, error) {
 	return db.RunStatusTx(t.tx, runID)
+}
+
+func (t *sqliteTx) RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, error) {
+	return db.RunStepEventsTx(t.tx, runID, kinds...)
 }
 
 func (t *sqliteTx) RunStepRollupTx(runID int) (db.RunStepRollup, error) {

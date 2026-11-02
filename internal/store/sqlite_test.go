@@ -3,8 +3,10 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
@@ -186,5 +188,110 @@ func TestSQLiteSagaQueries(t *testing.T) {
 	}
 	if err := tx.SetStepWorkRootTx(1, "/work/tree"); !errors.Is(err, ErrStepNotFound) {
 		t.Errorf("SetStepWorkRootTx with no steps: err = %v, want ErrStepNotFound", err)
+	}
+}
+
+// TestSQLiteReportAndLedgerQueries reaches the run report's and the executor
+// ledger's event reads through the Store and a read snapshot, on a seeded run:
+// each returns the rows of the run, issue and kinds it was asked for, typed by
+// the store aliases.
+func TestSQLiteReportAndLedgerQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	project, err := st.EnsureProject("/repo/report", "report", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	wf, _, err := st.InsertWorkflow(&model.Workflow{
+		ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+	}, 1)
+	testsupport.Must(t, err, "InsertWorkflow: %v", err)
+	issue, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: project, Title: "report subject", Status: model.StatusTodo,
+		Priority: model.PriorityNone, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+	newRun := func() int {
+		run, _, err := st.InsertRunWithContextIdempotent(project, "report", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		return run.ID
+	}
+	run, otherRun := newRun(), newRun()
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the seeding transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	addStep := func(runID int, name, executor string) int {
+		t.Helper()
+		instance := name + "@0"
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: runID, IssueID: issue, WorkflowID: wf.ID, StepName: name, Instance: instance,
+			Kind: "executor", Executor: executor, Status: db.StepDone,
+		}, 1), "InsertStepTx %s", instance)
+		id, found, err := tx.StepIDByInstanceTx(runID, issue, instance)
+		testsupport.Must(t, err, "StepIDByInstanceTx: %v", err)
+		if !found {
+			t.Fatalf("step %s was not found after its insert", instance)
+		}
+		return id
+	}
+	implement := addStep(run, "implement", "claude")
+	review := addStep(run, "review", "")
+	elsewhere := addStep(otherRun, "implement", "codex")
+	testsupport.Must(t, tx.SetStepRoutingTx(review, "advance", "approved", db.StepDone, "", 1), "SetStepRoutingTx")
+	for _, e := range []NewEvent{
+		{AtMS: 10, Kind: "step-claimed", RunID: run, StepID: implement, Data: `{"n": 1}`},
+		{AtMS: 20, Kind: "step-recorded", RunID: run, StepID: review, Data: `{"n": 2}`},
+		{AtMS: 30, Kind: "step-claimed", RunID: run, Data: `{"n": 3}`},
+		{AtMS: 40, Kind: "issue-done", RunID: run, StepID: review, IssueID: issue, Data: `{"n": 4}`},
+		{AtMS: 50, Kind: "step-claimed", RunID: otherRun, StepID: elsewhere, Data: `{"n": 5}`},
+		{AtMS: 60, Kind: "issue-done", IssueID: issue, Data: `{"n": 6}`},
+	} {
+		testsupport.Must(t, tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+
+	wantStepEvents := []StepEvent{
+		{StepID: implement, Kind: "step-claimed", Data: `{"n": 1}`},
+		{StepID: review, Kind: "step-recorded", Data: `{"n": 2}`},
+	}
+	if got, err := st.RunStepEvents(run, "step-claimed", "step-recorded"); err != nil || !reflect.DeepEqual(got, wantStepEvents) {
+		t.Errorf("RunStepEvents = (%+v, %v), want (%+v, nil)", got, err, wantStepEvents)
+	}
+	wantProducers := []StepProducer{
+		{StepID: implement, Instance: "implement@0", Executor: "claude", IssueID: issue},
+		{StepID: review, Instance: "review@0", IssueID: issue},
+	}
+	if got, err := st.RunStepProducers(run); err != nil || !reflect.DeepEqual(got, wantProducers) {
+		t.Errorf("RunStepProducers = (%+v, %v), want (%+v, nil)", got, err, wantProducers)
+	}
+	if first, last, found, err := st.RunEventSpanMS(run, "step-claimed", "issue-done"); err != nil || !found || first != 10 || last != 40 {
+		t.Errorf("RunEventSpanMS = (%d, %d, %v, %v), want (10, 40, true, nil)", first, last, found, err)
+	}
+	if first, last, found, err := st.RunEventSpanMS(otherRun, "issue-done"); err != nil || found || first != 0 || last != 0 {
+		t.Errorf("RunEventSpanMS of a kind the run never logged = (%d, %d, %v, %v), want (0, 0, false, nil)",
+			first, last, found, err)
+	}
+	wantLatest := IssueEvent{IssueID: issue, AtMS: 60, Data: `{"n": 6}`}
+	if got, found, err := st.LatestIssueEvent(issue, "issue-done"); err != nil || !found || got != wantLatest {
+		t.Errorf("LatestIssueEvent = (%+v, %v, %v), want (%+v, true, nil)", got, found, err, wantLatest)
+	}
+	if got, found, err := st.LatestIssueEvent(issue, "issue-abandoned"); err != nil || found || got != (IssueEvent{}) {
+		t.Errorf("LatestIssueEvent of a kind never logged = (%+v, %v, %v), want (zero, false, nil)", got, found, err)
+	}
+
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if got, err := snap.RunStepEventsTx(run, "step-claimed", "step-recorded"); err != nil || !reflect.DeepEqual(got, wantStepEvents) {
+		t.Errorf("RunStepEventsTx = (%+v, %v), want (%+v, nil)", got, err, wantStepEvents)
+	}
+	wantData := []string{`{"n": 1}`, `{"n": 3}`}
+	if got, err := snap.RunEventDataTx(run, "step-claimed"); err != nil || !reflect.DeepEqual(got, wantData) {
+		t.Errorf("RunEventDataTx = (%q, %v), want (%q, nil)", got, err, wantData)
+	}
+	wantIssueEvents := []IssueEvent{
+		{IssueID: issue, RunID: run, AtMS: 40, Data: `{"n": 4}`, StepRouting: "advance: approved"},
+	}
+	if got, err := snap.RunIssueEventsTx(run, "issue-done"); err != nil || !reflect.DeepEqual(got, wantIssueEvents) {
+		t.Errorf("RunIssueEventsTx = (%+v, %v), want (%+v, nil)", got, err, wantIssueEvents)
 	}
 }
