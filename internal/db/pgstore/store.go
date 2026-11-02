@@ -1007,6 +1007,10 @@ func (t *pgTx) IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepI
 	return db.IssueStepsBelowOrdinalTx(t.tx, runID, issueID, ordinal)
 }
 
+func (t *pgTx) IssueUnfinishedStepsTx(runID, issueID int) ([]db.UnfinishedStep, error) {
+	return db.IssueUnfinishedStepsTx(t.tx, runID, issueID)
+}
+
 func (t *pgTx) LastDispatchDeferralTx(q db.SourcedDeferralQuery) (int64, string, bool, error) {
 	return db.LastDispatchDeferralTx(t.tx, q)
 }
@@ -1172,8 +1176,16 @@ func (t *pgTx) RunEventDataTx(runID int, kinds ...string) ([]string, error) {
 	return db.RunEventDataTx(t.tx, runID, kinds...)
 }
 
+func (t *pgTx) RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error) {
+	return db.RunEventsTx(t.tx, runID, kinds...)
+}
+
 func (t *pgTx) RunEverDispatchedTx(runID int) (bool, error) {
 	return db.RunEverDispatchedTx(t.tx, runID)
+}
+
+func (t *pgTx) RunHasIssueTx(runID, issueID int) (bool, error) {
+	return db.RunHasIssueTx(t.tx, runID, issueID)
 }
 
 func (t *pgTx) RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error) {
@@ -1192,12 +1204,24 @@ func (t *pgTx) RunStatusTx(runID int) (model.RunStatus, error) {
 	return db.RunStatusTx(t.tx, runID)
 }
 
+func (t *pgTx) RunStepEventSeqsTx(runID int) ([]db.StepEventSeq, error) {
+	return db.RunStepEventSeqsTx(t.tx, runID)
+}
+
 func (t *pgTx) RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, error) {
 	return db.RunStepEventsTx(t.tx, runID, kinds...)
 }
 
 func (t *pgTx) RunStepRollupTx(runID int) (db.RunStepRollup, error) {
 	return db.RunStepRollupTx(t.tx, runID)
+}
+
+func (t *pgTx) RunUnfinishedStepCountTx(runID int) (int, error) {
+	return db.RunUnfinishedStepCountTx(t.tx, runID)
+}
+
+func (t *pgTx) RunWorktreesTx(runID, issueID int) ([]string, error) {
+	return db.RunWorktreesTx(t.tx, runID, issueID)
 }
 
 func (t *pgTx) StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error) {
@@ -1258,6 +1282,10 @@ func (t *pgTx) WorkGraphRelationsTx(issueIDs []int) ([]model.Relation, error) {
 
 func (t *pgTx) AckReapTx(runID int, seq int64, ackedBy string, nowMS int64) (db.AckReapResult, error) {
 	return db.AckReapTx(t.tx, runID, seq, ackedBy, nowMS)
+}
+
+func (t *pgTx) AddPinTx(p db.Pin) (int, error) {
+	return db.AddPinTx(t.tx, p)
 }
 
 func (t *pgTx) AdvanceSagaTx(id int, from, to string, nowMS int64) error {
@@ -1328,12 +1356,20 @@ func (t *pgTx) DeletePrunableEventsTx(sel db.EventPruneSelection) (int, error) {
 	return db.DeletePrunableEventsTx(t.tx, sel)
 }
 
+func (t *pgTx) DropPinTx(runID int, kind, ref, oldSHA string) (int, error) {
+	return db.DropPinTx(t.tx, runID, kind, ref, oldSHA)
+}
+
 func (t *pgTx) ExemptStepAttemptFromBudgetTx(id int, nowMS int64) error {
 	return db.ExemptStepAttemptFromBudgetTx(t.tx, id, nowMS)
 }
 
 func (t *pgTx) ExtendDispatchTx(id int, expiresMS, extendedSeq int64) (bool, error) {
 	return db.ExtendDispatchTx(t.tx, id, expiresMS, extendedSeq)
+}
+
+func (t *pgTx) FailRouteIssueStepsTx(runID, issueID int, nowMS int64) (int, error) {
+	return db.FailRouteIssueStepsTx(t.tx, runID, issueID, nowMS)
 }
 
 func (t *pgTx) GrantLoopTx(runID, issueID int) (int, error) {
@@ -1536,6 +1572,10 @@ func (t *pgTx) ReleaseStepLeaseTx(id int, nowMS int64) error {
 
 func (t *pgTx) ReMintStepTokenTx(id int, owner string, nowMS int64) (string, error) {
 	return db.ReMintStepTokenTx(t.tx, id, owner, nowMS)
+}
+
+func (t *pgTx) RepinPinTx(runID int, kind, ref, oldSHA, newSHA string) (int, error) {
+	return db.RepinPinTx(t.tx, runID, kind, ref, oldSHA, newSHA)
 }
 
 func (t *pgTx) ResetStepRetryBudgetTx(id int, nowMS int64) error {

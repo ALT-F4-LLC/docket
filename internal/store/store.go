@@ -61,6 +61,14 @@ type (
 	StepProducer = db.StepProducer
 )
 
+// The run lifecycle and repin query rows, aliased as in aliases.go so callers
+// can read them without importing internal/db.
+type (
+	RunEvent       = db.RunEvent
+	StepEventSeq   = db.StepEventSeq
+	UnfinishedStep = db.UnfinishedStep
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -303,6 +311,7 @@ type ReadTx interface {
 	IssueStatusResolutionTx(issueID int) (model.Status, string, error)
 	IssueStatusTx(issueID int) (model.Status, error)
 	IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepInstanceRef, error)
+	IssueUnfinishedStepsTx(runID, issueID int) ([]db.UnfinishedStep, error)
 	LastDispatchDeferralTx(q db.SourcedDeferralQuery) (seq int64, data string, found bool, err error)
 	LastEventAtMSTx() (atMS int64, found bool, err error)
 	LatestEventDataTx(runID int, kind string) (data string, found bool, err error)
@@ -339,13 +348,18 @@ type ReadTx interface {
 	RunConductorHashTx(id int) (string, error)
 	RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (float64, error)
 	RunEventDataTx(runID int, kinds ...string) ([]string, error)
+	RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error)
 	RunEverDispatchedTx(runID int) (bool, error)
+	RunHasIssueTx(runID, issueID int) (bool, error)
 	RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error)
 	RunPauseOriginTx(id int) (model.RunPauseOrigin, error)
 	RunProjectIDTx(runID int) (int, error)
 	RunStatusTx(runID int) (model.RunStatus, error)
+	RunStepEventSeqsTx(runID int) ([]db.StepEventSeq, error)
 	RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, error)
 	RunStepRollupTx(runID int) (db.RunStepRollup, error)
+	RunUnfinishedStepCountTx(runID int) (int, error)
+	RunWorktreesTx(runID, issueID int) ([]string, error)
 	StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error)
 	StepByInstanceTx(runID, issueID int, instance string) (db.StepInstanceRef, error)
 	StepHasLaterInstanceTx(runID, issueID int, stepName string, ordinal int) (bool, error)
@@ -370,6 +384,7 @@ type Tx interface {
 	Commit() error
 
 	AckReapTx(runID int, seq int64, ackedBy string, nowMS int64) (db.AckReapResult, error)
+	AddPinTx(p db.Pin) (int, error)
 	AdvanceSagaTx(id int, from, to string, nowMS int64) error
 	AuthorizeStepTx(id int, token string, nowMS int64) (*model.Lease, error)
 	BindRunIssueTx(ri *db.RunIssue) error
@@ -387,8 +402,10 @@ type Tx interface {
 	CompleteIssueTx(issueID int, prior model.Status, resolution string, nowMS int64) (bool, error)
 	CoverGateOverrideGrantsTx(ids []int) error
 	DeletePrunableEventsTx(sel db.EventPruneSelection) (int, error)
+	DropPinTx(runID int, kind, ref, oldSHA string) (int, error)
 	ExemptStepAttemptFromBudgetTx(id int, nowMS int64) error
 	ExtendDispatchTx(id int, expiresMS, extendedSeq int64) (bool, error)
+	FailRouteIssueStepsTx(runID, issueID int, nowMS int64) (int, error)
 	GrantLoopTx(runID, issueID int) (int, error)
 	IncrementLoopCountTx(runID, issueID int) (int, error)
 	InsertActionResultTx(r db.ActionResultRow) error
@@ -437,6 +454,7 @@ type Tx interface {
 	RefreshClaimLeaseTx(id int, tokenHash string, ttlMS, nowMS int64) (bool, error)
 	ReleaseStepLeaseTx(id int, nowMS int64) error
 	ReMintStepTokenTx(id int, owner string, nowMS int64) (token string, err error)
+	RepinPinTx(runID int, kind, ref, oldSHA, newSHA string) (int, error)
 	ResetStepRetryBudgetTx(id int, nowMS int64) error
 	RetireStepTokenTx(id int) error
 	SetConfigTx(projectID int, key, value string) (prior string, err error)

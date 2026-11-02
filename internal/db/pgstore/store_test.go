@@ -387,6 +387,120 @@ func TestPgStoreReportAndLedgerQueries(t *testing.T) {
 	}
 }
 
+// TestPgStoreRunLifecycleQueries runs the run lifecycle and repin queries,
+// whose helper SQL the PostgreSQL store shares, against a seeded run: the
+// reads keep their run, issue and kind filters, the jsonb data scans back as
+// text, INSERT OR IGNORE on a held pin affects no row, and each write reports
+// the rows it changed. Payloads are written in jsonb's canonical text so they
+// read back unchanged. It skips without DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreRunLifecycleQueries(t *testing.T) {
+	f := newSagaFixture(t)
+	implement := f.add(db.StepRow{StepName: "implement", Status: db.StepDone})
+	review := f.add(db.StepRow{StepName: "review", Status: db.StepRunning})
+	verify := f.add(db.StepRow{StepName: "verify", Status: db.StepPending})
+	elsewhere := f.add(db.StepRow{RunID: f.otherRun, StepName: "implement", Status: db.StepPending})
+	for id, root := range map[int]string{implement: "/wt/b", review: "/wt/a", verify: "/wt/b", elsewhere: "/wt/elsewhere"} {
+		testsupport.Must(t, f.tx.SetStepWorkRootTx(id, root), "SetStepWorkRootTx %d", id)
+	}
+	f.event(f.run, implement, "step-claimed", `{"n": 1}`)
+	f.event(f.run, 0, "run-paused", `{"n": 2}`)
+	f.event(f.run, review, "step-recorded", `{"n": 3}`)
+	f.event(f.otherRun, elsewhere, "step-claimed", `{"n": 4}`)
+	testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+	snap, err := f.st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	for _, issueID := range []int{0, f.issue} {
+		if got, err := snap.RunWorktreesTx(f.run, issueID); err != nil || !reflect.DeepEqual(got, []string{"/wt/a", "/wt/b"}) {
+			t.Errorf("RunWorktreesTx(run, %d) = (%q, %v), want ([/wt/a /wt/b], nil)", issueID, got, err)
+		}
+	}
+	if got, err := snap.RunWorktreesTx(f.run, f.issue+1000); err != nil || len(got) != 0 {
+		t.Errorf("RunWorktreesTx of an issue with no steps = (%q, %v), want (none, nil)", got, err)
+	}
+	if in, err := snap.RunHasIssueTx(f.run, f.issue); err != nil || !in {
+		t.Errorf("RunHasIssueTx of a bound issue = (%v, %v), want (true, nil)", in, err)
+	}
+	if in, err := snap.RunHasIssueTx(f.run, f.issue+1000); err != nil || in {
+		t.Errorf("RunHasIssueTx of an unbound issue = (%v, %v), want (false, nil)", in, err)
+	}
+	wantUnfinished := []db.UnfinishedStep{
+		{ID: review, Instance: "review@0", Status: db.StepRunning},
+		{ID: verify, Instance: "verify@0", Status: db.StepPending},
+	}
+	if got, err := snap.IssueUnfinishedStepsTx(f.run, f.issue); err != nil || !reflect.DeepEqual(got, wantUnfinished) {
+		t.Errorf("IssueUnfinishedStepsTx = (%+v, %v), want (%+v, nil)", got, err, wantUnfinished)
+	}
+	if n, err := snap.RunUnfinishedStepCountTx(f.run); err != nil || n != 2 {
+		t.Errorf("RunUnfinishedStepCountTx = (%d, %v), want (2, nil)", n, err)
+	}
+	events, err := snap.RunEventsTx(f.run, "step-claimed", "step-recorded")
+	if err != nil || len(events) != 2 {
+		t.Fatalf("RunEventsTx = (%+v, %v), want two events", events, err)
+	}
+	if events[0].Seq >= events[1].Seq {
+		t.Errorf("RunEventsTx seqs %d, %d are not in ascending order", events[0].Seq, events[1].Seq)
+	}
+	wantEvents := []db.RunEvent{
+		{Seq: events[0].Seq, AtMS: 1, Kind: "step-claimed", Data: `{"n": 1}`},
+		{Seq: events[1].Seq, AtMS: 1, Kind: "step-recorded", Data: `{"n": 3}`},
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Errorf("RunEventsTx = %+v, want %+v", events, wantEvents)
+	}
+	if got, err := snap.RunEventsTx(f.run); err != nil || len(got) != 0 {
+		t.Errorf("RunEventsTx naming no kind = (%+v, %v), want (none, nil)", got, err)
+	}
+	wantSeqs := []db.StepEventSeq{
+		{StepID: implement, Kind: "step-claimed", Seq: events[0].Seq},
+		{StepID: review, Kind: "step-recorded", Seq: events[1].Seq},
+	}
+	if got, err := snap.RunStepEventSeqsTx(f.run); err != nil || !reflect.DeepEqual(got, wantSeqs) {
+		t.Errorf("RunStepEventSeqsTx = (%+v, %v), want (%+v, nil)", got, err, wantSeqs)
+	}
+
+	tx, err := f.st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	pin := db.Pin{RunID: f.run, Kind: "contract", Ref: "contracts/implement.md", SHA256: "old",
+		Content: sql.NullString{String: "body", Valid: true}}
+	if n, err := tx.AddPinTx(pin); err != nil || n != 1 {
+		t.Errorf("AddPinTx of a new ref = (%d, %v), want (1, nil)", n, err)
+	}
+	if n, err := tx.AddPinTx(db.Pin{RunID: f.run, Kind: pin.Kind, Ref: pin.Ref, SHA256: "other"}); err != nil || n != 0 {
+		t.Errorf("AddPinTx of a ref the run already pins = (%d, %v), want (0, nil)", n, err)
+	}
+	if n, err := tx.RepinPinTx(f.run, pin.Kind, pin.Ref, "stale", "new"); err != nil || n != 0 {
+		t.Errorf("RepinPinTx from a hash the run does not hold = (%d, %v), want (0, nil)", n, err)
+	}
+	if n, err := tx.RepinPinTx(f.run, pin.Kind, pin.Ref, "old", "new"); err != nil || n != 1 {
+		t.Errorf("RepinPinTx = (%d, %v), want (1, nil)", n, err)
+	}
+	wantPins := []db.Pin{{RunID: f.run, Kind: pin.Kind, Ref: pin.Ref, SHA256: "new"}}
+	if got, err := tx.ListPinsTx(f.run); err != nil || !reflect.DeepEqual(got, wantPins) {
+		t.Errorf("ListPinsTx after the repin = (%+v, %v), want (%+v, nil): the old bytes are cleared", got, err, wantPins)
+	}
+	if n, err := tx.DropPinTx(f.run, pin.Kind, pin.Ref, "old"); err != nil || n != 0 {
+		t.Errorf("DropPinTx at a hash the run no longer holds = (%d, %v), want (0, nil)", n, err)
+	}
+	if n, err := tx.DropPinTx(f.run, pin.Kind, pin.Ref, "new"); err != nil || n != 1 {
+		t.Errorf("DropPinTx = (%d, %v), want (1, nil)", n, err)
+	}
+	if n, err := tx.FailRouteIssueStepsTx(f.run, f.issue, 99); err != nil || n != 2 {
+		t.Errorf("FailRouteIssueStepsTx = (%d, %v), want (2, nil)", n, err)
+	}
+	for id, want := range map[int]string{
+		implement: db.StepDone, review: db.StepFailedRouted, verify: db.StepFailedRouted, elsewhere: db.StepPending,
+	} {
+		step, err := tx.GetStepTx(id)
+		testsupport.Must(t, err, "GetStepTx: %v", err)
+		if step.Status != want {
+			t.Errorf("after FailRouteIssueStepsTx, step %d status = %q, want %q", id, step.Status, want)
+		}
+	}
+}
+
 func TestRebindPlaceholders(t *testing.T) {
 	cases := []struct {
 		in    string

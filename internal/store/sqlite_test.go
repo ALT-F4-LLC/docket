@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -293,5 +294,161 @@ func TestSQLiteReportAndLedgerQueries(t *testing.T) {
 	}
 	if got, err := snap.RunIssueEventsTx(run, "issue-done"); err != nil || !reflect.DeepEqual(got, wantIssueEvents) {
 		t.Errorf("RunIssueEventsTx = (%+v, %v), want (%+v, nil)", got, err, wantIssueEvents)
+	}
+}
+
+// TestSQLiteRunLifecycleQueries reaches the run lifecycle and repin queries
+// through a Tx and a read snapshot, on a seeded run of two issues: the reads
+// return only the run, issue and kinds asked for, typed by the store aliases,
+// and the pin and fail-route writes report how many rows they changed.
+func TestSQLiteRunLifecycleQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	project, err := st.EnsureProject("/repo/lifecycle", "lifecycle", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	wf, _, err := st.InsertWorkflow(&model.Workflow{
+		ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+	}, 1)
+	testsupport.Must(t, err, "InsertWorkflow: %v", err)
+	newIssue := func(title string) int {
+		id, _, err := st.CreateIssueIdempotent(&model.Issue{
+			ProjectID: project, Title: title, Status: model.StatusTodo,
+			Priority: model.PriorityNone, Kind: model.IssueKindTask,
+		}, nil, nil, "")
+		testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+		return id
+	}
+	issue, sibling, outsider := newIssue("lifecycle subject"), newIssue("lifecycle sibling"), newIssue("not in the run")
+	newRun := func() int {
+		run, _, err := st.InsertRunWithContextIdempotent(project, "lifecycle", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		testsupport.Must(t, st.AddRunIssue(run.ID, sibling), "AddRunIssue")
+		return run.ID
+	}
+	run, otherRun := newRun(), newRun()
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the seeding transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	addStep := func(runID, issueID int, name, status, workRoot string) int {
+		t.Helper()
+		instance := name + "@0"
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: runID, IssueID: issueID, WorkflowID: wf.ID, StepName: name, Instance: instance,
+			Kind: "executor", Status: status,
+		}, 1), "InsertStepTx %s", instance)
+		id, found, err := tx.StepIDByInstanceTx(runID, issueID, instance)
+		testsupport.Must(t, err, "StepIDByInstanceTx: %v", err)
+		if !found {
+			t.Fatalf("step %s was not found after its insert", instance)
+		}
+		if workRoot != "" {
+			testsupport.Must(t, tx.SetStepWorkRootTx(id, workRoot), "SetStepWorkRootTx %s", instance)
+		}
+		return id
+	}
+	implement := addStep(run, issue, "implement", db.StepDone, "/wt/b")
+	review := addStep(run, issue, "review", db.StepRunning, "/wt/a")
+	verify := addStep(run, issue, "verify", db.StepPending, "/wt/b")
+	siblingStep := addStep(run, sibling, "implement", db.StepPending, "/wt/c")
+	addStep(otherRun, issue, "implement", db.StepPending, "/wt/elsewhere")
+	for _, e := range []NewEvent{
+		{AtMS: 10, Kind: "step-claimed", RunID: run, StepID: implement, Data: `{"n": 1}`},
+		{AtMS: 20, Kind: "run-paused", RunID: run, Data: `{"n": 2}`},
+		{AtMS: 30, Kind: "step-recorded", RunID: run, StepID: review, Data: `{"n": 3}`},
+		{AtMS: 40, Kind: "step-claimed", RunID: otherRun, Data: `{"n": 4}`},
+	} {
+		testsupport.Must(t, tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	if got, err := snap.RunWorktreesTx(run, 0); err != nil || !reflect.DeepEqual(got, []string{"/wt/a", "/wt/b", "/wt/c"}) {
+		t.Errorf("RunWorktreesTx(run, 0) = (%q, %v), want ([/wt/a /wt/b /wt/c], nil)", got, err)
+	}
+	if got, err := snap.RunWorktreesTx(run, issue); err != nil || !reflect.DeepEqual(got, []string{"/wt/a", "/wt/b"}) {
+		t.Errorf("RunWorktreesTx(run, issue) = (%q, %v), want ([/wt/a /wt/b], nil)", got, err)
+	}
+	if in, err := snap.RunHasIssueTx(run, issue); err != nil || !in {
+		t.Errorf("RunHasIssueTx of a bound issue = (%v, %v), want (true, nil)", in, err)
+	}
+	if in, err := snap.RunHasIssueTx(run, outsider); err != nil || in {
+		t.Errorf("RunHasIssueTx of an unbound issue = (%v, %v), want (false, nil)", in, err)
+	}
+	wantUnfinished := []UnfinishedStep{
+		{ID: review, Instance: "review@0", Status: db.StepRunning},
+		{ID: verify, Instance: "verify@0", Status: db.StepPending},
+	}
+	if got, err := snap.IssueUnfinishedStepsTx(run, issue); err != nil || !reflect.DeepEqual(got, wantUnfinished) {
+		t.Errorf("IssueUnfinishedStepsTx = (%+v, %v), want (%+v, nil)", got, err, wantUnfinished)
+	}
+	if n, err := snap.RunUnfinishedStepCountTx(run); err != nil || n != 3 {
+		t.Errorf("RunUnfinishedStepCountTx = (%d, %v), want (3, nil)", n, err)
+	}
+	wantEvents := []RunEvent{
+		{Seq: 1, AtMS: 10, Kind: "step-claimed", Data: `{"n": 1}`},
+		{Seq: 3, AtMS: 30, Kind: "step-recorded", Data: `{"n": 3}`},
+	}
+	if got, err := snap.RunEventsTx(run, "step-claimed", "step-recorded"); err != nil || !reflect.DeepEqual(got, wantEvents) {
+		t.Errorf("RunEventsTx = (%+v, %v), want (%+v, nil)", got, err, wantEvents)
+	}
+	if got, err := snap.RunEventsTx(run); err != nil || len(got) != 0 {
+		t.Errorf("RunEventsTx naming no kind = (%+v, %v), want (none, nil)", got, err)
+	}
+	wantSeqs := []StepEventSeq{
+		{StepID: implement, Kind: "step-claimed", Seq: 1},
+		{StepID: review, Kind: "step-recorded", Seq: 3},
+	}
+	if got, err := snap.RunStepEventSeqsTx(run); err != nil || !reflect.DeepEqual(got, wantSeqs) {
+		t.Errorf("RunStepEventSeqsTx = (%+v, %v), want (%+v, nil)", got, err, wantSeqs)
+	}
+	testsupport.Must(t, snap.Rollback(), "closing the read snapshot")
+
+	tx, err = st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	pin := db.Pin{RunID: run, Kind: "contract", Ref: "contracts/implement.md", SHA256: "old",
+		Content: sql.NullString{String: "body", Valid: true}}
+	if n, err := tx.AddPinTx(pin); err != nil || n != 1 {
+		t.Errorf("AddPinTx of a new ref = (%d, %v), want (1, nil)", n, err)
+	}
+	if n, err := tx.AddPinTx(db.Pin{RunID: run, Kind: pin.Kind, Ref: pin.Ref, SHA256: "other"}); err != nil || n != 0 {
+		t.Errorf("AddPinTx of a ref the run already pins = (%d, %v), want (0, nil)", n, err)
+	}
+	if n, err := tx.RepinPinTx(run, pin.Kind, pin.Ref, "stale", "new"); err != nil || n != 0 {
+		t.Errorf("RepinPinTx from a hash the run does not hold = (%d, %v), want (0, nil)", n, err)
+	}
+	if n, err := tx.RepinPinTx(run, pin.Kind, pin.Ref, "old", "new"); err != nil || n != 1 {
+		t.Errorf("RepinPinTx = (%d, %v), want (1, nil)", n, err)
+	}
+	wantPins := []db.Pin{{RunID: run, Kind: pin.Kind, Ref: pin.Ref, SHA256: "new"}}
+	if got, err := tx.ListPinsTx(run); err != nil || !reflect.DeepEqual(got, wantPins) {
+		t.Errorf("ListPinsTx after the repin = (%+v, %v), want (%+v, nil): the old bytes are cleared", got, err, wantPins)
+	}
+	if n, err := tx.DropPinTx(run, pin.Kind, pin.Ref, "old"); err != nil || n != 0 {
+		t.Errorf("DropPinTx at a hash the run no longer holds = (%d, %v), want (0, nil)", n, err)
+	}
+	if n, err := tx.DropPinTx(run, pin.Kind, pin.Ref, "new"); err != nil || n != 1 {
+		t.Errorf("DropPinTx = (%d, %v), want (1, nil)", n, err)
+	}
+	if got, err := tx.ListPinsTx(run); err != nil || len(got) != 0 {
+		t.Errorf("ListPinsTx after the drop = (%+v, %v), want (none, nil)", got, err)
+	}
+
+	if n, err := tx.FailRouteIssueStepsTx(run, issue, 99); err != nil || n != 2 {
+		t.Errorf("FailRouteIssueStepsTx = (%d, %v), want (2, nil)", n, err)
+	}
+	for id, want := range map[int]string{
+		implement: db.StepDone, review: db.StepFailedRouted, verify: db.StepFailedRouted, siblingStep: db.StepPending,
+	} {
+		step, err := tx.GetStepTx(id)
+		testsupport.Must(t, err, "GetStepTx: %v", err)
+		if step.Status != want {
+			t.Errorf("after FailRouteIssueStepsTx, step %d status = %q, want %q", id, step.Status, want)
+		}
+	}
+	if n, err := tx.RunUnfinishedStepCountTx(run); err != nil || n != 1 {
+		t.Errorf("RunUnfinishedStepCountTx after the fail-route = (%d, %v), want (1, nil)", n, err)
 	}
 }
