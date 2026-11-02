@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -236,7 +235,7 @@ type issueFacts struct {
 }
 
 // LoadScheduler reads everything the predicate needs, once, inside tx.
-func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, nowMS int64) (*Scheduler, error) {
+func LoadScheduler(tx store.LegacyTx, runID int, defs map[int]*workflow.Definition, nowMS int64) (*Scheduler, error) {
 	st := store.TxOn(tx)
 	run, err := st.GetRunTx(runID)
 	if err != nil {
@@ -267,7 +266,7 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 	// question instead. No extra query: ListRunIssuesTx already carries it.
 	routing := make(map[int]snapshotRouting, len(runIssues))
 	for _, ri := range runIssues {
-		f, err := loadIssueFacts(tx, ri.IssueID)
+		f, err := loadIssueFacts(st, ri.IssueID)
 		if err != nil {
 			return nil, err
 		}
@@ -302,15 +301,12 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 		if _, ok := foreignScopes[holder.IssueID]; ok {
 			continue
 		}
-		var scope sql.NullString
-		err := tx.QueryRow(
-			`SELECT scope_globs FROM issues WHERE id = ?`, holder.IssueID,
-		).Scan(&scope)
+		scope, err := st.IssueScopeGlobsTx(holder.IssueID)
 		if err != nil {
 			return nil, fmt.Errorf("reading scope for %s: %w",
 				model.FormatID(holder.IssueID), err)
 		}
-		globs, err := decodeScope(scope.String)
+		globs, err := decodeScope(scope)
 		if err != nil {
 			return nil, fmt.Errorf("reading scope for %s: %w",
 				model.FormatID(holder.IssueID), err)
@@ -397,31 +393,27 @@ func LoadScheduler(tx *sql.Tx, runID int, defs map[int]*workflow.Definition, now
 // an operator's mid-run scope correction — which exists precisely to prevent a
 // collision — takes effect immediately. The CONTEXT BUNDLE asks a different
 // question and reads the snapshot; the two answers legitimately differ.
-func loadIssueFacts(tx *sql.Tx, issueID int) (*issueFacts, error) {
-	var (
-		priority string
-		scope    sql.NullString
-	)
-	err := tx.QueryRow(
-		`SELECT priority, scope_globs FROM issues WHERE id = ?`, issueID,
-	).Scan(&priority, &scope)
+func loadIssueFacts(tx store.ReadTx, issueID int) (*issueFacts, error) {
+	priority, scope, err := tx.IssueSchedulingFactsTx(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading scheduling facts for %s: %w",
 			model.FormatID(issueID), err)
 	}
 
-	globs, err := decodeScope(scope.String)
+	globs, err := decodeScope(scope)
 	if err != nil {
 		return nil, fmt.Errorf("reading scope for %s: %w", model.FormatID(issueID), err)
 	}
 
-	depsOK, err := issueDependenciesSatisfiedTx(tx, issueID)
+	// R2 asks about the ISSUE graph, not the step graph (R3 is the step half):
+	// every `depends_on` predecessor, in or out of the run, must be `done`.
+	depsOK, err := tx.IssueDependenciesDoneTx(issueID)
 	if err != nil {
 		return nil, err
 	}
 
 	return &issueFacts{
-		id: issueID, priority: model.Priority(priority),
+		id: issueID, priority: priority,
 		scopeGlobs: globs, depsOK: depsOK,
 	}, nil
 }
@@ -479,39 +471,6 @@ func decodeScope(stored string) ([]string, error) {
 	return globs, nil
 }
 
-// issueDependenciesSatisfiedTx is R2: every `depends_on` predecessor of this
-// issue is `done`.
-//
-// It asks about the ISSUE graph, not the step graph — R3 is the step half —
-// and it reads the relation table directly rather than through the planner
-// because the planner's DAG is built over a candidate set, while this question
-// is about one issue and all of its predecessors, in or out of the run.
-func issueDependenciesSatisfiedTx(tx *sql.Tx, issueID int) (bool, error) {
-	rows, err := tx.Query(
-		`SELECT i.status
-		   FROM issue_relations r
-		   JOIN issues i ON i.id = r.target_issue_id
-		  WHERE r.source_issue_id = ? AND r.relation_type = 'depends_on'`,
-		issueID,
-	)
-	if err != nil {
-		return false, fmt.Errorf("reading dependencies for %s: %w",
-			model.FormatID(issueID), err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var status string
-		if err := rows.Scan(&status); err != nil {
-			return false, fmt.Errorf("reading dependency status: %w", err)
-		}
-		if model.Status(status) != model.StatusDone {
-			return false, nil
-		}
-	}
-	return true, rows.Err()
-}
-
 // foreignHoldingStepsTx reads the claimed/running steps of every OTHER active
 // run IN THE SAME PROJECT. A scope is held against the whole repository, not
 // against one run, so a step claimed elsewhere excludes here (S3) — but
@@ -519,32 +478,8 @@ func issueDependenciesSatisfiedTx(tx *sql.Tx, issueID int) (bool, error) {
 // repo qualifier, so without the project predicate `internal/**` in one
 // repository would block `internal/**` in every other repository sharing the
 // store.
-func foreignHoldingStepsTx(tx *sql.Tx, projectID, runID int) ([]*store.Step, error) {
-	rows, err := tx.Query(
-		`SELECT s.id, s.issue_id, s.status
-		   FROM steps s
-		   JOIN runs r ON r.id = s.run_id
-		  WHERE s.run_id != ? AND s.status IN (?, ?)
-		    AND r.status NOT IN (?, ?)
-		    AND r.project_id = ?`,
-		runID, store.StepClaimed, store.StepRunning,
-		string(model.RunDone), string(model.RunAbandoned),
-		store.DefaultProjectIDOr(projectID),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("reading steps holding scope elsewhere: %w", err)
-	}
-	defer rows.Close()
-
-	var out []*store.Step
-	for rows.Next() {
-		var s store.Step
-		if err := rows.Scan(&s.ID, &s.IssueID, &s.Status); err != nil {
-			return nil, fmt.Errorf("reading foreign step: %w", err)
-		}
-		out = append(out, &s)
-	}
-	return out, rows.Err()
+func foreignHoldingStepsTx(tx store.LegacyTx, projectID, runID int) ([]*store.Step, error) {
+	return store.TxOn(tx).ForeignHoldingStepsTx(projectID, runID)
 }
 
 // mergeLimits collects the `[limits]` tables of every bound workflow, keyed by
@@ -609,7 +544,7 @@ func mergeLimits(defs map[int]*workflow.Definition) (map[string]workflow.Limit, 
 // override keeps its pinned max, unbounded included; an override on a class no
 // workflow bounds bounds it.
 func applyClassMaxOverrides(
-	tx *sql.Tx, projectID int, limits map[string]workflow.Limit,
+	tx store.LegacyTx, projectID int, limits map[string]workflow.Limit,
 ) (map[string]ClassCapSource, error) {
 	caps, err := store.TxOn(tx).ClassMaxOverridesTx(projectID)
 	if err != nil {

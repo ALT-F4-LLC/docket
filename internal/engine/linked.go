@@ -1,7 +1,7 @@
 package engine
 
 import (
-	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -69,7 +69,7 @@ func linkedSuffix(declared string) string {
 // pure function of the store, so two activations of the same state pin the
 // same rows.
 func resolveLinkedInputs(
-	tx *sql.Tx, issue *model.Issue, def *workflow.Definition,
+	tx store.LegacyTx, issue *model.Issue, def *workflow.Definition,
 ) (map[string][]int, error) {
 	var out map[string][]int
 	for _, step := range def.Steps {
@@ -100,9 +100,10 @@ func resolveLinkedInputs(
 // then the latest recorded artifact of the kind per linked issue, with the
 // loud refusals.
 func resolveLinkedDeclaration(
-	tx *sql.Tx, issue *model.Issue, declared, relation, kind string,
+	tx store.LegacyTx, issue *model.Issue, declared, relation, kind string,
 ) ([]int, error) {
-	linked, err := linkedIssueIDs(tx, issue.ID, relation)
+	stx := store.TxOn(tx)
+	linked, err := linkedIssueIDs(stx, issue.ID, relation)
 	if err != nil {
 		return nil, err
 	}
@@ -115,11 +116,11 @@ func resolveLinkedDeclaration(
 
 	var ids []int
 	for _, linkedID := range linked {
-		id, err := latestArtifactOfKind(tx, linkedID, kind)
+		id, found, err := stx.LatestRecordedArtifactIDTx(linkedID, kind)
 		if err != nil {
 			return nil, err
 		}
-		if id > 0 {
+		if found {
 			ids = append(ids, id)
 		}
 	}
@@ -136,7 +137,7 @@ func resolveLinkedDeclaration(
 
 // linkedIssueIDs resolves the issues one relation token reaches from a
 // consuming issue, sorted ascending so the pin order is deterministic.
-func linkedIssueIDs(tx *sql.Tx, issueID int, relation string) ([]int, error) {
+func linkedIssueIDs(tx store.ReadTx, issueID int, relation string) ([]int, error) {
 	rt, inverse, err := model.ParseRelationDirection(relation)
 	if err != nil {
 		// V11 refuses unknown relation tokens at register, so reaching here
@@ -152,63 +153,31 @@ func linkedIssueIDs(tx *sql.Tx, issueID int, relation string) ([]int, error) {
 
 	seen := make(map[int]bool)
 	var out []int
-	collect := func(query string) error {
-		rows, err := tx.Query(query, issueID, string(rt))
+	collect := func(ids []int, err error) error {
 		if err != nil {
-			return fmt.Errorf("reading %s relations: %w", rt, err)
+			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var id int
-			if err := rows.Scan(&id); err != nil {
-				return fmt.Errorf("reading %s relations: %w", rt, err)
-			}
+		for _, id := range ids {
 			if !seen[id] {
 				seen[id] = true
 				out = append(out, id)
 			}
 		}
-		return rows.Err()
+		return nil
 	}
 
 	if forward {
-		if err := collect(
-			`SELECT target_issue_id FROM issue_relations
-			  WHERE source_issue_id = ? AND relation_type = ?`); err != nil {
+		if err := collect(tx.RelationTargetsTx(issueID, rt)); err != nil {
 			return nil, err
 		}
 	}
 	if backward {
-		if err := collect(
-			`SELECT source_issue_id FROM issue_relations
-			  WHERE target_issue_id = ? AND relation_type = ?`); err != nil {
+		if err := collect(tx.RelationSourcesTx(issueID, rt)); err != nil {
 			return nil, err
 		}
 	}
 	sort.Ints(out)
 	return out, nil
-}
-
-// latestArtifactOfKind is one linked issue's contribution: the highest-id
-// artifact of the kind whose producing step recorded its work, across every
-// run — or 0 when the issue holds none.
-func latestArtifactOfKind(tx *sql.Tx, issueID int, kind string) (int, error) {
-	var id int
-	err := tx.QueryRow(
-		`SELECT a.id FROM artifacts a
-		   JOIN steps s ON s.id = a.step_id
-		  WHERE s.issue_id = ? AND a.kind = ? AND s.status IN (?, ?)
-		  ORDER BY a.id DESC LIMIT 1`,
-		issueID, kind, store.StepDone, store.StepSuperseded).Scan(&id)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf(
-			"resolving the latest %q artifact of %s: %w",
-			kind, model.FormatID(issueID), err)
-	}
-	return id, nil
 }
 
 // formatIDList renders issue ids as display ids for an error message.
@@ -235,7 +204,7 @@ func formatIDList(ids []int) string {
 // resolving to nothing would silently reopen the unenforced-citation gap this
 // form exists to close.
 func resolveLinkedPinned(
-	tx *sql.Tx, step *store.Step, linked map[string][]int, declared string,
+	tx store.LegacyTx, step *store.Step, linked map[string][]int, declared string,
 ) ([]ContextInput, error) {
 	ids, ok := linked[linkedSuffix(declared)]
 	if !ok {
@@ -244,20 +213,11 @@ func resolveLinkedPinned(
 				"snapshot holds no resolution for it", step.Instance, declared)
 	}
 
+	stx := store.TxOn(tx)
 	out := make([]ContextInput, 0, len(ids))
 	for _, id := range ids {
-		var (
-			kind, body string
-			payload    sql.NullString
-			instance   sql.NullString
-			issueID    sql.NullInt64
-		)
-		err := tx.QueryRow(
-			`SELECT a.kind, a.body, a.payload, s.instance, s.issue_id
-			   FROM artifacts a
-			   LEFT JOIN steps s ON s.id = a.step_id
-			  WHERE a.id = ?`, id).Scan(&kind, &body, &payload, &instance, &issueID)
-		if err == sql.ErrNoRows {
+		a, err := stx.PinnedArtifactTx(id)
+		if errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf(
 				"step %s: input %q was pinned to artifact %d at activation, "+
 					"but the artifact no longer exists", step.Instance, declared, id)
@@ -268,15 +228,15 @@ func resolveLinkedPinned(
 		}
 
 		producer := ""
-		if instance.Valid && issueID.Valid {
-			producer = model.FormatID(int(issueID.Int64)) + "/" + instance.String
+		if a.ProducerInstance != "" || a.ProducerIssueID != 0 {
+			producer = model.FormatID(a.ProducerIssueID) + "/" + a.ProducerInstance
 		}
 		out = append(out, ContextInput{
 			Artifact:     fmt.Sprintf("ARTIFACT-%d", id),
-			Kind:         kind,
+			Kind:         a.Kind,
 			ProducerStep: producer,
-			Body:         body,
-			Payload:      payload.String,
+			Body:         a.Body,
+			Payload:      a.Payload,
 		})
 	}
 	return out, nil
@@ -286,7 +246,7 @@ func resolveLinkedPinned(
 // ResolveInputArtifacts' reading, sharing the pinned-id lookup so the two
 // resolvers cannot disagree about which artifacts a declaration binds.
 func linkedArtifacts(
-	tx *sql.Tx, step *store.Step, linked map[string][]int, declared string,
+	tx store.LegacyTx, step *store.Step, linked map[string][]int, declared string,
 ) ([]*store.Artifact, error) {
 	ids, ok := linked[linkedSuffix(declared)]
 	if !ok {

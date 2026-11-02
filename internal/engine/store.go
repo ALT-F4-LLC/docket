@@ -1,10 +1,8 @@
 package engine
 
 import (
-	"database/sql"
+	"errors"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -12,27 +10,27 @@ import (
 
 // The transaction-scoped reads and writes the fat transaction needs.
 //
-// internal/db's API is *sql.DB-based, which is right for verbs that do one
-// thing. Activation is seven stages that either all happen or none do, so it
-// needs every read and write on ONE *sql.Tx — a stage reading through the pool
+// Activation is seven stages that either all happen or none do, so it needs
+// every read and write on ONE transaction — a stage reading through the pool
 // mid-transaction would see pre-transaction state and a stage writing through
-// it would survive the rollback. These helpers exist for that, and only that:
-// they duplicate no logic, they re-scope it.
+// it would survive the rollback. These helpers run the Store's Tx methods
+// inside the caller's transaction and add the engine's error context.
 
 // loadIssues reads a run's issues, with their labels, inside the transaction.
 //
 // Labels come along because binding evaluates `[match]` against them and the
 // snapshot freezes them — two stages that must see the same list, which they
 // will only do if it is read once.
-func loadIssues(tx *sql.Tx, runIssues []*store.RunIssue) (map[int]*model.Issue, error) {
+func loadIssues(tx store.LegacyTx, runIssues []*store.RunIssue) (map[int]*model.Issue, error) {
 	out := make(map[int]*model.Issue, len(runIssues))
 
+	stx := store.TxOn(tx)
 	for _, ri := range runIssues {
-		issue, err := issueTx(tx, ri.IssueID)
+		issue, err := issueTx(stx, ri.IssueID)
 		if err != nil {
 			return nil, err
 		}
-		labels, err := issueLabelsTx(tx, ri.IssueID)
+		labels, err := stx.IssueLabelsTx(ri.IssueID)
 		if err != nil {
 			return nil, err
 		}
@@ -49,53 +47,15 @@ func loadIssues(tx *sql.Tx, runIssues []*store.RunIssue) (map[int]*model.Issue, 
 // `size` joined `priority` and `kind` here for the same reason: binding
 // evaluates `[match].sizes_any` against it (schema v34), exactly as it
 // already evaluates `kind` against `[match].kind`.
-func issueTx(tx *sql.Tx, id int) (*model.Issue, error) {
-	var (
-		issue       model.Issue
-		description sql.NullString
-		createdAt   string
-		updatedAt   string
-	)
-	err := tx.QueryRow(
-		`SELECT id, title, description, status, priority, kind, size, created_at, updated_at, version
-		   FROM issues WHERE id = ?`, id,
-	).Scan(
-		&issue.ID, &issue.Title, &description, &issue.Status, &issue.Priority,
-		&issue.Kind, &issue.Size, &createdAt, &updatedAt, &issue.Version,
-	)
-	if err == sql.ErrNoRows {
+func issueTx(tx store.ReadTx, id int) (*model.Issue, error) {
+	issue, err := tx.ActivationIssueTx(id)
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, notFoundErr(store.ErrNotFound, "issue %s not found", model.FormatID(id))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading issue %s: %w", model.FormatID(id), err)
+		return nil, err
 	}
-	issue.Description = description.String
-	return &issue, nil
-}
-
-// issueLabelsTx reads an issue's label names, sorted. The order is stable
-// because the snapshot is canonical JSON that gets golden-diffed: a
-// label list in join order would make the goldens flap on an unrelated insert.
-func issueLabelsTx(tx *sql.Tx, issueID int) ([]string, error) {
-	rows, err := tx.Query(
-		`SELECT l.name FROM labels l
-		   JOIN issue_labels il ON il.label_id = l.id
-		  WHERE il.issue_id = ? ORDER BY l.name`, issueID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("reading labels for %s: %w", model.FormatID(issueID), err)
-	}
-	defer rows.Close()
-
-	var labels []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("reading label: %w", err)
-		}
-		labels = append(labels, name)
-	}
-	return labels, rows.Err()
+	return issue, nil
 }
 
 // relationsAmongTx reads the directional relations among a set of issues — the
@@ -105,41 +65,12 @@ func issueLabelsTx(tx *sql.Tx, issueID int) ([]string, error) {
 // BuildDAG, which ignores edges to absent nodes. That is the right behavior:
 // an issue depending on something the run does not schedule is not a cycle and
 // not an error, it is simply an edge the run has no say over.
-func relationsAmongTx(tx *sql.Tx, issues []*model.Issue) ([]model.Relation, error) {
-	if len(issues) == 0 {
-		return nil, nil
-	}
-
-	ids := make([]any, 0, len(issues))
-	placeholders := make([]string, 0, len(issues))
+func relationsAmongTx(tx store.LegacyTx, issues []*model.Issue) ([]model.Relation, error) {
+	ids := make([]int, 0, len(issues))
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
-		placeholders = append(placeholders, "?")
 	}
-	args := append(append([]any{}, ids...), ids...)
-
-	query := `SELECT source_issue_id, target_issue_id, relation_type
-	            FROM issue_relations
-	           WHERE relation_type IN ('blocks', 'depends_on')
-	             AND source_issue_id IN (` + strings.Join(placeholders, ", ") + `)
-	             AND target_issue_id IN (` + strings.Join(placeholders, ", ") + `)
-	           ORDER BY id`
-
-	rows, err := tx.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("reading work-graph relations: %w", err)
-	}
-	defer rows.Close()
-
-	var relations []model.Relation
-	for rows.Next() {
-		var rel model.Relation
-		if err := rows.Scan(&rel.SourceIssueID, &rel.TargetIssueID, &rel.RelationType); err != nil {
-			return nil, fmt.Errorf("reading relation: %w", err)
-		}
-		relations = append(relations, rel)
-	}
-	return relations, rows.Err()
+	return store.TxOn(tx).WorkGraphRelationsTx(ids)
 }
 
 // promoteIssueTx is stage 7's per-issue half: `backlog -> todo`, via the same
@@ -150,79 +81,29 @@ func relationsAmongTx(tx *sql.Tx, issues []*model.Issue) ([]model.Relation, erro
 // emits and rewriting it to epoch-ms would change their output (the
 // never-mutate rule). The CAS `version` bumps, so a concurrent writer holding a
 // stale version fails rather than clobbering the promotion.
-func promoteIssueTx(tx *sql.Tx, issueID int, nowMS int64) error {
-	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
-
-	res, err := tx.Exec(
-		`UPDATE issues SET status = ?, updated_at = ?, version = version + 1
-		  WHERE id = ? AND status = ?`,
-		model.StatusTodo, now, issueID, model.StatusBacklog,
-	)
-	if err != nil {
+//
+// An issue someone moved out of `backlog` between the read and this write is
+// not a failure: promotion advances an issue that has not started, and one
+// that has started needs no advancing.
+func promoteIssueTx(tx store.LegacyTx, issueID int, nowMS int64) error {
+	if _, err := moveIssueStatusTx(tx, issueID, model.StatusBacklog, model.StatusTodo, nowMS); err != nil {
 		return fmt.Errorf("promoting %s: %w", model.FormatID(issueID), err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("promoting %s: %w", model.FormatID(issueID), err)
-	}
-	if n == 0 {
-		// Someone moved it out of `backlog` between the read and this write.
-		// That is not a failure: promotion advances an issue that has not
-		// started, and one that has started needs no advancing.
-		return nil
-	}
-
-	_, err = tx.Exec(
-		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
-		 VALUES (?, 'status', ?, ?, '', ?)`,
-		issueID, model.StatusBacklog, model.StatusTodo, now,
-	)
-	if err != nil {
-		return fmt.Errorf("recording promotion of %s: %w", model.FormatID(issueID), err)
 	}
 	return nil
 }
 
-// moveIssueStatusTx moves an issue between two statuses other than `backlog`
-// and `done` (those stay `promoteIssueTx`'s and `completeIssue`'s own),
-// guarded by the same raw-tx-with-WHERE-guard shape those two writers use
-// (DKT-294): the WHERE clause's `status = from` IS the concurrency guard, and
-// `n == 0` means some other write already moved it — a no-op, not a failure,
-// exactly as `promoteIssueTx` treats it.
+// moveIssueStatusTx moves an issue between two statuses other than `done`
+// (that stays `completeIssue`'s own), guarded by `status = from` (DKT-294):
+// that guard IS the concurrency check, and an issue some other write already
+// moved is a no-op, not a failure.
 //
 // It reports whether the row actually moved, so a caller only comments or
 // events on a REAL transition rather than on every call that finds the issue
 // already where it was headed.
 func moveIssueStatusTx(
-	tx *sql.Tx, issueID int, from, to model.Status, nowMS int64,
+	tx store.LegacyTx, issueID int, from, to model.Status, nowMS int64,
 ) (bool, error) {
-	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
-
-	res, err := tx.Exec(
-		`UPDATE issues SET status = ?, updated_at = ?, version = version + 1
-		  WHERE id = ? AND status = ?`,
-		string(to), now, issueID, string(from),
-	)
-	if err != nil {
-		return false, fmt.Errorf("moving %s to %s: %w", model.FormatID(issueID), to, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("moving %s to %s: %w", model.FormatID(issueID), to, err)
-	}
-	if n == 0 {
-		return false, nil
-	}
-
-	_, err = tx.Exec(
-		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
-		 VALUES (?, 'status', ?, ?, '', ?)`,
-		issueID, string(from), string(to), now,
-	)
-	if err != nil {
-		return false, fmt.Errorf("recording the move of %s to %s: %w", model.FormatID(issueID), to, err)
-	}
-	return true, nil
+	return store.TxOn(tx).MoveIssueStatusTx(issueID, from, to, nowMS)
 }
 
 // commentEngineEvent drops one line of DKT-294's activity trail — an
@@ -231,7 +112,7 @@ func moveIssueStatusTx(
 // comment lands in the SAME transaction as the step-status write it narrates,
 // stamped from the SAME `nowMS` — the transition and its narration carry one
 // time, not two clock reads.
-func commentEngineEvent(tx *sql.Tx, issueID int, body string, nowMS int64) error {
+func commentEngineEvent(tx store.LegacyTx, issueID int, body string, nowMS int64) error {
 	if _, err := store.TxOn(tx).InsertEngineComment(issueID, body, nowMS); err != nil {
 		return fmt.Errorf("recording an activity comment on %s: %w", model.FormatID(issueID), err)
 	}
@@ -266,7 +147,7 @@ func commentEngineEvent(tx *sql.Tx, issueID int, body string, nowMS int64) error
 // Reports whether the row moved. `false` means the issue was already outside
 // the mirror's live range (`todo` — abandoned before any step was claimed) or
 // `done`, and there is nothing to undo.
-func releaseAbandonedIssueTx(tx *sql.Tx, issueID int, nowMS int64) (bool, error) {
+func releaseAbandonedIssueTx(tx store.LegacyTx, issueID int, nowMS int64) (bool, error) {
 	for _, from := range []model.Status{model.StatusReview, model.StatusInProgress} {
 		moved, err := moveIssueStatusTx(tx, issueID, from, model.StatusTodo, nowMS)
 		if err != nil {
@@ -288,7 +169,7 @@ func releaseAbandonedIssueTx(tx *sql.Tx, issueID int, nowMS int64) (bool, error)
 // `in-progress` still narrates ITS OWN claim — the trail is about the step
 // claimed, not about whether the issue's status happened to move because of
 // it.
-func reflectIssueOnClaim(tx *sql.Tx, step *store.Step, nowMS int64) error {
+func reflectIssueOnClaim(tx store.LegacyTx, step *store.Step, nowMS int64) error {
 	moved, err := moveIssueStatusTx(tx, step.IssueID, model.StatusTodo, model.StatusInProgress, nowMS)
 	if err != nil {
 		return err
@@ -311,17 +192,8 @@ func reflectIssueOnClaim(tx *sql.Tx, step *store.Step, nowMS int64) error {
 // run was first activated — the moment its pins and snapshots were taken — and
 // overwriting it on every re-activation would erase the timestamp the pin set
 // actually corresponds to.
-func setRunActiveTx(tx *sql.Tx, runID int, reactivation bool, nowMS int64) error {
-	query := `UPDATE runs SET status = ?, updated_at_ms = ?, row_version = row_version + 1`
-	args := []any{string(model.RunActive), nowMS}
-	if !reactivation {
-		query += `, activated_at_ms = ?`
-		args = append(args, nowMS)
-	}
-	query += ` WHERE id = ?`
-	args = append(args, runID)
-
-	if _, err := tx.Exec(query, args...); err != nil {
+func setRunActiveTx(tx store.LegacyTx, runID int, reactivation bool, nowMS int64) error {
+	if err := store.TxOn(tx).SetRunActiveTx(runID, reactivation, nowMS); err != nil {
 		return fmt.Errorf("activating run %s: %w", model.FormatRunID(runID), err)
 	}
 	return nil
