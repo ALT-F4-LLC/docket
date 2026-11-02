@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -187,7 +186,7 @@ func canonicalRowBytes(row model.StepRow) (string, string, error) {
 // batch — and an ack applied after the ready set was computed would produce a
 // manifest that omitted exactly the write-class steps the ack just released.
 func (e *Engine) OpenDispatch(
-	conn *sql.DB, runID int, limit int, ackSeqs []int64, nowMS int64,
+	conn store.LegacyDB, runID int, limit int, ackSeqs []int64, nowMS int64,
 ) (*Manifest, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
@@ -452,7 +451,7 @@ type Extension struct {
 // An EXPIRED manifest is refused rather than extended: extending one would push
 // a lapsed manifest's expiry back out and resurrect a batch the TTL had already
 // given up on, which is the wedge `dispatch abandon` exists to avoid.
-func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extension, error) {
+func (e *Engine) ExtendDispatch(conn store.LegacyDB, runID int, nowMS int64) (*Extension, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -612,7 +611,7 @@ func (e *Engine) ExtendDispatch(conn *sql.DB, runID int, nowMS int64) (*Extensio
 //     second config read could hand the drive a different roster than the
 //     snapshot's own ready set.
 func readySnapshot(
-	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
+	conn store.LegacyDB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) (*Scheduler, error) {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
@@ -833,12 +832,8 @@ func readyOnly(rows []model.StepRow, steps []*store.Step) []*store.Step {
 // A run with no events yet yields 0, which is a legitimate boundary meaning
 // "before everything" rather than a missing value: `opened_seq` answers
 // which reaps postdate the manifest, and every seq is > 0.
-func lastEventSeqTx(tx *sql.Tx) (int64, error) {
-	var seq sql.NullInt64
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&seq); err != nil {
-		return 0, fmt.Errorf("reading the event cursor: %w", err)
-	}
-	return seq.Int64, nil
+func lastEventSeqTx(tx store.LegacyTx) (int64, error) {
+	return store.TxOn(tx).LastEventSeqTx()
 }
 
 // VerifyResult is `dispatch verify`'s answer.
@@ -988,7 +983,7 @@ type RowMismatch struct {
 // core makes no claim that `Stage` is enforced or stable (stage.go: "Core
 // enforces nothing … that is the deliberate limit of a scheduling hint").
 func (e *Engine) VerifyDispatch(
-	conn *sql.DB, runID int, nowMS int64,
+	conn store.LegacyDB, runID int, nowMS int64,
 ) (*VerifyResult, *RowMismatch, error) {
 	result, mismatch, candidates, err := e.verifyDispatchTx(conn, runID, nowMS)
 	if err != nil || mismatch != nil {
@@ -1004,7 +999,7 @@ func (e *Engine) VerifyDispatch(
 // verifyDispatchTx is VerifyDispatch's transactional body: everything except
 // the DKT-193 git pass, which must wait for the rollback.
 func (e *Engine) verifyDispatchTx(
-	conn *sql.DB, runID int, nowMS int64,
+	conn store.LegacyDB, runID int, nowMS int64,
 ) (*VerifyResult, *RowMismatch, []targetCandidate, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
@@ -1246,7 +1241,7 @@ type targetCandidate struct {
 // It runs INSIDE the caller's transaction — resolution is snapshot reads —
 // and shells out to nothing; the git question is the caller's, afterward.
 func staleTargetCandidates(
-	tx *sql.Tx, sched *Scheduler, runID int, steps []*store.Step,
+	tx store.LegacyTx, sched *Scheduler, runID int, steps []*store.Step,
 ) ([]targetCandidate, error) {
 	var out []targetCandidate
 	var artifacts []*store.Artifact
@@ -1364,7 +1359,7 @@ func consumesIssueDiff(spec *workflow.Step) bool {
 // conductor dispatched through this warning on a guess at exactly that, and the
 // string gave it nothing to check the guess against.
 func (e *Engine) staleTargets(
-	conn *sql.DB, runID int, candidates []targetCandidate,
+	conn store.LegacyDB, runID int, candidates []targetCandidate,
 ) []StaleTarget {
 	if len(candidates) == 0 || e == nil || e.IsAncestorFn == nil || e.HeadFn == nil {
 		return nil
@@ -1613,7 +1608,7 @@ type Discrepancy struct {
 // the lease to expire", which is the one an operator can act on immediately, and
 // a list that led with the acceptance flag would invite closing over work that
 // is still running.
-func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Discrepancy, error) {
+func discrepanciesTx(tx store.LegacyTx, sched *Scheduler, runID int, nowMS int64) ([]Discrepancy, error) {
 	return discrepanciesGracedTx(tx, sched, runID, nowMS, true)
 }
 
@@ -1628,7 +1623,7 @@ func discrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]Di
 // report exists to say what is owed now, and a run's last wave has no later
 // close at which the grace would lapse into a refusal.
 func discrepanciesGracedTx(
-	tx *sql.Tx, sched *Scheduler, runID int, nowMS int64, usageGrace bool,
+	tx store.LegacyTx, sched *Scheduler, runID int, nowMS int64, usageGrace bool,
 ) ([]Discrepancy, error) {
 	grace, err := store.TxOn(tx).DispatchGraceTx(sched.run.ProjectID)
 	if err != nil {
@@ -2008,7 +2003,7 @@ const skipIntegrationVerb = "dispatch close --skip-integration-check"
 // `dispatch-close-refused` event, in its own transaction that commits although
 // the close did not, naming the dispatch when one was open.
 func (e *Engine) CloseDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
+	conn store.LegacyDB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*CloseOutcome, error) {
 	openID := 0
 	outcome, err := e.closeDispatch(conn, runID, acceptMissingUsage, skip, nowMS, &openID)
@@ -2021,7 +2016,7 @@ func (e *Engine) CloseDispatch(
 }
 
 // recordCloseRefused writes the `dispatch-close-refused` event (DKT-2758).
-func recordCloseRefused(conn *sql.DB, runID, dispatchID int, reason string, nowMS int64) error {
+func recordCloseRefused(conn store.LegacyDB, runID, dispatchID int, reason string, nowMS int64) error {
 	fields := map[string]any{"reason": reason}
 	if dispatchID > 0 {
 		fields["dispatch"] = FormatDispatchID(dispatchID)
@@ -2046,7 +2041,7 @@ func recordCloseRefused(conn *sql.DB, runID, dispatchID int, reason string, nowM
 // closeDispatch is CloseDispatch's body. openID receives the open dispatch's
 // id as soon as one is read, so a refusal can name it.
 func (e *Engine) closeDispatch(
-	conn *sql.DB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
+	conn store.LegacyDB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 	openID *int,
 ) (*CloseOutcome, error) {
 	if id, ok := openDispatchID(conn, runID); ok {
@@ -2280,7 +2275,7 @@ func closedEventData(instances []string, integration *IntegrationCheck, waiverRe
 //
 // The returned list is what the event and the outcome carry: "STEP-N instance",
 // so a reader of either can act on it without a join.
-func settleAcceptedTx(tx *sql.Tx, accepted []Discrepancy) ([]string, error) {
+func settleAcceptedTx(tx store.LegacyTx, accepted []Discrepancy) ([]string, error) {
 	out := make([]string, 0, len(accepted))
 	for _, d := range accepted {
 		id, err := model.ParseStepID(d.Step)
@@ -2309,7 +2304,7 @@ func settleAcceptedTx(tx *sql.Tx, accepted []Discrepancy) ([]string, error) {
 // able to pull a batch out from under it. The TTL abandon `next` performs
 // stays token-free, because there the engine, not the caller, decides.
 func (e *Engine) AbandonDispatchWith(
-	conn *sql.DB, runID int, opts AbandonDispatchOptions,
+	conn store.LegacyDB, runID int, opts AbandonDispatchOptions,
 ) (*CloseOutcome, error) {
 	reason, nowMS := opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
@@ -2380,7 +2375,7 @@ type AbandonDispatchOptions struct {
 // The run's own dormancy is the first line: a run that never opened a
 // dispatch has no row, the lookup returns nothing, and `next` proceeds exactly
 // as group 1's did.
-func autoAbandonExpiredDispatchTx(tx *sql.Tx, runID int, nowMS int64) error {
+func autoAbandonExpiredDispatchTx(tx store.LegacyTx, runID int, nowMS int64) error {
 	open, err := store.TxOn(tx).OpenDispatchTx(runID)
 	if err != nil {
 		if strings.Contains(err.Error(), store.ErrNoOpenDispatch.Error()) {
@@ -2418,7 +2413,7 @@ func autoAbandonExpiredDispatchTx(tx *sql.Tx, runID int, nowMS int64) error {
 // `accepted`, AbandonDispatchWith's optional `detail`); `dispatch` and `reason`
 // are added here, the two keys every closing event carries.
 func closeDispatchTx(
-	tx *sql.Tx, dispatchID, runID int, status, reason, eventKind string,
+	tx store.LegacyTx, dispatchID, runID int, status, reason, eventKind string,
 	payload map[string]any, errContext string, nowMS int64,
 ) (moved bool, err error) {
 	moved, err = store.TxOn(tx).CloseDispatchTx(dispatchID, status, reason, nowMS)
@@ -2453,7 +2448,7 @@ func closeDispatchTx(
 // The refusal is carried by the RETURN TYPE: this returns an error, so a caller
 // cannot accidentally render a refusal as an empty ready set. A version
 // returning `(bool, reason)` would put that mistake one careless `if` away.
-func refuseIfUnreconciledTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) error {
+func refuseIfUnreconciledTx(tx store.LegacyTx, sched *Scheduler, runID int, nowMS int64) error {
 	// An open dispatch refuses, naming the dispatch, its expiry, and the
 	// THREE WAYS OUT. A refusal that named the state without the exits would
 	// make recovery a documentation lookup, and the whole recovery design is
@@ -2490,7 +2485,7 @@ func refuseIfUnreconciledTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64
 // rather than a cleanup — stronger than "this function has no INSERT",
 // because it also covers anything a helper might write.
 func refuseIfUnreconciledSnapshot(
-	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
+	conn store.LegacyDB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) error {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
@@ -2518,7 +2513,7 @@ func refuseIfUnreconciledSnapshot(
 // `dispatch open` calls only THIS half, not refuseIfUnreconciledTx: an
 // already-open dispatch is the INSERT exclusion there, which reports the
 // race it actually lost rather than `next`'s "close it or wait" advice.
-func refuseIfDiscrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) error {
+func refuseIfDiscrepanciesTx(tx store.LegacyTx, sched *Scheduler, runID int, nowMS int64) error {
 	found, err := discrepanciesTx(tx, sched, runID, nowMS)
 	if err != nil {
 		return err
@@ -2537,7 +2532,7 @@ func refuseIfDiscrepanciesTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int6
 // The message names the status and reason now on the row rather than saying "not
 // open", because the loser's next act depends on which one happened: a TTL
 // abandon means the batch was never reconciled, and a close means it was.
-func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
+func lostTheCloseRace(tx store.LegacyTx, dispatchID int) error {
 	current, err := store.TxOn(tx).GetDispatchTx(dispatchID)
 	if err != nil {
 		return conflictErr("%s is no longer open", FormatDispatchID(dispatchID))
@@ -2550,7 +2545,7 @@ func lostTheCloseRace(tx *sql.Tx, dispatchID int) error {
 // readOpenDispatch reads the run's open dispatch in a rolled-back transaction of
 // its own. ok is false when none is open; a failure to read is returned, not
 // read as none open.
-func readOpenDispatch(conn *sql.DB, runID int) (open *store.Dispatch, ok bool, err error) {
+func readOpenDispatch(conn store.LegacyDB, runID int) (open *store.Dispatch, ok bool, err error) {
 	tx, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, false, fmt.Errorf("reading the open dispatch: %w", err)
@@ -2569,7 +2564,7 @@ func readOpenDispatch(conn *sql.DB, runID int) (open *store.Dispatch, ok bool, e
 // openDispatchID is the open dispatch's id, and false when none is open or
 // the read failed: it only names the dispatch in a refusal's record, and a
 // refusal that cannot name it is still recorded.
-func openDispatchID(conn *sql.DB, runID int) (int, bool) {
+func openDispatchID(conn store.LegacyDB, runID int) (int, bool) {
 	open, ok, err := readOpenDispatch(conn, runID)
 	if err != nil || !ok {
 		return 0, false

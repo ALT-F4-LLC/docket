@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -132,8 +131,9 @@ type integrationCandidate struct {
 // It runs inside the caller's transaction; the git questions run only after
 // it ends (no subprocess inside one) — the same split
 // staleTargetCandidates/staleTargets already use for the identical reason.
-func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integrationCandidate, error) {
-	artifacts, err := store.TxOn(tx).ListRunArtifactsTx(runID)
+func integrationCandidatesTx(tx store.LegacyTx, sched *Scheduler, runID int) ([]integrationCandidate, error) {
+	st := store.TxOn(tx)
+	artifacts, err := st.ListRunArtifactsTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -146,11 +146,11 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 			own[a.StepID] = a
 		}
 	}
-	accepted, err := priorIntegrationsTx(tx, runID)
+	accepted, err := priorIntegrationsTx(st, runID)
 	if err != nil {
 		return nil, err
 	}
-	abandoned, err := abandonedIssuesTx(tx, runID)
+	abandoned, err := st.RunEventIssueIDsTx(runID, EventIssueAbandoned)
 	if err != nil {
 		return nil, err
 	}
@@ -190,48 +190,19 @@ func integrationCandidatesTx(tx *sql.Tx, sched *Scheduler, runID int) ([]integra
 	return out, nil
 }
 
-// abandonedIssuesTx reads the issues this run abandoned, by either path.
-func abandonedIssuesTx(tx *sql.Tx, runID int) (map[int]bool, error) {
-	rows, err := tx.Query(
-		`SELECT DISTINCT issue_id FROM events
-		  WHERE run_id = ? AND kind = ? AND issue_id IS NOT NULL`,
-		runID, EventIssueAbandoned)
-	if err != nil {
-		return nil, fmt.Errorf("reading abandoned issues: %w", err)
-	}
-	defer rows.Close()
-
-	out := map[int]bool{}
-	for rows.Next() {
-		var issueID int
-		if err := rows.Scan(&issueID); err != nil {
-			return nil, fmt.Errorf("reading abandoned issues: %w", err)
-		}
-		out[issueID] = true
-	}
-	return out, rows.Err()
-}
-
 // priorIntegrationsTx reads every acceptance the run's earlier closes
 // recorded, keyed "STEP-N@sha", each carrying the close that recorded it and
 // its verdict. Events are read oldest first, so the newest acceptance of a
 // sha wins; a close older than this record (no `integration` key) contributes
 // nothing.
-func priorIntegrationsTx(tx *sql.Tx, runID int) (map[string]*CheckedIntegration, error) {
-	rows, err := tx.Query(
-		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq`,
-		runID, EventDispatchClosed)
+func priorIntegrationsTx(st store.ReadTx, runID int) (map[string]*CheckedIntegration, error) {
+	closes, err := st.PriorDispatchClosesTx(runID, EventDispatchClosed)
 	if err != nil {
-		return nil, fmt.Errorf("reading prior closes: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 
 	out := map[string]*CheckedIntegration{}
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("reading prior closes: %w", err)
-		}
+	for _, raw := range closes {
 		var data struct {
 			Dispatch    string            `json:"dispatch"`
 			Integration *IntegrationCheck `json:"integration"`
@@ -249,7 +220,7 @@ func priorIntegrationsTx(tx *sql.Tx, runID int) (map[string]*CheckedIntegration,
 			}
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // checkIntegration runs the git questions OUTSIDE any transaction: ancestry
@@ -350,7 +321,7 @@ func (e *Engine) checkIntegration(
 // refuse on — never both, and never neither: a nil error with an empty
 // unintegrated list always carries a non-nil verdict.
 func (e *Engine) integrationVerdict(
-	conn *sql.DB, runID int, defs map[int]*workflow.Definition, skipReason string, nowMS int64,
+	conn store.LegacyDB, runID int, defs map[int]*workflow.Definition, skipReason string, nowMS int64,
 ) (*IntegrationCheck, []UnintegratedStep, error) {
 	// Read BEFORE the transaction opens: runExecRoot is its own pool read
 	// (Store.GetRun), and the pool is capped at one connection, so a call to it

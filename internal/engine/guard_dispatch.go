@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,7 +48,7 @@ import (
 // every project (see GuardStop). An EXPLICIT `--run` is exempt from scoping:
 // naming a run is naming intent, and refusing a cross-project reference a hook
 // spelled out would trade one surprise for another.
-func GuardRecord(conn *sql.DB, runID, projectID int, nowMS int64) (*GuardVerdict, error) {
+func GuardRecord(conn store.LegacyDB, runID, projectID int, nowMS int64) (*GuardVerdict, error) {
 	runIDs, err := guardRunScope(conn, runID, projectID)
 	if err != nil {
 		return nil, err
@@ -73,7 +72,7 @@ func GuardRecord(conn *sql.DB, runID, projectID int, nowMS int64) (*GuardVerdict
 
 // unreconciledReason is the shared computation: the open-dispatch probe and the
 // discrepancy probe, in `next`'s own order and words.
-func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
+func unreconciledReason(conn store.LegacyDB, runID int, nowMS int64) (string, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return "", err
@@ -114,7 +113,7 @@ func unreconciledReason(conn *sql.DB, runID int, nowMS int64) (string, error) {
 //
 // projectID filters the every-non-terminal-run enumeration only; a named run is
 // returned regardless of project (see GuardRecord).
-func guardRunScope(conn *sql.DB, runID, projectID int) ([]int, error) {
+func guardRunScope(conn store.LegacyDB, runID, projectID int) ([]int, error) {
 	st := store.StoreOn(conn)
 	if runID != 0 {
 		if _, err := st.GetRun(runID); err != nil {
@@ -195,7 +194,7 @@ type SpawnOptions struct {
 // `step claim`'s CAS. This is the same honest bound `guard gate` carries, and
 // it is recorded rather than papered over.
 func (e *Engine) GuardSpawn(
-	conn *sql.DB, runID int, opts SpawnOptions,
+	conn store.LegacyDB, runID int, opts SpawnOptions,
 ) (*GuardVerdict, error) {
 	if runID == 0 {
 		return nil, validationErr(
@@ -259,7 +258,7 @@ const usageJoinWithDecidingVote = "--usage-join and --deciding-vote are mutually
 // a spawn that used it is legible in the relay's own logs rather than
 // indistinguishable from a spawn nothing was holding.
 func decidingVoteCarveOut(
-	conn *sql.DB, proposalID int, hold string,
+	conn store.LegacyDB, proposalID int, hold string,
 ) (*GuardVerdict, error) {
 	if err := requireDecidingVote(conn, proposalID); err != nil {
 		return nil, err
@@ -276,7 +275,7 @@ func decidingVoteCarveOut(
 // requireDecidingVote is the carve-out's first two clauses — the proposal
 // EXISTS and is OPEN — on their own, so the `--active` path can hold a claimed
 // vote to them even when it admits nothing (the run it names is not served).
-func requireDecidingVote(conn *sql.DB, proposalID int) error {
+func requireDecidingVote(conn store.LegacyDB, proposalID int) error {
 	proposal, err := store.StoreOn(conn).GetProposal(proposalID)
 	if err != nil {
 		return notFoundErr(err,
@@ -299,7 +298,7 @@ func requireDecidingVote(conn *sql.DB, proposalID int) error {
 // a run enters the picture — the same edge `step list --issue` walks. The set
 // is not scoped to a project or to live runs; the caller intersects it with the
 // runs it is answering over, which already are.
-func decidingVoteRuns(conn *sql.DB, proposalID int) (map[int]bool, error) {
+func decidingVoteRuns(conn store.LegacyDB, proposalID int) (map[int]bool, error) {
 	st := store.StoreOn(conn)
 	issueIDs, err := st.GetProposalIssues(proposalID)
 	if err != nil {
@@ -326,7 +325,7 @@ func decidingVoteRuns(conn *sql.DB, proposalID int) (map[int]bool, error) {
 // (a second unacknowledged reap, say). If the ack rolled back with the denial,
 // the session would have to re-pass every seq on every attempt, and a relay
 // clearing four reaps one refusal at a time would never converge.
-func applyAcks(conn *sql.DB, runID int, seqs []int64, nowMS int64) error {
+func applyAcks(conn store.LegacyDB, runID int, seqs []int64, nowMS int64) error {
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("acknowledging reaps: %w", err)
@@ -350,7 +349,7 @@ func applyAcks(conn *sql.DB, runID int, seqs []int64, nowMS int64) error {
 // GuardSpawn's "iff BOTH" true by construction: there is no way to return an ALLOW here and
 // skip (b).
 func spawnRowsVerdict(
-	conn *sql.DB, runID int, opts SpawnOptions,
+	conn store.LegacyDB, runID int, opts SpawnOptions,
 ) (*GuardVerdict, error) {
 	if opts.Rows == nil {
 		// No proposal, nothing to compare. (a) is vacuously satisfied and
@@ -460,7 +459,7 @@ func parseProposedRows(raw []byte) ([]model.StepRow, error) {
 // LEGITIMATE STATE this verb must answer about differently depending on whether
 // rows were proposed — mapping it to an error here would make the
 // caller unwrap a sentinel to tell the two apart.
-func storedManifestRows(conn *sql.DB, runID int) ([]store.DispatchRow, error) {
+func storedManifestRows(conn store.LegacyDB, runID int) ([]store.DispatchRow, error) {
 	snap, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("reading the open dispatch: %w", err)
@@ -486,7 +485,7 @@ func storedManifestRows(conn *sql.DB, runID int) ([]store.DispatchRow, error) {
 // shared with `next`'s headroom message, so the two cannot describe the same
 // hold differently.
 func spawnReapVerdict(
-	conn *sql.DB, runID, decidingVote int, usageJoin bool, nowMS int64,
+	conn store.LegacyDB, runID, decidingVote int, usageJoin bool, nowMS int64,
 ) (*GuardVerdict, error) {
 	// The hold is read in a transaction this function does not hold open: the
 	// carve-out below opens its own, and the pool is capped at ONE connection.
@@ -575,7 +574,7 @@ func usageJoinVerdict(hold string) *GuardVerdict {
 // `--usage-join` (DKT-3289) admits the hold of every run: the launch claims
 // no step on any of them, so no run's headroom is at stake.
 func GuardSpawnActive(
-	conn *sql.DB, projectID, decidingVote int, usageJoin bool, nowMS int64,
+	conn store.LegacyDB, projectID, decidingVote int, usageJoin bool, nowMS int64,
 ) (*GuardVerdict, error) {
 	if usageJoin && decidingVote > 0 {
 		return nil, validationErr(usageJoinWithDecidingVote)
@@ -649,7 +648,7 @@ func GuardSpawnActive(
 
 // openReapHold reads a run's unacknowledged reaps in its own rolled-back
 // transaction, so the caller holds none while it decides.
-func openReapHold(conn *sql.DB, runID int) ([]store.ReapAck, error) {
+func openReapHold(conn store.LegacyDB, runID int) ([]store.ReapAck, error) {
 	snap, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("reading unacknowledged reaps: %w", err)
@@ -663,7 +662,7 @@ func openReapHold(conn *sql.DB, runID int) ([]store.ReapAck, error) {
 // the same thing while meaning opposite things. A proposalID of 0 is the
 // usage-join carve-out (DKT-3289), which names no proposal.
 func recordGuardCarveOut(
-	conn *sql.DB, runID, proposalID int, hold string, nowMS int64,
+	conn store.LegacyDB, runID, proposalID int, hold string, nowMS int64,
 ) error {
 	fields := map[string]any{"carve_out": "usage-join", "hold": hold}
 	if proposalID > 0 {

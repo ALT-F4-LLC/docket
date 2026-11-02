@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -82,7 +81,7 @@ type GuardVerdict struct {
 // (observed 2026-08-11, RUN-2). A stop only interferes with the invoking
 // project's runs, so that is the default question; --all-projects asks the old
 // one.
-func GuardStop(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) {
+func GuardStop(conn store.LegacyDB, projectID int, nowMS int64) (*GuardVerdict, error) {
 	// A NEVER-DISPATCHED RUN IS NOT WORK IN FLIGHT (DKT-71).
 	//
 	// This guard's own header states the predicate is "is the MACHINE done
@@ -109,35 +108,10 @@ func GuardStop(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) 
 	// dispatch, and no step that has ever left `pending`. What it describes is
 	// a run NOTHING HAS EVER HAPPENED TO, which is bootstrap's terminal state
 	// exactly and is not a state a stop can interrupt.
-	query := `SELECT id FROM runs WHERE status NOT IN ('done', 'abandoned')
-		AND (EXISTS (SELECT 1 FROM dispatches WHERE dispatches.run_id = runs.id)
-		     OR EXISTS (SELECT 1 FROM steps
-		                 WHERE steps.run_id = runs.id AND steps.status != ?))`
-	args := []any{store.StepPending}
-	if projectID != 0 {
-		query += ` AND project_id = ?`
-		args = append(args, projectID)
-	}
-	query += ` ORDER BY id`
-
-	rows, err := conn.Query(query, args...)
+	runIDs, err := store.StoreOn(conn).ActiveStartedRunIDs(projectID)
 	if err != nil {
-		return nil, fmt.Errorf("reading active runs: %w", err)
+		return nil, err
 	}
-	var runIDs []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("reading an active run: %w", err)
-		}
-		runIDs = append(runIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("reading active runs: %w", err)
-	}
-	rows.Close()
 
 	var blocking []string
 	for _, runID := range runIDs {
@@ -168,7 +142,7 @@ func GuardStop(conn *sql.DB, projectID int, nowMS int64) (*GuardVerdict, error) 
 // It loads the run's scheduler READ-ONLY — the transaction is rolled back
 // unconditionally, per LoadStepView's pattern — because two of the rules are
 // readiness questions the raw status column cannot answer.
-func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
+func stopBlockers(conn store.LegacyDB, runID int, nowMS int64) ([]string, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -218,10 +192,11 @@ func stopBlockers(conn *sql.DB, runID int, nowMS int64) ([]string, error) {
 // the ones whose voters are still deliberating. A vote step with no proposal
 // yet is not among them: opening the proposal is `next`'s work, which a stop
 // would leave undone.
-func openVoteSteps(tx *sql.Tx, sched *Scheduler) (map[int]bool, error) {
+func openVoteSteps(tx store.LegacyReadTx, sched *Scheduler) (map[int]bool, error) {
 	if len(sched.voteProposals) == 0 {
 		return nil, nil
 	}
+	st := store.TxOn(tx)
 	out := make(map[int]bool)
 	for _, step := range sched.steps {
 		if step.Kind != workflow.TypeVote {
@@ -233,16 +208,11 @@ func openVoteSteps(tx *sql.Tx, sched *Scheduler) (map[int]bool, error) {
 		if id == 0 {
 			continue
 		}
-		var status string
-		err := tx.QueryRow(`SELECT status FROM proposals WHERE id = ?`, id).
-			Scan(&status)
-		if err == sql.ErrNoRows {
-			continue
-		}
+		status, found, err := st.ProposalStatusTx(id)
 		if err != nil {
-			return nil, fmt.Errorf("reading proposal %d: %w", id, err)
+			return nil, err
 		}
-		if status == string(model.ProposalStatusOpen) {
+		if found && status == model.ProposalStatusOpen {
 			out[step.ID] = true
 		}
 	}
@@ -339,21 +309,16 @@ func suspendedOnOpenPanel(sched *Scheduler, step *store.Step, openVotes map[int]
 // projectID scopes the unscoped search to one project's runs; 0 answers over
 // every project (see GuardStop). An approval is a decision about ONE project's
 // gate, so a same-named gate in another project must not answer for it.
-func GuardGate(conn *sql.DB, stepName string, runID, projectID int) (*GuardVerdict, error) {
+func GuardGate(conn store.LegacyDB, stepName string, runID, projectID int) (*GuardVerdict, error) {
 	if stepName == "" {
 		return nil, validationErr("--step is required: name the gate to check")
 	}
 
-	query := `SELECT s.status, s.routing
-	   FROM steps s JOIN runs r ON r.id = s.run_id
-	  WHERE r.status NOT IN ('done', 'abandoned')
-	    AND s.step_name = ? AND s.kind IN (?, ?)`
-	args := []any{stepName, workflow.TypeHuman, workflow.TypeVote}
+	st := store.StoreOn(conn)
 	subject := fmt.Sprintf("gate %q", stepName)
 	searched := "any active run"
-	switch {
-	case runID != 0:
-		run, err := store.StoreOn(conn).GetRun(runID)
+	if runID != 0 {
+		run, err := st.GetRun(runID)
 		if err != nil {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
@@ -362,44 +327,31 @@ func GuardGate(conn *sql.DB, stepName string, runID, projectID int) (*GuardVerdi
 				"run %s is %s; its gates authorize nothing further",
 				model.FormatRunID(runID), run.Status)}, nil
 		}
-		query += ` AND s.run_id = ?`
-		args = append(args, runID)
 		subject += " in " + model.FormatRunID(runID)
 		searched = model.FormatRunID(runID)
-	case projectID != 0:
-		query += ` AND r.project_id = ?`
-		args = append(args, projectID)
 	}
-	query += ` ORDER BY s.id`
 
-	rows, err := conn.Query(query, args...)
+	gates, err := st.ActiveGateSteps(store.GateStepQuery{
+		StepName: stepName,
+		Kinds:    []string{workflow.TypeHuman, workflow.TypeVote},
+		RunID:    runID, ProjectID: projectID,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("reading gate %s: %w", stepName, err)
+		return nil, err
 	}
-	defer rows.Close()
 
 	var (
 		found    bool
 		approved bool
 		state    string
 	)
-	for rows.Next() {
-		var (
-			status  string
-			routing sql.NullString
-		)
-		if err := rows.Scan(&status, &routing); err != nil {
-			return nil, fmt.Errorf("reading gate %s: %w", stepName, err)
-		}
+	for _, gate := range gates {
 		found = true
-		state = status
-		if status == store.StepDone && routingIs(routing.String, RoutingPass) {
+		state = gate.Status
+		if gate.Status == store.StepDone && routingIs(gate.Routing, RoutingPass) {
 			approved = true
 			break
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading gate %s: %w", stepName, err)
 	}
 
 	switch {
