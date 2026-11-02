@@ -744,20 +744,63 @@ type Pin struct {
 // rather than a conflict — a run pins a workflow once, however many issues bind
 // to it.
 func InsertPinTx(tx *sql.Tx, p Pin) error {
+	_, err := AddPinTx(tx, p)
+	return err
+}
+
+// AddPinTx is InsertPinTx reporting how many rows it inserted: 0 when the run
+// already pins the ref, whatever hash it holds.
+func AddPinTx(tx *sql.Tx, p Pin) (int, error) {
 	// Bound as []byte so the column holds a BLOB, never TEXT: pinned files
 	// need not be valid UTF-8.
 	var content []byte
 	if p.Content.Valid {
 		content = []byte(p.Content.String)
 	}
-	_, err := tx.Exec(
+	res, err := tx.Exec(
 		`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256, content) VALUES (?, ?, ?, ?, ?)`,
 		p.RunID, p.Kind, p.Ref, p.SHA256, content,
 	)
 	if err != nil {
-		return fmt.Errorf("pinning %s %s: %w", p.Kind, p.Ref, err)
+		return 0, fmt.Errorf("pinning %s %s: %w", p.Kind, p.Ref, err)
 	}
-	return nil
+	return rowsAffected(res, "pinning "+p.Kind+" "+p.Ref)
+}
+
+// RepinPinTx moves a run's pin of one ref from oldSHA to newSHA and clears its
+// stored bytes, which belong to the old hash. It returns 0 when the run does
+// not hold the ref at oldSHA.
+func RepinPinTx(tx *sql.Tx, runID int, kind, ref, oldSHA, newSHA string) (int, error) {
+	res, err := tx.Exec(
+		`UPDATE pins SET sha256 = ?, content = NULL
+		  WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
+		newSHA, runID, kind, ref, oldSHA,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("repinning %s %s: %w", kind, ref, err)
+	}
+	return rowsAffected(res, "repinning "+kind+" "+ref)
+}
+
+// DropPinTx deletes a run's pin of one ref at oldSHA. It returns 0 when the
+// run does not hold the ref at oldSHA.
+func DropPinTx(tx *sql.Tx, runID int, kind, ref, oldSHA string) (int, error) {
+	res, err := tx.Exec(
+		`DELETE FROM pins WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
+		runID, kind, ref, oldSHA,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("dropping %s %s: %w", kind, ref, err)
+	}
+	return rowsAffected(res, "dropping "+kind+" "+ref)
+}
+
+func rowsAffected(res sql.Result, doing string) (int, error) {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", doing, err)
+	}
+	return int(n), nil
 }
 
 // ListPins returns a run's pins, ordered so the set is stable across reads —
@@ -1016,4 +1059,153 @@ func IssueScopeGlobsTx(tx *sql.Tx, issueID int) (string, error) {
 		return "", fmt.Errorf("reading scope for issue %d: %w", issueID, err)
 	}
 	return globs.String, nil
+}
+
+// RunWorktreesTx returns the distinct non-empty worktrees a run's steps
+// recorded, sorted. A zero issueID reads the whole run; otherwise only that
+// issue's steps.
+func RunWorktreesTx(tx *sql.Tx, runID, issueID int) ([]string, error) {
+	query := `SELECT DISTINCT work_root FROM steps
+	           WHERE run_id = ? AND work_root != '' ORDER BY work_root`
+	args := []any{runID}
+	if issueID != 0 {
+		query = `SELECT DISTINCT work_root FROM steps
+		          WHERE run_id = ? AND issue_id = ? AND work_root != ''
+		          ORDER BY work_root`
+		args = append(args, issueID)
+	}
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("collecting recorded worktrees: %w", err)
+	}
+	return scanRows(rows, "recorded worktrees", func(r *sql.Rows) (string, error) {
+		var w string
+		if err := r.Scan(&w); err != nil {
+			return "", fmt.Errorf("reading a recorded worktree: %w", err)
+		}
+		return w, nil
+	})
+}
+
+// RunHasIssueTx reports whether the issue is part of the run.
+func RunHasIssueTx(tx *sql.Tx, runID, issueID int) (bool, error) {
+	var n int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM run_issues WHERE run_id = ? AND issue_id = ?`,
+		runID, issueID).Scan(&n); err != nil {
+		return false, fmt.Errorf("checking run membership: %w", err)
+	}
+	return n > 0, nil
+}
+
+// UnfinishedStep names one non-terminal step.
+type UnfinishedStep struct {
+	ID       int
+	Instance string
+	Status   string
+}
+
+// IssueUnfinishedStepsTx returns an issue's non-terminal steps in the run, in
+// id order.
+func IssueUnfinishedStepsTx(tx *sql.Tx, runID, issueID int) ([]UnfinishedStep, error) {
+	rows, err := tx.Query(
+		`SELECT id, instance, status FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
+		  ORDER BY id`,
+		runID, issueID, StepDone, StepSkipped, StepSuperseded, StepFailedRouted)
+	if err != nil {
+		return nil, fmt.Errorf("collecting %s's remaining steps: %w", model.FormatID(issueID), err)
+	}
+	return scanRows(rows, "remaining steps", func(r *sql.Rows) (UnfinishedStep, error) {
+		var s UnfinishedStep
+		if err := r.Scan(&s.ID, &s.Instance, &s.Status); err != nil {
+			return s, fmt.Errorf("reading a remaining step of %s: %w", model.FormatID(issueID), err)
+		}
+		return s, nil
+	})
+}
+
+// FailRouteIssueStepsTx moves every non-terminal step of an issue in the run to
+// `failed-routed`, stamping `recorded_at_ms` and leaving `routing` as it is. It
+// returns how many steps it moved.
+func FailRouteIssueStepsTx(tx *sql.Tx, runID, issueID int, nowMS int64) (int, error) {
+	res, err := tx.Exec(
+		`UPDATE steps
+		    SET status = ?, updated_at_ms = ?, recorded_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)`,
+		StepFailedRouted, nowMS, nowMS, runID, issueID,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted)
+	if err != nil {
+		return 0, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
+	}
+	return rowsAffected(res, "abandoning "+model.FormatID(issueID))
+}
+
+// RunUnfinishedStepCountTx counts a run's non-terminal steps.
+func RunUnfinishedStepCountTx(tx *sql.Tx, runID int) (int, error) {
+	var n int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM steps
+		  WHERE run_id = ? AND status NOT IN (?, ?, ?, ?)`,
+		runID, StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting %s's remaining steps: %w", model.FormatRunID(runID), err)
+	}
+	return n, nil
+}
+
+// RunEvent is one run event: its position, time, kind, and payload verbatim.
+type RunEvent struct {
+	Seq  int64
+	AtMS int64
+	Kind string
+	Data string
+}
+
+// RunEventsTx returns a run's events of the given kinds in seq order. A call
+// naming no kind selects no event.
+func RunEventsTx(tx *sql.Tx, runID int, kinds ...string) ([]RunEvent, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(
+		`SELECT seq, at_ms, kind, data FROM events
+		  WHERE run_id = ? AND kind IN (`+makePlaceholders(len(kinds))+`)
+		  ORDER BY seq`, kindArgs(runID, kinds)...)
+	if err != nil {
+		return nil, fmt.Errorf("reading the events of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "run events", func(r *sql.Rows) (RunEvent, error) {
+		var e RunEvent
+		if err := r.Scan(&e.Seq, &e.AtMS, &e.Kind, &e.Data); err != nil {
+			return e, fmt.Errorf("reading an event of %s: %w", model.FormatRunID(runID), err)
+		}
+		return e, nil
+	})
+}
+
+// StepEventSeq locates one step-scoped event in the log.
+type StepEventSeq struct {
+	StepID int
+	Kind   string
+	Seq    int64
+}
+
+// RunStepEventSeqsTx returns every event of a run that names a step, in seq
+// order.
+func RunStepEventSeqsTx(tx *sql.Tx, runID int) ([]StepEventSeq, error) {
+	rows, err := tx.Query(
+		`SELECT step_id, kind, seq FROM events
+		  WHERE run_id = ? AND step_id IS NOT NULL ORDER BY seq`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the step events of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "step events", func(r *sql.Rows) (StepEventSeq, error) {
+		var e StepEventSeq
+		if err := r.Scan(&e.StepID, &e.Kind, &e.Seq); err != nil {
+			return e, fmt.Errorf("reading a step event of %s: %w", model.FormatRunID(runID), err)
+		}
+		return e, nil
+	})
 }
