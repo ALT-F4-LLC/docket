@@ -269,6 +269,10 @@ func (s *pgStore) GateTrail(runID int) ([]db.ResultTrailRow, error) {
 	return db.GateTrail(s.db, runID)
 }
 
+func (s *pgStore) GatedStepIDAtOrdinal(runID, issueID int, stepName string, ordinal int) (int, bool, error) {
+	return db.GatedStepIDAtOrdinal(s.db, runID, issueID, stepName, ordinal)
+}
+
 func (s *pgStore) GetActivity(issueID int, limit int) ([]model.Activity, error) {
 	return db.GetActivity(s.db, issueID, limit)
 }
@@ -813,6 +817,10 @@ func (t *pgTx) CountPrunableEventsTx(sel db.EventPruneSelection) (int, error) {
 	return db.CountPrunableEventsTx(t.tx, sel)
 }
 
+func (t *pgTx) DeferralRecordedForDispatchTx(q db.DispatchDeferralQuery) (bool, error) {
+	return db.DeferralRecordedForDispatchTx(t.tx, q)
+}
+
 func (t *pgTx) DispatchGraceTx(projectID int) (time.Duration, error) {
 	return db.DispatchGraceTx(t.tx, projectID)
 }
@@ -873,12 +881,24 @@ func (t *pgTx) GetStepTx(id int) (*db.Step, error) {
 	return db.GetStepTx(t.tx, id)
 }
 
+func (t *pgTx) HighestOrdinalsTx(runID, issueID int) (map[string]int, error) {
+	return db.HighestOrdinalsTx(t.tx, runID, issueID)
+}
+
 func (t *pgTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
 }
 
+func (t *pgTx) IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error) {
+	return db.IssueHasParkedOrHeldStepTx(t.tx, runID, issueID)
+}
+
 func (t *pgTx) IssueLabelsTx(issueID int) ([]string, error) {
 	return db.IssueLabelsTx(t.tx, issueID)
+}
+
+func (t *pgTx) IssueLatestInstancesTerminalTx(runID, issueID int) (bool, error) {
+	return db.IssueLatestInstancesTerminalTx(t.tx, runID, issueID)
 }
 
 func (t *pgTx) IssueSchedulingFactsTx(issueID int) (model.Priority, string, error) {
@@ -891,6 +911,18 @@ func (t *pgTx) IssueScopeGlobsTx(issueID int) (string, error) {
 
 func (t *pgTx) IssueStatusResolutionTx(issueID int) (model.Status, string, error) {
 	return db.IssueStatusResolutionTx(t.tx, issueID)
+}
+
+func (t *pgTx) IssueStatusTx(issueID int) (model.Status, error) {
+	return db.IssueStatusTx(t.tx, issueID)
+}
+
+func (t *pgTx) IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepInstanceRef, error) {
+	return db.IssueStepsBelowOrdinalTx(t.tx, runID, issueID, ordinal)
+}
+
+func (t *pgTx) LastDispatchDeferralTx(q db.SourcedDeferralQuery) (int64, string, bool, error) {
+	return db.LastDispatchDeferralTx(t.tx, q)
 }
 
 func (t *pgTx) LastEventAtMSTx() (int64, bool, error) {
@@ -957,12 +989,32 @@ func (t *pgTx) MaxEventSeqTx() (int64, bool, error) {
 	return db.MaxEventSeqTx(t.tx)
 }
 
+func (t *pgTx) NewestIssueArtifactUpToTx(runID, issueID int, kind string, ordinal int) (string, string, bool, error) {
+	return db.NewestIssueArtifactUpToTx(t.tx, runID, issueID, kind, ordinal)
+}
+
+func (t *pgTx) NewestStepNameArtifactTx(r db.StepArtifactRange) (db.StepArtifact, bool, error) {
+	return db.NewestStepNameArtifactTx(t.tx, r)
+}
+
+func (t *pgTx) NewestStepPayloadTx(stepID int, kind string) (string, bool, error) {
+	return db.NewestStepPayloadTx(t.tx, stepID, kind)
+}
+
 func (t *pgTx) NextActionOrdinalTx(stepID int, action string) (int, error) {
 	return db.NextActionOrdinalTx(t.tx, stepID, action)
 }
 
 func (t *pgTx) OpenDispatchTx(runID int) (*db.Dispatch, error) {
 	return db.OpenDispatchTx(t.tx, runID)
+}
+
+func (t *pgTx) PendingDeclaredStepCountTx(runID, issueID int, kinds []string) (int, error) {
+	return db.PendingDeclaredStepCountTx(t.tx, runID, issueID, kinds)
+}
+
+func (t *pgTx) PendingInstancesUpToTx(runID, issueID int, stepName string, ordinal int) ([]db.StepInstanceRef, error) {
+	return db.PendingInstancesUpToTx(t.tx, runID, issueID, stepName, ordinal)
 }
 
 func (t *pgTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
@@ -1013,12 +1065,52 @@ func (t *pgTx) RunProjectIDTx(runID int) (int, error) {
 	return db.RunProjectIDTx(t.tx, runID)
 }
 
+func (t *pgTx) RunStatusTx(runID int) (model.RunStatus, error) {
+	return db.RunStatusTx(t.tx, runID)
+}
+
+func (t *pgTx) RunStepRollupTx(runID int) (db.RunStepRollup, error) {
+	return db.RunStepRollupTx(t.tx, runID)
+}
+
+func (t *pgTx) StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error) {
+	return db.StepArtifactPayloadsTx(t.tx, r)
+}
+
+func (t *pgTx) StepByInstanceTx(runID, issueID int, instance string) (db.StepInstanceRef, error) {
+	return db.StepByInstanceTx(t.tx, runID, issueID, instance)
+}
+
+func (t *pgTx) StepHasLaterInstanceTx(runID, issueID int, stepName string, ordinal int) (bool, error) {
+	return db.StepHasLaterInstanceTx(t.tx, runID, issueID, stepName, ordinal)
+}
+
 func (t *pgTx) StepIDByInstanceTx(runID, issueID int, instance string) (int, bool, error) {
 	return db.StepIDByInstanceTx(t.tx, runID, issueID, instance)
 }
 
+func (t *pgTx) StepInstancesAtOrdinalTx(runID, issueID int, stepName string, ordinal int) ([]db.StepStatusRouting, error) {
+	return db.StepInstancesAtOrdinalTx(t.tx, runID, issueID, stepName, ordinal)
+}
+
+func (t *pgTx) StepNamesAtOrdinalTx(runID, issueID, ordinal int) (map[string]bool, error) {
+	return db.StepNamesAtOrdinalTx(t.tx, runID, issueID, ordinal)
+}
+
+func (t *pgTx) StepRoundCountTx(runID, issueID int, names []string) (int, error) {
+	return db.StepRoundCountTx(t.tx, runID, issueID, names)
+}
+
+func (t *pgTx) StepsWithEventKindsSinceTx(runID int, afterSeq int64, kinds []string) (map[int]bool, error) {
+	return db.StepsWithEventKindsSinceTx(t.tx, runID, afterSeq, kinds)
+}
+
 func (t *pgTx) UnacknowledgedReapsTx(runID int) ([]db.ReapAck, error) {
 	return db.UnacknowledgedReapsTx(t.tx, runID)
+}
+
+func (t *pgTx) UnexpandedRunIssueCountTx(runID int) (int, error) {
+	return db.UnexpandedRunIssueCountTx(t.tx, runID)
 }
 
 func (t *pgTx) UsageBudgetUnitTx(projectID int) (string, error) {
@@ -1061,6 +1153,10 @@ func (t *pgTx) CacheRunFloorTx(runID int, floor float64) error {
 	return db.CacheRunFloorTx(t.tx, runID, floor)
 }
 
+func (t *pgTx) CascadeFailIssueStepsTx(runID, issueID, exceptStepID int, routing string, nowMS int64) (int, error) {
+	return db.CascadeFailIssueStepsTx(t.tx, runID, issueID, exceptStepID, routing, nowMS)
+}
+
 func (t *pgTx) ClaimStepWithRecoveryTx(id int, owner, recoverySecret string, ttlMS, nowMS int64) (string, *model.Lease, error) {
 	return db.ClaimStepWithRecoveryTx(t.tx, id, owner, recoverySecret, ttlMS, nowMS)
 }
@@ -1091,6 +1187,10 @@ func (t *pgTx) CloseDispatchTx(id int, status, reason string, nowMS int64) (bool
 
 func (t *pgTx) CloseOpenProposalsTx(ids []int, reason string) (int, error) {
 	return db.CloseOpenProposalsTx(t.tx, ids, reason)
+}
+
+func (t *pgTx) CompleteIssueTx(issueID int, prior model.Status, resolution string, nowMS int64) (bool, error) {
+	return db.CompleteIssueTx(t.tx, issueID, prior, resolution, nowMS)
 }
 
 func (t *pgTx) CoverGateOverrideGrantsTx(ids []int) error {
@@ -1343,6 +1443,10 @@ func (t *pgTx) SetRunIssueBodyTx(runID, issueID int, body, sha string) error {
 	return db.SetRunIssueBodyTx(t.tx, runID, issueID, body, sha)
 }
 
+func (t *pgTx) SetRunIssueLoopCountTx(runID, issueID, count int) error {
+	return db.SetRunIssueLoopCountTx(t.tx, runID, issueID, count)
+}
+
 func (t *pgTx) SetRunIssueSnapshotTx(runID, issueID int, snapshot string) error {
 	return db.SetRunIssueSnapshotTx(t.tx, runID, issueID, snapshot)
 }
@@ -1385,4 +1489,8 @@ func (t *pgTx) SetStepStatusTx(id int, status string, nowMS, activityMS int64) e
 
 func (t *pgTx) StartStepTx(id int, nowMS int64) error {
 	return db.StartStepTx(t.tx, id, nowMS)
+}
+
+func (t *pgTx) TransitionRunStatusTx(runID int, to model.RunStatus, nowMS int64) (model.RunStatus, bool, error) {
+	return db.TransitionRunStatusTx(t.tx, runID, to, nowMS)
 }

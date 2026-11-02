@@ -235,6 +235,10 @@ func (s *sqliteStore) GateTrail(runID int) ([]db.ResultTrailRow, error) {
 	return db.GateTrail(s.writer, runID)
 }
 
+func (s *sqliteStore) GatedStepIDAtOrdinal(runID, issueID int, stepName string, ordinal int) (int, bool, error) {
+	return db.GatedStepIDAtOrdinal(s.writer, runID, issueID, stepName, ordinal)
+}
+
 func (s *sqliteStore) GetActivity(issueID int, limit int) ([]model.Activity, error) {
 	return db.GetActivity(s.writer, issueID, limit)
 }
@@ -779,6 +783,10 @@ func (t *sqliteTx) CountPrunableEventsTx(sel db.EventPruneSelection) (int, error
 	return db.CountPrunableEventsTx(t.tx, sel)
 }
 
+func (t *sqliteTx) DeferralRecordedForDispatchTx(q db.DispatchDeferralQuery) (bool, error) {
+	return db.DeferralRecordedForDispatchTx(t.tx, q)
+}
+
 func (t *sqliteTx) DispatchGraceTx(projectID int) (time.Duration, error) {
 	return db.DispatchGraceTx(t.tx, projectID)
 }
@@ -843,12 +851,24 @@ func (t *sqliteTx) GetStepTx(id int) (*db.Step, error) {
 	return db.GetStepTx(t.tx, id)
 }
 
+func (t *sqliteTx) HighestOrdinalsTx(runID, issueID int) (map[string]int, error) {
+	return db.HighestOrdinalsTx(t.tx, runID, issueID)
+}
+
 func (t *sqliteTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
 }
 
+func (t *sqliteTx) IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error) {
+	return db.IssueHasParkedOrHeldStepTx(t.tx, runID, issueID)
+}
+
 func (t *sqliteTx) IssueLabelsTx(issueID int) ([]string, error) {
 	return db.IssueLabelsTx(t.tx, issueID)
+}
+
+func (t *sqliteTx) IssueLatestInstancesTerminalTx(runID, issueID int) (bool, error) {
+	return db.IssueLatestInstancesTerminalTx(t.tx, runID, issueID)
 }
 
 func (t *sqliteTx) IssueSchedulingFactsTx(issueID int) (model.Priority, string, error) {
@@ -861,6 +881,18 @@ func (t *sqliteTx) IssueScopeGlobsTx(issueID int) (string, error) {
 
 func (t *sqliteTx) IssueStatusResolutionTx(issueID int) (model.Status, string, error) {
 	return db.IssueStatusResolutionTx(t.tx, issueID)
+}
+
+func (t *sqliteTx) IssueStatusTx(issueID int) (model.Status, error) {
+	return db.IssueStatusTx(t.tx, issueID)
+}
+
+func (t *sqliteTx) IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepInstanceRef, error) {
+	return db.IssueStepsBelowOrdinalTx(t.tx, runID, issueID, ordinal)
+}
+
+func (t *sqliteTx) LastDispatchDeferralTx(q db.SourcedDeferralQuery) (int64, string, bool, error) {
+	return db.LastDispatchDeferralTx(t.tx, q)
 }
 
 func (t *sqliteTx) LastEventAtMSTx() (int64, bool, error) {
@@ -927,12 +959,32 @@ func (t *sqliteTx) MaxEventSeqTx() (int64, bool, error) {
 	return db.MaxEventSeqTx(t.tx)
 }
 
+func (t *sqliteTx) NewestIssueArtifactUpToTx(runID, issueID int, kind string, ordinal int) (string, string, bool, error) {
+	return db.NewestIssueArtifactUpToTx(t.tx, runID, issueID, kind, ordinal)
+}
+
+func (t *sqliteTx) NewestStepNameArtifactTx(r db.StepArtifactRange) (db.StepArtifact, bool, error) {
+	return db.NewestStepNameArtifactTx(t.tx, r)
+}
+
+func (t *sqliteTx) NewestStepPayloadTx(stepID int, kind string) (string, bool, error) {
+	return db.NewestStepPayloadTx(t.tx, stepID, kind)
+}
+
 func (t *sqliteTx) NextActionOrdinalTx(stepID int, action string) (int, error) {
 	return db.NextActionOrdinalTx(t.tx, stepID, action)
 }
 
 func (t *sqliteTx) OpenDispatchTx(runID int) (*db.Dispatch, error) {
 	return db.OpenDispatchTx(t.tx, runID)
+}
+
+func (t *sqliteTx) PendingDeclaredStepCountTx(runID, issueID int, kinds []string) (int, error) {
+	return db.PendingDeclaredStepCountTx(t.tx, runID, issueID, kinds)
+}
+
+func (t *sqliteTx) PendingInstancesUpToTx(runID, issueID int, stepName string, ordinal int) ([]db.StepInstanceRef, error) {
+	return db.PendingInstancesUpToTx(t.tx, runID, issueID, stepName, ordinal)
 }
 
 func (t *sqliteTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
@@ -983,12 +1035,52 @@ func (t *sqliteTx) RunProjectIDTx(runID int) (int, error) {
 	return db.RunProjectIDTx(t.tx, runID)
 }
 
+func (t *sqliteTx) RunStatusTx(runID int) (model.RunStatus, error) {
+	return db.RunStatusTx(t.tx, runID)
+}
+
+func (t *sqliteTx) RunStepRollupTx(runID int) (db.RunStepRollup, error) {
+	return db.RunStepRollupTx(t.tx, runID)
+}
+
+func (t *sqliteTx) StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error) {
+	return db.StepArtifactPayloadsTx(t.tx, r)
+}
+
+func (t *sqliteTx) StepByInstanceTx(runID, issueID int, instance string) (db.StepInstanceRef, error) {
+	return db.StepByInstanceTx(t.tx, runID, issueID, instance)
+}
+
+func (t *sqliteTx) StepHasLaterInstanceTx(runID, issueID int, stepName string, ordinal int) (bool, error) {
+	return db.StepHasLaterInstanceTx(t.tx, runID, issueID, stepName, ordinal)
+}
+
 func (t *sqliteTx) StepIDByInstanceTx(runID, issueID int, instance string) (int, bool, error) {
 	return db.StepIDByInstanceTx(t.tx, runID, issueID, instance)
 }
 
+func (t *sqliteTx) StepInstancesAtOrdinalTx(runID, issueID int, stepName string, ordinal int) ([]db.StepStatusRouting, error) {
+	return db.StepInstancesAtOrdinalTx(t.tx, runID, issueID, stepName, ordinal)
+}
+
+func (t *sqliteTx) StepNamesAtOrdinalTx(runID, issueID, ordinal int) (map[string]bool, error) {
+	return db.StepNamesAtOrdinalTx(t.tx, runID, issueID, ordinal)
+}
+
+func (t *sqliteTx) StepRoundCountTx(runID, issueID int, names []string) (int, error) {
+	return db.StepRoundCountTx(t.tx, runID, issueID, names)
+}
+
+func (t *sqliteTx) StepsWithEventKindsSinceTx(runID int, afterSeq int64, kinds []string) (map[int]bool, error) {
+	return db.StepsWithEventKindsSinceTx(t.tx, runID, afterSeq, kinds)
+}
+
 func (t *sqliteTx) UnacknowledgedReapsTx(runID int) ([]db.ReapAck, error) {
 	return db.UnacknowledgedReapsTx(t.tx, runID)
+}
+
+func (t *sqliteTx) UnexpandedRunIssueCountTx(runID int) (int, error) {
+	return db.UnexpandedRunIssueCountTx(t.tx, runID)
 }
 
 func (t *sqliteTx) UsageBudgetUnitTx(projectID int) (string, error) {
@@ -1031,6 +1123,10 @@ func (t *sqliteTx) CacheRunFloorTx(runID int, floor float64) error {
 	return db.CacheRunFloorTx(t.tx, runID, floor)
 }
 
+func (t *sqliteTx) CascadeFailIssueStepsTx(runID, issueID, exceptStepID int, routing string, nowMS int64) (int, error) {
+	return db.CascadeFailIssueStepsTx(t.tx, runID, issueID, exceptStepID, routing, nowMS)
+}
+
 func (t *sqliteTx) ClaimStepWithRecoveryTx(id int, owner, recoverySecret string, ttlMS, nowMS int64) (string, *model.Lease, error) {
 	return db.ClaimStepWithRecoveryTx(t.tx, id, owner, recoverySecret, ttlMS, nowMS)
 }
@@ -1061,6 +1157,10 @@ func (t *sqliteTx) CloseDispatchTx(id int, status, reason string, nowMS int64) (
 
 func (t *sqliteTx) CloseOpenProposalsTx(ids []int, reason string) (int, error) {
 	return db.CloseOpenProposalsTx(t.tx, ids, reason)
+}
+
+func (t *sqliteTx) CompleteIssueTx(issueID int, prior model.Status, resolution string, nowMS int64) (bool, error) {
+	return db.CompleteIssueTx(t.tx, issueID, prior, resolution, nowMS)
 }
 
 func (t *sqliteTx) CoverGateOverrideGrantsTx(ids []int) error {
@@ -1303,6 +1403,10 @@ func (t *sqliteTx) SetRunIssueBodyTx(runID, issueID int, body, sha string) error
 	return db.SetRunIssueBodyTx(t.tx, runID, issueID, body, sha)
 }
 
+func (t *sqliteTx) SetRunIssueLoopCountTx(runID, issueID, count int) error {
+	return db.SetRunIssueLoopCountTx(t.tx, runID, issueID, count)
+}
+
 func (t *sqliteTx) SetRunIssueSnapshotTx(runID, issueID int, snapshot string) error {
 	return db.SetRunIssueSnapshotTx(t.tx, runID, issueID, snapshot)
 }
@@ -1345,4 +1449,8 @@ func (t *sqliteTx) SetStepStatusTx(id int, status string, nowMS, activityMS int6
 
 func (t *sqliteTx) StartStepTx(id int, nowMS int64) error {
 	return db.StartStepTx(t.tx, id, nowMS)
+}
+
+func (t *sqliteTx) TransitionRunStatusTx(runID int, to model.RunStatus, nowMS int64) (model.RunStatus, bool, error) {
+	return db.TransitionRunStatusTx(t.tx, runID, to, nowMS)
 }

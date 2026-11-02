@@ -33,6 +33,19 @@ type (
 	ChainDeferralQuery = db.ChainDeferralQuery
 )
 
+// The routing and loop query inputs and rows, aliased as in aliases.go so
+// callers can build and read them without importing internal/db.
+type (
+	DispatchDeferralQuery = db.DispatchDeferralQuery
+	OrdinalPayload        = db.OrdinalPayload
+	RunStepRollup         = db.RunStepRollup
+	SourcedDeferralQuery  = db.SourcedDeferralQuery
+	StepArtifact          = db.StepArtifact
+	StepArtifactRange     = db.StepArtifactRange
+	StepInstanceRef       = db.StepInstanceRef
+	StepStatusRouting     = db.StepStatusRouting
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -85,6 +98,7 @@ type Store interface {
 	GateResultsForStep(stepID int) ([]db.GateResultRow, error)
 	GateRollup(runID int) ([]db.VerdictCount, error)
 	GateTrail(runID int) ([]db.ResultTrailRow, error)
+	GatedStepIDAtOrdinal(runID, issueID int, stepName string, ordinal int) (id int, found bool, err error)
 	GetActivity(issueID int, limit int) ([]model.Activity, error)
 	GetAllDirectionalRelations() ([]model.Relation, error)
 	GetAllRelations(projectID int) ([]model.Relation, error)
@@ -229,6 +243,7 @@ type ReadTx interface {
 	CountEventsHeldByRetentionTx(sel db.EventPruneSelection, cutoffMS int64) (int, error)
 	CountEventsTx(f db.EventFilter) (int, error)
 	CountPrunableEventsTx(sel db.EventPruneSelection) (int, error)
+	DeferralRecordedForDispatchTx(q db.DispatchDeferralQuery) (bool, error)
 	DispatchGraceTx(projectID int) (time.Duration, error)
 	DispatchTTLTx(projectID int) (time.Duration, error)
 	EventKindCountsTx(runID int) (map[string]int, error)
@@ -245,11 +260,17 @@ type ReadTx interface {
 	GetRunTx(id int) (*model.Run, error)
 	GetSchemaTx(projectID int, name string, version int) (*model.Schema, error)
 	GetStepTx(id int) (*db.Step, error)
+	HighestOrdinalsTx(runID, issueID int) (map[string]int, error)
 	IssueDependenciesDoneTx(issueID int) (bool, error)
+	IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error)
 	IssueLabelsTx(issueID int) ([]string, error)
+	IssueLatestInstancesTerminalTx(runID, issueID int) (bool, error)
 	IssueSchedulingFactsTx(issueID int) (priority model.Priority, scope string, err error)
 	IssueScopeGlobsTx(issueID int) (string, error)
 	IssueStatusResolutionTx(issueID int) (model.Status, string, error)
+	IssueStatusTx(issueID int) (model.Status, error)
+	IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepInstanceRef, error)
+	LastDispatchDeferralTx(q db.SourcedDeferralQuery) (seq int64, data string, found bool, err error)
 	LastEventAtMSTx() (atMS int64, found bool, err error)
 	LatestEventDataTx(runID int, kind string) (data string, found bool, err error)
 	LatestRecordedArtifactIDTx(issueID int, kind string) (id int, found bool, err error)
@@ -266,8 +287,13 @@ type ReadTx interface {
 	LookupIdempotencyKeyTx(scope, key string) (int, bool, error)
 	LoopGrantsTx(runID, issueID int) (int, error)
 	MaxEventSeqTx() (seq int64, found bool, err error)
+	NewestIssueArtifactUpToTx(runID, issueID int, kind string, ordinal int) (hash, body string, found bool, err error)
+	NewestStepNameArtifactTx(r db.StepArtifactRange) (db.StepArtifact, bool, error)
+	NewestStepPayloadTx(stepID int, kind string) (payload string, found bool, err error)
 	NextActionOrdinalTx(stepID int, action string) (int, error)
 	OpenDispatchTx(runID int) (*db.Dispatch, error)
+	PendingDeclaredStepCountTx(runID, issueID int, kinds []string) (int, error)
+	PendingInstancesUpToTx(runID, issueID int, stepName string, ordinal int) ([]db.StepInstanceRef, error)
 	PinnedArtifactTx(id int) (db.PinnedArtifact, error)
 	PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error)
 	ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error)
@@ -280,8 +306,18 @@ type ReadTx interface {
 	RunEverDispatchedTx(runID int) (bool, error)
 	RunPauseOriginTx(id int) (model.RunPauseOrigin, error)
 	RunProjectIDTx(runID int) (int, error)
+	RunStatusTx(runID int) (model.RunStatus, error)
+	RunStepRollupTx(runID int) (db.RunStepRollup, error)
+	StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error)
+	StepByInstanceTx(runID, issueID int, instance string) (db.StepInstanceRef, error)
+	StepHasLaterInstanceTx(runID, issueID int, stepName string, ordinal int) (bool, error)
 	StepIDByInstanceTx(runID, issueID int, instance string) (id int, found bool, err error)
+	StepInstancesAtOrdinalTx(runID, issueID int, stepName string, ordinal int) ([]db.StepStatusRouting, error)
+	StepNamesAtOrdinalTx(runID, issueID, ordinal int) (map[string]bool, error)
+	StepRoundCountTx(runID, issueID int, names []string) (int, error)
+	StepsWithEventKindsSinceTx(runID int, afterSeq int64, kinds []string) (map[int]bool, error)
 	UnacknowledgedReapsTx(runID int) ([]db.ReapAck, error)
+	UnexpandedRunIssueCountTx(runID int) (int, error)
 	UsageBudgetUnitTx(projectID int) (string, error)
 	VoteRuleExistsTx(projectID int, rule string) (bool, error)
 	VoteRuleSetElsewhereTx(projectID int, rule string) (projects int, value string, err error)
@@ -301,6 +337,7 @@ type Tx interface {
 	BindRunIssueTx(ri *db.RunIssue) error
 	BreachRunBudgetTx(runID int, reason string, nowMS int64) (bool, error)
 	CacheRunFloorTx(runID int, floor float64) error
+	CascadeFailIssueStepsTx(runID, issueID, exceptStepID int, routing string, nowMS int64) (int, error)
 	ClaimStepWithRecoveryTx(id int, owner, recoverySecret string, ttlMS, nowMS int64) (token string, lease *model.Lease, err error)
 	ClearProjectDataTx(projectID int) error
 	ClearRunBreachTx(runID int, newReason string, nowMS int64) error
@@ -309,6 +346,7 @@ type Tx interface {
 	ClearStepStartTx(id int) error
 	CloseDispatchTx(id int, status, reason string, nowMS int64) (bool, error)
 	CloseOpenProposalsTx(ids []int, reason string) (int, error)
+	CompleteIssueTx(issueID int, prior model.Status, resolution string, nowMS int64) (bool, error)
 	CoverGateOverrideGrantsTx(ids []int) error
 	DeletePrunableEventsTx(sel db.EventPruneSelection) (int, error)
 	ExemptStepAttemptFromBudgetTx(id int, nowMS int64) error
@@ -369,6 +407,7 @@ type Tx interface {
 	SetRunBudgetTx(runID int, budget float64, ifVersion *int, nowMS int64) error
 	SetRunConductorHashTx(id int, hash string) error
 	SetRunIssueBodyTx(runID, issueID int, body, sha string) error
+	SetRunIssueLoopCountTx(runID, issueID, count int) error
 	SetRunIssueSnapshotTx(runID, issueID int, snapshot string) error
 	SetRunPauseOriginTx(id int, origin model.RunPauseOrigin) error
 	SetRunStatusTx(id int, status model.RunStatus, reason string, nowMS int64) error
@@ -380,4 +419,5 @@ type Tx interface {
 	SetStepRoutingWithParkReasonTx(id int, routing, reason, status string, class db.ParkClass, parkReason string, nowMS int64) error
 	SetStepStatusTx(id int, status string, nowMS, activityMS int64) error
 	StartStepTx(id int, nowMS int64) error
+	TransitionRunStatusTx(runID int, to model.RunStatus, nowMS int64) (from model.RunStatus, moved bool, err error)
 }
