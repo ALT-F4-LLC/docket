@@ -250,6 +250,10 @@ func (s *pgStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.db)
 }
 
+func (s *pgStore) FirstIssueEventDataAfter(q db.IssueEventAfterQuery) (string, bool, error) {
+	return db.FirstIssueEventDataAfter(s.db, q)
+}
+
 func (s *pgStore) FirstRecorderAfterMetadata(q db.FirstRecorderAfterQuery) (string, bool, error) {
 	return db.FirstRecorderAfterMetadata(s.db, q)
 }
@@ -883,6 +887,10 @@ func (t *pgTx) BudgetUnitTx(projectID int) (string, error) {
 	return db.BudgetUnitTx(t.tx, projectID)
 }
 
+func (t *pgTx) ClaimEventsPrunedTx(q db.ClaimEventsPrunedQuery) (bool, error) {
+	return db.ClaimEventsPrunedTx(t.tx, q)
+}
+
 func (t *pgTx) ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOverride, error) {
 	return db.ClassMaxOverridesTx(t.tx, projectID)
 }
@@ -917,6 +925,10 @@ func (t *pgTx) DispatchTTLTx(projectID int) (time.Duration, error) {
 
 func (t *pgTx) EventKindCountsTx(runID int) (map[string]int, error) {
 	return db.EventKindCountsTx(t.tx, runID)
+}
+
+func (t *pgTx) FirstIssueEventDataAfterTx(q db.IssueEventAfterQuery) (string, bool, error) {
+	return db.FirstIssueEventDataAfterTx(t.tx, q)
 }
 
 func (t *pgTx) ForeignHoldingStepsTx(projectID, runID int) ([]*db.Step, error) {
@@ -973,6 +985,10 @@ func (t *pgTx) HighestOrdinalsTx(runID, issueID int) (map[string]int, error) {
 
 func (t *pgTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
+}
+
+func (t *pgTx) IssueDescriptionTx(issueID int) (string, error) {
+	return db.IssueDescriptionTx(t.tx, issueID)
 }
 
 func (t *pgTx) IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error) {
@@ -1192,6 +1208,10 @@ func (t *pgTx) RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error)
 	return db.RunIssueEventsTx(t.tx, runID, kind)
 }
 
+func (t *pgTx) RunIssueSnapshotsTx(runID, issueID int) (string, string, error) {
+	return db.RunIssueSnapshotsTx(t.tx, runID, issueID)
+}
+
 func (t *pgTx) RunPauseOriginTx(id int) (model.RunPauseOrigin, error) {
 	return db.RunPauseOriginTx(t.tx, id)
 }
@@ -1248,8 +1268,16 @@ func (t *pgTx) StepNamesAtOrdinalTx(runID, issueID, ordinal int) (map[string]boo
 	return db.StepNamesAtOrdinalTx(t.tx, runID, issueID, ordinal)
 }
 
+func (t *pgTx) StepRecoveryHashTx(stepID int) (string, bool, error) {
+	return db.StepRecoveryHashTx(t.tx, stepID)
+}
+
 func (t *pgTx) StepRoundCountTx(runID, issueID int, names []string) (int, error) {
 	return db.StepRoundCountTx(t.tx, runID, issueID, names)
+}
+
+func (t *pgTx) StepRowVersionTx(stepID int) (int, error) {
+	return db.StepRowVersionTx(t.tx, stepID)
 }
 
 func (t *pgTx) StepsWithEventKindsSinceTx(runID int, afterSeq int64, kinds []string) (map[int]bool, error) {

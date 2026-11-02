@@ -69,6 +69,13 @@ type (
 	UnfinishedStep = db.UnfinishedStep
 )
 
+// The claim and context query inputs, aliased as in aliases.go so callers can
+// build them without importing internal/db.
+type (
+	ClaimEventsPrunedQuery = db.ClaimEventsPrunedQuery
+	IssueEventAfterQuery   = db.IssueEventAfterQuery
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -116,6 +123,7 @@ type Store interface {
 	EnsureProject(identity, name string, nowMS int64) (int, error)
 	EnsureProjectCreated(identity, name string, nowMS int64) (int, bool, error)
 	EventsRetain() (time.Duration, error)
+	FirstIssueEventDataAfter(q db.IssueEventAfterQuery) (data string, found bool, err error)
 	FirstRecorderAfterMetadata(q db.FirstRecorderAfterQuery) (metadata string, found bool, err error)
 	FirstStepEventData(stepID int, kind string) (data string, found bool, err error)
 	FrozenIssueBindings(issueID int) ([]db.FrozenIssueBinding, error)
@@ -279,6 +287,7 @@ type ReadTx interface {
 	AutoRegisterEnabledTx(projectID int) (bool, error)
 	BudgetDefaultTx(projectID int) (float64, error)
 	BudgetUnitTx(projectID int) (string, error)
+	ClaimEventsPrunedTx(q db.ClaimEventsPrunedQuery) (bool, error)
 	ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOverride, error)
 	ConductorChainDeferralTx(q db.ChainDeferralQuery) (seq int64, data string, found bool, err error)
 	CountEventsHeldByRetentionTx(sel db.EventPruneSelection, cutoffMS int64) (int, error)
@@ -289,6 +298,7 @@ type ReadTx interface {
 	DispatchTTLTx(projectID int) (time.Duration, error)
 	EventKindCountsTx(runID int) (map[string]int, error)
 	EventLowWatermarkTx() (int64, error)
+	FirstIssueEventDataAfterTx(q db.IssueEventAfterQuery) (data string, found bool, err error)
 	ForeignHoldingStepsTx(projectID, runID int) ([]*db.Step, error)
 	GateResultsForStepTx(stepID int) ([]db.GateResultRow, error)
 	GetArtifactTx(id int) (*db.Artifact, error)
@@ -303,6 +313,7 @@ type ReadTx interface {
 	GetStepTx(id int) (*db.Step, error)
 	HighestOrdinalsTx(runID, issueID int) (map[string]int, error)
 	IssueDependenciesDoneTx(issueID int) (bool, error)
+	IssueDescriptionTx(issueID int) (string, error)
 	IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error)
 	IssueLabelsTx(issueID int) ([]string, error)
 	IssueLatestInstancesTerminalTx(runID, issueID int) (bool, error)
@@ -352,6 +363,7 @@ type ReadTx interface {
 	RunEverDispatchedTx(runID int) (bool, error)
 	RunHasIssueTx(runID, issueID int) (bool, error)
 	RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error)
+	RunIssueSnapshotsTx(runID, issueID int) (body, snapshot string, err error)
 	RunPauseOriginTx(id int) (model.RunPauseOrigin, error)
 	RunProjectIDTx(runID int) (int, error)
 	RunStatusTx(runID int) (model.RunStatus, error)
@@ -366,7 +378,9 @@ type ReadTx interface {
 	StepIDByInstanceTx(runID, issueID int, instance string) (id int, found bool, err error)
 	StepInstancesAtOrdinalTx(runID, issueID int, stepName string, ordinal int) ([]db.StepStatusRouting, error)
 	StepNamesAtOrdinalTx(runID, issueID, ordinal int) (map[string]bool, error)
+	StepRecoveryHashTx(stepID int) (hash string, found bool, err error)
 	StepRoundCountTx(runID, issueID int, names []string) (int, error)
+	StepRowVersionTx(stepID int) (int, error)
 	StepsWithEventKindsSinceTx(runID int, afterSeq int64, kinds []string) (map[int]bool, error)
 	UnacknowledgedReapsTx(runID int) ([]db.ReapAck, error)
 	UnexpandedRunIssueCountTx(runID int) (int, error)

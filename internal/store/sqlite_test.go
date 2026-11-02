@@ -452,3 +452,156 @@ func TestSQLiteRunLifecycleQueries(t *testing.T) {
 		t.Errorf("RunUnfinishedStepCountTx after the fail-route = (%d, %v), want (1, nil)", n, err)
 	}
 }
+
+// TestSQLiteClaimAndContextQueries reaches the claim and context queries
+// through a Tx, a read snapshot and the pool, on a seeded run of two issues:
+// each read returns only the step, run, issue and kind asked for, and a
+// missing step or issue reports its not-found error.
+func TestSQLiteClaimAndContextQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	project, err := st.EnsureProject("/repo/context", "context", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	wf, _, err := st.InsertWorkflow(&model.Workflow{
+		ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+	}, 1)
+	testsupport.Must(t, err, "InsertWorkflow: %v", err)
+	newIssue := func(title, description string) int {
+		id, _, err := st.CreateIssueIdempotent(&model.Issue{
+			ProjectID: project, Title: title, Description: description, Status: model.StatusTodo,
+			Priority: model.PriorityNone, Kind: model.IssueKindTask,
+		}, nil, nil, "")
+		testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+		return id
+	}
+	issue, sibling, outsider := newIssue("context subject", "live description"),
+		newIssue("context sibling", "sibling description"), newIssue("not in the run", "")
+	newRun := func() int {
+		run, _, err := st.InsertRunWithContextIdempotent(project, "context", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		testsupport.Must(t, st.AddRunIssue(run.ID, sibling), "AddRunIssue")
+		return run.ID
+	}
+	run, otherRun := newRun(), newRun()
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	addStep := func(name string) int {
+		t.Helper()
+		instance := name + "@0"
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: run, IssueID: issue, WorkflowID: wf.ID, StepName: name, Instance: instance,
+			Kind: "executor", Status: db.StepPending,
+		}, 1), "InsertStepTx %s", instance)
+		id, found, err := tx.StepIDByInstanceTx(run, issue, instance)
+		testsupport.Must(t, err, "StepIDByInstanceTx: %v", err)
+		if !found {
+			t.Fatalf("step %s was not found after its insert", instance)
+		}
+		return id
+	}
+	hashed, bare, other := addStep("implement"), addStep("review"), addStep("verify")
+
+	before, err := tx.StepRowVersionTx(hashed)
+	testsupport.Must(t, err, "StepRowVersionTx before the claim: %v", err)
+	_, _, err = tx.ClaimStepWithRecoveryTx(hashed, "owner", "recovery secret", 1000, 1)
+	testsupport.Must(t, err, "ClaimStepWithRecoveryTx: %v", err)
+	_, _, err = tx.ClaimStepWithRecoveryTx(bare, "owner", "", 1000, 1)
+	testsupport.Must(t, err, "ClaimStepWithRecoveryTx with no secret: %v", err)
+	after, err := tx.StepRowVersionTx(hashed)
+	step, stepErr := tx.GetStepTx(hashed)
+	testsupport.Must(t, stepErr, "GetStepTx: %v", stepErr)
+	if err != nil || after != step.RowVersion || after != before+1 {
+		t.Errorf("StepRowVersionTx after the claim = (%d, %v), want (%d, nil): the stored version, one past %d",
+			after, err, step.RowVersion, before)
+	}
+	if _, err := tx.StepRowVersionTx(999); !errors.Is(err, db.ErrStepNotFound) {
+		t.Errorf("StepRowVersionTx of a missing step = %v, want ErrStepNotFound", err)
+	}
+	if hash, found, err := tx.StepRecoveryHashTx(hashed); err != nil || !found || hash != model.HashToken("recovery secret") {
+		t.Errorf("StepRecoveryHashTx of a claim with a secret = (%q, %v, %v), want (its hash, true, nil)", hash, found, err)
+	}
+	if hash, found, err := tx.StepRecoveryHashTx(bare); err != nil || found || hash != "" {
+		t.Errorf("StepRecoveryHashTx of a claim with no secret = (%q, %v, %v), want (\"\", false, nil)", hash, found, err)
+	}
+	if _, _, err := tx.StepRecoveryHashTx(999); !errors.Is(err, db.ErrStepNotFound) {
+		t.Errorf("StepRecoveryHashTx of a missing step = %v, want ErrStepNotFound", err)
+	}
+
+	testsupport.Must(t, tx.SetRunIssueBodyTx(run, issue, "frozen body", "sha"), "SetRunIssueBodyTx")
+	testsupport.Must(t, tx.SetRunIssueSnapshotTx(run, issue, `{"title":"frozen"}`), "SetRunIssueSnapshotTx")
+	testsupport.Must(t, tx.SetRunIssueBodyTx(run, sibling, "sibling body", "sha"), "SetRunIssueBodyTx")
+	testsupport.Must(t, tx.SetRunIssueSnapshotTx(run, sibling, `{"title":"sibling"}`), "SetRunIssueSnapshotTx")
+	if body, snapshot, err := tx.RunIssueSnapshotsTx(run, issue); err != nil || body != "frozen body" || snapshot != `{"title":"frozen"}` {
+		t.Errorf("RunIssueSnapshotsTx = (%q, %q, %v), want (frozen body, {\"title\":\"frozen\"}, nil)", body, snapshot, err)
+	}
+	if body, snapshot, err := tx.RunIssueSnapshotsTx(otherRun, issue); err != nil || body != "" || snapshot != "" {
+		t.Errorf("RunIssueSnapshotsTx of an unfrozen issue = (%q, %q, %v), want (\"\", \"\", nil)", body, snapshot, err)
+	}
+	if _, _, err := tx.RunIssueSnapshotsTx(run, outsider); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("RunIssueSnapshotsTx of an issue outside the run = %v, want ErrNotFound", err)
+	}
+	if got, err := tx.IssueDescriptionTx(issue); err != nil || got != "live description" {
+		t.Errorf("IssueDescriptionTx = (%q, %v), want (live description, nil)", got, err)
+	}
+	if _, err := tx.IssueDescriptionTx(999); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("IssueDescriptionTx of a missing issue = %v, want ErrNotFound", err)
+	}
+
+	seed := func(e NewEvent) {
+		t.Helper()
+		testsupport.Must(t, tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+	pruned := ClaimEventsPrunedQuery{
+		RunID: run, StepID: hashed, PrunedKind: "events-pruned", ClaimKind: "step-claimed", ClaimedAtMS: 500,
+	}
+	askPruned := func(name string, want bool) {
+		t.Helper()
+		if got, err := tx.ClaimEventsPrunedTx(pruned); err != nil || got != want {
+			t.Errorf("ClaimEventsPrunedTx with %s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	seed(NewEvent{AtMS: 400, Kind: "step-claimed", RunID: run, StepID: hashed, Data: `{}`})
+	seed(NewEvent{AtMS: 600, Kind: "step-claimed", RunID: run, StepID: other, Data: `{}`})
+	seed(NewEvent{AtMS: 600, Kind: "step-heartbeat", RunID: run, StepID: hashed, Data: `{}`})
+	askPruned("no prune logged", false)
+	seed(NewEvent{AtMS: 700, Kind: "events-pruned", RunID: otherRun, Data: `{}`})
+	askPruned("only another run pruned", false)
+	seed(NewEvent{AtMS: 800, Kind: "events-pruned", RunID: run, Data: `{}`})
+	askPruned("a prune that took the claim record, past another kind's event", true)
+	seed(NewEvent{AtMS: 500, Kind: "step-claimed", RunID: run, StepID: hashed, Data: `{}`})
+	askPruned("a prune that left the claim record", false)
+
+	for _, e := range []NewEvent{
+		{AtMS: 100, Kind: "body-refreshed", RunID: run, IssueID: issue, Data: `"at the claim"`},
+		{AtMS: 300, Kind: "body-refreshed", RunID: run, IssueID: issue, Data: `"later"`},
+		{AtMS: 200, Kind: "body-refreshed", RunID: run, IssueID: issue, Data: `"first after"`},
+		{AtMS: 200, Kind: "body-refreshed", RunID: run, IssueID: issue, Data: `"same time, logged later"`},
+		{AtMS: 150, Kind: "scope-refreshed", RunID: run, IssueID: issue, Data: `"another kind"`},
+		{AtMS: 150, Kind: "body-refreshed", RunID: otherRun, IssueID: issue, Data: `"another run"`},
+		{AtMS: 150, Kind: "body-refreshed", RunID: run, IssueID: sibling, Data: `"another issue"`},
+	} {
+		seed(e)
+	}
+	refreshes := IssueEventAfterQuery{RunID: run, IssueID: issue, Kind: "body-refreshed", AfterMS: 100}
+	if data, found, err := tx.FirstIssueEventDataAfterTx(refreshes); err != nil || !found || data != `"first after"` {
+		t.Errorf("FirstIssueEventDataAfterTx = (%q, %v, %v), want (\"first after\", true, nil)", data, found, err)
+	}
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+
+	if data, found, err := st.FirstIssueEventDataAfter(refreshes); err != nil || !found || data != `"first after"` {
+		t.Errorf("FirstIssueEventDataAfter = (%q, %v, %v), want (\"first after\", true, nil)", data, found, err)
+	}
+	newest := refreshes
+	newest.AfterMS = 300
+	if data, found, err := st.FirstIssueEventDataAfter(newest); err != nil || found || data != "" {
+		t.Errorf("FirstIssueEventDataAfter past the newest = (%q, %v, %v), want (\"\", false, nil)", data, found, err)
+	}
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if data, found, err := snap.FirstIssueEventDataAfterTx(newest); err != nil || found || data != "" {
+		t.Errorf("FirstIssueEventDataAfterTx past the newest = (%q, %v, %v), want (\"\", false, nil)", data, found, err)
+	}
+}

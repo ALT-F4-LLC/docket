@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -498,6 +499,115 @@ func TestPgStoreRunLifecycleQueries(t *testing.T) {
 		if step.Status != want {
 			t.Errorf("after FailRouteIssueStepsTx, step %d status = %q, want %q", id, step.Status, want)
 		}
+	}
+}
+
+// TestPgStoreClaimAndContextQueries runs the claim and context queries, whose
+// helper SQL the PostgreSQL store shares, against a seeded run: the EXISTS
+// pair scans as a boolean and keeps its run, step and kind filters, a NULL
+// column reads as not found, the jsonb snapshot and event data scan back as
+// text, and a missing row reports its not-found error. Payloads are written in
+// jsonb's canonical text so they read back unchanged. It skips without
+// DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreClaimAndContextQueries(t *testing.T) {
+	f := newSagaFixture(t)
+	hashed := f.add(db.StepRow{StepName: "implement", Status: db.StepPending})
+	bare := f.add(db.StepRow{StepName: "review", Status: db.StepPending})
+	other := f.add(db.StepRow{StepName: "verify", Status: db.StepPending})
+
+	before, err := f.tx.StepRowVersionTx(hashed)
+	testsupport.Must(t, err, "StepRowVersionTx before the claim: %v", err)
+	_, _, err = f.tx.ClaimStepWithRecoveryTx(hashed, "owner", "recovery secret", 1000, 1)
+	testsupport.Must(t, err, "ClaimStepWithRecoveryTx: %v", err)
+	_, _, err = f.tx.ClaimStepWithRecoveryTx(bare, "owner", "", 1000, 1)
+	testsupport.Must(t, err, "ClaimStepWithRecoveryTx with no secret: %v", err)
+	if after, err := f.tx.StepRowVersionTx(hashed); err != nil || after != before+1 {
+		t.Errorf("StepRowVersionTx after the claim = (%d, %v), want (%d, nil)", after, err, before+1)
+	}
+	if _, err := f.tx.StepRowVersionTx(hashed + 1000); !errors.Is(err, db.ErrStepNotFound) {
+		t.Errorf("StepRowVersionTx of a missing step = %v, want ErrStepNotFound", err)
+	}
+	if hash, found, err := f.tx.StepRecoveryHashTx(hashed); err != nil || !found || hash != model.HashToken("recovery secret") {
+		t.Errorf("StepRecoveryHashTx of a claim with a secret = (%q, %v, %v), want (its hash, true, nil)", hash, found, err)
+	}
+	if hash, found, err := f.tx.StepRecoveryHashTx(bare); err != nil || found || hash != "" {
+		t.Errorf("StepRecoveryHashTx of a claim with no secret = (%q, %v, %v), want (\"\", false, nil)", hash, found, err)
+	}
+	if _, _, err := f.tx.StepRecoveryHashTx(hashed + 1000); !errors.Is(err, db.ErrStepNotFound) {
+		t.Errorf("StepRecoveryHashTx of a missing step = %v, want ErrStepNotFound", err)
+	}
+
+	testsupport.Must(t, f.tx.SetRunIssueBodyTx(f.run, f.issue, "frozen body", "sha"), "SetRunIssueBodyTx")
+	testsupport.Must(t, f.tx.SetRunIssueSnapshotTx(f.run, f.issue, `{"title": "frozen"}`), "SetRunIssueSnapshotTx")
+	if body, snapshot, err := f.tx.RunIssueSnapshotsTx(f.run, f.issue); err != nil || body != "frozen body" || snapshot != `{"title": "frozen"}` {
+		t.Errorf("RunIssueSnapshotsTx = (%q, %q, %v), want (frozen body, {\"title\": \"frozen\"}, nil)", body, snapshot, err)
+	}
+	if body, snapshot, err := f.tx.RunIssueSnapshotsTx(f.otherRun, f.issue); err != nil || body != "" || snapshot != "" {
+		t.Errorf("RunIssueSnapshotsTx of an unfrozen issue = (%q, %q, %v), want (\"\", \"\", nil)", body, snapshot, err)
+	}
+	if _, _, err := f.tx.RunIssueSnapshotsTx(f.run, f.issue+1000); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("RunIssueSnapshotsTx of an issue outside the run = %v, want ErrNotFound", err)
+	}
+
+	seed := func(e db.NewEvent) {
+		t.Helper()
+		testsupport.Must(t, f.tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+	pruned := db.ClaimEventsPrunedQuery{
+		RunID: f.run, StepID: hashed, PrunedKind: "events-pruned", ClaimKind: "step-claimed", ClaimedAtMS: 500,
+	}
+	askPruned := func(name string, want bool) {
+		t.Helper()
+		if got, err := f.tx.ClaimEventsPrunedTx(pruned); err != nil || got != want {
+			t.Errorf("ClaimEventsPrunedTx with %s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	seed(db.NewEvent{AtMS: 400, Kind: "step-claimed", RunID: f.run, StepID: hashed, Data: `{}`})
+	seed(db.NewEvent{AtMS: 600, Kind: "step-claimed", RunID: f.run, StepID: other, Data: `{}`})
+	seed(db.NewEvent{AtMS: 600, Kind: "step-heartbeat", RunID: f.run, StepID: hashed, Data: `{}`})
+	askPruned("no prune logged", false)
+	seed(db.NewEvent{AtMS: 700, Kind: "events-pruned", RunID: f.otherRun, Data: `{}`})
+	askPruned("only another run pruned", false)
+	seed(db.NewEvent{AtMS: 800, Kind: "events-pruned", RunID: f.run, Data: `{}`})
+	askPruned("a prune that took the claim record, past another kind's event", true)
+	seed(db.NewEvent{AtMS: 500, Kind: "step-claimed", RunID: f.run, StepID: hashed, Data: `{}`})
+	askPruned("a prune that left the claim record", false)
+
+	for _, e := range []db.NewEvent{
+		{AtMS: 100, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `{"n": "at the claim"}`},
+		{AtMS: 300, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `{"n": "later"}`},
+		{AtMS: 200, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `{"n": "first after"}`},
+		{AtMS: 200, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `{"n": "same time, logged later"}`},
+		{AtMS: 150, Kind: "scope-refreshed", RunID: f.run, IssueID: f.issue, Data: `{"n": "another kind"}`},
+		{AtMS: 150, Kind: "body-refreshed", RunID: f.otherRun, IssueID: f.issue, Data: `{"n": "another run"}`},
+	} {
+		seed(e)
+	}
+	refreshes := db.IssueEventAfterQuery{RunID: f.run, IssueID: f.issue, Kind: "body-refreshed", AfterMS: 100}
+	if data, found, err := f.tx.FirstIssueEventDataAfterTx(refreshes); err != nil || !found || data != `{"n": "first after"}` {
+		t.Errorf("FirstIssueEventDataAfterTx = (%q, %v, %v), want ({\"n\": \"first after\"}, true, nil)", data, found, err)
+	}
+	testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+	if data, found, err := f.st.FirstIssueEventDataAfter(refreshes); err != nil || !found || data != `{"n": "first after"}` {
+		t.Errorf("FirstIssueEventDataAfter = (%q, %v, %v), want ({\"n\": \"first after\"}, true, nil)", data, found, err)
+	}
+	newest := refreshes
+	newest.AfterMS = 300
+	if data, found, err := f.st.FirstIssueEventDataAfter(newest); err != nil || found || data != "" {
+		t.Errorf("FirstIssueEventDataAfter past the newest = (%q, %v, %v), want (\"\", false, nil)", data, found, err)
+	}
+
+	testsupport.Must(t, f.st.UpdateIssueCAS(f.issue, map[string]interface{}{"description": "live description"}, "tester", nil),
+		"UpdateIssueCAS")
+	snap, err := f.st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if got, err := snap.IssueDescriptionTx(f.issue); err != nil || got != "live description" {
+		t.Errorf("IssueDescriptionTx = (%q, %v), want (live description, nil)", got, err)
+	}
+	if _, err := snap.IssueDescriptionTx(f.issue + 1000); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("IssueDescriptionTx of a missing issue = %v, want ErrNotFound", err)
 	}
 }
 

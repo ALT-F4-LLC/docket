@@ -215,6 +215,10 @@ func (s *sqliteStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.writer)
 }
 
+func (s *sqliteStore) FirstIssueEventDataAfter(q db.IssueEventAfterQuery) (string, bool, error) {
+	return db.FirstIssueEventDataAfter(s.writer, q)
+}
+
 func (s *sqliteStore) FirstRecorderAfterMetadata(q db.FirstRecorderAfterQuery) (string, bool, error) {
 	return db.FirstRecorderAfterMetadata(s.writer, q)
 }
@@ -835,6 +839,10 @@ func (t *sqliteTx) BudgetUnitTx(projectID int) (string, error) {
 	return db.BudgetUnitTx(t.tx, projectID)
 }
 
+func (t *sqliteTx) ClaimEventsPrunedTx(q db.ClaimEventsPrunedQuery) (bool, error) {
+	return db.ClaimEventsPrunedTx(t.tx, q)
+}
+
 func (t *sqliteTx) ClassMaxOverridesTx(projectID int) (map[string]db.ClassMaxOverride, error) {
 	return db.ClassMaxOverridesTx(t.tx, projectID)
 }
@@ -873,6 +881,10 @@ func (t *sqliteTx) EventKindCountsTx(runID int) (map[string]int, error) {
 
 func (t *sqliteTx) EventLowWatermarkTx() (int64, error) {
 	return db.EventLowWatermarkTx(t.tx)
+}
+
+func (t *sqliteTx) FirstIssueEventDataAfterTx(q db.IssueEventAfterQuery) (string, bool, error) {
+	return db.FirstIssueEventDataAfterTx(t.tx, q)
 }
 
 func (t *sqliteTx) ForeignHoldingStepsTx(projectID, runID int) ([]*db.Step, error) {
@@ -929,6 +941,10 @@ func (t *sqliteTx) HighestOrdinalsTx(runID, issueID int) (map[string]int, error)
 
 func (t *sqliteTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
+}
+
+func (t *sqliteTx) IssueDescriptionTx(issueID int) (string, error) {
+	return db.IssueDescriptionTx(t.tx, issueID)
 }
 
 func (t *sqliteTx) IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error) {
@@ -1127,6 +1143,10 @@ func (t *sqliteTx) RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, er
 	return db.RunIssueEventsTx(t.tx, runID, kind)
 }
 
+func (t *sqliteTx) RunIssueSnapshotsTx(runID, issueID int) (string, string, error) {
+	return db.RunIssueSnapshotsTx(t.tx, runID, issueID)
+}
+
 func (t *sqliteTx) RunPauseOriginTx(id int) (model.RunPauseOrigin, error) {
 	return db.RunPauseOriginTx(t.tx, id)
 }
@@ -1183,8 +1203,16 @@ func (t *sqliteTx) StepNamesAtOrdinalTx(runID, issueID, ordinal int) (map[string
 	return db.StepNamesAtOrdinalTx(t.tx, runID, issueID, ordinal)
 }
 
+func (t *sqliteTx) StepRecoveryHashTx(stepID int) (string, bool, error) {
+	return db.StepRecoveryHashTx(t.tx, stepID)
+}
+
 func (t *sqliteTx) StepRoundCountTx(runID, issueID int, names []string) (int, error) {
 	return db.StepRoundCountTx(t.tx, runID, issueID, names)
+}
+
+func (t *sqliteTx) StepRowVersionTx(stepID int) (int, error) {
+	return db.StepRowVersionTx(t.tx, stepID)
 }
 
 func (t *sqliteTx) StepsWithEventKindsSinceTx(runID int, afterSeq int64, kinds []string) (map[int]bool, error) {
