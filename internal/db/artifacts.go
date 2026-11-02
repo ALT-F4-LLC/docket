@@ -363,3 +363,119 @@ func RunCostFloorTx(tx *sql.Tx, runID int, claimEventKind, voteStepKind string) 
 	}
 	return floor, nil
 }
+
+// StepRowVersionTx returns a step's row version, or ErrStepNotFound.
+func StepRowVersionTx(tx *sql.Tx, stepID int) (int, error) {
+	var version int
+	err := tx.QueryRow(`SELECT row_version FROM steps WHERE id = ?`, stepID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrStepNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading %s's row version: %w", model.FormatStepID(stepID), err)
+	}
+	return version, nil
+}
+
+// StepRecoveryHashTx returns the recovery hash a step's claim stored. found is
+// false when the claim stored none; a missing step is ErrStepNotFound.
+func StepRecoveryHashTx(tx *sql.Tx, stepID int) (hash string, found bool, err error) {
+	var h sql.NullString
+	err = tx.QueryRow(`SELECT recovery_hash FROM steps WHERE id = ?`, stepID).Scan(&h)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, ErrStepNotFound
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s's recovery hash: %w", model.FormatStepID(stepID), err)
+	}
+	return h.String, h.Valid, nil
+}
+
+// ClaimEventsPrunedQuery names a step's claim at ClaimedAtMS and the event
+// kinds that record a prune and a claim.
+type ClaimEventsPrunedQuery struct {
+	RunID, StepID         int
+	PrunedKind, ClaimKind string
+	ClaimedAtMS           int64
+}
+
+// ClaimEventsPrunedTx reports whether a prune covering the run, or one with no
+// run, has been logged while no ClaimKind event of the step at or after
+// ClaimedAtMS survives.
+func ClaimEventsPrunedTx(tx *sql.Tx, q ClaimEventsPrunedQuery) (bool, error) {
+	var pruned bool
+	err := tx.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM events
+		                 WHERE kind = ? AND (run_id = ? OR run_id IS NULL))
+		    AND NOT EXISTS (SELECT 1 FROM events
+		                     WHERE kind = ? AND step_id = ? AND at_ms >= ?)`,
+		q.PrunedKind, q.RunID, q.ClaimKind, q.StepID, q.ClaimedAtMS).Scan(&pruned)
+	if err != nil {
+		return false, fmt.Errorf("reading %s's claim record: %w", model.FormatStepID(q.StepID), err)
+	}
+	return pruned, nil
+}
+
+// RunIssueSnapshotsTx returns the body and issue snapshots activation froze for
+// an issue in a run, each "" when none was frozen, or ErrNotFound when the
+// issue is not in the run.
+func RunIssueSnapshotsTx(tx *sql.Tx, runID, issueID int) (body, snapshot string, err error) {
+	var b, s sql.NullString
+	err = tx.QueryRow(
+		`SELECT body_snapshot, issue_snapshot FROM run_issues WHERE run_id = ? AND issue_id = ?`,
+		runID, issueID).Scan(&b, &s)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("reading the snapshots of %s: %w", model.FormatID(issueID), err)
+	}
+	return b.String, s.String, nil
+}
+
+// IssueDescriptionTx returns an issue's live description, or ErrNotFound.
+func IssueDescriptionTx(tx *sql.Tx, issueID int) (string, error) {
+	var description sql.NullString
+	err := tx.QueryRow(`SELECT description FROM issues WHERE id = ?`, issueID).Scan(&description)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the live description for %s: %w", model.FormatID(issueID), err)
+	}
+	return description.String, nil
+}
+
+// IssueEventAfterQuery selects the events of Kind logged for an issue in a run
+// after AfterMS.
+type IssueEventAfterQuery struct {
+	RunID, IssueID int
+	Kind           string
+	AfterMS        int64
+}
+
+// FirstIssueEventDataAfterTx returns the data of the earliest event q selects,
+// by time and then log order. found is false when q selects none.
+func FirstIssueEventDataAfterTx(tx *sql.Tx, q IssueEventAfterQuery) (data string, found bool, err error) {
+	return firstIssueEventDataAfter(tx, q)
+}
+
+// FirstIssueEventDataAfter is FirstIssueEventDataAfterTx on the pool.
+func FirstIssueEventDataAfter(db *sql.DB, q IssueEventAfterQuery) (data string, found bool, err error) {
+	return firstIssueEventDataAfter(db, q)
+}
+
+func firstIssueEventDataAfter(rq rowQuerier, q IssueEventAfterQuery) (data string, found bool, err error) {
+	err = rq.QueryRow(
+		`SELECT data FROM events
+		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
+		  ORDER BY at_ms, seq LIMIT 1`,
+		q.Kind, q.RunID, q.IssueID, q.AfterMS).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s's %s events: %w", model.FormatID(q.IssueID), q.Kind, err)
+	}
+	return data, true, nil
+}

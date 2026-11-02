@@ -455,3 +455,182 @@ func TestSagaQueriesRunCostFloorTx(t *testing.T) {
 			floor, err)
 	}
 }
+
+func TestContextQueriesStepRowVersionTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "implement", Status: StepRunning})
+	other := f.add(StepRow{StepName: "review", Status: StepPending})
+	f.exec(`UPDATE steps SET row_version = 7 WHERE id = ?`, step)
+	f.exec(`UPDATE steps SET row_version = 3 WHERE id = ?`, other)
+
+	got, err := StepRowVersionTx(f.tx, step)
+	if err != nil || got != 7 {
+		t.Errorf("the step's row version = (%d, %v), want (7, nil)", got, err)
+	}
+	if _, err := StepRowVersionTx(f.tx, 999); !errors.Is(err, ErrStepNotFound) {
+		t.Errorf("a missing step's error = %v, want ErrStepNotFound", err)
+	}
+}
+
+func TestContextQueriesStepRecoveryHashTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	hashed := f.add(StepRow{StepName: "implement", Status: StepRunning})
+	bare := f.add(StepRow{StepName: "review", Status: StepRunning})
+	other := f.add(StepRow{StepName: "verify", Status: StepRunning})
+	f.exec(`UPDATE steps SET recovery_hash = 'h-implement' WHERE id = ?`, hashed)
+	f.exec(`UPDATE steps SET recovery_hash = 'h-verify' WHERE id = ?`, other)
+
+	hash, found, err := StepRecoveryHashTx(f.tx, hashed)
+	if err != nil || !found || hash != "h-implement" {
+		t.Errorf("a stored hash = (%q, %v, %v), want (h-implement, true, nil)", hash, found, err)
+	}
+	hash, found, err = StepRecoveryHashTx(f.tx, bare)
+	if err != nil || found || hash != "" {
+		t.Errorf("a claim with no hash = (%q, %v, %v), want (\"\", false, nil)", hash, found, err)
+	}
+	if _, _, err := StepRecoveryHashTx(f.tx, 999); !errors.Is(err, ErrStepNotFound) {
+		t.Errorf("a missing step's error = %v, want ErrStepNotFound", err)
+	}
+}
+
+func TestContextQueriesClaimEventsPrunedTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "implement", Status: StepRunning})
+	other := f.add(StepRow{StepName: "review", Status: StepRunning})
+	seed := func(atMS int64, kind string, runID, stepID int) {
+		t.Helper()
+		testsupport.Must(t, InsertEventTx(f.tx, NewEvent{
+			AtMS: atMS, Kind: kind, RunID: runID, StepID: stepID, Data: `{}`,
+		}), "seeding a %s event", kind)
+	}
+	q := ClaimEventsPrunedQuery{
+		RunID: f.run, StepID: step, PrunedKind: "events-pruned", ClaimKind: "step-claimed",
+		ClaimedAtMS: 500,
+	}
+	ask := func(name string, want bool) {
+		t.Helper()
+		got, err := ClaimEventsPrunedTx(f.tx, q)
+		if err != nil || got != want {
+			t.Errorf("%s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+
+	seed(400, "step-claimed", f.run, step)
+	seed(600, "step-claimed", f.run, other)
+	ask("no prune ever ran", false)
+
+	seed(700, "events-pruned", f.otherRun, 0)
+	ask("only another run was pruned", false)
+
+	seed(800, "events-pruned", f.run, 0)
+	ask("a prune that took the claim record", true)
+
+	seed(500, "step-claimed", f.run, step)
+	ask("a prune that left the claim record", false)
+
+	q.StepID = other
+	q.ClaimedAtMS = 650
+	ask("another step whose claim record went", true)
+}
+
+func TestContextQueriesClaimEventsPrunedTxRunlessPrune(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "implement", Status: StepRunning})
+	testsupport.Must(t, InsertEventTx(f.tx, NewEvent{AtMS: 900, Kind: "events-pruned", Data: `{}`}),
+		"seeding a run-less prune")
+
+	got, err := ClaimEventsPrunedTx(f.tx, ClaimEventsPrunedQuery{
+		RunID: f.run, StepID: step, PrunedKind: "events-pruned", ClaimKind: "step-claimed",
+		ClaimedAtMS: 500,
+	})
+	if err != nil || !got {
+		t.Errorf("a prune with no run = (%v, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestContextQueriesRunIssueSnapshotsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`UPDATE run_issues SET body_snapshot = ?, issue_snapshot = ? WHERE run_id = ? AND issue_id = ?`,
+		"frozen body", `{"title":"frozen"}`, f.run, f.issue)
+	f.exec(`UPDATE run_issues SET body_snapshot = ?, issue_snapshot = ? WHERE run_id = ? AND issue_id = ?`,
+		"other body", `{"title":"other"}`, f.run, f.otherIssue)
+
+	body, snapshot, err := RunIssueSnapshotsTx(f.tx, f.run, f.issue)
+	if err != nil || body != "frozen body" || snapshot != `{"title":"frozen"}` {
+		t.Errorf("the frozen snapshots = (%q, %q, %v), want (frozen body, {\"title\":\"frozen\"}, nil)",
+			body, snapshot, err)
+	}
+	body, snapshot, err = RunIssueSnapshotsTx(f.tx, f.otherRun, f.issue)
+	if err != nil || body != "" || snapshot != "" {
+		t.Errorf("unfrozen snapshots = (%q, %q, %v), want (\"\", \"\", nil)", body, snapshot, err)
+	}
+	if _, _, err := RunIssueSnapshotsTx(f.tx, f.otherRun, f.otherIssue); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an issue outside the run = %v, want ErrNotFound", err)
+	}
+}
+
+func TestContextQueriesIssueDescriptionTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`UPDATE issues SET description = ? WHERE id = ?`, "live description", f.issue)
+	f.exec(`UPDATE issues SET description = ? WHERE id = ?`, "other description", f.otherIssue)
+
+	got, err := IssueDescriptionTx(f.tx, f.issue)
+	if err != nil || got != "live description" {
+		t.Errorf("the live description = (%q, %v), want (live description, nil)", got, err)
+	}
+	if _, err := IssueDescriptionTx(f.tx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a missing issue's error = %v, want ErrNotFound", err)
+	}
+}
+
+// seedIssueRefreshes logs refresh events for the fixture's issue and a
+// distractor for each other key, and returns the query selecting the issue's
+// refreshes after at_ms 100.
+func seedIssueRefreshes(f *routingFixture) IssueEventAfterQuery {
+	f.t.Helper()
+	for _, e := range []NewEvent{
+		{AtMS: 100, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `"at the claim"`},
+		{AtMS: 300, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `"later"`},
+		{AtMS: 200, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `"first after"`},
+		{AtMS: 200, Kind: "body-refreshed", RunID: f.run, IssueID: f.issue, Data: `"same time, logged later"`},
+		{AtMS: 150, Kind: "scope-refreshed", RunID: f.run, IssueID: f.issue, Data: `"another kind"`},
+		{AtMS: 150, Kind: "body-refreshed", RunID: f.otherRun, IssueID: f.issue, Data: `"another run"`},
+		{AtMS: 150, Kind: "body-refreshed", RunID: f.run, IssueID: f.otherIssue, Data: `"another issue"`},
+	} {
+		testsupport.Must(f.t, InsertEventTx(f.tx, e), "seeding a %s event", e.Kind)
+	}
+	return IssueEventAfterQuery{RunID: f.run, IssueID: f.issue, Kind: "body-refreshed", AfterMS: 100}
+}
+
+func TestContextQueriesFirstIssueEventDataAfterTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	q := seedIssueRefreshes(f)
+
+	got, found, err := FirstIssueEventDataAfterTx(f.tx, q)
+	if err != nil || !found || got != `"first after"` {
+		t.Errorf("the first refresh after the claim = (%q, %v, %v), want (\"first after\", true, nil)",
+			got, found, err)
+	}
+	q.AfterMS = 300
+	got, found, err = FirstIssueEventDataAfterTx(f.tx, q)
+	if err != nil || found || got != "" {
+		t.Errorf("nothing after the newest = (%q, %v, %v), want (\"\", false, nil)", got, found, err)
+	}
+}
+
+func TestContextQueriesFirstIssueEventDataAfter(t *testing.T) {
+	f := newRoutingFixture(t)
+	q := seedIssueRefreshes(f)
+	db := sagaPool(f)
+
+	got, found, err := FirstIssueEventDataAfter(db, q)
+	if err != nil || !found || got != `"first after"` {
+		t.Errorf("the first refresh after the claim = (%q, %v, %v), want (\"first after\", true, nil)",
+			got, found, err)
+	}
+	q.AfterMS = 300
+	got, found, err = FirstIssueEventDataAfter(db, q)
+	if err != nil || found || got != "" {
+		t.Errorf("nothing after the newest = (%q, %v, %v), want (\"\", false, nil)", got, found, err)
+	}
+}
