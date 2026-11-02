@@ -1585,3 +1585,282 @@ func TestRoutingQueriesLastDispatchDeferralTx(t *testing.T) {
 	newerSeq := f.event("step-deferred", step, newer)
 	ask("the newest deferral of the latest closed dispatch", newerSeq, newer, true)
 }
+
+// holdFixture seeds one hold's rows out of instance order, plus rows the hold
+// queries must not match: another hold at the next ordinal, the same hold on
+// another issue, and the same hold in another run.
+func holdFixture(t *testing.T) *routingFixture {
+	t.Helper()
+	f := newRoutingFixture(t)
+	zero, one := 0, 1
+	approved := f.add(StepRow{StepName: "review-held", Ordinal: 1, SiblingIndex: &one,
+		Instance: "review-held@1#1", Status: StepDone, Materialized: true})
+	f.exec(`UPDATE steps SET routing = 'pass' WHERE id = ?`, approved)
+	f.add(StepRow{StepName: "review-held", Ordinal: 1, Status: StepWaitingHuman, Materialized: true})
+	f.add(StepRow{StepName: "review-held", Ordinal: 1, SiblingIndex: &zero,
+		Instance: "review-held@1#0", Status: StepPending, Materialized: true})
+	f.add(StepRow{StepName: "review-held", Ordinal: 2, SiblingIndex: &zero,
+		Instance: "review-held@2#0", Status: StepPending, Materialized: true})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "review-held", Ordinal: 1, SiblingIndex: &zero,
+		Instance: "review-held@1#0", Status: StepPending, Materialized: true})
+	f.add(StepRow{RunID: f.otherRun, StepName: "review-held", Ordinal: 1, SiblingIndex: &zero,
+		Instance: "review-held@1#0", Status: StepPending, Materialized: true})
+	return f
+}
+
+func TestActivationQueriesHoldInstances(t *testing.T) {
+	f := holdFixture(t)
+	testsupport.Must(t, f.tx.Commit(), "Commit")
+
+	got, err := HoldInstances(f.db, f.run, f.issue, "review-held@1")
+	testsupport.Must(t, err, "HoldInstances: %v", err)
+	want := []InstanceStatusRouting{
+		{Instance: "review-held@1", Status: StepWaitingHuman},
+		{Instance: "review-held@1#0", Status: StepPending},
+		{Instance: "review-held@1#1", Status: StepDone, Routing: "pass"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("review-held@1's rows = %+v, want %+v (instance order; a NULL routing reads \"\")", got, want)
+	}
+
+	got, err = HoldInstances(f.db, f.run, f.issue, "review-held@3")
+	if err != nil || len(got) != 0 {
+		t.Errorf("a hold never materialized = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestActivationQueriesHoldClusterInstancesTx(t *testing.T) {
+	f := holdFixture(t)
+
+	got, err := HoldClusterInstancesTx(f.tx, f.run, f.issue, "review-held@1")
+	testsupport.Must(t, err, "HoldClusterInstancesTx: %v", err)
+	want := []InstanceStatusRouting{
+		{Instance: "review-held@1#0", Status: StepPending},
+		{Instance: "review-held@1#1", Status: StepDone, Routing: "pass"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("review-held@1's clusters = %+v, want %+v (no whole-hold row)", got, want)
+	}
+
+	got, err = HoldClusterInstancesTx(f.tx, f.run, f.issue, "review-held@3")
+	if err != nil || len(got) != 0 {
+		t.Errorf("a hold with no clusters = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestActivationQueriesNewestStepArtifactExceptKindsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "triage", Status: StepDone})
+	other := f.add(StepRow{StepName: "review", Status: StepDone})
+	onlyOwned := f.add(StepRow{StepName: "lint", Status: StepDone})
+	f.artifact(step, "findings", "s1", "b", `[{"n":"old"}]`)
+	f.artifact(step, "findings", "s2", "b", `[{"n":"new"}]`)
+	f.artifact(step, "gap", "s3", "b", `[{"n":"gap"}]`)
+	f.artifact(step, "recorded-head", "s4", "b", "")
+	f.artifact(other, "findings", "s5", "b", `[{"n":"other step"}]`)
+	f.artifact(onlyOwned, "gap", "s6", "b", `[]`)
+
+	var newest int
+	testsupport.Must(t, f.tx.QueryRow(
+		`SELECT id FROM artifacts WHERE step_id = ? AND sha256 = 's2'`, step).Scan(&newest), "reading s2's id")
+	owned := []string{"gap", "recorded-head"}
+
+	got, found, err := NewestStepArtifactExceptKindsTx(f.tx, step, owned)
+	testsupport.Must(t, err, "NewestStepArtifactExceptKindsTx: %v", err)
+	want := StepArtifactRef{ID: newest, Kind: "findings", Payload: `[{"n":"new"}]`}
+	if !found || got != want {
+		t.Errorf("the newest unowned artifact = (%+v, %v), want (%+v, true)", got, found, want)
+	}
+
+	got, found, err = NewestStepArtifactExceptKindsTx(f.tx, step, nil)
+	testsupport.Must(t, err, "with no kinds excluded: %v", err)
+	if !found || got.Kind != "recorded-head" || got.Payload != "" {
+		t.Errorf("with no kinds excluded = (%+v, %v), want the NULL-payload recorded-head", got, found)
+	}
+
+	got, found, err = NewestStepArtifactExceptKindsTx(f.tx, onlyOwned, owned)
+	if err != nil || found || got != (StepArtifactRef{}) {
+		t.Errorf("a step with only excluded kinds = (%+v, %v, %v), want (zero, false, nil)", got, found, err)
+	}
+}
+
+func TestActivationQueriesStepIDAtOrdinal(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.add(StepRow{StepName: "review", Ordinal: 0, Status: StepDone})
+	review1 := f.add(StepRow{StepName: "review", Ordinal: 1, Status: StepWaitingHuman})
+	f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Ordinal: 2, Status: StepPending})
+	testsupport.Must(t, f.tx.Commit(), "Commit")
+
+	id, found, err := StepIDAtOrdinal(f.db, f.run, f.issue, "review", 1)
+	if err != nil || !found || id != review1 {
+		t.Errorf("review@1 = (%d, %v, %v), want (%d, true, nil)", id, found, err, review1)
+	}
+	id, found, err = StepIDAtOrdinal(f.db, f.run, f.issue, "review", 2)
+	if err != nil || found || id != 0 {
+		t.Errorf("review@2 of an issue without one = (%d, %v, %v), want (0, false, nil)", id, found, err)
+	}
+}
+
+func TestActivationQueriesProjectIdentityTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`INSERT INTO projects (id, identity, name, prefix) VALUES (7, 'github.com/acme/widgets', 'widgets', 'WID')`)
+
+	got, err := ProjectIdentityTx(f.tx, 7)
+	if err != nil || got != "github.com/acme/widgets" {
+		t.Errorf("project 7's identity = (%q, %v), want (github.com/acme/widgets, nil)", got, err)
+	}
+	got, err = ProjectIdentityTx(f.tx, DefaultProjectID)
+	if err != nil || got != "" {
+		t.Errorf("the default project's identity = (%q, %v), want (\"\", nil)", got, err)
+	}
+	if _, err := ProjectIdentityTx(f.tx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a missing project's error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestActivationQueriesRunExpectedCostTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	got, err := RunExpectedCostTx(f.tx, f.run)
+	if err != nil || got != 0 {
+		t.Errorf("a run with no steps = (%v, %v), want (0, nil)", got, err)
+	}
+
+	f.add(StepRow{StepName: "implement", Status: StepDone, ExpectedCost: 2.5})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "implement", Status: StepPending, ExpectedCost: 4})
+	f.add(StepRow{RunID: f.otherRun, StepName: "implement", Status: StepPending, ExpectedCost: 100})
+
+	got, err = RunExpectedCostTx(f.tx, f.run)
+	if err != nil || got != 6.5 {
+		t.Errorf("run's expected cost = (%v, %v), want (6.5, nil)", got, err)
+	}
+}
+
+// workflowRow seeds one registered workflow in a project and returns its id.
+func (f *routingFixture) workflowRow(projectID int, name string, version int, parsed string) int {
+	f.t.Helper()
+	res, err := f.tx.Exec(
+		`INSERT INTO workflows (project_id, name, version, source_sha256, body, parsed, created_at_ms, row_version)
+		 VALUES (?, ?, ?, 'sha', 'body', ?, 1000, 1)`, projectID, name, version, parsed)
+	testsupport.Must(f.t, err, "seeding workflow %s@%d: %v", name, version, err)
+	id, _ := res.LastInsertId()
+	return int(id)
+}
+
+func TestActivationQueriesProjectWorkflowsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`INSERT INTO projects (id, identity, name, prefix) VALUES (7, 'github.com/acme/widgets', 'widgets', 'WID')`)
+	alpha := f.workflowRow(DefaultProjectID, "alpha", 1, `{"a":1}`)
+	wf2 := f.workflowRow(DefaultProjectID, "wf", 2, `{"w":2}`)
+	f.exec(`UPDATE workflows SET description = 'second', deprecated_at_ms = 5 WHERE id = ?`, wf2)
+	elsewhere := f.workflowRow(7, "alpha", 1, `{"elsewhere":true}`)
+
+	got, err := ProjectWorkflowsTx(f.tx, 0)
+	testsupport.Must(t, err, "ProjectWorkflowsTx: %v", err)
+	type row struct {
+		ID           int
+		Name         string
+		Version      int
+		Parsed       string
+		Description  string
+		DeprecatedAt int64
+	}
+	var rows []row
+	for _, wf := range got {
+		rows = append(rows, row{wf.ID, wf.Name, wf.Version, wf.Parsed, wf.Description, wf.DeprecatedAtMS})
+	}
+	want := []row{
+		{alpha, "alpha", 1, `{"a":1}`, "", 0},
+		{wf2, "wf", 2, `{"w":2}`, "second", 5},
+		{f.workflow, "wf", 1, `{}`, "", 0},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Errorf("the default project's workflows = %+v, want %+v (name, then newest version)", rows, want)
+	}
+
+	got, err = ProjectWorkflowsTx(f.tx, 7)
+	if err != nil || len(got) != 1 || got[0].ID != elsewhere {
+		t.Errorf("project 7's workflows = (%+v, %v), want only workflow %d", got, err, elsewhere)
+	}
+	got, err = ProjectWorkflowsTx(f.tx, 999)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a project with no workflows = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+// definitionsFixture seeds a run whose steps were expanded from two workflows
+// and whose issues are bound to two (one shared), plus another run's step and
+// binding to a workflow neither query of the first run may return.
+func definitionsFixture(t *testing.T) (f *routingFixture, second, bound int) {
+	t.Helper()
+	f = newRoutingFixture(t)
+	second = f.workflowRow(DefaultProjectID, "second", 1, `{"second":true}`)
+	bound = f.workflowRow(DefaultProjectID, "bound", 1, `{"bound":true}`)
+	unrelated := f.workflowRow(DefaultProjectID, "unrelated", 1, `{"unrelated":true}`)
+
+	f.add(StepRow{StepName: "implement", Ordinal: 0, Status: StepDone})
+	f.add(StepRow{StepName: "implement", Ordinal: 1, Status: StepPending})
+	review := f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Status: StepPending})
+	f.exec(`UPDATE steps SET workflow_id = ? WHERE id = ?`, second, review)
+	foreign := f.add(StepRow{RunID: f.otherRun, StepName: "implement", Status: StepPending})
+	f.exec(`UPDATE steps SET workflow_id = ? WHERE id = ?`, unrelated, foreign)
+
+	f.exec(`UPDATE run_issues SET workflow_id = ? WHERE run_id = ? AND issue_id = ?`, bound, f.run, f.issue)
+	f.exec(`UPDATE run_issues SET workflow_id = ? WHERE run_id = ? AND issue_id = ?`, f.workflow, f.run, f.otherIssue)
+	f.exec(`UPDATE run_issues SET workflow_id = ? WHERE run_id = ? AND issue_id = ?`, unrelated, f.otherRun, f.issue)
+	return f, second, bound
+}
+
+func TestActivationQueriesRunStepWorkflows(t *testing.T) {
+	f, second, _ := definitionsFixture(t)
+	testsupport.Must(t, f.tx.Commit(), "Commit")
+
+	got, err := RunStepWorkflows(f.db, f.run)
+	testsupport.Must(t, err, "RunStepWorkflows: %v", err)
+	want := []ParsedWorkflow{{ID: f.workflow, Parsed: `{}`}, {ID: second, Parsed: `{"second":true}`}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the run's step workflows = %+v, want %+v (each once, by id)", got, want)
+	}
+
+	empty, err := InsertRun(f.db, 1, "req", 0, 1000)
+	testsupport.Must(t, err, "InsertRun: %v", err)
+	got, err = RunStepWorkflows(f.db, empty.ID)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a run with no steps = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestActivationQueriesRunStepWorkflowsTx(t *testing.T) {
+	f, second, _ := definitionsFixture(t)
+
+	got, err := RunStepWorkflowsTx(f.tx, f.run)
+	testsupport.Must(t, err, "RunStepWorkflowsTx: %v", err)
+	want := []ParsedWorkflow{{ID: f.workflow, Parsed: `{}`}, {ID: second, Parsed: `{"second":true}`}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the run's step workflows = %+v, want %+v (each once, by id)", got, want)
+	}
+	got, err = RunStepWorkflowsTx(f.tx, 999)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a run with no steps = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestActivationQueriesRunBoundWorkflows(t *testing.T) {
+	f, _, bound := definitionsFixture(t)
+	testsupport.Must(t, f.tx.Commit(), "Commit")
+
+	got, err := RunBoundWorkflows(f.db, f.run)
+	testsupport.Must(t, err, "RunBoundWorkflows: %v", err)
+	want := []ParsedWorkflow{{ID: f.workflow, Parsed: `{}`}, {ID: bound, Parsed: `{"bound":true}`}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the run's bound workflows = %+v, want %+v (each once, by id)", got, want)
+	}
+
+	unbound, err := InsertRun(f.db, 1, "req", 0, 1000)
+	testsupport.Must(t, err, "InsertRun: %v", err)
+	testsupport.Must(t, AddRunIssue(f.db, unbound.ID, f.issue), "AddRunIssue")
+	got, err = RunBoundWorkflows(f.db, unbound.ID)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a run whose issues are unbound = (%+v, %v), want (none, nil)", got, err)
+	}
+}

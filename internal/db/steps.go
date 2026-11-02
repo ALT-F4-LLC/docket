@@ -2048,6 +2048,189 @@ func LastDispatchDeferralTx(
 	return seq, data, true, nil
 }
 
+// InstanceStatusRouting is one step row's instance, status, and recorded
+// routing. Routing is "" when none is recorded.
+type InstanceStatusRouting struct {
+	Instance, Status, Routing string
+}
+
+func scanInstanceStatusRoutings(rows *sql.Rows, err error) ([]InstanceStatusRouting, error) {
+	if err != nil {
+		return nil, fmt.Errorf("reading hold instances: %w", err)
+	}
+	return scanRows(rows, "hold instances", func(r *sql.Rows) (InstanceStatusRouting, error) {
+		var (
+			out     InstanceStatusRouting
+			routing sql.NullString
+		)
+		if err := r.Scan(&out.Instance, &out.Status, &routing); err != nil {
+			return out, fmt.Errorf("reading a hold instance: %w", err)
+		}
+		out.Routing = routing.String
+		return out, nil
+	})
+}
+
+// HoldInstances returns a materialized hold's rows for an issue in the run:
+// the whole-hold row named holdInstance and every `<holdInstance>#<n>` cluster
+// row, in instance order.
+func HoldInstances(db *sql.DB, runID, issueID int, holdInstance string) ([]InstanceStatusRouting, error) {
+	return scanInstanceStatusRoutings(db.Query(
+		`SELECT instance, status, routing FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND (instance = ? OR instance LIKE ?)
+		  ORDER BY instance`,
+		runID, issueID, holdInstance, holdInstance+"#%"))
+}
+
+// HoldClusterInstancesTx returns only the `<holdInstance>#<n>` cluster rows of
+// a materialized hold for an issue in the run, in instance order.
+func HoldClusterInstancesTx(tx *sql.Tx, runID, issueID int, holdInstance string) ([]InstanceStatusRouting, error) {
+	return scanInstanceStatusRoutings(tx.Query(
+		`SELECT instance, status, routing FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND instance LIKE ?
+		  ORDER BY instance`,
+		runID, issueID, holdInstance+"#%"))
+}
+
+// StepArtifactRef is one artifact's id and kind with its payload. Payload is
+// "" when none was recorded.
+type StepArtifactRef struct {
+	ID            int
+	Kind, Payload string
+}
+
+// NewestStepArtifactExceptKindsTx returns the newest artifact a step recorded
+// whose kind is not in exceptKinds. found is false when there is none.
+func NewestStepArtifactExceptKindsTx(
+	tx *sql.Tx, stepID int, exceptKinds []string,
+) (StepArtifactRef, bool, error) {
+	query := `SELECT id, kind, payload FROM artifacts WHERE step_id = ?`
+	args := []any{stepID}
+	if len(exceptKinds) > 0 {
+		query += ` AND kind NOT IN (` + makePlaceholders(len(exceptKinds)) + `)`
+		for _, kind := range exceptKinds {
+			args = append(args, kind)
+		}
+	}
+	var (
+		out     StepArtifactRef
+		payload sql.NullString
+	)
+	err := tx.QueryRow(query+` ORDER BY id DESC LIMIT 1`, args...).Scan(&out.ID, &out.Kind, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StepArtifactRef{}, false, nil
+	}
+	if err != nil {
+		return StepArtifactRef{}, false, fmt.Errorf("reading %s's newest artifact: %w",
+			model.FormatStepID(stepID), err)
+	}
+	out.Payload = payload.String
+	return out, true, nil
+}
+
+// StepIDAtOrdinal returns the id of the lowest-id instance of one step name at
+// one ordinal of an issue. found is false when there is none.
+func StepIDAtOrdinal(
+	db *sql.DB, runID, issueID int, stepName string, ordinal int,
+) (id int, found bool, err error) {
+	err = db.QueryRow(
+		`SELECT id FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?
+		  ORDER BY id LIMIT 1`,
+		runID, issueID, stepName, ordinal).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("reading %s@%d: %w", stepName, ordinal, err)
+	}
+	return id, true, nil
+}
+
+// ProjectIdentityTx reads a project's identity, or returns ErrNotFound.
+func ProjectIdentityTx(tx *sql.Tx, projectID int) (string, error) {
+	var identity string
+	err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`, projectID).Scan(&identity)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the identity of project %d: %w", projectID, err)
+	}
+	return identity, nil
+}
+
+// RunExpectedCostTx sums the declared `expected_cost` of every step in the
+// run. A run with no steps sums to 0.
+func RunExpectedCostTx(tx *sql.Tx, runID int) (float64, error) {
+	var total float64
+	err := tx.QueryRow(
+		`SELECT COALESCE(SUM(expected_cost), 0) FROM steps WHERE run_id = ?`, runID).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("summing run %s's expected cost: %w", model.FormatRunID(runID), err)
+	}
+	return total, nil
+}
+
+// ProjectWorkflowsTx returns every registered workflow of a project (0 is the
+// default project), ordered by name and then newest version first.
+func ProjectWorkflowsTx(tx *sql.Tx, projectID int) ([]*model.Workflow, error) {
+	rows, err := tx.Query(
+		workflowSelect+` WHERE project_id = ? ORDER BY name ASC, version DESC`,
+		projectOrDefault(projectID))
+	if err != nil {
+		return nil, fmt.Errorf("listing workflows: %w", err)
+	}
+	return scanRows(rows, "workflows", func(r *sql.Rows) (*model.Workflow, error) {
+		return scanWorkflowRows(r)
+	})
+}
+
+// ParsedWorkflow is one registered workflow's id and its stored parsed form.
+type ParsedWorkflow struct {
+	ID     int
+	Parsed string
+}
+
+func scanParsedWorkflows(rows *sql.Rows, err error) ([]ParsedWorkflow, error) {
+	if err != nil {
+		return nil, fmt.Errorf("reading run workflows: %w", err)
+	}
+	return scanRows(rows, "run workflows", func(r *sql.Rows) (ParsedWorkflow, error) {
+		var out ParsedWorkflow
+		if err := r.Scan(&out.ID, &out.Parsed); err != nil {
+			return out, fmt.Errorf("reading a run workflow: %w", err)
+		}
+		return out, nil
+	})
+}
+
+const runStepWorkflowsQuery = `SELECT DISTINCT w.id, w.parsed
+   FROM steps s JOIN workflows w ON w.id = s.workflow_id
+  WHERE s.run_id = ?
+  ORDER BY w.id`
+
+// RunStepWorkflows returns, once each and in id order, the workflows the run's
+// steps were expanded from.
+func RunStepWorkflows(db *sql.DB, runID int) ([]ParsedWorkflow, error) {
+	return scanParsedWorkflows(db.Query(runStepWorkflowsQuery, runID))
+}
+
+// RunStepWorkflowsTx is RunStepWorkflows inside the caller's transaction.
+func RunStepWorkflowsTx(tx *sql.Tx, runID int) ([]ParsedWorkflow, error) {
+	return scanParsedWorkflows(tx.Query(runStepWorkflowsQuery, runID))
+}
+
+// RunBoundWorkflows returns, once each and in id order, the workflows the
+// run's issues are bound to.
+func RunBoundWorkflows(db *sql.DB, runID int) ([]ParsedWorkflow, error) {
+	return scanParsedWorkflows(db.Query(
+		`SELECT DISTINCT w.id, w.parsed
+		   FROM run_issues ri JOIN workflows w ON w.id = ri.workflow_id
+		  WHERE ri.run_id = ? AND ri.workflow_id IS NOT NULL
+		  ORDER BY w.id`, runID))
+}
+
 // nullableInt maps 0 to SQL NULL, for optional foreign keys.
 func nullableInt(n int) any {
 	if n == 0 {
