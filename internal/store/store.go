@@ -76,6 +76,13 @@ type (
 	IssueEventAfterQuery   = db.IssueEventAfterQuery
 )
 
+// The dispatch and guard query inputs and rows, aliased as in aliases.go so
+// callers can build and read them without importing internal/db.
+type (
+	GateStepQuery = db.GateStepQuery
+	GateStepState = db.GateStepState
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -90,6 +97,8 @@ type Store interface {
 	ActionOutputsFor(stepID int, action string) ([]string, error)
 	ActionRollup(runID int) ([]db.VerdictCount, error)
 	ActionTrail(runID int) ([]db.ResultTrailRow, error)
+	ActiveGateSteps(q db.GateStepQuery) ([]db.GateStepState, error)
+	ActiveStartedRunIDs(projectID int) ([]int, error)
 	AddLabelsToIssue(issueID int, labelNames []string, color string, author string) error
 	AddRunIssue(runID, issueID int) error
 	AllProjectPrefixes() ([]string, error)
@@ -325,6 +334,7 @@ type ReadTx interface {
 	IssueUnfinishedStepsTx(runID, issueID int) ([]db.UnfinishedStep, error)
 	LastDispatchDeferralTx(q db.SourcedDeferralQuery) (seq int64, data string, found bool, err error)
 	LastEventAtMSTx() (atMS int64, found bool, err error)
+	LastEventSeqTx() (int64, error)
 	LatestEventDataTx(runID int, kind string) (data string, found bool, err error)
 	LatestRecordedArtifactIDTx(issueID int, kind string) (id int, found bool, err error)
 	ListDispatchRowsTx(dispatchID int) ([]db.DispatchRow, error)
@@ -349,8 +359,10 @@ type ReadTx interface {
 	PendingDeclaredStepCountTx(runID, issueID int, kinds []string) (int, error)
 	PendingInstancesUpToTx(runID, issueID int, stepName string, ordinal int) ([]db.StepInstanceRef, error)
 	PinnedArtifactTx(id int) (db.PinnedArtifact, error)
+	PriorDispatchClosesTx(runID int, closedKind string) ([]string, error)
 	PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error)
 	ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error)
+	ProposalStatusTx(id int) (status model.ProposalStatus, found bool, err error)
 	RegisteredVoteRulesTx(projectID int) ([]string, error)
 	RelationSourcesTx(targetID int, rt model.RelationType) ([]int, error)
 	RelationTargetsTx(sourceID int, rt model.RelationType) ([]int, error)
@@ -360,6 +372,7 @@ type ReadTx interface {
 	RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (float64, error)
 	RunEventDataTx(runID int, kinds ...string) ([]string, error)
 	RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error)
+	RunEventIssueIDsTx(runID int, kind string) (map[int]bool, error)
 	RunEverDispatchedTx(runID int) (bool, error)
 	RunHasIssueTx(runID, issueID int) (bool, error)
 	RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error)

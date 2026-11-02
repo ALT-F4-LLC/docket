@@ -611,6 +611,161 @@ func TestPgStoreClaimAndContextQueries(t *testing.T) {
 	}
 }
 
+// TestPgStoreDispatchAndGuardQueries runs the dispatch and guard queries,
+// whose helper SQL the PostgreSQL store shares, against seeded runs of two
+// projects: each read keeps its run, project, kind, name and status filters,
+// the jsonb close payloads scan back as text in seq order although their
+// timestamps descend, and a missing proposal reads as not found. The run and
+// step updated last move to the end of their tables' heaps, so a list read
+// that dropped its ORDER BY would return them after their later siblings.
+// Payloads are written in jsonb's canonical text so they read back unchanged.
+// It skips without DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreDispatchAndGuardQueries(t *testing.T) {
+	f := newSagaFixture(t)
+	testsupport.Must(t, f.tx.Commit(), "releasing the fixture's transaction")
+	project, err := f.st.RunProjectID(f.run)
+	testsupport.Must(t, err, "RunProjectID: %v", err)
+	awayProject, err := f.st.EnsureProject("/repo/away", "away", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	sibling, _, err := f.st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: project, Title: "sibling", Status: model.StatusTodo,
+		Priority: model.PriorityNone, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+	newRun := func(projectID int) int {
+		t.Helper()
+		run, _, err := f.st.InsertRunWithContextIdempotent(projectID, "dispatch", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, f.st.AddRunIssue(run.ID, f.issue), "AddRunIssue")
+		return run.ID
+	}
+	dispatched, idle := f.run, f.otherRun
+	gated, done, abandoned, elsewhere := newRun(project), newRun(project), newRun(project), newRun(awayProject)
+	f.tx, err = f.st.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	seed := func(e db.NewEvent) {
+		t.Helper()
+		testsupport.Must(t, f.tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+
+	before, err := f.tx.LastEventSeqTx()
+	testsupport.Must(t, err, "LastEventSeqTx before the seeded events: %v", err)
+	seed(db.NewEvent{AtMS: 900, Kind: "dispatch-closed", RunID: dispatched, Data: `{"dispatch": "DISPATCH-1"}`})
+	seed(db.NewEvent{AtMS: 800, Kind: "dispatch-opened", RunID: dispatched, Data: `{"dispatch": "DISPATCH-2"}`})
+	seed(db.NewEvent{AtMS: 700, Kind: "dispatch-closed", RunID: gated, Data: `{"dispatch": "DISPATCH-3"}`})
+	seed(db.NewEvent{AtMS: 600, Kind: "dispatch-closed", RunID: dispatched, Data: `{"dispatch": "DISPATCH-2"}`})
+	seed(db.NewEvent{AtMS: 1, Kind: "issue-abandoned", RunID: dispatched, IssueID: f.issue, Data: `{}`})
+	seed(db.NewEvent{AtMS: 2, Kind: "issue-abandoned", RunID: dispatched, IssueID: f.issue, Data: `{}`})
+	seed(db.NewEvent{AtMS: 3, Kind: "issue-abandoned", RunID: dispatched, Data: `{"no": "issue"}`})
+	seed(db.NewEvent{AtMS: 4, Kind: "issue-reopened", RunID: dispatched, IssueID: sibling, Data: `{}`})
+	seed(db.NewEvent{AtMS: 5, Kind: "issue-abandoned", RunID: gated, IssueID: sibling, Data: `{}`})
+	seed(db.NewEvent{AtMS: 6, Kind: "run-note-added", RunID: elsewhere, Data: `{}`})
+	newest, found, err := f.tx.MaxEventSeqTx()
+	testsupport.Must(t, err, "MaxEventSeqTx: %v", err)
+	if seq, err := f.tx.LastEventSeqTx(); err != nil || !found || seq != newest || seq <= before {
+		t.Errorf("LastEventSeqTx over every run's events = (%d, %v), want (%d, nil), past %d", seq, err, newest, before)
+	}
+
+	if got, err := f.tx.PriorDispatchClosesTx(dispatched, "dispatch-closed"); err != nil ||
+		!reflect.DeepEqual(got, []string{`{"dispatch": "DISPATCH-1"}`, `{"dispatch": "DISPATCH-2"}`}) {
+		t.Errorf("PriorDispatchClosesTx = (%q, %v), want DISPATCH-1 then DISPATCH-2 in seq order", got, err)
+	}
+	if got, err := f.tx.PriorDispatchClosesTx(idle, "dispatch-closed"); err != nil || len(got) != 0 {
+		t.Errorf("PriorDispatchClosesTx of a run that never closed one = (%q, %v), want (none, nil)", got, err)
+	}
+	if got, err := f.tx.RunEventIssueIDsTx(dispatched, "issue-abandoned"); err != nil ||
+		!reflect.DeepEqual(got, map[int]bool{f.issue: true}) {
+		t.Errorf("RunEventIssueIDsTx = (%v, %v), want ({%d: true}, nil)", got, err, f.issue)
+	}
+	if got, err := f.tx.RunEventIssueIDsTx(idle, "issue-abandoned"); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("RunEventIssueIDsTx of a run that logged none = (%v, %v), want (an empty set, nil)", got, err)
+	}
+
+	now := time.Unix(1000, 0)
+	for id, status := range map[int]model.ProposalStatus{7: model.ProposalStatusOpen, 8: model.ProposalStatusCommitted} {
+		_, err := f.tx.InsertProposalWithID(&model.Proposal{
+			ID: id, ProjectID: project, Description: "vote", Criticality: model.CriticalityLow, Status: status,
+			RequiredVoters: 1, Threshold: 0.5, CreatedAt: now, UpdatedAt: now,
+		})
+		testsupport.Must(t, err, "InsertProposalWithID %d: %v", id, err)
+	}
+	if status, found, err := f.tx.ProposalStatusTx(8); err != nil || !found || status != model.ProposalStatusCommitted {
+		t.Errorf("ProposalStatusTx = (%q, %v, %v), want (committed, true, nil)", status, found, err)
+	}
+
+	f.add(db.StepRow{RunID: dispatched, StepName: "approve", Kind: "human", Status: db.StepPending})
+	tallied := f.add(db.StepRow{RunID: dispatched, StepName: "approve", Ordinal: 1, Kind: "vote", Status: db.StepPending})
+	f.add(db.StepRow{RunID: dispatched, StepName: "approve", Ordinal: 2, Status: db.StepDone})
+	f.add(db.StepRow{RunID: dispatched, StepName: "ship", Kind: "human", Status: db.StepDone})
+	f.add(db.StepRow{RunID: idle, StepName: "implement", Status: db.StepPending})
+	f.add(db.StepRow{RunID: gated, StepName: "approve", Kind: "human", Status: db.StepWaitingHuman})
+	f.add(db.StepRow{RunID: done, StepName: "approve", Kind: "human", Status: db.StepDone})
+	f.add(db.StepRow{RunID: abandoned, StepName: "implement", Status: db.StepRunning})
+	f.add(db.StepRow{RunID: elsewhere, StepName: "approve", Kind: "human", Status: db.StepFailedRouted})
+	for _, run := range []int{dispatched, done, elsewhere} {
+		_, err := f.tx.InsertDispatchTx(run, 0, 5000, 1000)
+		testsupport.Must(t, err, "InsertDispatchTx: %v", err)
+	}
+	testsupport.Must(t, f.tx.SetRunStatusTx(done, model.RunDone, "", 2), "SetRunStatusTx done")
+	testsupport.Must(t, f.tx.SetRunStatusTx(abandoned, model.RunAbandoned, "", 2), "SetRunStatusTx abandoned")
+	testsupport.Must(t, f.tx.SetRunStatusTx(elsewhere, model.RunWaitingHuman, "", 2), "SetRunStatusTx waiting-human")
+	testsupport.Must(t, f.tx.SetStepRoutingTx(tallied, "pass", "tallied", db.StepDone, "", 3), "SetStepRoutingTx")
+	testsupport.Must(t, f.tx.SetRunStatusTx(dispatched, model.RunWaitingHuman, "", 3), "SetRunStatusTx dispatched")
+	testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+	if got, err := f.st.ActiveStartedRunIDs(0); err != nil || !reflect.DeepEqual(got, []int{dispatched, gated, elsewhere}) {
+		t.Errorf("ActiveStartedRunIDs over every project = (%v, %v), want (%v, nil)", got, err,
+			[]int{dispatched, gated, elsewhere})
+	}
+	if got, err := f.st.ActiveStartedRunIDs(project); err != nil || !reflect.DeepEqual(got, []int{dispatched, gated}) {
+		t.Errorf("ActiveStartedRunIDs of one project = (%v, %v), want (%v, nil)", got, err, []int{dispatched, gated})
+	}
+	if got, err := f.st.ActiveStartedRunIDs(awayProject + 1); err != nil || len(got) != 0 {
+		t.Errorf("ActiveStartedRunIDs of a project with no runs = (%v, %v), want (none, nil)", got, err)
+	}
+
+	routed, err := f.st.GetStep(tallied)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if routed.Routing == "" {
+		t.Fatalf("the routed vote step stored no routing record, so the routing column went unchecked")
+	}
+	kinds := []string{"human", "vote"}
+	inRun := []store.GateStepState{{Status: db.StepPending}, {Status: db.StepDone, Routing: routed.Routing}}
+	cases := []struct {
+		name string
+		q    store.GateStepQuery
+		want []store.GateStepState
+	}{
+		{"every project", store.GateStepQuery{StepName: "approve", Kinds: kinds},
+			append(append([]store.GateStepState{}, inRun...), store.GateStepState{Status: db.StepWaitingHuman},
+				store.GateStepState{Status: db.StepFailedRouted})},
+		{"one project", store.GateStepQuery{StepName: "approve", Kinds: kinds, ProjectID: project},
+			append(append([]store.GateStepState{}, inRun...), store.GateStepState{Status: db.StepWaitingHuman})},
+		{"a named run outside the project", store.GateStepQuery{StepName: "approve", Kinds: kinds,
+			RunID: elsewhere, ProjectID: project}, []store.GateStepState{{Status: db.StepFailedRouted}}},
+		{"one kind", store.GateStepQuery{StepName: "approve", Kinds: []string{"vote"}, RunID: dispatched}, inRun[1:]},
+		{"an ended run", store.GateStepQuery{StepName: "approve", Kinds: kinds, RunID: done}, nil},
+	}
+	for _, c := range cases {
+		if got, err := f.st.ActiveGateSteps(c.q); err != nil || len(got) != len(c.want) || (len(got) > 0 && !reflect.DeepEqual(got, c.want)) {
+			t.Errorf("ActiveGateSteps for %s = (%+v, %v), want (%+v, nil)", c.name, got, err, c.want)
+		}
+	}
+
+	snap, err := f.st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if status, found, err := snap.ProposalStatusTx(7); err != nil || !found || status != model.ProposalStatusOpen {
+		t.Errorf("ProposalStatusTx through a snapshot = (%q, %v, %v), want (open, true, nil)", status, found, err)
+	}
+	if status, found, err := snap.ProposalStatusTx(999); err != nil || found || status != "" {
+		t.Errorf("ProposalStatusTx of a missing proposal = (%q, %v, %v), want (\"\", false, nil)", status, found, err)
+	}
+	if seq, err := snap.LastEventSeqTx(); err != nil || seq != newest {
+		t.Errorf("LastEventSeqTx through a snapshot = (%d, %v), want (%d, nil)", seq, err, newest)
+	}
+}
+
 func TestRebindPlaceholders(t *testing.T) {
 	cases := []struct {
 		in    string

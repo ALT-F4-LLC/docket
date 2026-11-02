@@ -83,6 +83,14 @@ func (s *sqliteStore) ActionTrail(runID int) ([]db.ResultTrailRow, error) {
 	return db.ActionTrail(s.writer, runID)
 }
 
+func (s *sqliteStore) ActiveGateSteps(q db.GateStepQuery) ([]db.GateStepState, error) {
+	return db.ActiveGateSteps(s.writer, q)
+}
+
+func (s *sqliteStore) ActiveStartedRunIDs(projectID int) ([]int, error) {
+	return db.ActiveStartedRunIDs(s.writer, projectID)
+}
+
 func (s *sqliteStore) AddLabelsToIssue(issueID int, labelNames []string, color string, author string) error {
 	return db.AddLabelsToIssue(s.writer, issueID, labelNames, color, author)
 }
@@ -991,6 +999,10 @@ func (t *sqliteTx) LastEventAtMSTx() (int64, bool, error) {
 	return db.LastEventAtMSTx(t.tx)
 }
 
+func (t *sqliteTx) LastEventSeqTx() (int64, error) {
+	return db.LastEventSeqTx(t.tx)
+}
+
 func (t *sqliteTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
 	return db.LatestEventDataTx(t.tx, runID, kind)
 }
@@ -1087,12 +1099,20 @@ func (t *sqliteTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
 	return db.PinnedArtifactTx(t.tx, id)
 }
 
+func (t *sqliteTx) PriorDispatchClosesTx(runID int, closedKind string) ([]string, error) {
+	return db.PriorDispatchClosesTx(t.tx, runID, closedKind)
+}
+
 func (t *sqliteTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error) {
 	return db.PrunableEventRunsTx(t.tx, sel)
 }
 
 func (t *sqliteTx) ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error) {
 	return db.ProposalStatusesTx(t.tx, ids)
+}
+
+func (t *sqliteTx) ProposalStatusTx(id int) (model.ProposalStatus, bool, error) {
+	return db.ProposalStatusTx(t.tx, id)
 }
 
 func (t *sqliteTx) RegisteredVoteRulesTx(projectID int) ([]string, error) {
@@ -1129,6 +1149,10 @@ func (t *sqliteTx) RunEventDataTx(runID int, kinds ...string) ([]string, error) 
 
 func (t *sqliteTx) RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error) {
 	return db.RunEventsTx(t.tx, runID, kinds...)
+}
+
+func (t *sqliteTx) RunEventIssueIDsTx(runID int, kind string) (map[int]bool, error) {
+	return db.RunEventIssueIDsTx(t.tx, runID, kind)
 }
 
 func (t *sqliteTx) RunEverDispatchedTx(runID int) (bool, error) {

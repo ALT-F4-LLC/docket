@@ -118,6 +118,14 @@ func (s *pgStore) ActionTrail(runID int) ([]db.ResultTrailRow, error) {
 	return db.ActionTrail(s.db, runID)
 }
 
+func (s *pgStore) ActiveGateSteps(q db.GateStepQuery) ([]db.GateStepState, error) {
+	return db.ActiveGateSteps(s.db, q)
+}
+
+func (s *pgStore) ActiveStartedRunIDs(projectID int) ([]int, error) {
+	return db.ActiveStartedRunIDs(s.db, projectID)
+}
+
 func (s *pgStore) AddLabelsToIssue(issueID int, labelNames []string, color string, author string) error {
 	return db.AddLabelsToIssue(s.db, issueID, labelNames, color, author)
 }
@@ -1035,6 +1043,10 @@ func (t *pgTx) LastEventAtMSTx() (int64, bool, error) {
 	return db.LastEventAtMSTx(t.tx)
 }
 
+func (t *pgTx) LastEventSeqTx() (int64, error) {
+	return db.LastEventSeqTx(t.tx)
+}
+
 func (t *pgTx) LatestEventDataTx(runID int, kind string) (string, bool, error) {
 	return db.LatestEventDataTx(t.tx, runID, kind)
 }
@@ -1131,12 +1143,20 @@ func (t *pgTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
 	return db.PinnedArtifactTx(t.tx, id)
 }
 
+func (t *pgTx) PriorDispatchClosesTx(runID int, closedKind string) ([]string, error) {
+	return db.PriorDispatchClosesTx(t.tx, runID, closedKind)
+}
+
 func (t *pgTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error) {
 	return db.PrunableEventRunsTx(t.tx, sel)
 }
 
 func (t *pgTx) ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error) {
 	return db.ProposalStatusesTx(t.tx, ids)
+}
+
+func (t *pgTx) ProposalStatusTx(id int) (model.ProposalStatus, bool, error) {
+	return db.ProposalStatusTx(t.tx, id)
 }
 
 func (t *pgTx) RegisteredVoteRulesTx(projectID int) ([]string, error) {
@@ -1194,6 +1214,10 @@ func (t *pgTx) RunEventDataTx(runID int, kinds ...string) ([]string, error) {
 
 func (t *pgTx) RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error) {
 	return db.RunEventsTx(t.tx, runID, kinds...)
+}
+
+func (t *pgTx) RunEventIssueIDsTx(runID int, kind string) (map[int]bool, error) {
+	return db.RunEventIssueIDsTx(t.tx, runID, kind)
 }
 
 func (t *pgTx) RunEverDispatchedTx(runID int) (bool, error) {

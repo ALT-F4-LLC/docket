@@ -5,7 +5,9 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -603,5 +605,191 @@ func TestSQLiteClaimAndContextQueries(t *testing.T) {
 	t.Cleanup(func() { snap.Rollback() })
 	if data, found, err := snap.FirstIssueEventDataAfterTx(newest); err != nil || found || data != "" {
 		t.Errorf("FirstIssueEventDataAfterTx past the newest = (%q, %v, %v), want (\"\", false, nil)", data, found, err)
+	}
+}
+
+// TestSQLiteDispatchAndGuardQueries reaches the dispatch and guard queries
+// through a Tx, a read snapshot and the pool, on runs of two projects: each
+// read keeps its run, project, kind, name and status filters, the list reads
+// come back in seq or id order even where timestamps or later updates run the
+// other way, and a missing proposal reads as not found.
+func TestSQLiteDispatchAndGuardQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	type scope struct{ project, workflow, issue, sibling int }
+	newScope := func(identity string) scope {
+		t.Helper()
+		project, err := st.EnsureProject(identity, filepath.Base(identity), 1)
+		testsupport.Must(t, err, "EnsureProject: %v", err)
+		wf, _, err := st.InsertWorkflow(&model.Workflow{
+			ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+		}, 1)
+		testsupport.Must(t, err, "InsertWorkflow: %v", err)
+		newIssue := func(title string) int {
+			id, _, err := st.CreateIssueIdempotent(&model.Issue{
+				ProjectID: project, Title: title, Status: model.StatusTodo,
+				Priority: model.PriorityNone, Kind: model.IssueKindTask,
+			}, nil, nil, "")
+			testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+			return id
+		}
+		return scope{project: project, workflow: wf.ID, issue: newIssue("dispatch subject"), sibling: newIssue("sibling")}
+	}
+	home, away := newScope("/repo/dispatch"), newScope("/repo/away")
+	newRun := func(s scope) int {
+		t.Helper()
+		run, _, err := st.InsertRunWithContextIdempotent(s.project, "dispatch", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, s.issue), "AddRunIssue")
+		testsupport.Must(t, st.AddRunIssue(run.ID, s.sibling), "AddRunIssue")
+		return run.ID
+	}
+	dispatched, idle, gated := newRun(home), newRun(home), newRun(home)
+	done, abandoned, elsewhere := newRun(home), newRun(home), newRun(away)
+	scopeOf := map[int]scope{elsewhere: away}
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	add := func(runID int, name string, ordinal int, kind, status string) int {
+		t.Helper()
+		s, ok := scopeOf[runID]
+		if !ok {
+			s = home
+		}
+		instance := name + "@" + strconv.Itoa(ordinal)
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: runID, IssueID: s.issue, WorkflowID: s.workflow, StepName: name, Ordinal: ordinal,
+			Instance: instance, Kind: kind, Status: status,
+		}, 1), "InsertStepTx %s", instance)
+		id, found, err := tx.StepIDByInstanceTx(runID, s.issue, instance)
+		testsupport.Must(t, err, "StepIDByInstanceTx: %v", err)
+		if !found {
+			t.Fatalf("step %s was not found after its insert", instance)
+		}
+		return id
+	}
+	seed := func(e NewEvent) {
+		t.Helper()
+		testsupport.Must(t, tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+	}
+
+	before, err := tx.LastEventSeqTx()
+	testsupport.Must(t, err, "LastEventSeqTx before the seeded events: %v", err)
+	seed(NewEvent{AtMS: 900, Kind: "dispatch-closed", RunID: dispatched, Data: `{"dispatch": "DISPATCH-1"}`})
+	seed(NewEvent{AtMS: 800, Kind: "dispatch-opened", RunID: dispatched, Data: `{"dispatch": "DISPATCH-2"}`})
+	seed(NewEvent{AtMS: 700, Kind: "dispatch-closed", RunID: gated, Data: `{"dispatch": "DISPATCH-3"}`})
+	seed(NewEvent{AtMS: 600, Kind: "dispatch-closed", RunID: dispatched, Data: `{"dispatch": "DISPATCH-2"}`})
+	seed(NewEvent{AtMS: 1, Kind: "issue-abandoned", RunID: dispatched, IssueID: home.issue, Data: `{}`})
+	seed(NewEvent{AtMS: 2, Kind: "issue-abandoned", RunID: dispatched, IssueID: home.issue, Data: `{}`})
+	seed(NewEvent{AtMS: 3, Kind: "issue-abandoned", RunID: dispatched, Data: `{"no": "issue"}`})
+	seed(NewEvent{AtMS: 4, Kind: "issue-reopened", RunID: dispatched, IssueID: home.sibling, Data: `{}`})
+	seed(NewEvent{AtMS: 5, Kind: "issue-abandoned", RunID: gated, IssueID: home.sibling, Data: `{}`})
+	seed(NewEvent{AtMS: 6, Kind: "run-note-added", RunID: elsewhere, Data: `{}`})
+	newest, found, err := tx.MaxEventSeqTx()
+	testsupport.Must(t, err, "MaxEventSeqTx: %v", err)
+	if seq, err := tx.LastEventSeqTx(); err != nil || !found || seq != newest || seq <= before {
+		t.Errorf("LastEventSeqTx over every run's events = (%d, %v), want (%d, nil), past %d", seq, err, newest, before)
+	}
+
+	if got, err := tx.PriorDispatchClosesTx(dispatched, "dispatch-closed"); err != nil ||
+		!reflect.DeepEqual(got, []string{`{"dispatch": "DISPATCH-1"}`, `{"dispatch": "DISPATCH-2"}`}) {
+		t.Errorf("PriorDispatchClosesTx = (%q, %v), want DISPATCH-1 then DISPATCH-2 in seq order", got, err)
+	}
+	if got, err := tx.PriorDispatchClosesTx(idle, "dispatch-closed"); err != nil || len(got) != 0 {
+		t.Errorf("PriorDispatchClosesTx of a run that never closed one = (%q, %v), want (none, nil)", got, err)
+	}
+	if got, err := tx.RunEventIssueIDsTx(dispatched, "issue-abandoned"); err != nil ||
+		!reflect.DeepEqual(got, map[int]bool{home.issue: true}) {
+		t.Errorf("RunEventIssueIDsTx = (%v, %v), want ({%d: true}, nil)", got, err, home.issue)
+	}
+	if got, err := tx.RunEventIssueIDsTx(idle, "issue-abandoned"); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("RunEventIssueIDsTx of a run that logged none = (%v, %v), want (an empty set, nil)", got, err)
+	}
+
+	now := time.Unix(1000, 0)
+	for id, status := range map[int]model.ProposalStatus{7: model.ProposalStatusOpen, 8: model.ProposalStatusCommitted} {
+		_, err := tx.InsertProposalWithID(&model.Proposal{
+			ID: id, ProjectID: home.project, Description: "vote", Criticality: model.CriticalityLow, Status: status,
+			RequiredVoters: 1, Threshold: 0.5, CreatedAt: now, UpdatedAt: now,
+		})
+		testsupport.Must(t, err, "InsertProposalWithID %d: %v", id, err)
+	}
+	if status, found, err := tx.ProposalStatusTx(8); err != nil || !found || status != model.ProposalStatusCommitted {
+		t.Errorf("ProposalStatusTx = (%q, %v, %v), want (committed, true, nil)", status, found, err)
+	}
+
+	add(dispatched, "approve", 0, "human", db.StepPending)
+	tallied := add(dispatched, "approve", 1, "vote", db.StepPending)
+	add(dispatched, "approve", 2, "executor", db.StepDone)
+	add(dispatched, "ship", 0, "human", db.StepDone)
+	add(idle, "implement", 0, "executor", db.StepPending)
+	add(gated, "approve", 0, "human", db.StepWaitingHuman)
+	add(done, "approve", 0, "human", db.StepDone)
+	add(abandoned, "implement", 0, "executor", db.StepRunning)
+	add(elsewhere, "approve", 0, "human", db.StepFailedRouted)
+	for _, run := range []int{dispatched, done, elsewhere} {
+		_, err := tx.InsertDispatchTx(run, 0, 5000, 1000)
+		testsupport.Must(t, err, "InsertDispatchTx: %v", err)
+	}
+	testsupport.Must(t, tx.SetRunStatusTx(done, model.RunDone, "", 2), "SetRunStatusTx done")
+	testsupport.Must(t, tx.SetRunStatusTx(abandoned, model.RunAbandoned, "", 2), "SetRunStatusTx abandoned")
+	testsupport.Must(t, tx.SetRunStatusTx(elsewhere, model.RunWaitingHuman, "", 2), "SetRunStatusTx waiting-human")
+	// Updated last, so a row store that rewrites updated rows lists these after
+	// their later siblings unless the read orders by id.
+	testsupport.Must(t, tx.SetStepRoutingTx(tallied, "pass", "tallied", db.StepDone, "", 3), "SetStepRoutingTx")
+	testsupport.Must(t, tx.SetRunStatusTx(dispatched, model.RunWaitingHuman, "", 3), "SetRunStatusTx dispatched")
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+
+	if got, err := st.ActiveStartedRunIDs(0); err != nil || !reflect.DeepEqual(got, []int{dispatched, gated, elsewhere}) {
+		t.Errorf("ActiveStartedRunIDs over every project = (%v, %v), want (%v, nil)", got, err,
+			[]int{dispatched, gated, elsewhere})
+	}
+	if got, err := st.ActiveStartedRunIDs(home.project); err != nil || !reflect.DeepEqual(got, []int{dispatched, gated}) {
+		t.Errorf("ActiveStartedRunIDs of one project = (%v, %v), want (%v, nil)", got, err, []int{dispatched, gated})
+	}
+	if got, err := st.ActiveStartedRunIDs(away.project + 1); err != nil || len(got) != 0 {
+		t.Errorf("ActiveStartedRunIDs of a project with no runs = (%v, %v), want (none, nil)", got, err)
+	}
+
+	routed, err := st.GetStep(tallied)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if routed.Routing == "" {
+		t.Fatalf("the routed vote step stored no routing record, so the routing column went unchecked")
+	}
+	kinds :=[]string{"human", "vote"}
+	inRun := []GateStepState{{Status: db.StepPending}, {Status: db.StepDone, Routing: routed.Routing}}
+	cases := []struct {
+		name string
+		q    GateStepQuery
+		want []GateStepState
+	}{
+		{"every project", GateStepQuery{StepName: "approve", Kinds: kinds},
+			append(append([]GateStepState{}, inRun...), GateStepState{Status: db.StepWaitingHuman},
+				GateStepState{Status: db.StepFailedRouted})},
+		{"one project", GateStepQuery{StepName: "approve", Kinds: kinds, ProjectID: home.project},
+			append(append([]GateStepState{}, inRun...), GateStepState{Status: db.StepWaitingHuman})},
+		{"a named run outside the project", GateStepQuery{StepName: "approve", Kinds: kinds,
+			RunID: elsewhere, ProjectID: home.project}, []GateStepState{{Status: db.StepFailedRouted}}},
+		{"one kind", GateStepQuery{StepName: "approve", Kinds: []string{"vote"}, RunID: dispatched}, inRun[1:]},
+		{"an ended run", GateStepQuery{StepName: "approve", Kinds: kinds, RunID: done}, nil},
+		{"no kinds", GateStepQuery{StepName: "approve", RunID: dispatched}, nil},
+	}
+	for _, c := range cases {
+		if got, err := st.ActiveGateSteps(c.q); err != nil || len(got) != len(c.want) || (len(got) > 0 && !reflect.DeepEqual(got, c.want)) {
+			t.Errorf("ActiveGateSteps for %s = (%+v, %v), want (%+v, nil)", c.name, got, err, c.want)
+		}
+	}
+
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if status, found, err := snap.ProposalStatusTx(7); err != nil || !found || status != model.ProposalStatusOpen {
+		t.Errorf("ProposalStatusTx through a snapshot = (%q, %v, %v), want (open, true, nil)", status, found, err)
+	}
+	if status, found, err := snap.ProposalStatusTx(999); err != nil || found || status != "" {
+		t.Errorf("ProposalStatusTx of a missing proposal = (%q, %v, %v), want (\"\", false, nil)", status, found, err)
+	}
+	if seq, err := snap.LastEventSeqTx(); err != nil || seq != newest {
+		t.Errorf("LastEventSeqTx through a snapshot = (%d, %v), want (%d, nil)", seq, err, newest)
 	}
 }
