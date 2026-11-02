@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -1390,6 +1391,661 @@ func ListStepInputArtifactsTx(tx *sql.Tx, stepID int) ([]*Artifact, error) {
 	return scanArtifacts(tx.Query(
 		artifactSelect+` WHERE id IN (SELECT artifact_id FROM step_inputs WHERE step_id = ?)
 		 ORDER BY id`, stepID))
+}
+
+// The routing and loop queries: the reads and writes the engine's routing,
+// loop entry, triage and dispatch-chain code makes against `steps` and the
+// rows beside it. Each runs inside the caller's transaction unless its name
+// lacks the Tx suffix. Engine vocabulary (artifact kinds, event kinds, step
+// types) arrives as arguments; what a result means stays the engine's.
+
+// StepStatusRouting is one instance's status and recorded routing. Routing
+// is "" when none is recorded.
+type StepStatusRouting struct {
+	Status  string
+	Routing string
+}
+
+// StepInstanceRef names one step row by id and instance, with its status.
+type StepInstanceRef struct {
+	ID       int
+	Instance string
+	Status   string
+}
+
+func scanStepInstanceRefs(rows *sql.Rows, err error) ([]StepInstanceRef, error) {
+	if err != nil {
+		return nil, fmt.Errorf("listing step instances: %w", err)
+	}
+	return scanRows(rows, "step instances", func(r *sql.Rows) (StepInstanceRef, error) {
+		var ref StepInstanceRef
+		if err := r.Scan(&ref.ID, &ref.Instance, &ref.Status); err != nil {
+			return ref, fmt.Errorf("reading a step instance: %w", err)
+		}
+		return ref, nil
+	})
+}
+
+// StepInstancesAtOrdinalTx returns the status and routing of every instance of
+// one step name at one ordinal of an issue — a fanned-out step's siblings, or
+// the single row of an unfanned one — in id order.
+func StepInstancesAtOrdinalTx(
+	tx *sql.Tx, runID, issueID int, stepName string, ordinal int,
+) ([]StepStatusRouting, error) {
+	rows, err := tx.Query(
+		`SELECT status, routing FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?
+		  ORDER BY id`,
+		runID, issueID, stepName, ordinal)
+	if err != nil {
+		return nil, fmt.Errorf("reading the instances of %s@%d: %w", stepName, ordinal, err)
+	}
+	return scanRows(rows, "step instances", func(r *sql.Rows) (StepStatusRouting, error) {
+		var (
+			out     StepStatusRouting
+			routing sql.NullString
+		)
+		if err := r.Scan(&out.Status, &routing); err != nil {
+			return out, fmt.Errorf("reading an instance of %s@%d: %w", stepName, ordinal, err)
+		}
+		out.Routing = routing.String
+		return out, nil
+	})
+}
+
+// PendingInstancesUpToTx returns an issue's `pending` instances of one step
+// name at or below an ordinal, in id order.
+func PendingInstancesUpToTx(
+	tx *sql.Tx, runID, issueID int, stepName string, ordinal int,
+) ([]StepInstanceRef, error) {
+	return scanStepInstanceRefs(tx.Query(
+		`SELECT id, instance, status FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ?
+		    AND status = ? AND ordinal <= ?
+		  ORDER BY id`,
+		runID, issueID, stepName, StepPending, ordinal))
+}
+
+// IssueStatusTx reads an issue's status, or returns ErrNotFound.
+func IssueStatusTx(tx *sql.Tx, issueID int) (model.Status, error) {
+	var status model.Status
+	err := tx.QueryRow(`SELECT status FROM issues WHERE id = ?`, issueID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the status of %s: %w", model.FormatID(issueID), err)
+	}
+	return status, nil
+}
+
+// IssueHasParkedOrHeldStepTx reports whether any of an issue's steps in the run
+// is `waiting-human`, or is a non-terminal materialized step (an open hold).
+func IssueHasParkedOrHeldStepTx(tx *sql.Tx, runID, issueID int) (bool, error) {
+	var n int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM steps
+		  WHERE run_id = ? AND issue_id = ?
+		    AND (status = ? OR (materialized = 1 AND status NOT IN (?, ?, ?, ?)))`,
+		runID, issueID, StepWaitingHuman,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("checking %s for parked steps: %w", model.FormatID(issueID), err)
+	}
+	return n > 0, nil
+}
+
+// PendingDeclaredStepCountTx counts an issue's `pending` steps of the given
+// kinds that the pinned definition declared (not materialized). No kinds
+// counts nothing.
+func PendingDeclaredStepCountTx(tx *sql.Tx, runID, issueID int, kinds []string) (int, error) {
+	if len(kinds) == 0 {
+		return 0, nil
+	}
+	args := []any{runID, issueID, StepPending}
+	for _, kind := range kinds {
+		args = append(args, kind)
+	}
+	var n int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND status = ?
+		    AND materialized = 0 AND kind IN (`+makePlaceholders(len(kinds))+`)`,
+		args...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("checking %s for open gates: %w", model.FormatID(issueID), err)
+	}
+	return n, nil
+}
+
+// IssueLatestInstancesTerminalTx reports whether, for every step name of an
+// issue in the run, the instance at that name's highest ordinal is terminal.
+// An issue with no steps reports true.
+func IssueLatestInstancesTerminalTx(tx *sql.Tx, runID, issueID int) (bool, error) {
+	var unfinished int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM steps s
+		  WHERE s.run_id = ? AND s.issue_id = ?
+		    AND s.ordinal = (SELECT MAX(h.ordinal) FROM steps h
+		                      WHERE h.run_id = s.run_id AND h.issue_id = s.issue_id
+		                        AND h.step_name = s.step_name)
+		    AND s.status NOT IN (?, ?, ?, ?)`,
+		runID, issueID, StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+	).Scan(&unfinished)
+	if err != nil {
+		return false, fmt.Errorf("counting unfinished steps: %w", err)
+	}
+	return unfinished == 0, nil
+}
+
+// CompleteIssueTx moves an issue to `done` with the given resolution, bumping
+// its version, and logs the move from `prior` in activity_log with no actor.
+// Both timestamps are nowMS as RFC3339 text. It reports false and writes
+// nothing when the issue is already done or does not exist.
+func CompleteIssueTx(
+	tx *sql.Tx, issueID int, prior model.Status, resolution string, nowMS int64,
+) (bool, error) {
+	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
+	res, err := tx.Exec(
+		`UPDATE issues SET status = ?, resolution = ?, updated_at = ?, version = version + 1
+		  WHERE id = ? AND status != ?`,
+		model.StatusDone, resolution, now, issueID, model.StatusDone)
+	if err != nil {
+		return false, fmt.Errorf("completing %s: %w", model.FormatID(issueID), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("completing %s: %w", model.FormatID(issueID), err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
+		 VALUES (?, 'status', ?, ?, '', ?)`,
+		issueID, prior, model.StatusDone, now,
+	); err != nil {
+		return false, fmt.Errorf("recording completion of %s: %w", model.FormatID(issueID), err)
+	}
+	return true, nil
+}
+
+// CascadeFailIssueStepsTx moves every non-terminal step of an issue in the run,
+// except exceptStepID, to `failed-routed` with the given routing record,
+// stamping `recorded_at_ms`. It returns how many steps it moved.
+func CascadeFailIssueStepsTx(
+	tx *sql.Tx, runID, issueID, exceptStepID int, routing string, nowMS int64,
+) (int, error) {
+	res, err := tx.Exec(
+		`UPDATE steps
+		    SET status = ?, routing = ?, updated_at_ms = ?, recorded_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE run_id = ? AND issue_id = ? AND id != ?
+		    AND status NOT IN (?, ?, ?, ?)`,
+		StepFailedRouted, routing, nowMS, nowMS, runID, issueID, exceptStepID,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted)
+	if err != nil {
+		return 0, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
+	}
+	return int(n), nil
+}
+
+// RunStepRollup is the step-status rollup of one run.
+type RunStepRollup struct {
+	// Parked counts `waiting-human` steps.
+	Parked int
+	// Unfinished counts non-terminal steps, parked ones included.
+	Unfinished int
+	// UnparkedWork counts non-terminal, non-parked steps of issues that hold
+	// no parked step.
+	UnparkedWork int
+}
+
+// RunStepRollupTx computes a run's step rollup. A run with no steps rolls up
+// to zeros.
+func RunStepRollupTx(tx *sql.Tx, runID int) (RunStepRollup, error) {
+	var out RunStepRollup
+	err := tx.QueryRow(
+		`SELECT
+		   COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0),
+		   COALESCE(SUM(CASE WHEN status NOT IN (?, ?, ?, ?) THEN 1 ELSE 0 END), 0),
+		   COALESCE(SUM(CASE WHEN status NOT IN (?, ?, ?, ?, ?)
+		                      AND issue_id NOT IN (
+		                        SELECT issue_id FROM steps
+		                         WHERE run_id = ? AND status = ?)
+		                     THEN 1 ELSE 0 END), 0)
+		 FROM steps WHERE run_id = ?`,
+		StepWaitingHuman,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted, StepWaitingHuman,
+		runID, StepWaitingHuman,
+		runID,
+	).Scan(&out.Parked, &out.Unfinished, &out.UnparkedWork)
+	if err != nil {
+		return RunStepRollup{}, fmt.Errorf("rolling up run %s: %w", model.FormatRunID(runID), err)
+	}
+	return out, nil
+}
+
+// UnexpandedRunIssueCountTx counts a run's issues not yet expanded.
+func UnexpandedRunIssueCountTx(tx *sql.Tx, runID int) (int, error) {
+	var n int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM run_issues WHERE run_id = ? AND expanded_at_ms IS NULL`,
+		runID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("counting unexpanded issues: %w", err)
+	}
+	return n, nil
+}
+
+// RunStatusTx reads a run's status, or returns ErrRunNotFound.
+func RunStatusTx(tx *sql.Tx, runID int) (model.RunStatus, error) {
+	var status model.RunStatus
+	err := tx.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrRunNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading run %s status: %w", model.FormatRunID(runID), err)
+	}
+	return status, nil
+}
+
+// TransitionRunStatusTx moves a run to `to`, stamping `updated_at_ms` and
+// bumping `row_version`, unless the run already has that status or is
+// terminal. It returns the status the run held and whether it moved, or
+// ErrRunNotFound.
+func TransitionRunStatusTx(
+	tx *sql.Tx, runID int, to model.RunStatus, nowMS int64,
+) (from model.RunStatus, moved bool, err error) {
+	from, err = RunStatusTx(tx, runID)
+	if err != nil {
+		return "", false, err
+	}
+	if from == to || from.Terminal() {
+		return from, false, nil
+	}
+	if _, err := tx.Exec(
+		`UPDATE runs SET status = ?, updated_at_ms = ?, row_version = row_version + 1
+		  WHERE id = ?`,
+		string(to), nowMS, runID,
+	); err != nil {
+		return "", false, fmt.Errorf("updating run %s: %w", model.FormatRunID(runID), err)
+	}
+	return from, true, nil
+}
+
+// NewestStepPayloadTx returns the payload of the newest artifact of one kind a
+// step recorded. found is false when it recorded none; a recorded artifact
+// with no payload reads "".
+func NewestStepPayloadTx(tx *sql.Tx, stepID int, kind string) (payload string, found bool, err error) {
+	var p sql.NullString
+	err = tx.QueryRow(
+		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
+		  ORDER BY id DESC LIMIT 1`,
+		stepID, kind).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s's recorded %s: %w", model.FormatStepID(stepID), kind, err)
+	}
+	return p.String, true, nil
+}
+
+// NewestIssueArtifactUpToTx returns the sha256 and body of the newest artifact
+// of one kind recorded by any of an issue's steps at or below an ordinal.
+// found is false when there is none.
+func NewestIssueArtifactUpToTx(
+	tx *sql.Tx, runID, issueID int, kind string, ordinal int,
+) (hash, body string, found bool, err error) {
+	err = tx.QueryRow(
+		`SELECT a.sha256, a.body FROM artifacts a JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ? AND s.ordinal <= ?
+		  ORDER BY a.id DESC LIMIT 1`,
+		runID, issueID, kind, ordinal).Scan(&hash, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("reading %s's %s up to ordinal %d: %w",
+			model.FormatID(issueID), kind, ordinal, err)
+	}
+	return hash, body, true, nil
+}
+
+// StepArtifactRange selects the artifacts of one kind recorded by one step
+// name's instances of an issue, at ordinals MinOrdinal through MaxOrdinal.
+type StepArtifactRange struct {
+	RunID, IssueID         int
+	StepName, Kind         string
+	MinOrdinal, MaxOrdinal int
+}
+
+// StepArtifact is one artifact's content address and bytes, with the ordinal
+// of the step instance that recorded it. Payload is "" when none was recorded.
+type StepArtifact struct {
+	SHA256, Body, Payload string
+	Ordinal               int
+}
+
+// NewestStepNameArtifactTx returns the newest artifact in r. found is false
+// when r holds none.
+func NewestStepNameArtifactTx(tx *sql.Tx, r StepArtifactRange) (StepArtifact, bool, error) {
+	var (
+		out     StepArtifact
+		payload sql.NullString
+	)
+	err := tx.QueryRow(
+		`SELECT a.sha256, a.body, a.payload, s.ordinal FROM artifacts a
+		   JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ? AND a.kind = ?
+		    AND s.ordinal >= ? AND s.ordinal <= ?
+		  ORDER BY a.id DESC LIMIT 1`,
+		r.RunID, r.IssueID, r.StepName, r.Kind, r.MinOrdinal, r.MaxOrdinal,
+	).Scan(&out.SHA256, &out.Body, &payload, &out.Ordinal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StepArtifact{}, false, nil
+	}
+	if err != nil {
+		return StepArtifact{}, false, fmt.Errorf("reading %s's %s from %q at ordinals %d-%d: %w",
+			model.FormatID(r.IssueID), r.Kind, r.StepName, r.MinOrdinal, r.MaxOrdinal, err)
+	}
+	out.Payload = payload.String
+	return out, true, nil
+}
+
+// OrdinalPayload is one artifact's payload and the ordinal of the step
+// instance that recorded it. Payload is "" when none was recorded.
+type OrdinalPayload struct {
+	Ordinal int
+	Payload string
+}
+
+// StepArtifactPayloadsTx returns the payload of every artifact in r, in
+// artifact id order.
+func StepArtifactPayloadsTx(tx *sql.Tx, r StepArtifactRange) ([]OrdinalPayload, error) {
+	rows, err := tx.Query(
+		`SELECT s.ordinal, a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
+		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ? AND a.kind = ?
+		    AND s.ordinal >= ? AND s.ordinal <= ?
+		  ORDER BY a.id`,
+		r.RunID, r.IssueID, r.StepName, r.Kind, r.MinOrdinal, r.MaxOrdinal)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s's %s payloads: %w", model.FormatID(r.IssueID), r.Kind, err)
+	}
+	return scanRows(rows, "artifact payloads", func(rs *sql.Rows) (OrdinalPayload, error) {
+		var (
+			out     OrdinalPayload
+			payload sql.NullString
+		)
+		if err := rs.Scan(&out.Ordinal, &payload); err != nil {
+			return out, fmt.Errorf("reading an artifact payload: %w", err)
+		}
+		out.Payload = payload.String
+		return out, nil
+	})
+}
+
+// StepRoundCountTx counts the distinct ordinals at which any of the named
+// steps has an instance for an issue. No names counts nothing.
+func StepRoundCountTx(tx *sql.Tx, runID, issueID int, names []string) (int, error) {
+	if len(names) == 0 {
+		return 0, nil
+	}
+	args := []any{runID, issueID}
+	for _, name := range names {
+		args = append(args, name)
+	}
+	var rounds int
+	err := tx.QueryRow(
+		`SELECT COUNT(DISTINCT ordinal) FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name IN (`+makePlaceholders(len(names))+`)`,
+		args...).Scan(&rounds)
+	if err != nil {
+		return 0, fmt.Errorf("counting %s's cluster rounds: %w", model.FormatID(issueID), err)
+	}
+	return rounds, nil
+}
+
+// IssueStepsBelowOrdinalTx returns every step of an issue in the run below an
+// ordinal, in id order.
+func IssueStepsBelowOrdinalTx(tx *sql.Tx, runID, issueID, ordinal int) ([]StepInstanceRef, error) {
+	return scanStepInstanceRefs(tx.Query(
+		`SELECT id, instance, status FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND ordinal < ?
+		  ORDER BY id`,
+		runID, issueID, ordinal))
+}
+
+// StepByInstanceTx resolves an issue's step by its instance, or returns
+// ErrStepNotFound.
+func StepByInstanceTx(tx *sql.Tx, runID, issueID int, instance string) (StepInstanceRef, error) {
+	ref := StepInstanceRef{Instance: instance}
+	err := tx.QueryRow(
+		`SELECT id, status FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND instance = ?`,
+		runID, issueID, instance).Scan(&ref.ID, &ref.Status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StepInstanceRef{}, ErrStepNotFound
+	}
+	if err != nil {
+		return StepInstanceRef{}, fmt.Errorf("reading step %s of %s: %w",
+			instance, model.FormatID(issueID), err)
+	}
+	return ref, nil
+}
+
+// StepNamesAtOrdinalTx returns the set of step names with an instance for an
+// issue at one ordinal.
+func StepNamesAtOrdinalTx(tx *sql.Tx, runID, issueID, ordinal int) (map[string]bool, error) {
+	rows, err := tx.Query(
+		`SELECT DISTINCT step_name FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND ordinal = ?`,
+		runID, issueID, ordinal)
+	if err != nil {
+		return nil, fmt.Errorf("reading ordinal %d of %s: %w", ordinal, model.FormatID(issueID), err)
+	}
+	names, err := scanRows(rows, "step names", func(r *sql.Rows) (string, error) {
+		var name string
+		if err := r.Scan(&name); err != nil {
+			return "", fmt.Errorf("reading a step name at ordinal %d: %w", ordinal, err)
+		}
+		return name, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		out[name] = true
+	}
+	return out, nil
+}
+
+// SetRunIssueLoopCountTx sets an issue's loop counter in a run, or returns
+// ErrNotFound when the issue is not in the run.
+func SetRunIssueLoopCountTx(tx *sql.Tx, runID, issueID, count int) error {
+	res, err := tx.Exec(
+		`UPDATE run_issues SET loop_count = ? WHERE run_id = ? AND issue_id = ?`,
+		count, runID, issueID)
+	if err != nil {
+		return fmt.Errorf("setting the loop counter for %s: %w", model.FormatID(issueID), err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("setting the loop counter for %s: %w", model.FormatID(issueID), err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// StepHasLaterInstanceTx reports whether one step name has an instance for an
+// issue above an ordinal.
+func StepHasLaterInstanceTx(tx *sql.Tx, runID, issueID int, stepName string, ordinal int) (bool, error) {
+	var later int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal > ?`,
+		runID, issueID, stepName, ordinal).Scan(&later)
+	if err != nil {
+		return false, fmt.Errorf("reading later instances of %s@%d: %w", stepName, ordinal, err)
+	}
+	return later > 0, nil
+}
+
+// HighestOrdinalsTx returns, per step name, the highest ordinal with an
+// instance for an issue in the run.
+func HighestOrdinalsTx(tx *sql.Tx, runID, issueID int) (map[string]int, error) {
+	rows, err := tx.Query(
+		`SELECT step_name, MAX(ordinal) FROM steps
+		  WHERE run_id = ? AND issue_id = ? GROUP BY step_name`,
+		runID, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the highest ordinals for %s: %w", model.FormatID(issueID), err)
+	}
+	type highest struct {
+		name    string
+		ordinal int
+	}
+	pairs, err := scanRows(rows, "highest ordinals", func(r *sql.Rows) (highest, error) {
+		var h highest
+		if err := r.Scan(&h.name, &h.ordinal); err != nil {
+			return h, fmt.Errorf("reading a highest ordinal: %w", err)
+		}
+		return h, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(pairs))
+	for _, h := range pairs {
+		out[h.name] = h.ordinal
+	}
+	return out, nil
+}
+
+// GatedStepIDAtOrdinal returns the id of a `gated` instance of one step name
+// at one ordinal of an issue. found is false when there is none.
+func GatedStepIDAtOrdinal(
+	db *sql.DB, runID, issueID int, stepName string, ordinal int,
+) (id int, found bool, err error) {
+	err = db.QueryRow(
+		`SELECT id FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?
+		    AND status = ?`,
+		runID, issueID, stepName, ordinal, StepGated).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("reading the gated %s@%d: %w", stepName, ordinal, err)
+	}
+	return id, true, nil
+}
+
+// DispatchDeferralQuery names one step's deferral event for one dispatch: an
+// event of Kind whose `$.cause` is Cause and whose `$.dispatch` is Dispatch.
+type DispatchDeferralQuery struct {
+	RunID, StepID         int
+	Kind, Cause, Dispatch string
+}
+
+// DeferralRecordedForDispatchTx reports whether the event q names exists.
+func DeferralRecordedForDispatchTx(tx *sql.Tx, q DispatchDeferralQuery) (bool, error) {
+	var seen int
+	err := tx.QueryRow(
+		`SELECT 1 FROM events
+		  WHERE run_id = ? AND step_id = ? AND kind = ?
+		    AND json_extract(data, '$.cause') = ?
+		    AND json_extract(data, '$.dispatch') = ?
+		  LIMIT 1`,
+		q.RunID, q.StepID, q.Kind, q.Cause, q.Dispatch).Scan(&seen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("checking for a recorded %s deferral: %w", q.Cause, err)
+	}
+	return true, nil
+}
+
+// StepsWithEventKindsSinceTx returns the set of step ids with an event of one
+// of the kinds in the run after seq afterSeq. No kinds matches nothing.
+func StepsWithEventKindsSinceTx(
+	tx *sql.Tx, runID int, afterSeq int64, kinds []string,
+) (map[int]bool, error) {
+	out := map[int]bool{}
+	if len(kinds) == 0 {
+		return out, nil
+	}
+	args := []any{runID, afterSeq}
+	for _, kind := range kinds {
+		args = append(args, kind)
+	}
+	rows, err := tx.Query(
+		`SELECT DISTINCT step_id FROM events
+		  WHERE run_id = ? AND seq > ? AND step_id IS NOT NULL
+		    AND kind IN (`+makePlaceholders(len(kinds))+`)`,
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading the steps with events since seq %d: %w", afterSeq, err)
+	}
+	ids, err := scanRows(rows, "event steps", func(r *sql.Rows) (int, error) {
+		var id int
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("reading an event's step: %w", err)
+		}
+		return id, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
+}
+
+// SourcedDeferralQuery names one step's deferral events from one source: an
+// event of Kind whose `$.cause` is Cause and whose `$.source` is Source.
+type SourcedDeferralQuery struct {
+	RunID, StepID       int
+	Kind, Cause, Source string
+}
+
+// LastDispatchDeferralTx returns the newest event q names whose `$.dispatch`
+// is the run's most recently closed dispatch, as `DISPATCH-<id>`. found is
+// false when there is none, including when no dispatch has closed.
+func LastDispatchDeferralTx(
+	tx *sql.Tx, q SourcedDeferralQuery,
+) (seq int64, data string, found bool, err error) {
+	err = tx.QueryRow(
+		`SELECT seq, data FROM events
+		  WHERE run_id = ? AND step_id = ? AND kind = ?
+		    AND json_extract(data, '$.cause') = ?
+		    AND json_extract(data, '$.source') = ?
+		    AND json_extract(data, '$.dispatch') = (
+		        SELECT 'DISPATCH-' || id FROM dispatches
+		         WHERE run_id = ? AND status = ?
+		         ORDER BY closed_at_ms DESC, id DESC LIMIT 1)
+		  ORDER BY seq DESC LIMIT 1`,
+		q.RunID, q.StepID, q.Kind, q.Cause, q.Source, q.RunID, DispatchClosed).Scan(&seq, &data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, fmt.Errorf("reading the %s deferral of the last dispatch: %w", q.Source, err)
+	}
+	return seq, data, true, nil
 }
 
 // nullableInt maps 0 to SQL NULL, for optional foreign keys.

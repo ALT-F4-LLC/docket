@@ -3,10 +3,12 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -788,4 +790,798 @@ func TestRecordedAtStampsOnlyTheMoveIntoTerminal(t *testing.T) {
 		t.Errorf("after a terminal-to-terminal rewrite, RecordedAtMS = %d, want 2000",
 			step.RecordedAtMS)
 	}
+}
+
+// routingFixture is a migrated database with two runs and two issues, and an
+// open transaction the routing-query helpers read inside. `run` holds both
+// issues; `otherRun` holds `issue` only. Every row a test seeds goes through
+// the transaction, because the pool's one connection belongs to it.
+type routingFixture struct {
+	t                 *testing.T
+	db                *sql.DB
+	tx                *sql.Tx
+	run, otherRun     int
+	issue, otherIssue int
+	workflow          int
+}
+
+func newRoutingFixture(t *testing.T) *routingFixture {
+	t.Helper()
+	db := mustOpen(t)
+	testsupport.Must(t, Initialize(db), "Initialize")
+	testsupport.Must(t, Migrate(db), "Migrate")
+	f := &routingFixture{t: t, db: db}
+	for _, id := range []*int{&f.issue, &f.otherIssue} {
+		issueID, err := CreateIssue(db, &model.Issue{
+			Title: "routing subject", Status: model.StatusTodo,
+			Priority: model.PriorityNone, Kind: model.IssueKindTask,
+		}, nil, nil)
+		testsupport.Must(t, err, "CreateIssue: %v", err)
+		*id = issueID
+	}
+	res, err := db.Exec(
+		`INSERT INTO workflows (name, version, source_sha256, body, parsed, created_at_ms, row_version)
+		 VALUES ('wf', 1, 'sha', 'body', '{}', 1000, 1)`)
+	testsupport.Must(t, err, "seeding workflow: %v", err)
+	wfID, _ := res.LastInsertId()
+	f.workflow = int(wfID)
+	for _, id := range []*int{&f.run, &f.otherRun} {
+		run, err := InsertRun(db, 1, "req", 0, 1000)
+		testsupport.Must(t, err, "InsertRun: %v", err)
+		*id = run.ID
+	}
+	testsupport.Must(t, AddRunIssue(db, f.run, f.issue), "AddRunIssue")
+	testsupport.Must(t, AddRunIssue(db, f.run, f.otherIssue), "AddRunIssue")
+	testsupport.Must(t, AddRunIssue(db, f.otherRun, f.issue), "AddRunIssue")
+	f.tx, err = db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	t.Cleanup(func() { _ = f.tx.Rollback() })
+	return f
+}
+
+// add inserts one step and returns its id. A zero RunID or IssueID takes the
+// fixture's `run` and `issue`; an empty Instance is `<name>@<ordinal>`.
+func (f *routingFixture) add(row StepRow) int {
+	f.t.Helper()
+	if row.RunID == 0 {
+		row.RunID = f.run
+	}
+	if row.IssueID == 0 {
+		row.IssueID = f.issue
+	}
+	if row.Instance == "" {
+		row.Instance = fmt.Sprintf("%s@%d", row.StepName, row.Ordinal)
+	}
+	if row.Kind == "" {
+		row.Kind = "executor"
+	}
+	row.WorkflowID = f.workflow
+	testsupport.Must(f.t, InsertStepTx(f.tx, row, 1000), "InsertStepTx %s", row.Instance)
+	var id int
+	testsupport.Must(f.t, f.tx.QueryRow(
+		`SELECT id FROM steps WHERE run_id = ? AND issue_id = ? AND instance = ?`,
+		row.RunID, row.IssueID, row.Instance).Scan(&id), "reading %s's id", row.Instance)
+	return id
+}
+
+func (f *routingFixture) exec(query string, args ...any) {
+	f.t.Helper()
+	_, err := f.tx.Exec(query, args...)
+	testsupport.Must(f.t, err, "%s: %v", query, err)
+}
+
+func (f *routingFixture) artifact(stepID int, kind, sha, body, payload string) {
+	f.t.Helper()
+	var runID int
+	testsupport.Must(f.t, f.tx.QueryRow(`SELECT run_id FROM steps WHERE id = ?`, stepID).Scan(&runID),
+		"reading step %d's run", stepID)
+	_, err := InsertArtifactTx(f.tx, Artifact{
+		RunID: runID, StepID: stepID, Kind: kind, Body: body, Payload: payload, SHA256: sha,
+	}, 1000)
+	testsupport.Must(f.t, err, "InsertArtifactTx: %v", err)
+}
+
+func (f *routingFixture) event(kind string, stepID int, data string) int64 {
+	f.t.Helper()
+	testsupport.Must(f.t, InsertEventTx(f.tx, NewEvent{
+		AtMS: 1, Kind: kind, RunID: f.run, StepID: stepID, Data: data,
+	}), "seeding a %s event", kind)
+	var seq int64
+	testsupport.Must(f.t, f.tx.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&seq), "reading the seq")
+	return seq
+}
+
+func TestRoutingQueriesStepInstancesAtOrdinalTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	zero, one := 0, 1
+	passed := f.add(StepRow{StepName: "review", Ordinal: 1, SiblingIndex: &zero,
+		Instance: "review@1#0", Status: StepDone})
+	f.exec(`UPDATE steps SET routing = 'pass' WHERE id = ?`, passed)
+	f.add(StepRow{StepName: "review", Ordinal: 1, SiblingIndex: &one,
+		Instance: "review@1#1", Status: StepFailedRouted})
+	f.add(StepRow{StepName: "review", Ordinal: 0, Status: StepDone})
+	f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepDone})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{RunID: f.otherRun, StepName: "review", Ordinal: 1, Status: StepPending})
+
+	got, err := StepInstancesAtOrdinalTx(f.tx, f.run, f.issue, "review", 1)
+	testsupport.Must(t, err, "StepInstancesAtOrdinalTx: %v", err)
+	want := []StepStatusRouting{{Status: StepDone, Routing: "pass"}, {Status: StepFailedRouted}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("review@1's instances = %+v, want %+v (a NULL routing reads \"\")", got, want)
+	}
+
+	got, err = StepInstancesAtOrdinalTx(f.tx, f.run, f.issue, "absent", 1)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a step with no instance = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesPendingInstancesUpToTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	g0 := f.add(StepRow{StepName: "gate", Ordinal: 0, Status: StepPending})
+	g1 := f.add(StepRow{StepName: "gate", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{StepName: "gate", Ordinal: 2, Status: StepPending})
+	f.add(StepRow{StepName: "gate", Ordinal: 1, Instance: "gate@1#1", Status: StepDone})
+	f.add(StepRow{StepName: "other", Ordinal: 0, Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "gate", Ordinal: 0, Status: StepPending})
+
+	got, err := PendingInstancesUpToTx(f.tx, f.run, f.issue, "gate", 1)
+	testsupport.Must(t, err, "PendingInstancesUpToTx: %v", err)
+	want := []StepInstanceRef{
+		{ID: g0, Instance: "gate@0", Status: StepPending},
+		{ID: g1, Instance: "gate@1", Status: StepPending},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pending gates up to ordinal 1 = %+v, want %+v", got, want)
+	}
+
+	got, err = PendingInstancesUpToTx(f.tx, f.run, f.issue, "absent", 5)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a target with no instance = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesIssueStatusTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`UPDATE issues SET status = ? WHERE id = ?`, model.StatusReview, f.otherIssue)
+
+	got, err := IssueStatusTx(f.tx, f.otherIssue)
+	if err != nil || got != model.StatusReview {
+		t.Errorf("IssueStatusTx = (%q, %v), want (%q, nil)", got, err, model.StatusReview)
+	}
+	got, err = IssueStatusTx(f.tx, f.issue)
+	if err != nil || got != model.StatusTodo {
+		t.Errorf("IssueStatusTx = (%q, %v), want (%q, nil)", got, err, model.StatusTodo)
+	}
+	if _, err := IssueStatusTx(f.tx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a missing issue's error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRoutingQueriesIssueHasParkedOrHeldStepTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	ask := func(name string, issueID int, want bool) {
+		t.Helper()
+		got, err := IssueHasParkedOrHeldStepTx(f.tx, f.run, issueID)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if got != want {
+			t.Errorf("%s: %v, want %v", name, got, want)
+		}
+	}
+	ask("an issue with no steps", f.issue, false)
+
+	f.add(StepRow{StepName: "implement", Status: StepPending})
+	f.add(StepRow{StepName: "review-held", Status: StepDone, Materialized: true})
+	f.add(StepRow{RunID: f.otherRun, StepName: "verify", Status: StepWaitingHuman})
+	ask("only unparked and terminal held steps", f.issue, false)
+
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "verify", Status: StepWaitingHuman})
+	ask("a waiting-human step", f.otherIssue, true)
+	ask("another issue's park", f.issue, false)
+
+	f.add(StepRow{StepName: "aggregate-held", Status: StepPending, Materialized: true})
+	ask("an open materialized hold", f.issue, true)
+}
+
+func TestRoutingQueriesPendingDeclaredStepCountTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	kinds := []string{"human", "vote"}
+	f.add(StepRow{StepName: "approve", Kind: "human", Status: StepPending})
+	f.add(StepRow{StepName: "ballot", Kind: "vote", Status: StepPending})
+	f.add(StepRow{StepName: "approve", Ordinal: 1, Kind: "human", Status: StepDone})
+	f.add(StepRow{StepName: "approve-held", Kind: "human", Status: StepPending, Materialized: true})
+	f.add(StepRow{StepName: "implement", Kind: "executor", Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "approve", Kind: "human", Status: StepPending})
+
+	got, err := PendingDeclaredStepCountTx(f.tx, f.run, f.issue, kinds)
+	if err != nil || got != 2 {
+		t.Errorf("pending declared gates = (%d, %v), want (2, nil)", got, err)
+	}
+	got, err = PendingDeclaredStepCountTx(f.tx, f.run, f.issue, nil)
+	if err != nil || got != 0 {
+		t.Errorf("no kinds = (%d, %v), want (0, nil)", got, err)
+	}
+	got, err = PendingDeclaredStepCountTx(f.tx, f.otherRun, f.issue, kinds)
+	if err != nil || got != 0 {
+		t.Errorf("a run with no steps = (%d, %v), want (0, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesIssueLatestInstancesTerminalTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	ask := func(name string, issueID int, want bool) {
+		t.Helper()
+		got, err := IssueLatestInstancesTerminalTx(f.tx, f.run, issueID)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if got != want {
+			t.Errorf("%s: %v, want %v", name, got, want)
+		}
+	}
+	f.add(StepRow{StepName: "implement", Status: StepDone})
+	f.add(StepRow{StepName: "review", Ordinal: 0, Status: StepPending})
+	f.add(StepRow{StepName: "review", Ordinal: 1, Status: StepSuperseded})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "implement", Status: StepPending})
+	f.add(StepRow{RunID: f.otherRun, StepName: "implement", Status: StepPending})
+	ask("every latest instance terminal, a lower ordinal pending", f.issue, true)
+
+	f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepWaitingHuman})
+	ask("a waiting-human latest instance", f.issue, false)
+	ask("another issue's pending step", f.otherIssue, false)
+	ask("an issue with no steps", 999, true)
+}
+
+func TestRoutingQueriesCompleteIssueTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`UPDATE issues SET status = ?, resolution = ? WHERE id = ?`,
+		model.StatusInProgress, model.ResolutionAbandoned, f.issue)
+	var version int
+	testsupport.Must(t, f.tx.QueryRow(`SELECT version FROM issues WHERE id = ?`, f.issue).Scan(&version),
+		"reading the version")
+	nowMS := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC).UnixMilli()
+
+	moved, err := CompleteIssueTx(f.tx, f.issue, model.StatusInProgress, "", nowMS)
+	if err != nil || !moved {
+		t.Fatalf("CompleteIssueTx = (%v, %v), want (true, nil)", moved, err)
+	}
+	var status, resolution, updated string
+	var gotVersion int
+	testsupport.Must(t, f.tx.QueryRow(
+		`SELECT status, resolution, updated_at, version FROM issues WHERE id = ?`, f.issue).
+		Scan(&status, &resolution, &updated, &gotVersion), "reading the issue")
+	if status != string(model.StatusDone) || resolution != "" ||
+		updated != "2026-03-04T05:06:07Z" || gotVersion != version+1 {
+		t.Errorf("issue = (%q, %q, %q, v%d), want (done, \"\", 2026-03-04T05:06:07Z, v%d)",
+			status, resolution, updated, gotVersion, version+1)
+	}
+	activity := func() []string {
+		t.Helper()
+		rows, err := f.tx.Query(`SELECT issue_id || ' ' || field_changed || ' ' || old_value || ' ' ||
+			new_value || ' [' || changed_by || '] ' || created_at FROM activity_log
+			WHERE field_changed = 'status' ORDER BY id`)
+		testsupport.Must(t, err, "reading activity: %v", err)
+		out, err := scanRows(rows, "activity", func(r *sql.Rows) (string, error) {
+			var s string
+			return s, r.Scan(&s)
+		})
+		testsupport.Must(t, err, "reading activity: %v", err)
+		return out
+	}
+	want := []string{fmt.Sprintf("%d status in-progress done [] 2026-03-04T05:06:07Z", f.issue)}
+	if got := activity(); !reflect.DeepEqual(got, want) {
+		t.Errorf("activity = %q, want %q", got, want)
+	}
+
+	moved, err = CompleteIssueTx(f.tx, f.issue, model.StatusDone, "", nowMS+1000)
+	if err != nil || moved {
+		t.Errorf("an issue already done = (%v, %v), want (false, nil)", moved, err)
+	}
+	moved, err = CompleteIssueTx(f.tx, 999, model.StatusTodo, "", nowMS)
+	if err != nil || moved {
+		t.Errorf("a missing issue = (%v, %v), want (false, nil)", moved, err)
+	}
+	if got := activity(); !reflect.DeepEqual(got, want) {
+		t.Errorf("activity after two no-op completions = %q, want %q", got, want)
+	}
+}
+
+func TestRoutingQueriesCascadeFailIssueStepsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	router := f.add(StepRow{StepName: "verify", Status: StepRunning})
+	open := []int{
+		f.add(StepRow{StepName: "commit", Status: StepPending}),
+		f.add(StepRow{StepName: "review", Status: StepGated}),
+		f.add(StepRow{StepName: "approve", Status: StepWaitingHuman}),
+	}
+	finished := f.add(StepRow{StepName: "implement", Status: StepDone})
+	skipped := f.add(StepRow{StepName: "lint", Status: StepSkipped})
+	other := f.add(StepRow{IssueID: f.otherIssue, StepName: "commit", Status: StepPending})
+	elsewhere := f.add(StepRow{RunID: f.otherRun, StepName: "commit", Status: StepPending})
+
+	n, err := CascadeFailIssueStepsTx(f.tx, f.run, f.issue, router, "abandon-issue: cascade", 5000)
+	if err != nil || n != len(open) {
+		t.Fatalf("CascadeFailIssueStepsTx = (%d, %v), want (%d, nil)", n, err, len(open))
+	}
+	read := func(id int) (status, routing string, recorded int64) {
+		t.Helper()
+		var r sql.NullString
+		testsupport.Must(t, f.tx.QueryRow(
+			`SELECT status, routing, recorded_at_ms FROM steps WHERE id = ?`, id).
+			Scan(&status, &r, &recorded), "reading step %d", id)
+		return status, r.String, recorded
+	}
+	for _, id := range open {
+		if s, r, at := read(id); s != StepFailedRouted || r != "abandon-issue: cascade" || at != 5000 {
+			t.Errorf("open step %d = (%q, %q, %d), want (failed-routed, the cascade, 5000)", id, s, r, at)
+		}
+	}
+	for id, want := range map[int]string{
+		router: StepRunning, finished: StepDone, skipped: StepSkipped,
+		other: StepPending, elsewhere: StepPending,
+	} {
+		if s, r, _ := read(id); s != want || r != "" {
+			t.Errorf("step %d = (%q, %q), want (%q, \"\"): not the cascade's", id, s, r, want)
+		}
+	}
+
+	n, err = CascadeFailIssueStepsTx(f.tx, f.run, 999, 0, "x", 6000)
+	if err != nil || n != 0 {
+		t.Errorf("an issue with no steps = (%d, %v), want (0, nil)", n, err)
+	}
+}
+
+func TestRoutingQueriesRunStepRollupTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.add(StepRow{StepName: "verify", Status: StepWaitingHuman})
+	f.add(StepRow{StepName: "commit", Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "implement", Status: StepRunning})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "lint", Status: StepDone})
+	f.add(StepRow{RunID: f.otherRun, StepName: "implement", Status: StepPending})
+
+	got, err := RunStepRollupTx(f.tx, f.run)
+	testsupport.Must(t, err, "RunStepRollupTx: %v", err)
+	want := RunStepRollup{Parked: 1, Unfinished: 3, UnparkedWork: 1}
+	if got != want {
+		t.Errorf("rollup = %+v, want %+v", got, want)
+	}
+
+	got, err = RunStepRollupTx(f.tx, 999)
+	if err != nil || got != (RunStepRollup{}) {
+		t.Errorf("a run with no steps = (%+v, %v), want (zero, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesUnexpandedRunIssueCountTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	ask := func(name string, runID, want int) {
+		t.Helper()
+		got, err := UnexpandedRunIssueCountTx(f.tx, runID)
+		if err != nil || got != want {
+			t.Errorf("%s = (%d, %v), want (%d, nil)", name, got, err, want)
+		}
+	}
+	ask("two unexpanded issues", f.run, 2)
+	testsupport.Must(t, MarkExpandedTx(f.tx, f.run, f.issue, 2000), "MarkExpandedTx")
+	ask("one issue expanded", f.run, 1)
+	ask("the other run", f.otherRun, 1)
+	ask("a missing run", 999, 0)
+}
+
+func TestRoutingQueriesRunStatusTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`UPDATE runs SET status = ? WHERE id = ?`, model.RunActive, f.run)
+	f.exec(`UPDATE runs SET status = ? WHERE id = ?`, model.RunWaitingHuman, f.otherRun)
+
+	got, err := RunStatusTx(f.tx, f.run)
+	if err != nil || got != model.RunActive {
+		t.Errorf("RunStatusTx = (%q, %v), want (%q, nil)", got, err, model.RunActive)
+	}
+	if _, err := RunStatusTx(f.tx, 999); !errors.Is(err, ErrRunNotFound) {
+		t.Errorf("a missing run's error = %v, want ErrRunNotFound", err)
+	}
+}
+
+func TestRoutingQueriesTransitionRunStatusTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.exec(`UPDATE runs SET status = ? WHERE id = ?`, model.RunActive, f.run)
+	read := func(id int) (status model.RunStatus, updated int64, version int) {
+		t.Helper()
+		testsupport.Must(t, f.tx.QueryRow(
+			`SELECT status, updated_at_ms, row_version FROM runs WHERE id = ?`, id).
+			Scan(&status, &updated, &version), "reading run %d", id)
+		return status, updated, version
+	}
+	_, _, version := read(f.run)
+	_, otherUpdated, otherVersion := read(f.otherRun)
+
+	from, moved, err := TransitionRunStatusTx(f.tx, f.run, model.RunWaitingHuman, 7000)
+	if err != nil || !moved || from != model.RunActive {
+		t.Fatalf("active -> waiting-human = (%q, %v, %v), want (active, true, nil)", from, moved, err)
+	}
+	if s, at, v := read(f.run); s != model.RunWaitingHuman || at != 7000 || v != version+1 {
+		t.Errorf("run = (%q, %d, v%d), want (waiting-human, 7000, v%d)", s, at, v, version+1)
+	}
+	if _, at, v := read(f.otherRun); at != otherUpdated || v != otherVersion {
+		t.Errorf("the other run moved: (%d, v%d), want (%d, v%d)", at, v, otherUpdated, otherVersion)
+	}
+
+	from, moved, err = TransitionRunStatusTx(f.tx, f.run, model.RunWaitingHuman, 8000)
+	if err != nil || moved || from != model.RunWaitingHuman {
+		t.Errorf("an unchanged status = (%q, %v, %v), want (waiting-human, false, nil)", from, moved, err)
+	}
+	if _, at, _ := read(f.run); at != 7000 {
+		t.Errorf("an unchanged status wrote updated_at_ms %d, want 7000", at)
+	}
+
+	f.exec(`UPDATE runs SET status = ? WHERE id = ?`, model.RunDone, f.run)
+	from, moved, err = TransitionRunStatusTx(f.tx, f.run, model.RunActive, 9000)
+	if err != nil || moved || from != model.RunDone {
+		t.Errorf("a terminal run = (%q, %v, %v), want (done, false, nil)", from, moved, err)
+	}
+	if s, _, _ := read(f.run); s != model.RunDone {
+		t.Errorf("a terminal run was revived to %q", s)
+	}
+
+	if _, _, err := TransitionRunStatusTx(f.tx, 999, model.RunActive, 1); !errors.Is(err, ErrRunNotFound) {
+		t.Errorf("a missing run's error = %v, want ErrRunNotFound", err)
+	}
+}
+
+func TestRoutingQueriesNewestStepPayloadTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "verify", Status: StepDone})
+	other := f.add(StepRow{StepName: "review", Status: StepDone})
+	bare := f.add(StepRow{StepName: "lint", Status: StepDone})
+	f.artifact(step, "ac-report", "s1", "b", `[{"verdict":"old"}]`)
+	f.artifact(step, "ac-report", "s2", "b", `[{"verdict":"new"}]`)
+	f.artifact(step, "notes", "s3", "b", `[{"verdict":"other kind"}]`)
+	f.artifact(other, "ac-report", "s4", "b", `[{"verdict":"other step"}]`)
+	f.artifact(bare, "ac-report", "s5", "b", "")
+
+	ask := func(name string, stepID int, kind, want string, wantFound bool) {
+		t.Helper()
+		got, found, err := NewestStepPayloadTx(f.tx, stepID, kind)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if got != want || found != wantFound {
+			t.Errorf("%s = (%q, %v), want (%q, %v)", name, got, found, want, wantFound)
+		}
+	}
+	ask("the newest ac-report", step, "ac-report", `[{"verdict":"new"}]`, true)
+	ask("a NULL payload", bare, "ac-report", "", true)
+	ask("a kind never recorded", step, "findings", "", false)
+}
+
+func TestRoutingQueriesNewestIssueArtifactUpToTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	const diff = "issue.diff"
+	f.artifact(f.add(StepRow{StepName: "implement", Ordinal: 0, Status: StepDone}), diff, "a", "body-a", "")
+	fix1 := f.add(StepRow{StepName: "fix", Ordinal: 1, Status: StepDone})
+	f.artifact(fix1, diff, "b", "body-b", "")
+	f.artifact(f.add(StepRow{StepName: "fix", Ordinal: 2, Status: StepDone}), diff, "c", "body-c", "")
+	f.artifact(fix1, "change-summary", "not-a-diff", "x", "")
+	f.artifact(f.add(StepRow{IssueID: f.otherIssue, StepName: "fix", Ordinal: 1, Status: StepDone}),
+		diff, "other-issue", "x", "")
+
+	ask := func(name string, issueID, ordinal int, wantHash, wantBody string, wantFound bool) {
+		t.Helper()
+		hash, body, found, err := NewestIssueArtifactUpToTx(f.tx, f.run, issueID, diff, ordinal)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if hash != wantHash || body != wantBody || found != wantFound {
+			t.Errorf("%s = (%q, %q, %v), want (%q, %q, %v)",
+				name, hash, body, found, wantHash, wantBody, wantFound)
+		}
+	}
+	ask("up to ordinal 0", f.issue, 0, "a", "body-a", true)
+	ask("up to ordinal 1", f.issue, 1, "b", "body-b", true)
+	ask("past the last round", f.issue, 9, "c", "body-c", true)
+	ask("an issue with no diff that far back", f.otherIssue, 0, "", "", false)
+}
+
+func TestRoutingQueriesNewestStepNameArtifactTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	v0 := f.add(StepRow{StepName: "verify", Ordinal: 0, Status: StepDone})
+	v1 := f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepDone})
+	f.artifact(v0, "ac-report", "v0", "body-0", `[0]`)
+	f.artifact(v1, "ac-report", "v1", "body-1", "")
+	f.artifact(v1, "ac-report", "v1b", "body-1b", `[1]`)
+	f.artifact(f.add(StepRow{StepName: "fix", Ordinal: 1, Status: StepDone}), "ac-report", "fix", "x", "")
+	f.artifact(v1, "findings", "kind", "x", "")
+	f.artifact(f.add(StepRow{IssueID: f.otherIssue, StepName: "verify", Ordinal: 1, Status: StepDone}),
+		"ac-report", "issue", "x", "")
+
+	q := StepArtifactRange{RunID: f.run, IssueID: f.issue, StepName: "verify", Kind: "ac-report"}
+	ask := func(name string, lo, hi int, want StepArtifact, wantFound bool) {
+		t.Helper()
+		r := q
+		r.MinOrdinal, r.MaxOrdinal = lo, hi
+		got, found, err := NewestStepNameArtifactTx(f.tx, r)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if got != want || found != wantFound {
+			t.Errorf("%s = (%+v, %v), want (%+v, %v)", name, got, found, want, wantFound)
+		}
+	}
+	ask("at ordinal 1", 1, 1, StepArtifact{SHA256: "v1b", Body: "body-1b", Payload: `[1]`, Ordinal: 1}, true)
+	ask("at ordinal 0", 0, 0, StepArtifact{SHA256: "v0", Body: "body-0", Payload: `[0]`, Ordinal: 0}, true)
+	ask("across every round", 0, 5, StepArtifact{SHA256: "v1b", Body: "body-1b", Payload: `[1]`, Ordinal: 1}, true)
+	ask("a range with no record", 2, 3, StepArtifact{}, false)
+}
+
+func TestRoutingQueriesStepArtifactPayloadsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	v0 := f.add(StepRow{StepName: "verify", Ordinal: 0, Status: StepDone})
+	v1 := f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepDone})
+	f.artifact(v0, "findings", "a", "b", `[0]`)
+	f.artifact(v1, "findings", "b", "b", `[1, 1]`)
+	f.artifact(v1, "findings", "c", "b", "")
+	f.artifact(f.add(StepRow{StepName: "verify", Ordinal: 2, Status: StepDone}), "findings", "d", "b", `[2]`)
+	f.artifact(f.add(StepRow{StepName: "fix", Ordinal: 1, Status: StepDone}), "findings", "e", "b", `[9]`)
+	f.artifact(v1, "ac-report", "f", "b", `[9]`)
+
+	got, err := StepArtifactPayloadsTx(f.tx, StepArtifactRange{
+		RunID: f.run, IssueID: f.issue, StepName: "verify", Kind: "findings", MaxOrdinal: 1,
+	})
+	testsupport.Must(t, err, "StepArtifactPayloadsTx: %v", err)
+	want := []OrdinalPayload{{Ordinal: 0, Payload: `[0]`}, {Ordinal: 1, Payload: `[1, 1]`}, {Ordinal: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("payloads = %+v, want %+v in artifact order", got, want)
+	}
+
+	got, err = StepArtifactPayloadsTx(f.tx, StepArtifactRange{
+		RunID: f.run, IssueID: f.otherIssue, StepName: "verify", Kind: "findings", MaxOrdinal: 9,
+	})
+	if err != nil || len(got) != 0 {
+		t.Errorf("an issue with no payloads = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesStepRoundCountTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.add(StepRow{StepName: "fix", Ordinal: 1, Status: StepDone})
+	f.add(StepRow{StepName: "fix", Ordinal: 2, Status: StepDone})
+	f.add(StepRow{StepName: "review", Ordinal: 2, Status: StepDone})
+	f.add(StepRow{StepName: "review", Ordinal: 3, Status: StepPending})
+	f.add(StepRow{StepName: "lint", Ordinal: 4, Status: StepDone})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "fix", Ordinal: 5, Status: StepDone})
+
+	ask := func(name string, names []string, want int) {
+		t.Helper()
+		got, err := StepRoundCountTx(f.tx, f.run, f.issue, names)
+		if err != nil || got != want {
+			t.Errorf("%s = (%d, %v), want (%d, nil)", name, got, err, want)
+		}
+	}
+	ask("fix and review", []string{"fix", "review"}, 3)
+	ask("no bodies", nil, 0)
+	ask("a body that never ran", []string{"absent"}, 0)
+}
+
+func TestRoutingQueriesIssueStepsBelowOrdinalTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	a := f.add(StepRow{StepName: "implement", Ordinal: 0, Status: StepDone})
+	b := f.add(StepRow{StepName: "review", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{StepName: "review", Ordinal: 2, Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Ordinal: 0, Status: StepPending})
+
+	got, err := IssueStepsBelowOrdinalTx(f.tx, f.run, f.issue, 2)
+	testsupport.Must(t, err, "IssueStepsBelowOrdinalTx: %v", err)
+	want := []StepInstanceRef{
+		{ID: a, Instance: "implement@0", Status: StepDone},
+		{ID: b, Instance: "review@1", Status: StepPending},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("steps below ordinal 2 = %+v, want %+v", got, want)
+	}
+	got, err = IssueStepsBelowOrdinalTx(f.tx, f.run, f.issue, 0)
+	if err != nil || len(got) != 0 {
+		t.Errorf("below ordinal 0 = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesStepByInstanceTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	mine := f.add(StepRow{StepName: "review", Ordinal: 1, Status: StepSkipped})
+	theirs := f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Ordinal: 1, Status: StepPending})
+
+	got, err := StepByInstanceTx(f.tx, f.run, f.issue, "review@1")
+	if err != nil || got != (StepInstanceRef{ID: mine, Instance: "review@1", Status: StepSkipped}) {
+		t.Errorf("this issue's review@1 = (%+v, %v), want step %d skipped", got, err, mine)
+	}
+	got, err = StepByInstanceTx(f.tx, f.run, f.otherIssue, "review@1")
+	if err != nil || got.ID != theirs {
+		t.Errorf("the other issue's review@1 = (%+v, %v), want step %d", got, err, theirs)
+	}
+	if _, err := StepByInstanceTx(f.tx, f.run, f.issue, "review@2"); !errors.Is(err, ErrStepNotFound) {
+		t.Errorf("a missing instance's error = %v, want ErrStepNotFound", err)
+	}
+}
+
+func TestRoutingQueriesStepNamesAtOrdinalTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	zero, one := 0, 1
+	f.add(StepRow{StepName: "review", Ordinal: 1, SiblingIndex: &zero, Instance: "review@1#0", Status: StepPending})
+	f.add(StepRow{StepName: "review", Ordinal: 1, SiblingIndex: &one, Instance: "review@1#1", Status: StepPending})
+	f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{StepName: "implement", Ordinal: 0, Status: StepDone})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "commit", Ordinal: 1, Status: StepPending})
+
+	got, err := StepNamesAtOrdinalTx(f.tx, f.run, f.issue, 1)
+	testsupport.Must(t, err, "StepNamesAtOrdinalTx: %v", err)
+	if want := map[string]bool{"review": true, "verify": true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("names at ordinal 1 = %v, want %v", got, want)
+	}
+	got, err = StepNamesAtOrdinalTx(f.tx, f.run, f.issue, 7)
+	if err != nil || len(got) != 0 {
+		t.Errorf("an empty ordinal = (%v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesSetRunIssueLoopCountTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	loopCount := func(runID, issueID int) int {
+		t.Helper()
+		var n int
+		testsupport.Must(t, f.tx.QueryRow(
+			`SELECT loop_count FROM run_issues WHERE run_id = ? AND issue_id = ?`, runID, issueID).
+			Scan(&n), "reading the loop count")
+		return n
+	}
+	testsupport.Must(t, SetRunIssueLoopCountTx(f.tx, f.run, f.issue, 3), "SetRunIssueLoopCountTx")
+	if got := loopCount(f.run, f.issue); got != 3 {
+		t.Errorf("loop_count = %d, want 3", got)
+	}
+	if a, b := loopCount(f.run, f.otherIssue), loopCount(f.otherRun, f.issue); a != 0 || b != 0 {
+		t.Errorf("other bindings moved to (%d, %d), want (0, 0)", a, b)
+	}
+	if err := SetRunIssueLoopCountTx(f.tx, f.run, 999, 1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an issue not in the run: error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRoutingQueriesStepHasLaterInstanceTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.add(StepRow{StepName: "review", Ordinal: 0, Status: StepDone})
+	f.add(StepRow{StepName: "review", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{StepName: "verify", Ordinal: 3, Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Ordinal: 4, Status: StepPending})
+
+	ask := func(name, step string, ordinal int, want bool) {
+		t.Helper()
+		got, err := StepHasLaterInstanceTx(f.tx, f.run, f.issue, step, ordinal)
+		if err != nil || got != want {
+			t.Errorf("%s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	ask("review@0 has review@1", "review", 0, true)
+	ask("review@1 is the latest", "review", 1, false)
+	ask("a step with no instance", "absent", 0, false)
+}
+
+func TestRoutingQueriesHighestOrdinalsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.add(StepRow{StepName: "implement", Ordinal: 0, Status: StepDone})
+	f.add(StepRow{StepName: "review", Ordinal: 0, Status: StepDone})
+	f.add(StepRow{StepName: "review", Ordinal: 2, Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "implement", Ordinal: 5, Status: StepPending})
+
+	got, err := HighestOrdinalsTx(f.tx, f.run, f.issue)
+	testsupport.Must(t, err, "HighestOrdinalsTx: %v", err)
+	if want := map[string]int{"implement": 0, "review": 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("highest ordinals = %v, want %v", got, want)
+	}
+	got, err = HighestOrdinalsTx(f.tx, f.otherRun, f.issue)
+	if err != nil || len(got) != 0 {
+		t.Errorf("an issue with no steps in the run = (%v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesGatedStepIDAtOrdinal(t *testing.T) {
+	f := newRoutingFixture(t)
+	f.add(StepRow{StepName: "verify", Ordinal: 0, Status: StepGated})
+	gated := f.add(StepRow{StepName: "verify", Ordinal: 1, Status: StepGated})
+	f.add(StepRow{StepName: "review", Ordinal: 1, Status: StepPending})
+	f.add(StepRow{IssueID: f.otherIssue, StepName: "review", Ordinal: 1, Status: StepGated})
+	testsupport.Must(t, f.tx.Commit(), "Commit")
+
+	id, found, err := GatedStepIDAtOrdinal(f.db, f.run, f.issue, "verify", 1)
+	if err != nil || !found || id != gated {
+		t.Errorf("gated verify@1 = (%d, %v, %v), want (%d, true, nil)", id, found, err, gated)
+	}
+	id, found, err = GatedStepIDAtOrdinal(f.db, f.run, f.issue, "review", 1)
+	if err != nil || found || id != 0 {
+		t.Errorf("a pending review@1 = (%d, %v, %v), want (0, false, nil)", id, found, err)
+	}
+}
+
+func TestRoutingQueriesDeferralRecordedForDispatchTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "review", Status: StepPending})
+	other := f.add(StepRow{StepName: "verify", Status: StepPending})
+	q := DispatchDeferralQuery{
+		RunID: f.run, StepID: step, Kind: "step-deferred", Cause: "chain", Dispatch: "DISPATCH-7",
+	}
+	ask := func(name string, want bool) {
+		t.Helper()
+		got, err := DeferralRecordedForDispatchTx(f.tx, q)
+		if err != nil || got != want {
+			t.Errorf("%s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	f.event("step-deferred", step, `{"cause":"budget","dispatch":"DISPATCH-7"}`)
+	f.event("step-deferred", step, `{"cause":"chain","dispatch":"DISPATCH-6"}`)
+	f.event("step-claimed", step, `{"cause":"chain","dispatch":"DISPATCH-7"}`)
+	f.event("step-deferred", other, `{"cause":"chain","dispatch":"DISPATCH-7"}`)
+	ask("only near misses recorded", false)
+
+	f.event("step-deferred", step, `{"cause":"chain","dispatch":"DISPATCH-7"}`)
+	ask("the deferral recorded", true)
+}
+
+func TestRoutingQueriesStepsWithEventKindsSinceTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	early := f.add(StepRow{StepName: "implement", Status: StepPending})
+	claimed := f.add(StepRow{StepName: "review", Status: StepPending})
+	failed := f.add(StepRow{StepName: "verify", Status: StepPending})
+	other := f.add(StepRow{StepName: "commit", Status: StepPending})
+	opened := f.event("step-claimed", early, `{}`)
+	f.event("step-claimed", claimed, `{}`)
+	f.event("step-claimed", claimed, `{}`)
+	f.event("step-failed", failed, `{}`)
+	f.event("step-recorded", other, `{}`)
+	f.event("step-claimed", 0, `{}`)
+	kinds := []string{"step-claimed", "step-failed"}
+
+	got, err := StepsWithEventKindsSinceTx(f.tx, f.run, opened, kinds)
+	testsupport.Must(t, err, "StepsWithEventKindsSinceTx: %v", err)
+	if want := map[int]bool{claimed: true, failed: true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("attempted steps = %v, want %v", got, want)
+	}
+	got, err = StepsWithEventKindsSinceTx(f.tx, f.otherRun, 0, kinds)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a run with no events = (%v, %v), want (none, nil)", got, err)
+	}
+	got, err = StepsWithEventKindsSinceTx(f.tx, f.run, 0, nil)
+	if err != nil || len(got) != 0 {
+		t.Errorf("no kinds = (%v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRoutingQueriesLastDispatchDeferralTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "review", Status: StepPending})
+	q := SourcedDeferralQuery{
+		RunID: f.run, StepID: step, Kind: "step-deferred", Cause: "chain", Source: "engine",
+	}
+	ask := func(name string, wantSeq int64, wantData string, wantFound bool) {
+		t.Helper()
+		seq, data, found, err := LastDispatchDeferralTx(f.tx, q)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if seq != wantSeq || data != wantData || found != wantFound {
+			t.Errorf("%s = (%d, %q, %v), want (%d, %q, %v)",
+				name, seq, data, found, wantSeq, wantData, wantFound)
+		}
+	}
+	dispatch := func(status string, closedAt int64) string {
+		t.Helper()
+		res, err := f.tx.Exec(`INSERT INTO dispatches (run_id, status, opened_seq, expires_ms, closed_at_ms, created_at_ms)
+			VALUES (?, ?, 0, 1, ?, 1)`, f.run, status, closedAt)
+		testsupport.Must(t, err, "seeding a dispatch: %v", err)
+		id, _ := res.LastInsertId()
+		return fmt.Sprintf("DISPATCH-%d", id)
+	}
+	first := dispatch(DispatchClosed, 10)
+	f.event("step-deferred", step, fmt.Sprintf(`{"cause":"chain","source":"engine","dispatch":%q}`, first))
+	latest := dispatch(DispatchClosed, 20)
+	ask("only a deferral of an earlier dispatch", 0, "", false)
+
+	open := dispatch("open", 30)
+	f.event("step-deferred", step, fmt.Sprintf(`{"cause":"chain","dispatch":%q}`, latest))
+	f.event("step-deferred", step, fmt.Sprintf(`{"cause":"budget","source":"engine","dispatch":%q}`, latest))
+	f.event("step-deferred", step, fmt.Sprintf(`{"cause":"chain","source":"engine","dispatch":%q}`, open))
+	ask("only conductor, budget, and open-dispatch deferrals", 0, "", false)
+
+	older := fmt.Sprintf(`{"cause":"chain","source":"engine","dispatch":%q,"n":1}`, latest)
+	newer := fmt.Sprintf(`{"cause":"chain","source":"engine","dispatch":%q,"n":2}`, latest)
+	f.event("step-deferred", step, older)
+	newerSeq := f.event("step-deferred", step, newer)
+	ask("the newest deferral of the latest closed dispatch", newerSeq, newer, true)
 }
