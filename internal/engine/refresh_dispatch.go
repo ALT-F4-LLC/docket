@@ -34,27 +34,31 @@ import (
 // refresh event: the dispatch id and the instances re-rendered. It returns nil
 // when no dispatch is open, or the issue has no row in it.
 func refreshUnderDispatchTx(tx *sql.Tx, runID, issueID int) (map[string]any, error) {
-	open, err := store.TxOn(tx).OpenDispatchTx(runID)
+	st := store.TxOn(tx)
+	open, err := st.OpenDispatchTx(runID)
 	if errors.Is(err, store.ErrNoOpenDispatch) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(
-		`SELECT dr.instance
-		   FROM dispatch_rows dr JOIN steps s ON s.id = dr.step_id
-		  WHERE dr.dispatch_id = ? AND s.issue_id = ?
-		  ORDER BY dr.position`, open.ID, issueID)
+	rows, err := st.ListDispatchRowsTx(open.ID)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s's rows for the issue: %w", FormatDispatchID(open.ID), err)
 	}
-	instances, err := scanTxRows(rows, func(r *sql.Rows) (string, error) {
-		var s string
-		return s, r.Scan(&s)
-	})
+	steps, err := st.ListIssueStepsTx(runID, issueID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading %s's rows for the issue: %w", FormatDispatchID(open.ID), err)
+	}
+	issueSteps := make(map[int]bool, len(steps))
+	for _, s := range steps {
+		issueSteps[s.ID] = true
+	}
+	var instances []string
+	for _, row := range rows {
+		if issueSteps[row.StepID] {
+			instances = append(instances, row.Instance)
+		}
 	}
 	if len(instances) == 0 {
 		return nil, nil

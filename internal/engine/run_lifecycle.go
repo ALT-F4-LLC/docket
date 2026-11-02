@@ -401,31 +401,6 @@ func AbandonIssueInRunWith(conn store.LegacyDB, opts AbandonIssueOptions) (*Aban
 	}, nil
 }
 
-// rowCursor is the iteration half of a query result, as *sql.Rows provides it.
-type rowCursor interface {
-	Next() bool
-	Err() error
-	Close() error
-}
-
-// scanTxRows is scanRows' shape for this package: drain, close, and surface
-// the iteration error once.
-func scanTxRows[R rowCursor, T any](rows R, scan func(R) (T, error)) ([]T, error) {
-	defer rows.Close()
-	var out []T
-	for rows.Next() {
-		v, err := scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading rows: %w", err)
-	}
-	return out, nil
-}
-
 // orStatusList renders the legal source statuses for a refusal message.
 func orStatusList(statuses []model.RunStatus) string {
 	switch len(statuses) {
