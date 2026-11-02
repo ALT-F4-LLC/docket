@@ -304,7 +304,7 @@ func TestReportFloorAgreesWithEnforcement(t *testing.T) {
 // and the bodies are one `step context` away for anyone who wants them.
 func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
+	runID, issueID := budgetRun(t, conn, 0)
 	e := testEngine()
 
 	const body = "the-artifact-body-nobody-should-see-in-a-rollup"
@@ -327,6 +327,10 @@ func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 	}
 	if entry.SHA256 == "" || entry.Producer == "" || entry.Kind == "" {
 		t.Errorf("the index row is incomplete: %+v", entry)
+	}
+	if entry.Producer != "implement@0" || entry.Issue != model.FormatID(issueID) {
+		t.Errorf("the index row names producer %q on %q, want implement@0 on %s",
+			entry.Producer, entry.Issue, model.FormatID(issueID))
 	}
 }
 

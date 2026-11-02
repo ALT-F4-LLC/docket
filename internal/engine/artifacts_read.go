@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -69,7 +68,7 @@ type StepArtifact struct {
 // A step that produced nothing is not an error: it returns an empty list. Many
 // steps legitimately produce no artifact, and turning that into a failure
 // would make the verb unusable as the "what is here?" probe it exists to be.
-func ListStepArtifacts(conn *sql.DB, stepID int) ([]StepArtifact, error) {
+func ListStepArtifacts(conn store.LegacyDB, stepID int) ([]StepArtifact, error) {
 	// The step must EXIST, even though having no artifacts is fine. Without
 	// this, a typo'd step reference reports "no artifacts" — an answer that
 	// reads as fact and is actually a missing step.
@@ -111,7 +110,7 @@ func ListStepArtifacts(conn *sql.DB, stepID int) ([]StepArtifact, error) {
 // Reached by numeric id (the N in ARTIFACT-N), which is what the listing above
 // and the run report's index both print — so the reference an operator already
 // has on screen is the one this takes.
-func ReadArtifact(conn *sql.DB, artifactID int) (*StepArtifact, error) {
+func ReadArtifact(conn store.LegacyDB, artifactID int) (*StepArtifact, error) {
 	snap, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("reading artifact ARTIFACT-%d: %w", artifactID, err)
