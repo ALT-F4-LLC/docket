@@ -456,3 +456,150 @@ func AckReapTx(tx *sql.Tx, runID int, seq int64, ackedBy string, nowMS int64) (A
 	}
 	return AckNoSuchReap, nil
 }
+
+// LastEventSeqTx returns the highest event seq across every run, or 0 when the
+// log is empty. Every seq is > 0, so 0 is the boundary "before everything".
+func LastEventSeqTx(tx *sql.Tx) (int64, error) {
+	var seq int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM events`).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("reading the event cursor: %w", err)
+	}
+	return seq, nil
+}
+
+// RunEventIssueIDsTx returns the set of issues a run's events of one kind
+// name. Events that name no issue are skipped; the set is empty, never nil,
+// when there are none.
+func RunEventIssueIDsTx(tx *sql.Tx, runID int, kind string) (map[int]bool, error) {
+	rows, err := tx.Query(
+		`SELECT DISTINCT issue_id FROM events
+		  WHERE run_id = ? AND kind = ? AND issue_id IS NOT NULL`,
+		runID, kind)
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s issues of %s: %w", kind, model.FormatRunID(runID), err)
+	}
+	defer rows.Close()
+
+	out := map[int]bool{}
+	for rows.Next() {
+		var issueID int
+		if err := rows.Scan(&issueID); err != nil {
+			return nil, fmt.Errorf("reading a %s issue of %s: %w", kind, model.FormatRunID(runID), err)
+		}
+		out[issueID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating the %s issues of %s: %w", kind, model.FormatRunID(runID), err)
+	}
+	return out, nil
+}
+
+// PriorDispatchClosesTx returns the payloads of a run's dispatch-close events,
+// oldest first; closedKind is the event kind a close is logged under.
+func PriorDispatchClosesTx(tx *sql.Tx, runID int, closedKind string) ([]string, error) {
+	rows, err := tx.Query(
+		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq`,
+		runID, closedKind)
+	if err != nil {
+		return nil, fmt.Errorf("reading the prior closes of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "prior closes", func(r *sql.Rows) (string, error) {
+		var data string
+		if err := r.Scan(&data); err != nil {
+			return "", fmt.Errorf("reading a prior close of %s: %w", model.FormatRunID(runID), err)
+		}
+		return data, nil
+	})
+}
+
+// ProposalStatusTx returns one proposal's status. found is false when no
+// proposal has the id.
+func ProposalStatusTx(tx *sql.Tx, id int) (status model.ProposalStatus, found bool, err error) {
+	err = tx.QueryRow(`SELECT status FROM proposals WHERE id = ?`, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading proposal %d: %w", id, err)
+	}
+	return status, true, nil
+}
+
+// ActiveStartedRunIDs returns, in id order, the runs that are neither done
+// nor abandoned and that something has happened to: a dispatch was opened for
+// the run, or one of its steps has left pending. projectID 0 answers over
+// every project.
+func ActiveStartedRunIDs(db *sql.DB, projectID int) ([]int, error) {
+	query := `SELECT id FROM runs WHERE status NOT IN (?, ?)
+		AND (EXISTS (SELECT 1 FROM dispatches WHERE dispatches.run_id = runs.id)
+		     OR EXISTS (SELECT 1 FROM steps
+		                 WHERE steps.run_id = runs.id AND steps.status != ?))`
+	args := []any{model.RunDone, model.RunAbandoned, StepPending}
+	if projectID != 0 {
+		query += ` AND project_id = ?`
+		args = append(args, projectID)
+	}
+	rows, err := db.Query(query+` ORDER BY id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading active runs: %w", err)
+	}
+	return scanRows(rows, "active runs", func(r *sql.Rows) (int, error) {
+		var id int
+		if err := r.Scan(&id); err != nil {
+			return 0, fmt.Errorf("reading an active run: %w", err)
+		}
+		return id, nil
+	})
+}
+
+// GateStepQuery names the gate steps ActiveGateSteps reads: steps called
+// StepName of one of Kinds, in runs that are neither done nor abandoned.
+// A non-zero RunID restricts the search to that run and overrides ProjectID,
+// since naming a run exempts it from project scoping; otherwise a non-zero
+// ProjectID restricts it to that project's runs.
+type GateStepQuery struct {
+	StepName         string
+	Kinds            []string
+	RunID, ProjectID int
+}
+
+// GateStepState is one gate step's status and stored routing record, "" when
+// the step has none.
+type GateStepState struct {
+	Status  string
+	Routing string
+}
+
+// ActiveGateSteps returns the gate steps q names, in step id order.
+func ActiveGateSteps(db *sql.DB, q GateStepQuery) ([]GateStepState, error) {
+	if len(q.Kinds) == 0 {
+		return nil, nil
+	}
+	query := `SELECT s.status, COALESCE(s.routing, '')
+	   FROM steps s JOIN runs r ON r.id = s.run_id
+	  WHERE r.status NOT IN (?, ?)
+	    AND s.step_name = ? AND s.kind IN (` + makePlaceholders(len(q.Kinds)) + `)`
+	args := []any{model.RunDone, model.RunAbandoned, q.StepName}
+	for _, kind := range q.Kinds {
+		args = append(args, kind)
+	}
+	switch {
+	case q.RunID != 0:
+		query += ` AND s.run_id = ?`
+		args = append(args, q.RunID)
+	case q.ProjectID != 0:
+		query += ` AND r.project_id = ?`
+		args = append(args, q.ProjectID)
+	}
+	rows, err := db.Query(query+` ORDER BY s.id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading gate %s: %w", q.StepName, err)
+	}
+	return scanRows(rows, "gate "+q.StepName, func(r *sql.Rows) (GateStepState, error) {
+		var g GateStepState
+		if err := r.Scan(&g.Status, &g.Routing); err != nil {
+			return g, fmt.Errorf("reading gate %s: %w", q.StepName, err)
+		}
+		return g, nil
+	})
+}
