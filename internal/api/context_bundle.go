@@ -16,6 +16,9 @@ import (
 // The v1 schema has no slot for a step row's attempt counters, a pre-gate's
 // truncation and stub flags or reason, or a resolution's gate outcomes; those
 // do not cross the wire. A pre-gate's argv travels space-joined as its command.
+// A pre-gate that produced no exit status carries exit_code 0, the same as a
+// clean exit; its status still names the verdict. A nil issue scope leaves the
+// scope message unset, while an empty non-nil scope sets it with no globs.
 func ContextBundle(c *engine.Context) (*docketv1.StepContextBundle, error) {
 	bundle := &docketv1.StepContextBundle{
 		Step: stepRowMessage(c.Step),
@@ -25,11 +28,13 @@ func ContextBundle(c *engine.Context) (*docketv1.StepContextBundle, error) {
 			BodySnapshot: c.Issue.BodySnapshot,
 			Kind:         c.Issue.Kind,
 			Labels:       c.Issue.Labels,
-			Scope:        &docketv1.ScopeGlobs{Globs: c.Issue.Scope},
 		},
 		TargetSha:      c.TargetSHA,
 		TargetWorktree: c.TargetWorktree,
 		DiffBase:       c.DiffBase,
+	}
+	if c.Issue.Scope != nil {
+		bundle.Issue.Scope = &docketv1.ScopeGlobs{Globs: c.Issue.Scope}
 	}
 	for _, in := range c.Inputs {
 		bundle.Inputs = append(bundle.Inputs, &docketv1.ContextInput{
