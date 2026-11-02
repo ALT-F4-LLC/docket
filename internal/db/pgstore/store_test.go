@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -190,6 +191,128 @@ func openTestStore(t *testing.T) store.Store {
 		t.Fatalf("Migrate: %v", err)
 	}
 	return st
+}
+
+// sagaFixture is a run with one issue on a fresh PostgreSQL schema, plus a
+// second run, for the saga queries whose PostgreSQL SQL is the store's own.
+type sagaFixture struct {
+	t               *testing.T
+	st              store.Store
+	tx              store.Tx
+	workflow, issue int
+	run, otherRun   int
+}
+
+func newSagaFixture(t *testing.T) *sagaFixture {
+	t.Helper()
+	st := openTestStore(t)
+	project, err := st.EnsureProject("/repo/saga", "saga", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	wf, _, err := st.InsertWorkflow(&model.Workflow{
+		ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+	}, 1)
+	testsupport.Must(t, err, "InsertWorkflow: %v", err)
+	issue, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: project, Title: "saga subject", Status: model.StatusTodo,
+		Priority: model.PriorityNone, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+	f := &sagaFixture{t: t, st: st, workflow: wf.ID, issue: issue}
+	for _, id := range []*int{&f.run, &f.otherRun} {
+		run, _, err := st.InsertRunWithContextIdempotent(project, "saga", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		*id = run.ID
+	}
+	f.tx, err = st.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	t.Cleanup(func() { f.tx.Rollback() })
+	return f
+}
+
+// add inserts one step of the fixture's issue and returns its id. A zero
+// RunID takes the fixture's run; Kind defaults to executor.
+func (f *sagaFixture) add(row db.StepRow) int {
+	f.t.Helper()
+	if row.RunID == 0 {
+		row.RunID = f.run
+	}
+	if row.Kind == "" {
+		row.Kind = "executor"
+	}
+	row.IssueID, row.WorkflowID = f.issue, f.workflow
+	row.Instance = fmt.Sprintf("%s@%d", row.StepName, row.Ordinal)
+	testsupport.Must(f.t, f.tx.InsertStepTx(row, 1), "InsertStepTx %s", row.Instance)
+	steps, err := f.tx.ListIssueStepsTx(row.RunID, f.issue)
+	testsupport.Must(f.t, err, "ListIssueStepsTx: %v", err)
+	for _, s := range steps {
+		if s.Instance == row.Instance {
+			return s.ID
+		}
+	}
+	f.t.Fatalf("step %s was not listed after its insert", row.Instance)
+	return 0
+}
+
+func (f *sagaFixture) event(runID, stepID int, kind, data string) {
+	f.t.Helper()
+	testsupport.Must(f.t, f.tx.InsertEventTx(db.NewEvent{AtMS: 1, Kind: kind, RunID: runID, StepID: stepID, Data: data}),
+		"InsertEventTx %s", kind)
+}
+
+// TestPgStoreStepEventDataContains matches a step's events of one kind on
+// the text of their jsonb data, case-folded as SQLite's LIKE is. It skips
+// without DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreStepEventDataContains(t *testing.T) {
+	f := newSagaFixture(t)
+	step := f.add(db.StepRow{StepName: "implement", Status: db.StepRunning})
+	other := f.add(db.StepRow{StepName: "review", Status: db.StepRunning})
+	f.event(f.run, step, "gate-started", `{"gate":"tests"}`)
+	f.event(f.run, step, "gate-finished", `{"gate":"build"}`)
+	f.event(f.run, other, "gate-started", `{"gate":"lint"}`)
+	testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+	ask := func(name, kind, text string, want bool) {
+		t.Helper()
+		got, err := f.st.StepEventDataContains(f.run, step, kind, text)
+		if err != nil || got != want {
+			t.Errorf("%s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	ask("a started gate", "gate-started", "tests", true)
+	ask("a started gate in other case", "gate-started", "TESTS", true)
+	ask("a gate only another kind names", "gate-started", "build", false)
+	ask("a gate only another step started", "gate-started", "lint", false)
+	ask(`a backslash, which is literal`, "gate-started", `te\sts`, false)
+}
+
+// TestPgStoreRunCostFloorTx sums a run's claim costs, each the claim's own
+// numeric expected_cost or else its step's declared one, plus the declared
+// cost of every open vote step. It skips without DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreRunCostFloorTx(t *testing.T) {
+	f := newSagaFixture(t)
+	floor, err := f.tx.RunCostFloorTx(f.run, "step-claimed", "vote")
+	if err != nil || floor != 0 {
+		t.Errorf("a run with no claims or votes = (%v, %v), want (0, nil)", floor, err)
+	}
+
+	cheap := f.add(db.StepRow{StepName: "implement", Status: db.StepDone, ExpectedCost: 1})
+	dear := f.add(db.StepRow{StepName: "review", Status: db.StepDone, ExpectedCost: 4})
+	f.event(f.run, cheap, "step-claimed", `{"expected_cost":2.5}`)
+	f.event(f.run, cheap, "step-claimed", `{}`)
+	f.event(f.run, dear, "step-claimed", `{"expected_cost":null}`)
+	f.event(f.run, dear, "step-recorded", `{"expected_cost":100}`)
+	f.add(db.StepRow{StepName: "ballot", Kind: "vote", Status: db.StepPending, ExpectedCost: 3})
+	f.add(db.StepRow{StepName: "ballot", Ordinal: 1, Kind: "vote", Status: db.StepSkipped, ExpectedCost: 10})
+	f.add(db.StepRow{StepName: "ballot", Ordinal: 2, Kind: "vote", Status: db.StepSuperseded, ExpectedCost: 10})
+	elsewhere := f.add(db.StepRow{RunID: f.otherRun, StepName: "ballot", Kind: "vote", Status: db.StepPending, ExpectedCost: 20})
+	f.event(f.otherRun, elsewhere, "step-claimed", `{"expected_cost":50}`)
+
+	floor, err = f.tx.RunCostFloorTx(f.run, "step-claimed", "vote")
+	if err != nil || floor != 10.5 {
+		t.Errorf("the floor = (%v, %v), want (10.5, nil): 2.5 carried + 1 and 4 declared + 3 open vote",
+			floor, err)
+	}
 }
 
 func TestRebindPlaceholders(t *testing.T) {

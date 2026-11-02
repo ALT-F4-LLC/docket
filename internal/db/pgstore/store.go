@@ -13,9 +13,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
-// pgStore is the PostgreSQL Store. Like the SQLite store, every method
-// delegates to the internal/db helper of the same name; the helpers run on a
-// pool of storeConns, which rebind their placeholders and give writes the
+// pgStore is the PostgreSQL Store. Like the SQLite store, its methods
+// delegate to the internal/db helper of the same name, except the few whose
+// helper SQL has no PostgreSQL translation, which carry their own; all run on
+// a pool of storeConns, which rebind their placeholders and give writes the
 // global write lock while reads stay lock-free.
 type pgStore struct {
 	db *sql.DB
@@ -247,6 +248,14 @@ func (s *pgStore) EnsureProjectCreated(identity, name string, nowMS int64) (int,
 
 func (s *pgStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.db)
+}
+
+func (s *pgStore) FirstRecorderAfterMetadata(q db.FirstRecorderAfterQuery) (string, bool, error) {
+	return db.FirstRecorderAfterMetadata(s.db, q)
+}
+
+func (s *pgStore) FirstStepEventData(stepID int, kind string) (string, bool, error) {
+	return db.FirstStepEventData(s.db, stepID, kind)
 }
 
 func (s *pgStore) FrozenIssueBindings(issueID int) ([]db.FrozenIssueBinding, error) {
@@ -625,6 +634,34 @@ func (s *pgStore) MoveIssueProject(issueID, targetProjectID int, author string, 
 	return db.MoveIssueProject(s.db, issueID, targetProjectID, author, nowMS)
 }
 
+func (s *pgStore) NewestIssueArtifact(runID, issueID int, kind string) (string, string, bool, error) {
+	return db.NewestIssueArtifact(s.db, runID, issueID, kind)
+}
+
+func (s *pgStore) NewestIssueArtifactBodies(runID, issueID int, kind string, limit int) ([]string, error) {
+	return db.NewestIssueArtifactBodies(s.db, runID, issueID, kind, limit)
+}
+
+func (s *pgStore) NewestIssueArtifactConsumedByDoneStep(runID, issueID int, kind string) (int, string, bool, error) {
+	return db.NewestIssueArtifactConsumedByDoneStep(s.db, runID, issueID, kind)
+}
+
+func (s *pgStore) NewestIssueArtifactPayloadExcept(runID, issueID int, kind string, exceptStepID int) (string, bool, error) {
+	return db.NewestIssueArtifactPayloadExcept(s.db, runID, issueID, kind, exceptStepID)
+}
+
+func (s *pgStore) NewestStepArtifactBody(stepID int, kind string) (string, bool, error) {
+	return db.NewestStepArtifactBody(s.db, stepID, kind)
+}
+
+func (s *pgStore) NewestStepNamePayloadBelowOrdinal(runID, issueID int, stepName string, ordinal int, kind string) (string, bool, error) {
+	return db.NewestStepNamePayloadBelowOrdinal(s.db, runID, issueID, stepName, ordinal, kind)
+}
+
+func (s *pgStore) NewestStepPayload(stepID int, kind string) (string, bool, error) {
+	return db.NewestStepPayload(s.db, stepID, kind)
+}
+
 func (s *pgStore) NextGateOrdinal(stepID int, gate string) (int, error) {
 	return db.NextGateOrdinal(s.db, stepID, gate)
 }
@@ -685,6 +722,14 @@ func (s *pgStore) RunConductorHash(id int) (string, error) {
 	return db.RunConductorHash(s.db, id)
 }
 
+func (s *pgStore) RunFenceCommands(runID, issueID int, tag string) ([]db.FenceCommand, bool, error) {
+	return db.RunFenceCommands(s.db, runID, issueID, tag)
+}
+
+func (s *pgStore) RunIssueSnapshot(runID, issueID int) (string, error) {
+	return db.RunIssueSnapshot(s.db, runID, issueID)
+}
+
 func (s *pgStore) RunProjectID(runID int) (int, error) {
 	return db.RunProjectID(s.db, runID)
 }
@@ -717,12 +762,37 @@ func (s *pgStore) StaleTargetWaiversForRun(runID int) ([]db.StaleTargetWaiver, e
 	return db.StaleTargetWaiversForRun(s.db, runID)
 }
 
+func (s *pgStore) StepArtifactCount(stepID int, kind string) (int, error) {
+	return db.StepArtifactCount(s.db, stepID, kind)
+}
+
+// StepEventDataContains has its own SQL rather than the helper's: events.data
+// is jsonb here, which LIKE cannot compare, so it matches the text form.
+// ILIKE with no escape character keeps SQLite's LIKE semantics: ASCII case
+// folded, and a backslash in text is a literal.
+func (s *pgStore) StepEventDataContains(runID, stepID int, kind, text string) (bool, error) {
+	var found bool
+	err := s.db.QueryRow(
+		`SELECT EXISTS(
+		   SELECT 1 FROM events
+		    WHERE run_id = ? AND step_id = ? AND kind = ? AND data::text ILIKE ? ESCAPE '')`,
+		runID, stepID, kind, "%"+text+"%").Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("probing %s's %s events: %w", model.FormatStepID(stepID), kind, err)
+	}
+	return found, nil
+}
+
 func (s *pgStore) StepInputCount(stepID int) (int, error) {
 	return db.StepInputCount(s.db, stepID)
 }
 
 func (s *pgStore) StepStatusCounts(runID int) ([]model.StatusCount, error) {
 	return db.StepStatusCounts(s.db, runID)
+}
+
+func (s *pgStore) StrandedSagaStepIDs(runID int, excludedKind string, updatedBeforeMS int64) ([]int, error) {
+	return db.StrandedSagaStepIDs(s.db, runID, excludedKind, updatedBeforeMS)
 }
 
 func (s *pgStore) UnlinkDocIssue(docID, issueID int) error {
@@ -1005,6 +1075,10 @@ func (t *pgTx) NextActionOrdinalTx(stepID int, action string) (int, error) {
 	return db.NextActionOrdinalTx(t.tx, stepID, action)
 }
 
+func (t *pgTx) NextGateOrdinalTx(stepID int, gate string) (int, error) {
+	return db.NextGateOrdinalTx(t.tx, stepID, gate)
+}
+
 func (t *pgTx) OpenDispatchTx(runID int) (*db.Dispatch, error) {
 	return db.OpenDispatchTx(t.tx, runID)
 }
@@ -1051,6 +1125,31 @@ func (t *pgTx) RunBudgetFactsTx(runID int) (db.RunBudgetFacts, error) {
 
 func (t *pgTx) RunConductorHashTx(id int) (string, error) {
 	return db.RunConductorHashTx(t.tx, id)
+}
+
+// RunCostFloorTx has its own SQL rather than the helper's: events.data is
+// jsonb here, so every row is valid JSON and ->> yields text, which must be
+// cast before it can share a COALESCE with the DOUBLE PRECISION
+// expected_cost. A claim whose expected_cost is absent or not a JSON number
+// falls back to its step's declared cost.
+func (t *pgTx) RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (float64, error) {
+	var floor float64
+	err := t.tx.QueryRow(
+		`SELECT COALESCE((SELECT SUM(COALESCE(
+		           CASE WHEN jsonb_typeof(e.data -> 'expected_cost') = 'number'
+		                THEN (e.data ->> 'expected_cost')::double precision END,
+		           s.expected_cost))
+		           FROM events e JOIN steps s ON s.id = e.step_id
+		          WHERE e.run_id = ? AND e.kind = ?), 0)
+		      + COALESCE((SELECT SUM(expected_cost)
+		           FROM steps WHERE run_id = ? AND kind = ?
+		            AND status NOT IN (?, ?)), 0)`,
+		runID, claimEventKind, runID, voteStepKind, db.StepSkipped, db.StepSuperseded,
+	).Scan(&floor)
+	if err != nil {
+		return 0, fmt.Errorf("computing the floor for %s: %w", model.FormatRunID(runID), err)
+	}
+	return floor, nil
 }
 
 func (t *pgTx) RunEverDispatchedTx(runID int) (bool, error) {
@@ -1485,6 +1584,10 @@ func (t *pgTx) SetStepRoutingWithParkReasonTx(id int, routing, reason, status st
 
 func (t *pgTx) SetStepStatusTx(id int, status string, nowMS, activityMS int64) error {
 	return db.SetStepStatusTx(t.tx, id, status, nowMS, activityMS)
+}
+
+func (t *pgTx) SetStepWorkRootTx(stepID int, workRoot string) error {
+	return db.SetStepWorkRootTx(t.tx, stepID, workRoot)
 }
 
 func (t *pgTx) StartStepTx(id int, nowMS int64) error {

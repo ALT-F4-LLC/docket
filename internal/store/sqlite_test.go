@@ -118,3 +118,73 @@ func TestSQLiteRoutingAndLoopQueries(t *testing.T) {
 		t.Errorf("CascadeFailIssueStepsTx with no steps = (%d, %v), want (0, nil)", n, err)
 	}
 }
+
+// TestSQLiteSagaQueries reaches the engine's completion-saga queries through
+// the Store and a Tx, building their inputs from the store aliases: on a
+// store with no runs, the lookups report no match, the counts and sums are
+// zero, and recording a worktree reports the store's step sentinel.
+func TestSQLiteSagaQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+
+	if n, err := st.StepArtifactCount(1, "change-summary"); err != nil || n != 0 {
+		t.Errorf("StepArtifactCount with no artifacts = (%d, %v), want (0, nil)", n, err)
+	}
+	if body, found, err := st.NewestStepArtifactBody(1, "change-summary"); err != nil || found || body != "" {
+		t.Errorf("NewestStepArtifactBody with no artifacts = (%q, %v, %v), want (\"\", false, nil)", body, found, err)
+	}
+	if p, found, err := st.NewestStepPayload(1, ""); err != nil || found || p != "" {
+		t.Errorf("NewestStepPayload with no artifacts = (%q, %v, %v), want (\"\", false, nil)", p, found, err)
+	}
+	if _, err := st.RunIssueSnapshot(1, 1); !errors.Is(err, ErrNotFound) {
+		t.Errorf("RunIssueSnapshot with no run issues: err = %v, want ErrNotFound", err)
+	}
+	if p, found, err := st.NewestIssueArtifactPayloadExcept(1, 1, "findings", 2); err != nil || found || p != "" {
+		t.Errorf("NewestIssueArtifactPayloadExcept with no artifacts = (%q, %v, %v), want (\"\", false, nil)", p, found, err)
+	}
+	if id, p, found, err := st.NewestIssueArtifactConsumedByDoneStep(1, 1, "findings"); err != nil || found || id != 0 || p != "" {
+		t.Errorf("NewestIssueArtifactConsumedByDoneStep with no inputs = (%d, %q, %v, %v), want (0, \"\", false, nil)",
+			id, p, found, err)
+	}
+	if m, found, err := st.FirstRecorderAfterMetadata(FirstRecorderAfterQuery{
+		RunID: 1, IssueID: 1, Kind: "findings", AfterArtifactID: 0, ExceptStepID: 2,
+	}); err != nil || found || m != "" {
+		t.Errorf("FirstRecorderAfterMetadata with no artifacts = (%q, %v, %v), want (\"\", false, nil)", m, found, err)
+	}
+	if p, found, err := st.NewestStepNamePayloadBelowOrdinal(1, 1, "review", 2, "findings"); err != nil || found || p != "" {
+		t.Errorf("NewestStepNamePayloadBelowOrdinal with no artifacts = (%q, %v, %v), want (\"\", false, nil)", p, found, err)
+	}
+	var commands []FenceCommand
+	commands, found, err := st.RunFenceCommands(1, 1, "verify")
+	if err != nil || found || len(commands) != 0 {
+		t.Errorf("RunFenceCommands with no fences = (%v, %v, %v), want (none, false, nil)", commands, found, err)
+	}
+	if body, p, found, err := st.NewestIssueArtifact(1, 1, "findings"); err != nil || found || body != "" || p != "" {
+		t.Errorf("NewestIssueArtifact with no artifacts = (%q, %q, %v, %v), want (\"\", \"\", false, nil)", body, p, found, err)
+	}
+	if bodies, err := st.NewestIssueArtifactBodies(1, 1, "findings", 3); err != nil || len(bodies) != 0 {
+		t.Errorf("NewestIssueArtifactBodies with no artifacts = (%v, %v), want (none, nil)", bodies, err)
+	}
+	if data, found, err := st.FirstStepEventData(1, "step-claimed"); err != nil || found || data != "" {
+		t.Errorf("FirstStepEventData with no events = (%q, %v, %v), want (\"\", false, nil)", data, found, err)
+	}
+	if seen, err := st.StepEventDataContains(1, 1, "gate-started", "tests"); err != nil || seen {
+		t.Errorf("StepEventDataContains with no events = (%v, %v), want (false, nil)", seen, err)
+	}
+	if ids, err := st.StrandedSagaStepIDs(1, "action", 1000); err != nil || len(ids) != 0 {
+		t.Errorf("StrandedSagaStepIDs with no steps = (%v, %v), want (none, nil)", ids, err)
+	}
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+
+	if n, err := tx.NextGateOrdinalTx(1, "tests"); err != nil || n != 0 {
+		t.Errorf("NextGateOrdinalTx with no results = (%d, %v), want (0, nil)", n, err)
+	}
+	if floor, err := tx.RunCostFloorTx(1, "step-claimed", "vote"); err != nil || floor != 0 {
+		t.Errorf("RunCostFloorTx with no claims or votes = (%v, %v), want (0, nil)", floor, err)
+	}
+	if err := tx.SetStepWorkRootTx(1, "/work/tree"); !errors.Is(err, ErrStepNotFound) {
+		t.Errorf("SetStepWorkRootTx with no steps: err = %v, want ErrStepNotFound", err)
+	}
+}

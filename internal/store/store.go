@@ -46,6 +46,13 @@ type (
 	StepStatusRouting     = db.StepStatusRouting
 )
 
+// The saga query inputs and rows, aliased as in aliases.go so callers can
+// build and read them without importing internal/db.
+type (
+	FenceCommand            = db.FenceCommand
+	FirstRecorderAfterQuery = db.FirstRecorderAfterQuery
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -93,6 +100,8 @@ type Store interface {
 	EnsureProject(identity, name string, nowMS int64) (int, error)
 	EnsureProjectCreated(identity, name string, nowMS int64) (int, bool, error)
 	EventsRetain() (time.Duration, error)
+	FirstRecorderAfterMetadata(q db.FirstRecorderAfterQuery) (metadata string, found bool, err error)
+	FirstStepEventData(stepID int, kind string) (data string, found bool, err error)
 	FrozenIssueBindings(issueID int) ([]db.FrozenIssueBinding, error)
 	GateOverrideGrantsForRun(runID int) ([]db.GateOverrideGrant, error)
 	GateResultsForStep(stepID int) ([]db.GateResultRow, error)
@@ -187,6 +196,13 @@ type Store interface {
 	MetadataRollup(runID int) ([]db.MetadataKeyRollup, error)
 	Migrate() error
 	MoveIssueProject(issueID, targetProjectID int, author string, nowMS int64) ([]int, error)
+	NewestIssueArtifact(runID, issueID int, kind string) (body, payload string, found bool, err error)
+	NewestIssueArtifactBodies(runID, issueID int, kind string, limit int) ([]string, error)
+	NewestIssueArtifactConsumedByDoneStep(runID, issueID int, kind string) (artifactID int, payload string, found bool, err error)
+	NewestIssueArtifactPayloadExcept(runID, issueID int, kind string, exceptStepID int) (payload string, found bool, err error)
+	NewestStepArtifactBody(stepID int, kind string) (body string, found bool, err error)
+	NewestStepNamePayloadBelowOrdinal(runID, issueID int, stepName string, ordinal int, kind string) (payload string, found bool, err error)
+	NewestStepPayload(stepID int, kind string) (payload string, found bool, err error)
 	NextGateOrdinal(stepID int, gate string) (int, error)
 	OrphanSubIssues(parentID int, author string) error
 	PrefixHolder(prefix string, exclude int) (int, error)
@@ -202,6 +218,8 @@ type Store interface {
 	RestoreWorkflow(projectID int, name string, version int) (*model.Workflow, error)
 	RunBudgetFactsFor(runID int) (db.RunBudgetFacts, error)
 	RunConductorHash(id int) (string, error)
+	RunFenceCommands(runID, issueID int, tag string) (commands []db.FenceCommand, found bool, err error)
+	RunIssueSnapshot(runID, issueID int) (string, error)
 	RunProjectID(runID int) (int, error)
 	SchemaVersion() (int, error)
 	SetConfig(projectID int, key, value string) error
@@ -210,8 +228,11 @@ type Store interface {
 	SetProjectPrefix(id int, prefix string) error
 	SilentVoteSeatsFor(scope, prefix string, extraIDs ...int) ([]db.SilentVoteSeatRow, error)
 	StaleTargetWaiversForRun(runID int) ([]db.StaleTargetWaiver, error)
+	StepArtifactCount(stepID int, kind string) (int, error)
+	StepEventDataContains(runID, stepID int, kind, text string) (bool, error)
 	StepInputCount(stepID int) (int, error)
 	StepStatusCounts(runID int) ([]model.StatusCount, error)
+	StrandedSagaStepIDs(runID int, excludedKind string, updatedBeforeMS int64) ([]int, error)
 	UnlinkDocIssue(docID, issueID int) error
 	UnlinkProposalIssue(proposalID, issueID int) error
 	UpdateDoc(id int, upd db.DocUpdate) (int, error)
@@ -291,6 +312,7 @@ type ReadTx interface {
 	NewestStepNameArtifactTx(r db.StepArtifactRange) (db.StepArtifact, bool, error)
 	NewestStepPayloadTx(stepID int, kind string) (payload string, found bool, err error)
 	NextActionOrdinalTx(stepID int, action string) (int, error)
+	NextGateOrdinalTx(stepID int, gate string) (int, error)
 	OpenDispatchTx(runID int) (*db.Dispatch, error)
 	PendingDeclaredStepCountTx(runID, issueID int, kinds []string) (int, error)
 	PendingInstancesUpToTx(runID, issueID int, stepName string, ordinal int) ([]db.StepInstanceRef, error)
@@ -303,6 +325,7 @@ type ReadTx interface {
 	ReportedUsageTx(runID int, unit string) (float64, error)
 	RunBudgetFactsTx(runID int) (db.RunBudgetFacts, error)
 	RunConductorHashTx(id int) (string, error)
+	RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (float64, error)
 	RunEverDispatchedTx(runID int) (bool, error)
 	RunPauseOriginTx(id int) (model.RunPauseOrigin, error)
 	RunProjectIDTx(runID int) (int, error)
@@ -418,6 +441,7 @@ type Tx interface {
 	SetStepRoutingTx(id int, routing, reason, status string, class db.ParkClass, nowMS int64) error
 	SetStepRoutingWithParkReasonTx(id int, routing, reason, status string, class db.ParkClass, parkReason string, nowMS int64) error
 	SetStepStatusTx(id int, status string, nowMS, activityMS int64) error
+	SetStepWorkRootTx(stepID int, workRoot string) error
 	StartStepTx(id int, nowMS int64) error
 	TransitionRunStatusTx(runID int, to model.RunStatus, nowMS int64) (from model.RunStatus, moved bool, err error)
 }
