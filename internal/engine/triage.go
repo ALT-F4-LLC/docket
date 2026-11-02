@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -41,24 +40,20 @@ import (
 // records the panel's name as its routing (routeStep), which is the same fact
 // the readiness latch reads, so the two cannot disagree about which failure a
 // panel is deciding.
-func triageRouter(conn *sql.DB, panel *store.Step, def *workflow.Definition) (*store.Step, error) {
+func triageRouter(conn store.LegacyDB, panel *store.Step, def *workflow.Definition) (*store.Step, error) {
 	if def == nil {
 		return nil, nil
 	}
+	st := store.StoreOn(conn)
 	for _, name := range workflow.RoutingPredecessors(def, panel.StepName) {
-		var id int
-		err := conn.QueryRow(
-			`SELECT id FROM steps
-			  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?
-			    AND status = ?`,
-			panel.RunID, panel.IssueID, name, panel.Ordinal, store.StepGated).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
+		id, found, err := st.GatedStepIDAtOrdinal(panel.RunID, panel.IssueID, name, panel.Ordinal)
 		if err != nil {
 			return nil, fmt.Errorf("reading the step %s triages: %w", panel.Instance, err)
 		}
-		router, err := store.StoreOn(conn).GetStep(id)
+		if !found {
+			continue
+		}
+		router, err := st.GetStep(id)
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +90,7 @@ func triageRouter(conn *sql.DB, panel *store.Step, def *workflow.Definition) (*s
 // A routing that does not name the panel is returned untouched, so the ordinary
 // paths are byte-identical to what they were.
 func suspendForPanel(
-	tx *sql.Tx, step *store.Step, spec *workflow.Step,
+	tx store.LegacyTx, step *store.Step, spec *workflow.Step,
 	routing, reason, status string, nowMS int64,
 ) (string, string, string, error) {
 	panel := spec.OnFailTarget()
@@ -125,29 +120,19 @@ func suspendForPanel(
 //
 // A panel with no row yet is NOT spent: expansion may not have reached it, and
 // the ordinary suspension is correct.
-func panelSpent(tx *sql.Tx, step *store.Step, panel string) (bool, error) {
-	rows, err := tx.Query(
-		`SELECT status FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?`,
+func panelSpent(tx store.LegacyTx, step *store.Step, panel string) (bool, error) {
+	instances, err := store.TxOn(tx).StepInstancesAtOrdinalTx(
 		step.RunID, step.IssueID, panel, step.Ordinal)
 	if err != nil {
 		return false, fmt.Errorf("reading the panel %s for %s: %w",
 			panel, step.Instance, err)
 	}
-	defer rows.Close()
-
-	spent := false
-	for rows.Next() {
-		var status string
-		if err := rows.Scan(&status); err != nil {
-			return false, fmt.Errorf("reading the panel %s for %s: %w",
-				panel, step.Instance, err)
-		}
-		if store.StepTerminal(status) {
-			spent = true
+	for _, instance := range instances {
+		if store.StepTerminal(instance.Status) {
+			return true, nil
 		}
 	}
-	return spent, rows.Err()
+	return false, nil
 }
 
 // triageEvidence renders the failure a panel is being asked about: which step
@@ -160,7 +145,7 @@ func panelSpent(tx *sql.Tx, step *store.Step, panel string) (bool, error) {
 // to tell an environmental failure from a real one, and that distinction lives
 // in the output text — a row saying `build: exit 1` supports no verdict the
 // operator's own override-pass did not already make blindly.
-func triageEvidence(conn *sql.DB, panel *store.Step) (string, error) {
+func triageEvidence(conn store.LegacyDB, panel *store.Step) (string, error) {
 	defs, err := StepDefinitions(conn, panel.RunID)
 	if err != nil {
 		return "", err
@@ -223,7 +208,7 @@ func indent(s string) string {
 // would strand it `gated`: the proposal is closed and nothing else resolves a
 // suspension.
 func applyTriageOutcome(
-	tx *sql.Tx, panel *store.Step, spec *workflow.Step, def *workflow.Definition,
+	tx store.LegacyTx, panel *store.Step, spec *workflow.Step, def *workflow.Definition,
 	router *store.Step, outcome *VoteOutcome, nowMS int64,
 ) error {
 	routing, ok := triageRouting(spec, outcome)
@@ -263,7 +248,7 @@ func triageRouting(spec *workflow.Step, outcome *VoteOutcome) (string, bool) {
 // with the panel's routing, and the two steps have different successors and
 // different issue-level consequences.
 func applyTriageRouting(
-	tx *sql.Tx, def *workflow.Definition, router *store.Step,
+	tx store.LegacyTx, def *workflow.Definition, router *store.Step,
 	routing, note string, nowMS int64,
 ) error {
 	stx := store.TxOn(tx)
@@ -316,7 +301,7 @@ func applyTriageRouting(
 // there: a retry that left the lease held would let the original holder record
 // without re-claiming, and one that left the saga's resume point would resume a
 // half-finished saga under the new attempt.
-func applyTriageRetry(tx *sql.Tx, router *store.Step, note string, nowMS int64) error {
+func applyTriageRetry(tx store.LegacyTx, router *store.Step, note string, nowMS int64) error {
 	stx := store.TxOn(tx)
 	if err := stx.ResetStepRetryBudgetTx(router.ID, nowMS); err != nil {
 		return err
@@ -348,7 +333,7 @@ func applyTriageRetry(tx *sql.Tx, router *store.Step, note string, nowMS int64) 
 // for an operator whatever `on_exhausted` says, and no grant is recorded for a
 // round that was not minted.
 func applyTriageFixRound(
-	tx *sql.Tx, router *store.Step, def *workflow.Definition, note string, nowMS int64,
+	tx store.LegacyTx, router *store.Step, def *workflow.Definition, note string, nowMS int64,
 ) error {
 	stx := store.TxOn(tx)
 	capped, err := extensionPastHardCap(tx, router, def)
@@ -399,7 +384,7 @@ func applyTriageFixRound(
 // The panel's own row is terminalized `skipped`: it was convened, it closed
 // without ruling, and leaving it non-terminal would hold its own successors.
 func releaseUntriaged(
-	tx *sql.Tx, panel, router *store.Step, spec *workflow.Step,
+	tx store.LegacyTx, panel, router *store.Step, spec *workflow.Step,
 	def *workflow.Definition, outcome *VoteOutcome, nowMS int64,
 ) error {
 	routing := spec.EffectiveOnFail()

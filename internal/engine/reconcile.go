@@ -1,10 +1,8 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -41,7 +39,7 @@ import (
 // interposed targets and nothing else; `def` is the issue's pinned definition
 // (nil likewise), consulted for the `after_fired` cascade and nothing else.
 func reconcileIssueAndRun(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, spec *workflow.Step,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, spec *workflow.Step,
 	routing string, nowMS int64,
 ) error {
 	// BEFORE the completion check: an unrouted gate left `pending` is exactly
@@ -123,7 +121,7 @@ func reconcileIssueAndRun(
 // `pending`) and correctly defers; a `waiting-human` park defers the same way
 // until an operator's resolution re-enters here with a terminal routing.
 func skipUnroutedTargets(
-	tx *sql.Tx, step *store.Step, spec *workflow.Step, routing string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, spec *workflow.Step, routing string, nowMS int64,
 ) error {
 	if spec == nil {
 		return nil
@@ -150,12 +148,12 @@ func skipUnroutedTargets(
 			return err
 		}
 		for _, g := range gates {
-			if err := store.TxOn(tx).SetStepStatusTx(g.id, store.StepSkipped, nowMS, nowMS); err != nil {
+			if err := store.TxOn(tx).SetStepStatusTx(g.ID, store.StepSkipped, nowMS, nowMS); err != nil {
 				return err
 			}
 			if err := recordEvent(tx, eventRecord{
 				Kind: EventStepSkipped, RunID: step.RunID,
-				Instance: g.instance, IssueID: step.IssueID,
+				Instance: g.Instance, IssueID: step.IssueID,
 				Data: fmt.Sprintf("interposed gate not routed to: %s routed %s",
 					step.Instance, routing),
 				AtMS: nowMS,
@@ -171,73 +169,38 @@ func skipUnroutedTargets(
 // reports which targets a `done` sibling's recorded routing names. `joined` is
 // false while any sibling is non-terminal — the choice is still open.
 func targetRoutings(
-	tx *sql.Tx, step *store.Step, targets []string,
+	tx store.LegacyTx, step *store.Step, targets []string,
 ) (routed map[string]bool, joined bool, err error) {
-	rows, err := tx.Query(
-		`SELECT status, routing FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?`,
-		step.RunID, step.IssueID, step.StepName, step.Ordinal,
-	)
+	siblings, err := store.TxOn(tx).StepInstancesAtOrdinalTx(
+		step.RunID, step.IssueID, step.StepName, step.Ordinal)
 	if err != nil {
 		return nil, false, fmt.Errorf("reading %s's siblings: %w", step.Instance, err)
 	}
-	defer rows.Close()
 
 	routed = make(map[string]bool, len(targets))
-	for rows.Next() {
-		var status string
-		var recorded sql.NullString
-		if err := rows.Scan(&status, &recorded); err != nil {
-			return nil, false, fmt.Errorf("reading a sibling of %s: %w", step.Instance, err)
-		}
-		if !store.StepTerminal(status) {
+	for _, sibling := range siblings {
+		if !store.StepTerminal(sibling.Status) {
 			return nil, false, nil
 		}
-		if status != store.StepDone {
+		if sibling.Status != store.StepDone {
 			continue
 		}
 		for _, target := range targets {
-			if routingIs(recorded.String, target) {
+			if routingIs(sibling.Routing, target) {
 				routed[target] = true
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("reading %s's siblings: %w", step.Instance, err)
-	}
 	return routed, true, nil
-}
-
-type pendingGate struct {
-	id       int
-	instance string
 }
 
 // pendingTargetInstances lists a target's `pending` instances at or below the
 // routing step's ordinal: the gate this ordinal's routing decided against,
 // plus any straggler a loop sweep left behind. Higher ordinals belong to
 // routings that have not happened yet.
-func pendingTargetInstances(tx *sql.Tx, step *store.Step, target string) ([]pendingGate, error) {
-	rows, err := tx.Query(
-		`SELECT id, instance FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND step_name = ?
-		    AND status = ? AND ordinal <= ?`,
-		step.RunID, step.IssueID, target, store.StepPending, step.Ordinal,
-	)
+func pendingTargetInstances(tx store.LegacyTx, step *store.Step, target string) ([]store.StepInstanceRef, error) {
+	gates, err := store.TxOn(tx).PendingInstancesUpToTx(step.RunID, step.IssueID, target, step.Ordinal)
 	if err != nil {
-		return nil, fmt.Errorf("reading unrouted target %q: %w", target, err)
-	}
-	defer rows.Close()
-
-	var gates []pendingGate
-	for rows.Next() {
-		var g pendingGate
-		if err := rows.Scan(&g.id, &g.instance); err != nil {
-			return nil, fmt.Errorf("reading unrouted target %q: %w", target, err)
-		}
-		gates = append(gates, g)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reading unrouted target %q: %w", target, err)
 	}
 	return gates, nil
@@ -264,7 +227,7 @@ func pendingTargetInstances(tx *sql.Tx, step *store.Step, target string) ([]pend
 // is exactly as notable as the first, and the issue may already be
 // `in-progress` when it happens (a straight `verify -> fix-loop` that was never
 // parked at all).
-func reflectIssueStatus(tx *sql.Tx, step *store.Step, routing string, nowMS int64) error {
+func reflectIssueStatus(tx store.LegacyTx, step *store.Step, routing string, nowMS int64) error {
 	if routing == workflow.OnFailFixLoop {
 		if err := commentEngineEvent(tx, step.IssueID, fmt.Sprintf(
 			"%s did not pass review; starting another round.", step.Instance), nowMS); err != nil {
@@ -277,13 +240,13 @@ func reflectIssueStatus(tx *sql.Tx, step *store.Step, routing string, nowMS int6
 		return err
 	}
 
-	var current string
-	if err := tx.QueryRow(`SELECT status FROM issues WHERE id = ?`, step.IssueID).Scan(&current); err != nil {
+	current, err := store.TxOn(tx).IssueStatusTx(step.IssueID)
+	if err != nil {
 		return fmt.Errorf("reading %s's status: %w", model.FormatID(step.IssueID), err)
 	}
 
 	switch {
-	case reviewing && model.Status(current) == model.StatusInProgress:
+	case reviewing && current == model.StatusInProgress:
 		moved, err := moveIssueStatusTx(tx, step.IssueID, model.StatusInProgress, model.StatusReview, nowMS)
 		if err != nil {
 			return err
@@ -300,7 +263,7 @@ func reflectIssueStatus(tx *sql.Tx, step *store.Step, routing string, nowMS int6
 		return commentEngineEvent(tx, step.IssueID,
 			fmt.Sprintf("%s is awaiting review.", step.Instance), nowMS)
 
-	case !reviewing && model.Status(current) == model.StatusReview:
+	case !reviewing && current == model.StatusReview:
 		moved, err := moveIssueStatusTx(tx, step.IssueID, model.StatusReview, model.StatusInProgress, nowMS)
 		if err != nil {
 			return err
@@ -351,19 +314,12 @@ func reflectIssueStatus(tx *sql.Tx, step *store.Step, routing string, nowMS int6
 //
 // It is a live computation, not a cache, which is what makes leaving `review`
 // automatic the moment the last one clears (DKT-294).
-func issueAwaitingReviewTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool, error) {
-	var n int
-	err := tx.QueryRow(
-		`SELECT COUNT(*) FROM steps
-		  WHERE run_id = ? AND issue_id = ?
-		    AND (status = ? OR (materialized = 1 AND status NOT IN (?, ?, ?, ?)))`,
-		runID, issueID, store.StepWaitingHuman,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-	).Scan(&n)
+func issueAwaitingReviewTx(tx store.LegacyTx, runID, issueID int, nowMS int64) (bool, error) {
+	parked, err := store.TxOn(tx).IssueHasParkedOrHeldStepTx(runID, issueID)
 	if err != nil {
-		return false, fmt.Errorf("checking %s for parked steps: %w", model.FormatID(issueID), err)
+		return false, err
 	}
-	if n > 0 {
+	if parked {
 		return true, nil
 	}
 	return issueAwaitingDecisionTx(tx, runID, issueID, nowMS)
@@ -377,17 +333,11 @@ func issueAwaitingReviewTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool, e
 // no `type=human`/`type=vote` step answers with one indexed count and no
 // scheduler, and one that has them answers the same way at every ordinal before
 // the gate's turn comes.
-func issueAwaitingDecisionTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool, error) {
-	var candidates int
-	err := tx.QueryRow(
-		`SELECT COUNT(*) FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND status = ?
-		    AND materialized = 0 AND kind IN (?, ?)`,
-		runID, issueID, store.StepPending, workflow.TypeHuman, workflow.TypeVote,
-	).Scan(&candidates)
+func issueAwaitingDecisionTx(tx store.LegacyTx, runID, issueID int, nowMS int64) (bool, error) {
+	candidates, err := store.TxOn(tx).PendingDeclaredStepCountTx(
+		runID, issueID, []string{workflow.TypeHuman, workflow.TypeVote})
 	if err != nil {
-		return false, fmt.Errorf(
-			"checking %s for open gates: %w", model.FormatID(issueID), err)
+		return false, err
 	}
 	if candidates == 0 {
 		return false, nil
@@ -424,22 +374,8 @@ func issueAwaitingDecisionTx(tx *sql.Tx, runID, issueID int, nowMS int64) (bool,
 // not consulted; and were it consulted, `superseded` is terminal anyway. Both
 // halves of the completion rule — ignore lower ordinals, and prior
 // instances stay immutable and addressable — fall out of the same query.
-func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
-	var pending int
-	err := tx.QueryRow(
-		`SELECT COUNT(*) FROM steps s
-		  WHERE s.run_id = ? AND s.issue_id = ?
-		    AND s.ordinal = (SELECT MAX(h.ordinal) FROM steps h
-		                      WHERE h.run_id = s.run_id AND h.issue_id = s.issue_id
-		                        AND h.step_name = s.step_name)
-		    AND s.status NOT IN (?, ?, ?, ?)`,
-		runID, issueID,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-	).Scan(&pending)
-	if err != nil {
-		return false, fmt.Errorf("counting unfinished steps: %w", err)
-	}
-	return pending == 0, nil
+func issueStepsComplete(tx store.LegacyTx, runID, issueID int) (bool, error) {
+	return store.TxOn(tx).IssueLatestInstancesTerminalTx(runID, issueID)
 }
 
 // completeIssue moves an issue to `done` through the SAME column and the same
@@ -452,10 +388,9 @@ func issueStepsComplete(tx *sql.Tx, runID, issueID int) (bool, error) {
 // The transition clears `resolution`: an `abandoned` left by an earlier run no
 // longer describes an issue this run finished. The `status != done` guard keeps
 // an abandonment recorded AFTER completion (DKT-245) from being erased.
-func completeIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
-	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
-
-	prior, resolution, err := store.TxOn(tx).IssueStatusResolutionTx(step.IssueID)
+func completeIssue(tx store.LegacyTx, step *store.Step, nowMS int64) error {
+	st := store.TxOn(tx)
+	prior, resolution, err := st.IssueStatusResolutionTx(step.IssueID)
 	if err != nil {
 		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
 	}
@@ -463,29 +398,12 @@ func completeIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
 		resolution = ""
 	}
 
-	res, err := tx.Exec(
-		`UPDATE issues SET status = ?, resolution = ?, updated_at = ?, version = version + 1
-		  WHERE id = ? AND status != ?`,
-		model.StatusDone, resolution, now, step.IssueID, model.StatusDone,
-	)
+	completed, err := st.CompleteIssueTx(step.IssueID, prior, resolution, nowMS)
 	if err != nil {
-		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
+		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("completing %s: %w", model.FormatID(step.IssueID), err)
-	}
-	if n == 0 {
+	if !completed {
 		return nil // Already done; nothing to record twice.
-	}
-
-	_, err = tx.Exec(
-		`INSERT INTO activity_log (issue_id, field_changed, old_value, new_value, changed_by, created_at)
-		 VALUES (?, 'status', ?, ?, '', ?)`,
-		step.IssueID, prior, model.StatusDone, now,
-	)
-	if err != nil {
-		return fmt.Errorf("recording completion of %s: %w", model.FormatID(step.IssueID), err)
 	}
 	return commentEngineEvent(tx, step.IssueID,
 		fmt.Sprintf("%s completed the issue.", step.Instance), nowMS)
@@ -498,7 +416,7 @@ func completeIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
 // says this RUN stops working on it, which is a statement about the run; an
 // operator may still triage the issue by hand, and closing it here would take
 // that decision away from them.
-func abandonIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
+func abandonIssue(tx store.LegacyTx, step *store.Step, nowMS int64) error {
 	// Every not-yet-terminal step of the issue stops, AND EACH ONE RECORDS WHY
 	// (DKT-258).
 	//
@@ -525,17 +443,9 @@ func abandonIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
 	cascade := routingRecord(workflow.OnFailAbandonIssue, fmt.Sprintf(
 		"cascade: %s was abandoned by %s; this step was never measured",
 		model.FormatID(step.IssueID), step.Instance))
-	_, err := tx.Exec(
-		`UPDATE steps
-		    SET status = ?, routing = ?, updated_at_ms = ?, recorded_at_ms = ?,
-		        row_version = row_version + 1
-		  WHERE run_id = ? AND issue_id = ? AND id != ?
-		    AND status NOT IN (?, ?, ?, ?)`,
-		store.StepFailedRouted, cascade, nowMS, nowMS, step.RunID, step.IssueID, step.ID,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-	)
-	if err != nil {
-		return fmt.Errorf("abandoning %s: %w", model.FormatID(step.IssueID), err)
+	if _, err := store.TxOn(tx).CascadeFailIssueStepsTx(
+		step.RunID, step.IssueID, step.ID, cascade, nowMS); err != nil {
+		return err
 	}
 
 	// The issue's own STATUS is left alone, for the reason above; what is
@@ -586,51 +496,27 @@ func abandonIssue(tx *sql.Tx, step *store.Step, nowMS int64) error {
 // first. Checking `done` first would let a run whose last unfinished step is
 // parked read as complete, which is the failure mode `guard stop`
 // exists to catch and should never have to.
-func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
-	var (
-		parked     int
-		unfinished int
-		// unparkedWork is the unfinished steps of issues holding no parked
-		// step: exactly the rows R2b still admits while a park stands.
-		unparkedWork int
-	)
-	err := tx.QueryRow(
-		`SELECT
-		   SUM(CASE WHEN status = ? THEN 1 ELSE 0 END),
-		   SUM(CASE WHEN status NOT IN (?, ?, ?, ?) THEN 1 ELSE 0 END),
-		   COALESCE(SUM(CASE WHEN status NOT IN (?, ?, ?, ?, ?)
-		                      AND issue_id NOT IN (
-		                        SELECT issue_id FROM steps
-		                         WHERE run_id = ? AND status = ?)
-		                     THEN 1 ELSE 0 END), 0)
-		 FROM steps WHERE run_id = ?`,
-		store.StepWaitingHuman,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-		store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
-		store.StepWaitingHuman,
-		runID, store.StepWaitingHuman,
-		runID,
-	).Scan(&parked, &unfinished, &unparkedWork)
+func reconcileRun(tx store.LegacyTx, runID int, nowMS int64) error {
+	st := store.TxOn(tx)
+	// UnparkedWork is the unfinished steps of issues holding no parked step:
+	// exactly the rows R2b still admits while a park stands.
+	rollup, err := st.RunStepRollupTx(runID)
 	if err != nil {
-		return fmt.Errorf("rolling up run %s: %w", model.FormatRunID(runID), err)
+		return err
 	}
 
 	// A run with UNEXPANDED issues is not done however its expanded steps read:
 	// later phases expand when their predecessors complete, and a rollup blind
 	// to them would call a run finished with work it has not scheduled yet.
-	var unexpanded int
-	err = tx.QueryRow(
-		`SELECT COUNT(*) FROM run_issues WHERE run_id = ? AND expanded_at_ms IS NULL`,
-		runID,
-	).Scan(&unexpanded)
+	unexpanded, err := st.UnexpandedRunIssueCountTx(runID)
 	if err != nil {
-		return fmt.Errorf("counting unexpanded issues: %w", err)
+		return err
 	}
 
 	switch {
-	case parked > 0 && unparkedWork == 0:
+	case rollup.Parked > 0 && rollup.UnparkedWork == 0:
 		return setRunStatusTx(tx, runID, model.RunWaitingHuman, EventRunPaused, nowMS)
-	case unfinished == 0 && unexpanded == 0:
+	case rollup.Unfinished == 0 && unexpanded == 0:
 		// A run-level park does NOT hold this branch, and the guard below is
 		// deliberately the only place that reads the origin. `done` resumes
 		// nothing — it records that the work finished — and a paused run held
@@ -679,16 +565,16 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 		// returns it to `active` right here — without which every step-level
 		// park would need an operator to type `run resume` for a decision the
 		// engine made and the engine already unmade.
-		origin, err := store.TxOn(tx).RunPauseOriginTx(runID)
+		origin, err := st.RunPauseOriginTx(runID)
 		if err != nil {
 			return err
 		}
 		if origin.RunLevel() {
-			var status string
-			if err := tx.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&status); err != nil {
-				return fmt.Errorf("reading run %s status: %w", model.FormatRunID(runID), err)
+			status, err := st.RunStatusTx(runID)
+			if err != nil {
+				return err
 			}
-			if model.RunStatus(status) == model.RunWaitingHuman {
+			if status == model.RunWaitingHuman {
 				return nil
 			}
 		}
@@ -704,29 +590,18 @@ func reconcileRun(tx *sql.Tx, runID int, nowMS int64) error {
 // paused, and the rule that "every transition is attributable" would be
 // checking a table of non-transitions.
 func setRunStatusTx(
-	tx *sql.Tx, runID int, status model.RunStatus, event string, nowMS int64,
+	tx store.LegacyTx, runID int, status model.RunStatus, event string, nowMS int64,
 ) error {
-	var current string
-	if err := tx.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&current); err != nil {
-		return fmt.Errorf("reading run status: %w", err)
-	}
-	if model.RunStatus(current) == status {
-		return nil
-	}
-	// A terminal run is never revived by a rollup. Reaching here means a step
-	// changed under a `done` or `abandoned` run, which is a state the verbs
-	// refuse to create; the rollup declines to paper over it.
-	if model.RunStatus(current).Terminal() {
-		return nil
-	}
-
-	_, err := tx.Exec(
-		`UPDATE runs SET status = ?, updated_at_ms = ?, row_version = row_version + 1
-		  WHERE id = ?`,
-		string(status), nowMS, runID,
-	)
+	// The move is skipped when the status is unchanged, and when the run is
+	// terminal: a terminal run is never revived by a rollup. Reaching that means
+	// a step changed under a `done` or `abandoned` run, which is a state the
+	// verbs refuse to create; the rollup declines to paper over it.
+	current, moved, err := store.TxOn(tx).TransitionRunStatusTx(runID, status, nowMS)
 	if err != nil {
-		return fmt.Errorf("updating run %s: %w", model.FormatRunID(runID), err)
+		return err
+	}
+	if !moved {
+		return nil
 	}
 
 	// THE EVENT SAYS THE ROLLUP DID IT (DKT-304). Every one of these three

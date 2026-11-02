@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,7 +82,7 @@ type LoopOutcome struct {
 // outcome's — entered stays `fix-loop`, bounded becomes `waiting-human` — and
 // the caller re-derives the step's status from it.
 func applyFixLoop(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, routing string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, routing string, nowMS int64,
 ) (string, *LoopOutcome, error) {
 	if routing != workflow.OnFailFixLoop {
 		return routing, nil, nil
@@ -152,7 +150,7 @@ func loopBoundClass(outcome *LoopOutcome) (store.ParkClass, bool) {
 // recover. Written in the SAME transaction as the routing decision, so no
 // reader ever sees an exhaustion whose history has not landed yet.
 func exhausted(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, trigger string,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, trigger string,
 	ordinal, roundsRun, loopCap int, reason string, nowMS int64,
 ) (*LoopOutcome, error) {
 	routing := workflow.OnFailWaitingHuman
@@ -185,7 +183,7 @@ func exhausted(
 // It never substitutes the routing token. `fix-loop` is how the round was
 // routed, which the refusal already implies; a reader of the loop history asks
 // what the round concluded.
-func recordedVerdict(tx *sql.Tx, step *store.Step, spec *workflow.Step) (string, error) {
+func recordedVerdict(tx store.LegacyTx, step *store.Step, spec *workflow.Step) (string, error) {
 	if spec == nil || spec.VerdictField == "" {
 		return "", nil
 	}
@@ -193,19 +191,14 @@ func recordedVerdict(tx *sql.Tx, step *store.Step, spec *workflow.Step) (string,
 	if kind == "" {
 		return "", nil
 	}
-	var payload sql.NullString
-	err := tx.QueryRow(
-		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
-		  ORDER BY id DESC LIMIT 1`,
-		step.ID, kind,
-	).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+	payload, found, err := store.TxOn(tx).NewestStepPayloadTx(step.ID, kind)
 	if err != nil {
 		return "", fmt.Errorf("reading %s's recorded %s: %w", step.Instance, kind, err)
 	}
-	elements, err := parsePayload([]byte(payload.String))
+	if !found {
+		return "", nil
+	}
+	elements, err := parsePayload([]byte(payload))
 	if err != nil {
 		return "", fmt.Errorf("reading %s's recorded %s: %w", step.Instance, kind, err)
 	}
@@ -234,7 +227,7 @@ func recordedVerdict(tx *sql.Tx, step *store.Step, spec *workflow.Step) (string,
 // operator a park they have to reason about and undo. The same direction
 // `issueHasRecordedChange` fails in, for the same reason: the guard must not
 // act on absence of evidence.
-func roundMovedNothing(tx *sql.Tx, step *store.Step, count int) (bool, error) {
+func roundMovedNothing(tx store.LegacyTx, step *store.Step, count int) (bool, error) {
 	// count is the ordinal about to be entered, so `count-1` just ran and
 	// `count-2` is what it built on. At count = 1 there is no prior round to
 	// compare against: ordinal 0 is the original work, not a repeat of it.
@@ -284,23 +277,13 @@ func roundMovedNothing(tx *sql.Tx, step *store.Step, count int) (bool, error) {
 // Newest-first by artifact id, matching every other "the latest artifact wins"
 // read in the engine: a re-claimed step completing a second time records again,
 // and the last record is the one that describes the tree.
-func newestIssueDiffUpTo(tx *sql.Tx, step *store.Step, ordinal int) (hash, body string, err error) {
+func newestIssueDiffUpTo(tx store.LegacyTx, step *store.Step, ordinal int) (hash, body string, err error) {
 	if ordinal < 0 {
 		return "", "", nil
 	}
-	err = tx.QueryRow(
-		`SELECT a.sha256, a.body FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ? AND s.ordinal <= ?
-		  ORDER BY a.id DESC LIMIT 1`,
-		step.RunID, step.IssueID, ArtifactKindIssueDiff, ordinal).Scan(&hash, &body)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", nil
-	}
-	if err != nil {
-		return "", "", fmt.Errorf("reading %s's diff up to ordinal %d: %w",
-			model.FormatID(step.IssueID), ordinal, err)
-	}
-	return hash, body, nil
+	hash, body, _, err = store.TxOn(tx).NewestIssueArtifactUpToTx(
+		step.RunID, step.IssueID, ArtifactKindIssueDiff, ordinal)
+	return hash, body, err
 }
 
 // routingVerdictUnchanged reports whether the step whose routing is about to
@@ -349,7 +332,7 @@ func newestIssueDiffUpTo(tx *sql.Tx, step *store.Step, ordinal int) (hash, body 
 // "newest strictly below" so a cluster whose routing step skipped an ordinal
 // still compares against the last verdict it actually reached.
 func routingVerdictUnchanged(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, trigger string,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, trigger string,
 ) (bool, int, error) {
 	if step.Ordinal < 1 {
 		return false, 0, nil
@@ -399,33 +382,22 @@ func routingVerdictUnchanged(
 // because it recorded no conclusion at all — and parking a loop on that is
 // roundMovedNothing's degenerate-diff failure in a new place.
 func newestStepEmit(
-	tx *sql.Tx, step *store.Step, name, kind string, lo, hi int,
+	tx store.LegacyTx, step *store.Step, name, kind string, lo, hi int,
 ) (string, int, error) {
 	if hi < lo || hi < 0 {
 		return "", 0, nil
 	}
-	var hash, body string
-	var payload sql.NullString
-	var ordinal int
-	err := tx.QueryRow(
-		`SELECT a.sha256, a.body, a.payload, s.ordinal FROM artifacts a
-		   JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ? AND a.kind = ?
-		    AND s.ordinal >= ? AND s.ordinal <= ?
-		  ORDER BY a.id DESC LIMIT 1`,
-		step.RunID, step.IssueID, name, kind, lo, hi,
-	).Scan(&hash, &body, &payload, &ordinal)
-	if errors.Is(err, sql.ErrNoRows) {
+	emit, found, err := store.TxOn(tx).NewestStepNameArtifactTx(store.StepArtifactRange{
+		RunID: step.RunID, IssueID: step.IssueID, StepName: name, Kind: kind,
+		MinOrdinal: lo, MaxOrdinal: hi,
+	})
+	if err != nil || !found {
+		return "", 0, err
+	}
+	if strings.TrimSpace(emit.Body) == "" && strings.TrimSpace(emit.Payload) == "" {
 		return "", 0, nil
 	}
-	if err != nil {
-		return "", 0, fmt.Errorf("reading %s's %s from %q at ordinals %d-%d: %w",
-			model.FormatID(step.IssueID), kind, name, lo, hi, err)
-	}
-	if strings.TrimSpace(body) == "" && strings.TrimSpace(payload.String) == "" {
-		return "", 0, nil
-	}
-	return hash, ordinal, nil
+	return emit.SHA256, emit.Ordinal, nil
 }
 
 // stalledVolume is what volumeStalled reports when the trigger's routed volume
@@ -465,7 +437,7 @@ type stalledVolume struct {
 // artifact, a payload with no bytes, and unparseable bytes are all absent
 // measurements, never flat ones — a guard must not act on absence of evidence.
 func volumeStalled(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, trigger string,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, trigger string,
 ) (*stalledVolume, error) {
 	spec := workflow.StepByName(def, trigger)
 	if spec == nil || spec.MaxStalledRounds == nil || *spec.MaxStalledRounds <= 0 {
@@ -479,35 +451,22 @@ func volumeStalled(
 	// The newest payload per ordinal, up to the round that just completed.
 	// Ordered by artifact id so a later row overwrites an earlier one in the
 	// map — the same "latest artifact wins" read as everywhere else.
-	rows, err := tx.Query(
-		`SELECT s.ordinal, a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ? AND a.kind = ?
-		    AND s.ordinal <= ?
-		  ORDER BY a.id`,
-		step.RunID, step.IssueID, trigger, kind, step.Ordinal)
+	payloads, err := store.TxOn(tx).StepArtifactPayloadsTx(store.StepArtifactRange{
+		RunID: step.RunID, IssueID: step.IssueID, StepName: trigger, Kind: kind,
+		MinOrdinal: 0, MaxOrdinal: step.Ordinal,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reading %s's routed volumes: %w",
 			model.FormatID(step.IssueID), err)
 	}
-	defer rows.Close()
 
 	byOrdinal := make(map[int]string)
 	var ordinals []int
-	for rows.Next() {
-		var (
-			ordinal int
-			payload sql.NullString
-		)
-		if err := rows.Scan(&ordinal, &payload); err != nil {
-			return nil, fmt.Errorf("reading a routed volume: %w", err)
+	for _, p := range payloads {
+		if _, seen := byOrdinal[p.Ordinal]; !seen {
+			ordinals = append(ordinals, p.Ordinal)
 		}
-		if _, seen := byOrdinal[ordinal]; !seen {
-			ordinals = append(ordinals, ordinal)
-		}
-		byOrdinal[ordinal] = payload.String
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading the routed volumes: %w", err)
+		byOrdinal[p.Ordinal] = p.Payload
 	}
 	sort.Ints(ordinals)
 
@@ -560,7 +519,7 @@ func volumeStalled(
 // either way: every cluster's entries share one ordinal sequence and one
 // global ceiling.
 func EnterLoop(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, nowMS int64,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, nowMS int64,
 ) (*LoopOutcome, error) {
 	return enterLoop(tx, step, def, false, "", nowMS)
 }
@@ -587,13 +546,13 @@ func EnterLoop(
 // the note died on the SUPERSEDED park's row — RUN-51's fix@9 rendered zero
 // bytes of the judge-converged remedy the operator recorded when authorizing it.
 func EnterLoopAuthorized(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, note string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, note string, nowMS int64,
 ) (*LoopOutcome, error) {
 	return enterLoop(tx, step, def, true, note, nowMS)
 }
 
 func enterLoop(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition, authorized bool,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition, authorized bool,
 	note string, nowMS int64,
 ) (*LoopOutcome, error) {
 	// The TRIGGER is the routing step's name, and it selects the cluster: the
@@ -951,7 +910,7 @@ func issueBoundStep(def *workflow.Definition) *workflow.Step {
 // bounds rounds: a panel approving a round the soft cap already admits spends
 // no extension. An operator's `fix-round` never asks, so it is admitted past
 // the cap exactly as it is past the soft bound.
-func extensionPastHardCap(tx *sql.Tx, step *store.Step, def *workflow.Definition) (string, error) {
+func extensionPastHardCap(tx store.LegacyTx, step *store.Step, def *workflow.Definition) (string, error) {
 	hard := maxFixLoopsHard(def)
 	if hard <= 0 {
 		return "", nil
@@ -1021,26 +980,8 @@ func clusterMaxFixLoops(def *workflow.Definition, trigger string) int {
 // Bodies SHARED between clusters (one `serves` list naming several triggers)
 // are counted wherever they ran: a shared body's round is a real round of every
 // cluster it serves, which is the conservative reading of a budget.
-func clusterRoundsUsed(tx *sql.Tx, step *store.Step, bodies []string) (int, error) {
-	if len(bodies) == 0 {
-		return 0, nil
-	}
-	placeholders := strings.Repeat("?,", len(bodies))
-	placeholders = placeholders[:len(placeholders)-1]
-	args := []any{step.RunID, step.IssueID}
-	for _, name := range bodies {
-		args = append(args, name)
-	}
-	var rounds int
-	err := tx.QueryRow(
-		`SELECT COUNT(DISTINCT ordinal) FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND step_name IN (`+placeholders+`)`,
-		args...).Scan(&rounds)
-	if err != nil {
-		return 0, fmt.Errorf("counting %s's cluster rounds: %w",
-			model.FormatID(step.IssueID), err)
-	}
-	return rounds, nil
+func clusterRoundsUsed(tx store.LegacyTx, step *store.Step, bodies []string) (int, error) {
+	return store.TxOn(tx).StepRoundCountTx(step.RunID, step.IssueID, bodies)
 }
 
 // supersedeSweep is the supersede rule, exactly, over the TRIGGERING
@@ -1077,7 +1018,7 @@ func clusterRoundsUsed(tx *sql.Tx, step *store.Step, bodies []string) (int, erro
 // an operator was asked. The sweep is therefore written as an explicit
 // unclaimed-and-pending test rather than as a negation.
 func supersedeSweep(
-	tx *sql.Tx, step *store.Step, downstream map[string]bool, ordinal int, nowMS int64,
+	tx store.LegacyTx, step *store.Step, downstream map[string]bool, ordinal int, nowMS int64,
 ) ([]string, error) {
 	if len(downstream) == 0 {
 		return nil, nil
@@ -1085,34 +1026,17 @@ func supersedeSweep(
 
 	// Every instance of the downstream set for THIS issue, below the new
 	// ordinal. Read before writing so the event log can name each one.
-	rows, err := tx.Query(
-		`SELECT id, instance, status FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND ordinal < ?
-		  ORDER BY id`,
-		step.RunID, step.IssueID, ordinal)
+	st := store.TxOn(tx)
+	candidates, err := st.IssueStepsBelowOrdinalTx(step.RunID, step.IssueID, ordinal)
 	if err != nil {
 		return nil, fmt.Errorf("reading the supersede set for %s: %w", step.Instance, err)
 	}
 
-	type candidate struct {
-		id       int
-		instance string
-	}
-	var sweep []candidate
-	for rows.Next() {
-		var (
-			id       int
-			instance string
-			status   string
-		)
-		if err := rows.Scan(&id, &instance, &status); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("reading a supersede candidate: %w", err)
-		}
+	var sweep []store.StepInstanceRef
+	for _, c := range candidates {
 		// Only the `after_loop` downstream set.
-		name, _, _, err := workflow.ParseInstance(instance)
+		name, _, _, err := workflow.ParseInstance(c.Instance)
 		if err != nil {
-			rows.Close()
 			return nil, err
 		}
 		// A MATERIALIZED `<step>-held@k` is in its routing step's lineage,
@@ -1130,25 +1054,20 @@ func supersedeSweep(
 		// Only NOT-YET-CLAIMED instances. `pending` is the whole
 		// test: `ready` is computed and never stored, so a computed-ready step
 		// is a `pending` row and sweeps here correctly.
-		if status != store.StepPending {
+		if c.Status != store.StepPending {
 			continue
 		}
-		sweep = append(sweep, candidate{id: id, instance: instance})
+		sweep = append(sweep, c)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("reading the supersede set: %w", err)
-	}
-	rows.Close()
 
 	out := make([]string, 0, len(sweep))
 	for _, c := range sweep {
-		if err := store.TxOn(tx).SetStepStatusTx(c.id, store.StepSuperseded, nowMS, nowMS); err != nil {
+		if err := st.SetStepStatusTx(c.ID, store.StepSuperseded, nowMS, nowMS); err != nil {
 			return nil, err
 		}
 		if err := recordEvent(tx, eventRecord{
 			Kind: EventStepSuperseded, RunID: step.RunID,
-			Instance: c.instance, IssueID: step.IssueID, AtMS: nowMS,
+			Instance: c.Instance, IssueID: step.IssueID, AtMS: nowMS,
 		}); err != nil {
 			return nil, err
 		}
@@ -1157,15 +1076,15 @@ func supersedeSweep(
 		// moved past it — DKT-V3 stood open forever as "superseded by a later
 		// proposal, never closed". Non-vote steps have no ballot and this is a
 		// no-op for them, which is most of the sweep.
-		if err := closeStepProposalTx(tx, step.RunID, step.IssueID, c.instance,
+		if err := closeStepProposalTx(tx, step.RunID, step.IssueID, c.Instance,
 			fmt.Sprintf(
 				"%s was superseded when the loop entered a later ordinal; the "+
 					"ballot's question was about the ordinal that no longer "+
-					"exists, and it was never decided", c.instance),
+					"exists, and it was never decided", c.Instance),
 		); err != nil {
 			return nil, err
 		}
-		out = append(out, c.instance)
+		out = append(out, c.Instance)
 	}
 	return out, nil
 }
@@ -1256,7 +1175,7 @@ func downstreamClosure(def *workflow.Definition, roots []string) map[string]bool
 // per-input rather than per-step. Another cluster's bodies and chain are
 // likewise untouched: their rounds are their own triggers' to mint.
 func instantiateOrdinal(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition,
 	bodies, downstream map[string]bool, ordinal int, nowMS int64,
 ) ([]string, error) {
 	// The issue's subject, for `when` predicates — read from the SNAPSHOT, so a
@@ -1309,26 +1228,19 @@ func instantiateOrdinal(
 // the ledger. Every row in `instances` was written by THIS transaction's
 // expansion, so reading them back inside it is consistent by construction.
 func stampEntryRouting(
-	tx *sql.Tx, step *store.Step, instances []string, note string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, instances []string, note string, nowMS int64,
 ) error {
+	st := store.TxOn(tx)
 	for _, instance := range instances {
-		var (
-			id     int
-			status string
-		)
-		err := tx.QueryRow(
-			`SELECT id, status FROM steps
-			  WHERE run_id = ? AND issue_id = ? AND instance = ?`,
-			step.RunID, step.IssueID, instance,
-		).Scan(&id, &status)
+		ref, err := st.StepByInstanceTx(step.RunID, step.IssueID, instance)
 		if err != nil {
 			return fmt.Errorf("stamping the fix-round note on %s: %w", instance, err)
 		}
-		if status != store.StepPending {
+		if ref.Status != store.StepPending {
 			continue
 		}
-		if err := store.TxOn(tx).SetStepRoutingTx(
-			id, workflow.OnFailFixLoop, note, store.StepPending, "", nowMS,
+		if err := st.SetStepRoutingTx(
+			ref.ID, workflow.OnFailFixLoop, note, store.StepPending, "", nowMS,
 		); err != nil {
 			return err
 		}
@@ -1337,7 +1249,7 @@ func stampEntryRouting(
 }
 
 func writeInstances(
-	tx *sql.Tx, step *store.Step, rows []workflow.StepInstance, nowMS int64,
+	tx store.LegacyTx, step *store.Step, rows []workflow.StepInstance, nowMS int64,
 ) ([]string, error) {
 	out := make([]string, 0, len(rows))
 	for _, inst := range rows {
@@ -1385,7 +1297,7 @@ func writeInstances(
 // nothing to repair: its successor IS its routing step's new instance, which is
 // what the mapped lookup asks about.
 func ensureSupersededHaveSuccessors(
-	tx *sql.Tx, step *store.Step, def *workflow.Definition,
+	tx store.LegacyTx, step *store.Step, def *workflow.Definition,
 	superseded []string, ordinal int, nowMS int64,
 ) ([]string, error) {
 	if len(superseded) == 0 {
@@ -1442,26 +1354,8 @@ func ensureSupersededHaveSuccessors(
 
 // stepNamesAtOrdinal is the set of step NAMES that have an instance for one
 // issue at one ordinal.
-func stepNamesAtOrdinal(tx *sql.Tx, runID, issueID, ordinal int) (map[string]bool, error) {
-	rows, err := tx.Query(
-		`SELECT DISTINCT step_name FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND ordinal = ?`,
-		runID, issueID, ordinal)
-	if err != nil {
-		return nil, fmt.Errorf("reading ordinal %d of %s: %w",
-			ordinal, model.FormatID(issueID), err)
-	}
-	defer rows.Close()
-
-	out := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("reading a step name at ordinal %d: %w", ordinal, err)
-		}
-		out[name] = true
-	}
-	return out, rows.Err()
+func stepNamesAtOrdinal(tx store.LegacyTx, runID, issueID, ordinal int) (map[string]bool, error) {
+	return store.TxOn(tx).StepNamesAtOrdinalTx(runID, issueID, ordinal)
 }
 
 // restoreLoopCount puts the issue's counter back after a bounded entry, to the
@@ -1471,11 +1365,8 @@ func stepNamesAtOrdinal(tx *sql.Tx, runID, issueID, ordinal int) (map[string]boo
 // lands on the value the caller actually read. The two are the same under the
 // single-writer transaction this runs in; the absolute form stays right if that
 // ever stops being true, and says plainly which ordinal the issue is left at.
-func restoreLoopCount(tx *sql.Tx, step *store.Step, raised int) error {
-	_, err := tx.Exec(
-		`UPDATE run_issues SET loop_count = ? WHERE run_id = ? AND issue_id = ?`,
-		raised-1, step.RunID, step.IssueID)
-	if err != nil {
+func restoreLoopCount(tx store.LegacyTx, step *store.Step, raised int) error {
+	if err := store.TxOn(tx).SetRunIssueLoopCountTx(step.RunID, step.IssueID, raised-1); err != nil {
 		return fmt.Errorf("restoring the loop counter for %s: %w",
 			model.FormatID(step.IssueID), err)
 	}
@@ -1484,7 +1375,7 @@ func restoreLoopCount(tx *sql.Tx, step *store.Step, raised int) error {
 
 // snapshotSubject reads the `when`-predicate subject from the issue snapshot
 // activation froze.
-func snapshotSubject(tx *sql.Tx, runID, issueID int) (workflow.Subject, error) {
+func snapshotSubject(tx store.LegacyTx, runID, issueID int) (workflow.Subject, error) {
 	ri, err := store.TxOn(tx).GetRunIssueTx(runID, issueID)
 	if err != nil {
 		return workflow.Subject{}, err
@@ -1507,7 +1398,7 @@ func snapshotSubject(tx *sql.Tx, runID, issueID int) (workflow.Subject, error) {
 // false on the first pass and the miss would never resolve. `next` is called
 // constantly by dispatchers, so the check has to distinguish "already resolved
 // as a miss" from "resolved as anything at all".
-func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
+func resolveQuorumMisses(tx store.LegacyTx, sched *Scheduler, nowMS int64) error {
 	for _, step := range sched.QuorumMisses() {
 		def := sched.defs[step.WorkflowID]
 		spec := workflow.StepByName(def, step.StepName)
@@ -1617,7 +1508,7 @@ func resolveQuorumMisses(tx *sql.Tx, sched *Scheduler, nowMS int64) error {
 // one for every step a loop entry actually superseded, so the two readings
 // agree wherever the sweep reached — and disagree only where it never did,
 // which is precisely where the routing must stay live.
-func StaleLineage(tx *sql.Tx, step *store.Step) (bool, error) {
+func StaleLineage(tx store.LegacyTx, step *store.Step) (bool, error) {
 	ri, err := store.TxOn(tx).GetRunIssueTx(step.RunID, step.IssueID)
 	if err != nil {
 		return false, err
@@ -1635,16 +1526,11 @@ func StaleLineage(tx *sql.Tx, step *store.Step) (bool, error) {
 		name = routing
 	}
 
-	var successors int
-	err = tx.QueryRow(
-		`SELECT COUNT(*) FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal > ?`,
-		step.RunID, step.IssueID, name, step.Ordinal,
-	).Scan(&successors)
+	later, err := store.TxOn(tx).StepHasLaterInstanceTx(step.RunID, step.IssueID, name, step.Ordinal)
 	if err != nil {
 		return false, fmt.Errorf("reading later instances of %s: %w", step.Instance, err)
 	}
-	return successors > 0, nil
+	return later, nil
 }
 
 // HighestOrdinals returns, per step NAME, the highest ordinal that has an
@@ -1656,27 +1542,6 @@ func StaleLineage(tx *sql.Tx, step *store.Step) (bool, error) {
 // instances only at ordinal 0 while `review` has them at 0 and 1, and a single
 // issue-wide maximum would rule `implement@0` out of the completion check and
 // call the issue complete without it.
-func HighestOrdinals(tx *sql.Tx, runID, issueID int) (map[string]int, error) {
-	rows, err := tx.Query(
-		`SELECT step_name, MAX(ordinal) FROM steps
-		  WHERE run_id = ? AND issue_id = ? GROUP BY step_name`,
-		runID, issueID)
-	if err != nil {
-		return nil, fmt.Errorf("reading the highest ordinals for %s: %w",
-			model.FormatID(issueID), err)
-	}
-	defer rows.Close()
-
-	out := make(map[string]int)
-	for rows.Next() {
-		var (
-			name    string
-			ordinal int
-		)
-		if err := rows.Scan(&name, &ordinal); err != nil {
-			return nil, fmt.Errorf("reading a highest ordinal: %w", err)
-		}
-		out[name] = ordinal
-	}
-	return out, rows.Err()
+func HighestOrdinals(tx store.LegacyTx, runID, issueID int) (map[string]int, error) {
+	return store.TxOn(tx).HighestOrdinalsTx(runID, issueID)
 }
