@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -699,4 +700,190 @@ func ProposalRunLinks(db *sql.DB, filter ProposalRunLinkFilter) ([]ProposalRunLi
 		out = append(out, link)
 	}
 	return out, rows.Err()
+}
+
+// The report and ledger event reads below take engine vocabulary (event kinds)
+// as arguments and return payloads verbatim: what a kind or a payload means
+// stays the engine's. A call naming no kind selects no event.
+
+// rowsQuerier is the read surface shared by *sql.DB and *sql.Tx, so a pooled
+// helper and its Tx twin run one query text.
+type rowsQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// kindArgs binds a run id followed by event kinds, for a `kind IN (...)`
+// built with makePlaceholders(len(kinds)).
+func kindArgs(runID int, kinds []string) []any {
+	args := make([]any, 0, 1+len(kinds))
+	args = append(args, runID)
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	return args
+}
+
+// StepEvent is one step-scoped event: the step it names, its kind, and its
+// payload verbatim.
+type StepEvent struct {
+	StepID int
+	Kind   string
+	Data   string
+}
+
+// RunStepEvents returns a run's events of the given kinds that name a step,
+// in seq order.
+func RunStepEvents(db *sql.DB, runID int, kinds ...string) ([]StepEvent, error) {
+	return runStepEvents(db, runID, kinds)
+}
+
+// RunStepEventsTx is RunStepEvents inside the caller's transaction.
+func RunStepEventsTx(tx *sql.Tx, runID int, kinds ...string) ([]StepEvent, error) {
+	return runStepEvents(tx, runID, kinds)
+}
+
+func runStepEvents(q rowsQuerier, runID int, kinds []string) ([]StepEvent, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	rows, err := q.Query(
+		`SELECT step_id, kind, data FROM events
+		  WHERE run_id = ? AND step_id IS NOT NULL
+		    AND kind IN (`+makePlaceholders(len(kinds))+`)
+		  ORDER BY seq`, kindArgs(runID, kinds)...)
+	if err != nil {
+		return nil, fmt.Errorf("reading the step events of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "step events", func(r *sql.Rows) (StepEvent, error) {
+		var e StepEvent
+		if err := r.Scan(&e.StepID, &e.Kind, &e.Data); err != nil {
+			return e, fmt.Errorf("reading a step event of %s: %w", model.FormatRunID(runID), err)
+		}
+		return e, nil
+	})
+}
+
+// RunEventDataTx returns the payloads of a run's events of the given kinds,
+// in seq order.
+func RunEventDataTx(tx *sql.Tx, runID int, kinds ...string) ([]string, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(
+		`SELECT data FROM events
+		  WHERE run_id = ? AND kind IN (`+makePlaceholders(len(kinds))+`)
+		  ORDER BY seq`, kindArgs(runID, kinds)...)
+	if err != nil {
+		return nil, fmt.Errorf("reading the events of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "run events", func(r *sql.Rows) (string, error) {
+		var data string
+		if err := r.Scan(&data); err != nil {
+			return "", fmt.Errorf("reading an event of %s: %w", model.FormatRunID(runID), err)
+		}
+		return data, nil
+	})
+}
+
+// IssueEvent is one issue-scoped event with the routing of the step it names.
+type IssueEvent struct {
+	IssueID int
+	// RunID is 0 for an event recorded outside any run.
+	RunID int
+	AtMS  int64
+	Data  string
+	// StepRouting is "" when the event names no step or its step has no
+	// recorded routing.
+	StepRouting string
+}
+
+const issueEventSelect = `
+	SELECT e.issue_id, COALESCE(e.run_id, 0), e.at_ms, e.data, COALESCE(s.routing, '')
+	  FROM events e
+	  LEFT JOIN steps s ON s.id = e.step_id
+	 WHERE e.kind = ?`
+
+func scanIssueEvent(r scanner) (IssueEvent, error) {
+	var e IssueEvent
+	err := r.Scan(&e.IssueID, &e.RunID, &e.AtMS, &e.Data, &e.StepRouting)
+	return e, err
+}
+
+// RunIssueEventsTx returns a run's events of one kind that name an issue, in
+// seq order.
+func RunIssueEventsTx(tx *sql.Tx, runID int, kind string) ([]IssueEvent, error) {
+	rows, err := tx.Query(
+		issueEventSelect+` AND e.run_id = ? AND e.issue_id IS NOT NULL ORDER BY e.seq`,
+		kind, runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the %s events of %s: %w", kind, model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, kind+" events", func(r *sql.Rows) (IssueEvent, error) {
+		e, err := scanIssueEvent(r)
+		if err != nil {
+			return e, fmt.Errorf("reading a %s event of %s: %w", kind, model.FormatRunID(runID), err)
+		}
+		return e, nil
+	})
+}
+
+// LatestIssueEvent returns an issue's newest event of one kind, in any run or
+// none. found is false when the issue has none.
+func LatestIssueEvent(db *sql.DB, issueID int, kind string) (event IssueEvent, found bool, err error) {
+	event, err = scanIssueEvent(db.QueryRow(
+		issueEventSelect+` AND e.issue_id = ? ORDER BY e.seq DESC LIMIT 1`,
+		kind, issueID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return IssueEvent{}, false, nil
+	}
+	if err != nil {
+		return IssueEvent{}, false, fmt.Errorf("reading the latest %s event of %s: %w",
+			kind, model.FormatID(issueID), err)
+	}
+	return event, true, nil
+}
+
+// StepProducer is the identity the run report attributes a step's output to.
+type StepProducer struct {
+	StepID   int
+	Instance string
+	// Executor is the step's declared executor hint, "" when it declares none.
+	Executor string
+	IssueID  int
+}
+
+// RunStepProducers returns every step of a run, ordered by id.
+func RunStepProducers(db *sql.DB, runID int) ([]StepProducer, error) {
+	rows, err := db.Query(
+		`SELECT id, instance, COALESCE(executor, ''), issue_id FROM steps
+		  WHERE run_id = ? ORDER BY id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the step producers of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "step producers", func(r *sql.Rows) (StepProducer, error) {
+		var p StepProducer
+		if err := r.Scan(&p.StepID, &p.Instance, &p.Executor, &p.IssueID); err != nil {
+			return p, fmt.Errorf("reading a step producer of %s: %w", model.FormatRunID(runID), err)
+		}
+		return p, nil
+	})
+}
+
+// RunEventSpanMS returns the at_ms of a run's earliest and latest events of
+// the given kinds. found is false when the run has none.
+func RunEventSpanMS(db *sql.DB, runID int, kinds ...string) (first, last int64, found bool, err error) {
+	if len(kinds) == 0 {
+		return 0, 0, false, nil
+	}
+	var lo, hi sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT MIN(at_ms), MAX(at_ms) FROM events
+		  WHERE run_id = ? AND kind IN (`+makePlaceholders(len(kinds))+`)`,
+		kindArgs(runID, kinds)...).Scan(&lo, &hi); err != nil {
+		return 0, 0, false, fmt.Errorf("reading the event span of %s: %w", model.FormatRunID(runID), err)
+	}
+	if !lo.Valid {
+		return 0, 0, false, nil
+	}
+	return lo.Int64, hi.Int64, true, nil
 }
