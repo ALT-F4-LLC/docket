@@ -1,8 +1,8 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -270,7 +270,7 @@ const (
 // returns is what a claim made now would hand over. For a step that HAS been
 // handed out, the answer to "what did this step see" is AssembleRecordedContext.
 func AssembleContext(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, ttls ttlConfig,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, ttls ttlConfig,
 ) (*Context, error) {
 	return assembleContext(tx, sched, step, ttls, liveArtifacts, liveIssue, liveNotes)
 }
@@ -308,21 +308,21 @@ func AssembleContext(
 // step's completion-side gate rows on a read-back that were not yet recorded
 // at claim; that is the one engine-produced input whose read-back can grow.
 func AssembleRecordedContext(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, ttls ttlConfig,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, ttls ttlConfig,
 ) (*Context, error) {
 	return assembleContext(tx, sched, step, ttls, recordedArtifacts, recordedIssue, recordedNotes)
 }
 
 // artifactSource loads the artifact set one assembly resolves over.
-type artifactSource func(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error)
+type artifactSource func(tx store.LegacyTx, step *store.Step) ([]*store.Artifact, error)
 
 // liveArtifacts is the run's whole artifact table — the claim's view.
-func liveArtifacts(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error) {
+func liveArtifacts(tx store.LegacyTx, step *store.Step) ([]*store.Artifact, error) {
 	return store.TxOn(tx).ListRunArtifactsTx(step.RunID)
 }
 
 // recordedArtifacts is the set the step's claim recorded — the read-back's view.
-func recordedArtifacts(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error) {
+func recordedArtifacts(tx store.LegacyTx, step *store.Step) ([]*store.Artifact, error) {
 	return store.TxOn(tx).ListStepInputArtifactsTx(step.ID)
 }
 
@@ -335,10 +335,10 @@ func recordedArtifacts(tx *sql.Tx, step *store.Step) ([]*store.Artifact, error) 
 // unlike `step_inputs` there is nothing a claim recorded to read back — and a
 // read-back that took the live columns would report a body or a scope the step
 // was never given the moment `run refresh-body` or `run refresh-scope` ran.
-type issueSource func(tx *sql.Tx, step *store.Step, issue *ContextIssue) error
+type issueSource func(tx store.LegacyTx, step *store.Step, issue *ContextIssue) error
 
 // liveIssue leaves the columns as they stand — the claim's view.
-func liveIssue(*sql.Tx, *store.Step, *ContextIssue) error { return nil }
+func liveIssue(store.LegacyTx, *store.Step, *ContextIssue) error { return nil }
 
 // recordedIssue rewinds the body and the scope to the ones the step's claim
 // was given, reconstructed from the refresh ledger.
@@ -372,19 +372,16 @@ func liveIssue(*sql.Tx, *store.Step, *ContextIssue) error { return nil }
 // removed that claim row, a missing refresh row no longer means "no refresh",
 // and the read-back reports the body and scope GONE instead of stating the
 // live columns as what this attempt was handed.
-func recordedIssue(tx *sql.Tx, step *store.Step, issue *ContextIssue) error {
+func recordedIssue(tx store.LegacyTx, step *store.Step, issue *ContextIssue) error {
 	if step.StartedMS == nil {
 		return nil
 	}
 	claimedAtMS := *step.StartedMS
-	var claimPruned bool
-	err := tx.QueryRow(
-		`SELECT EXISTS (SELECT 1 FROM events
-		                 WHERE kind = ? AND (run_id = ? OR run_id IS NULL))
-		    AND NOT EXISTS (SELECT 1 FROM events
-		                     WHERE kind = ? AND step_id = ? AND at_ms >= ?)`,
-		EventEventsPruned, step.RunID,
-		EventStepClaimed, step.ID, claimedAtMS).Scan(&claimPruned)
+	claimPruned, err := store.TxOn(tx).ClaimEventsPrunedTx(store.ClaimEventsPrunedQuery{
+		RunID: step.RunID, StepID: step.ID,
+		PrunedKind: EventEventsPruned, ClaimKind: EventStepClaimed,
+		ClaimedAtMS: claimedAtMS,
+	})
 	if err != nil {
 		return fmt.Errorf("reading %s's claim record: %w", step.Instance, err)
 	}
@@ -404,11 +401,12 @@ func recordedIssue(tx *sql.Tx, step *store.Step, issue *ContextIssue) error {
 
 // recordedIssueBody is the body the claim at claimedAtMS was given (DKT-2291):
 // the superseding refresh's `from_body`, or the column when none followed.
-func recordedIssueBody(tx *sql.Tx, step *store.Step, claimedAtMS int64, snapshot string) (string, error) {
+func recordedIssueBody(tx store.LegacyTx, step *store.Step, claimedAtMS int64, snapshot string) (string, error) {
 	var refresh struct {
 		FromBody string `json:"from_body"`
 	}
-	found, err := refreshAfterClaim(tx, step, claimedAtMS, EventIssueBodyRefreshed, &refresh)
+	found, err := refreshAfterClaim(
+		store.TxOn(tx).FirstIssueEventDataAfterTx, step, claimedAtMS, EventIssueBodyRefreshed, &refresh)
 	if err != nil || !found {
 		return snapshot, err
 	}
@@ -417,11 +415,12 @@ func recordedIssueBody(tx *sql.Tx, step *store.Step, claimedAtMS int64, snapshot
 
 // recordedIssueScope is the scope the claim at claimedAtMS was given (DKT-869):
 // the superseding refresh's `from`, or the snapshot's when none followed.
-func recordedIssueScope(tx *sql.Tx, step *store.Step, claimedAtMS int64, snapshot []string) ([]string, error) {
+func recordedIssueScope(tx store.LegacyTx, step *store.Step, claimedAtMS int64, snapshot []string) ([]string, error) {
 	var refresh struct {
 		From []string `json:"from"`
 	}
-	found, err := refreshAfterClaim(tx, step, claimedAtMS, EventIssueScopeRefreshed, &refresh)
+	found, err := refreshAfterClaim(
+		store.TxOn(tx).FirstIssueEventDataAfterTx, step, claimedAtMS, EventIssueScopeRefreshed, &refresh)
 	if err != nil || !found {
 		return snapshot, err
 	}
@@ -437,7 +436,7 @@ func recordedIssueScope(tx *sql.Tx, step *store.Step, claimedAtMS int64, snapsho
 // given: the earliest later `issue-files-refreshed` event's `from`, or the
 // snapshot's frozen list when none followed. It shares recordedIssue's anchor,
 // and with no anchor the frozen list is the same fallback.
-func recordedAttachedPaths(conn *sql.DB, step *store.Step) ([]string, error) {
+func recordedAttachedPaths(conn store.LegacyDB, step *store.Step) ([]string, error) {
 	frozen, err := frozenAttachedPaths(conn, step.RunID, step.IssueID)
 	if err != nil || step.StartedMS == nil {
 		return frozen, err
@@ -445,38 +444,31 @@ func recordedAttachedPaths(conn *sql.DB, step *store.Step) ([]string, error) {
 	var refresh struct {
 		From []string `json:"from"`
 	}
-	found, err := refreshAfterClaim(conn, step, *step.StartedMS, EventIssueFilesRefreshed, &refresh)
+	found, err := refreshAfterClaim(
+		store.StoreOn(conn).FirstIssueEventDataAfter, step, *step.StartedMS, EventIssueFilesRefreshed, &refresh)
 	if err != nil || !found {
 		return frozen, err
 	}
 	return refresh.From, nil
 }
 
-// rowQuerier is the single-row read refreshAfterClaim needs, satisfied by
-// *sql.Tx for context assembly and *sql.DB for packet rendering.
-type rowQuerier interface {
-	QueryRow(query string, args ...any) *sql.Row
-}
-
 // refreshAfterClaim decodes into `into` the earliest `kind` refresh of the
 // step's issue that followed the claim at claimedAtMS, reporting whether one
 // exists. None means nothing superseded what the claim was handed, so the
-// column still holds it.
+// column still holds it. first reads that refresh, inside the assembly's
+// transaction for context assembly and on the pool for packet rendering.
 func refreshAfterClaim(
-	q rowQuerier, step *store.Step, claimedAtMS int64, kind string, into any,
+	first func(store.IssueEventAfterQuery) (string, bool, error),
+	step *store.Step, claimedAtMS int64, kind string, into any,
 ) (bool, error) {
-	var data string
-	err := q.QueryRow(
-		`SELECT data FROM events
-		  WHERE kind = ? AND run_id = ? AND issue_id = ? AND at_ms > ?
-		  ORDER BY at_ms, seq
-		  LIMIT 1`,
-		kind, step.RunID, step.IssueID, claimedAtMS).Scan(&data)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+	data, found, err := first(store.IssueEventAfterQuery{
+		RunID: step.RunID, IssueID: step.IssueID, Kind: kind, AfterMS: claimedAtMS,
+	})
 	if err != nil {
 		return false, fmt.Errorf("reading %s's %s events: %w", step.Instance, kind, err)
+	}
+	if !found {
+		return false, nil
 	}
 	if err := json.Unmarshal([]byte(data), into); err != nil {
 		return false, fmt.Errorf("reading %s's %s events: %w", step.Instance, kind, err)
@@ -507,7 +499,7 @@ func recordedClaim(step *store.Step) bool {
 }
 
 func assembleContext(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, ttls ttlConfig,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, ttls ttlConfig,
 	source artifactSource, issueView issueSource, notesOf noteSource,
 ) (*Context, error) {
 	def := sched.defs[step.WorkflowID]
@@ -624,10 +616,10 @@ func assembleContext(
 // claim: notes are append-only run state with no per-step record, so a
 // read-back that took the whole table would report notes added after the
 // claim as guidance the step was given.
-type noteSource func(tx *sql.Tx, step *store.Step) ([]RunNote, error)
+type noteSource func(tx store.LegacyTx, step *store.Step) ([]RunNote, error)
 
 // liveNotes is every note the run holds — the claim's view.
-func liveNotes(tx *sql.Tx, step *store.Step) ([]RunNote, error) {
+func liveNotes(tx store.LegacyTx, step *store.Step) ([]RunNote, error) {
 	return contextNotes(tx, step.RunID)
 }
 
@@ -638,7 +630,7 @@ func liveNotes(tx *sql.Tx, step *store.Step) ([]RunNote, error) {
 //
 // A nil anchor falls back to the live notes, by the rule and for the reasons
 // recordedIssueBody documents.
-func recordedNotes(tx *sql.Tx, step *store.Step) ([]RunNote, error) {
+func recordedNotes(tx store.LegacyTx, step *store.Step) ([]RunNote, error) {
 	notes, err := contextNotes(tx, step.RunID)
 	if err != nil || step.StartedMS == nil {
 		return notes, err
@@ -657,7 +649,7 @@ func recordedNotes(tx *sql.Tx, step *store.Step) ([]RunNote, error) {
 // nil, not an empty slice, when the run has none: `omitempty` elides either,
 // but a nil keeps the in-memory bundle a test compares field-by-field equal to
 // one assembled before the field existed.
-func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
+func contextNotes(tx store.LegacyTx, runID int) ([]RunNote, error) {
 	rows, err := store.TxOn(tx).ListRunNotesTx(runID)
 	if err != nil {
 		return nil, err
@@ -678,7 +670,7 @@ func contextNotes(tx *sql.Tx, runID int) ([]RunNote, error) {
 // is pure over the step row and this one needs the gate table. Keeping the
 // split makes the extra read visibly bounded to steps that have a routing
 // record at all — a first-attempt packet performs none.
-func attachGateOutcomes(tx *sql.Tx, step *store.Step, res *ContextResolution) error {
+func attachGateOutcomes(tx store.LegacyTx, step *store.Step, res *ContextResolution) error {
 	if res == nil || step == nil {
 		return nil
 	}
@@ -754,16 +746,9 @@ func resolveTarget(inputs []ContextInput) (sha, worktree string) {
 // resolved and froze them. It rides the same read because it lives in the same
 // column; it is not a member of the wire-shape ContextIssue, because bundle
 // consumers read artifacts through `inputs`, never through `issue`.
-func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]int, error) {
-	var (
-		body     sql.NullString
-		snapshot sql.NullString
-	)
-	err := tx.QueryRow(
-		`SELECT body_snapshot, issue_snapshot FROM run_issues
-		  WHERE run_id = ? AND issue_id = ?`, runID, issueID,
-	).Scan(&body, &snapshot)
-	if err == sql.ErrNoRows {
+func contextIssue(tx store.LegacyTx, runID, issueID int) (*ContextIssue, map[string][]int, error) {
+	body, snapshot, err := store.TxOn(tx).RunIssueSnapshotsTx(runID, issueID)
+	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil, fmt.Errorf("issue %s is not in run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
@@ -773,13 +758,13 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]i
 
 	out := &ContextIssue{
 		ID:           model.FormatID(issueID),
-		BodySnapshot: body.String,
+		BodySnapshot: body,
 		Labels:       []string{},
 		Scope:        []string{},
 	}
 
 	var linked map[string][]int
-	if snapshot.String != "" {
+	if snapshot != "" {
 		var frozen struct {
 			Title  string           `json:"title"`
 			Kind   string           `json:"kind"`
@@ -787,7 +772,7 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]i
 			Scope  []string         `json:"scope"`
 			Linked map[string][]int `json:"linked"`
 		}
-		if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
+		if err := json.Unmarshal([]byte(snapshot), &frozen); err != nil {
 			return nil, nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 				model.FormatID(issueID), err)
 		}
@@ -807,7 +792,7 @@ func contextIssue(tx *sql.Tx, runID, issueID int) (*ContextIssue, map[string][]i
 // file: assembly never re-reads a file a pin names.
 // The hash IS the contract; re-reading would make the bundle depend on the
 // working tree, which is exactly what the pin exists to prevent.
-func contextPins(tx *sql.Tx, runID int) ([]ContextPin, error) {
+func contextPins(tx store.LegacyTx, runID int) ([]ContextPin, error) {
 	rows, err := store.TxOn(tx).ListPinsTx(runID)
 	if err != nil {
 		return nil, err
@@ -1048,7 +1033,7 @@ func loopEntryOf(step *store.Step) *LoopEntry {
 // `linked` is the issue snapshot's activation-pinned cross-issue artifact ids
 // (DKT-547), consulted only for `issue.linked.<relation>.<kind>` entries.
 func resolveInputs(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, spec *workflow.Step,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, spec *workflow.Step,
 	bodySnapshot string, artifacts []*store.Artifact, linked map[string][]int,
 ) ([]ContextInput, error) {
 	if len(spec.Inputs) == 0 {
@@ -1173,7 +1158,7 @@ func resolveInputs(
 // — they are prose and a diff, not a JSON array of clusters. A caller wanting
 // them as text still has the bundle.
 func ResolveInputArtifacts(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, spec *workflow.Step,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, spec *workflow.Step,
 ) ([]*store.Artifact, error) {
 	if len(spec.Inputs) == 0 {
 		return nil, nil
@@ -1811,7 +1796,7 @@ func resolveIssueDiff(
 // says "this round ran no checks", which is truer than the previous round's
 // results.
 func resolveGateResults(
-	tx *sql.Tx, sched *Scheduler, step *store.Step, stepName string,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step, stepName string,
 ) ([]ContextInput, error) {
 	var candidates []*store.Step
 	best := -1

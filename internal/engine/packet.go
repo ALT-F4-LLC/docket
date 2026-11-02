@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -432,7 +431,7 @@ func checkPacketRef(ref, entry string) error {
 // NOT_FOUND, as `run verify-pins` answers; an unactivated one has no pin set.
 //
 // It writes nothing: no lease, no lock, no event.
-func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
+func PinContent(conn store.LegacyDB, runID int, ref string) (string, error) {
 	runRef := model.FormatRunID(runID)
 	st := store.StoreOn(conn)
 	run, err := st.GetRun(runID)
@@ -456,7 +455,7 @@ func PinContent(conn *sql.DB, runID int, ref string) (string, error) {
 	// activation still refuses here as `pin drift`.
 	onDisk := packetFilePins(pins)
 	for pinRef, pin := range onDisk {
-		pin.Content = sql.NullString{}
+		pin.Content.String, pin.Content.Valid = "", false
 		onDisk[pinRef] = pin
 	}
 	body, _, err := readPinnedPacketFile(runRef, onDisk, instanceConfigRoots(), ref)
@@ -510,7 +509,7 @@ func packetPinsForRun(pins []store.Pin) map[string]string {
 // `executor` is a RESOLVED hint overriding the declared one (DKT-70), "" for
 // the declared behavior — see RenderStepAs.
 func stepPacketFiles(
-	conn *sql.DB, step *store.Step, spec *workflow.Step, executor string,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step, executor string,
 ) ([]PacketFile, error) {
 	if spec == nil || len(spec.Packet) == 0 {
 		return nil, nil
@@ -585,7 +584,7 @@ const AttachmentMaxBytes = exec.CaptureCap
 // under the attached path. A hard link is not a path property, so os.Root does
 // not contain it.
 func issueAttachmentFiles(
-	conn *sql.DB, step *store.Step, spec *workflow.Step,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step,
 ) ([]PacketFile, error) {
 	if spec == nil || !slices.Contains(spec.Inputs, workflow.InputIssueFiles) {
 		return nil, nil
@@ -698,12 +697,9 @@ func checkAttachmentPath(issueID int, path string) error {
 // frozenAttachedPaths returns the attached path list the run's issue snapshot
 // froze at activation. A snapshot written before the list was frozen carries
 // no `files` key, and for that run the live attachment list stands in.
-func frozenAttachedPaths(conn *sql.DB, runID, issueID int) ([]string, error) {
-	var snapshot sql.NullString
-	err := conn.QueryRow(
-		`SELECT issue_snapshot FROM run_issues WHERE run_id = ? AND issue_id = ?`,
-		runID, issueID,
-	).Scan(&snapshot)
+func frozenAttachedPaths(conn store.LegacyDB, runID, issueID int) ([]string, error) {
+	st := store.StoreOn(conn)
+	snapshot, err := st.RunIssueSnapshot(runID, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 			model.FormatID(issueID), err)
@@ -712,14 +708,14 @@ func frozenAttachedPaths(conn *sql.DB, runID, issueID int) ([]string, error) {
 	var frozen struct {
 		Files *[]string `json:"files"`
 	}
-	if snapshot.String != "" {
-		if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
+	if snapshot != "" {
+		if err := json.Unmarshal([]byte(snapshot), &frozen); err != nil {
 			return nil, fmt.Errorf("reading the issue snapshot for %s: %w",
 				model.FormatID(issueID), err)
 		}
 	}
 	if frozen.Files == nil {
-		return store.StoreOn(conn).GetIssueFiles(issueID)
+		return st.GetIssueFiles(issueID)
 	}
 	return *frozen.Files, nil
 }

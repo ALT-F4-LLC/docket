@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -83,7 +82,7 @@ type RefreshedBody struct {
 // check an executor could amend its own issue and then make that amendment
 // reach its own packets.
 func RefreshIssueBodyInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedBody, error) {
 	if strings.TrimSpace(reason) == "" {
@@ -237,17 +236,11 @@ func RefreshIssueBodyInRun(
 // the value written is the value that was read — an amendment landing between a
 // standalone read and the UPDATE would otherwise be reported as the `to` of an
 // event that wrote something else.
-func liveIssueBodyTx(tx *sql.Tx, issueID int) (string, error) {
-	var description sql.NullString
-	err := tx.QueryRow(
-		`SELECT description FROM issues WHERE id = ?`, issueID).Scan(&description)
-	if err == sql.ErrNoRows {
+func liveIssueBodyTx(tx store.LegacyTx, issueID int) (string, error) {
+	description, err := store.TxOn(tx).IssueDescriptionTx(issueID)
+	if errors.Is(err, store.ErrNotFound) {
 		return "", notFoundErr(store.ErrNotFound, "issue %s not found",
 			model.FormatID(issueID))
 	}
-	if err != nil {
-		return "", fmt.Errorf("reading the live description for %s: %w",
-			model.FormatID(issueID), err)
-	}
-	return description.String, nil
+	return description, err
 }

@@ -101,6 +101,12 @@ func resolvedDir(path string) string {
 	return filepath.Clean(path)
 }
 
+// rowQuerier is the single-row read recordedHeadOfErr needs, satisfied by
+// *sql.Tx and *sql.DB.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // recordedHeadOf is the head recorded for the step's CURRENT worktree. It
 // swallows a read error as "no record", the refusal direction for its
 // callers; a stage that would fall back to the live worktree on "no record"
