@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"math"
 
@@ -192,7 +191,7 @@ func (b budgetSnapshot) admits(cost float64) bool {
 // run whose `--budget` happened to equal the default reads as `config`. Both
 // answers name a number the operator can act on, which is what the report line
 // is for.
-func loadBudget(tx *sql.Tx, run *model.Run) (budgetSnapshot, error) {
+func loadBudget(tx store.LegacyTx, run *model.Run) (budgetSnapshot, error) {
 	snap := budgetSnapshot{cap: run.Budget, source: BudgetFromRun}
 	st := store.TxOn(tx)
 
@@ -324,33 +323,12 @@ func BudgetSourceOf(cap, configDefault float64) BudgetSource {
 // package and the two must not be able to disagree — a report that recomputed
 // the floor its own way would be a second source of truth for the number a
 // breach is attributed to.
-func RunFloorTx(tx *sql.Tx, runID int) (float64, error) {
-	// The `json_valid` guard follows events_read.go's discipline: SQLite's
-	// `json_extract` ABORTS on malformed input rather than returning NULL, and
-	// a hand-edited event row must degrade to the step's declared cost, not
-	// take the whole budget check down. A pre-DKT-867 claim event's data
-	// carries no `expected_cost` key, so it extracts NULL, falls through to
-	// `s.expected_cost`, and historical floors are byte-for-byte what they
-	// were.
-	var floor float64
-	err := tx.QueryRow(
-		`SELECT COALESCE((SELECT SUM(COALESCE(
-		           CASE WHEN json_valid(e.data)
-		                THEN json_extract(e.data, '$.expected_cost') END,
-		           s.expected_cost))
-		           FROM events e JOIN steps s ON s.id = e.step_id
-		          WHERE e.run_id = ? AND e.kind = ?), 0)
-		      + COALESCE((SELECT SUM(expected_cost)
-		           FROM steps WHERE run_id = ? AND kind = ?
-		            AND status NOT IN (?, ?)), 0)`,
-		runID, EventStepClaimed, runID, workflow.TypeVote,
-		store.StepSkipped, store.StepSuperseded,
-	).Scan(&floor)
-	if err != nil {
-		return 0, fmt.Errorf("computing the floor for %s: %w",
-			model.FormatRunID(runID), err)
-	}
-	return floor, nil
+func RunFloorTx(tx store.LegacyTx, runID int) (float64, error) {
+	// A hand-edited event row whose data is not valid JSON degrades to the
+	// step's declared cost rather than taking the budget check down, and a
+	// pre-DKT-867 claim event carries no `expected_cost` key, so its floor is
+	// byte-for-byte what it was.
+	return store.TxOn(tx).RunCostFloorTx(runID, EventStepClaimed, workflow.TypeVote)
 }
 
 // reservableCost is the cost a budget check may RESERVE for one step — the
@@ -449,7 +427,7 @@ func parseUsage(raw string) ([]store.UsageRow, error) {
 // back-fills from its dispatch journal, source recorded" describes that
 // harness's practice, not a core surface: no verb at this stage writes any
 // other value.
-func recordUsageTx(tx *sql.Tx, step *store.Step, raw string, nowMS int64) error {
+func recordUsageTx(tx store.LegacyTx, step *store.Step, raw string, nowMS int64) error {
 	rows, err := parseUsage(raw)
 	if err != nil {
 		return err
@@ -475,7 +453,7 @@ func recordUsageTx(tx *sql.Tx, step *store.Step, raw string, nowMS int64) error 
 // number it stores is the same query enforcement runs, so a report and a breach
 // never disagree — but enforcement never READS it, so a poisoned cache changes
 // no decision.
-func cacheRunFloorTx(tx *sql.Tx, runID int) error {
+func cacheRunFloorTx(tx store.LegacyTx, runID int) error {
 	floor, err := RunFloorTx(tx, runID)
 	if err != nil {
 		return err
@@ -617,7 +595,7 @@ func UsageBudgetBreachReason(spend, cap float64, unit, instance string) string {
 // carries a `--cost-multiplier` (DKT-867). It is a parameter rather than
 // re-derived from the step because the step row cannot know which variant the
 // dispatcher resolved.
-func enforceBudgetTx(tx *sql.Tx, sched *Scheduler, step *store.Step, cost float64, nowMS int64) error {
+func enforceBudgetTx(tx store.LegacyTx, sched *Scheduler, step *store.Step, cost float64, nowMS int64) error {
 	if sched.budgetAdmits(step, cost) {
 		return nil
 	}

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -27,13 +26,9 @@ import (
 // The two halves are both necessary. A `gate-started` with no result is the
 // crash window. A result with no start cannot happen — the event commits first,
 // which is the entire reason the saga orders them that way.
-func gateWasStartedButNotRecorded(conn *sql.DB, step *store.Step, gate string) (bool, error) {
-	var started bool
-	err := conn.QueryRow(
-		`SELECT EXISTS(
-		   SELECT 1 FROM events
-		    WHERE run_id = ? AND step_id = ? AND kind = ? AND data LIKE ?)`,
-		step.RunID, step.ID, EventGateStarted, "%"+gate+"%").Scan(&started)
+func gateWasStartedButNotRecorded(conn store.LegacyDB, step *store.Step, gate string) (bool, error) {
+	st := store.StoreOn(conn)
+	started, err := st.StepEventDataContains(step.RunID, step.ID, EventGateStarted, gate)
 	if err != nil {
 		return false, fmt.Errorf("probing for an interrupted gate: %w", err)
 	}
@@ -41,7 +36,7 @@ func gateWasStartedButNotRecorded(conn *sql.DB, step *store.Step, gate string) (
 		return false, nil
 	}
 
-	recorded, err := store.StoreOn(conn).HasGateResult(step.ID, gate)
+	recorded, err := st.HasGateResult(step.ID, gate)
 	if err != nil {
 		return false, err
 	}
@@ -55,7 +50,7 @@ func gateWasStartedButNotRecorded(conn *sql.DB, step *store.Step, gate string) (
 // what the operator declares about this command NOW, and a revocation between
 // the crash and the resume must take effect.
 func (e *Engine) resolveInterruptedGate(
-	conn *sql.DB, step *store.Step, gate workflow.Gate, stage string, nowMS int64,
+	conn store.LegacyDB, step *store.Step, gate workflow.Gate, stage string, nowMS int64,
 ) error {
 	entry, reason, err := e.reRunnableEntryFor(gate, step)
 	if err != nil {
@@ -195,7 +190,7 @@ func execRunnerBehind(g GateRunner) *ExecRunner {
 // trail carries why: an operator opening the step sees the interrupted gate and
 // the reason, rather than a `waiting-human` with no explanation.
 func (e *Engine) parkInterruptedGate(
-	conn *sql.DB, step *store.Step, gate workflow.Gate, reason string, nowMS int64,
+	conn store.LegacyDB, step *store.Step, gate workflow.Gate, reason string, nowMS int64,
 ) error {
 	tx, err := conn.Begin()
 	if err != nil {

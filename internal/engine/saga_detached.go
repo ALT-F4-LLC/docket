@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -72,7 +71,7 @@ func sagaHeldElsewhere(stepID int) bool {
 // RunDetachedSaga is the detached child's whole work: hold the step's saga
 // lock, resume the saga, then drive the run's engine-side lifecycles. A child
 // finding the lock held exits without running.
-func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (DetachedSagaRun, error) {
+func (e *Engine) RunDetachedSaga(conn store.LegacyDB, stepID int, nowMS int64) (DetachedSagaRun, error) {
 	run := DetachedSagaRun{Step: model.FormatStepID(stepID)}
 
 	lockPath := detachedSagaLockPath(stepID)
@@ -108,7 +107,7 @@ func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (Detache
 // hasCompletionGates reports whether the recorded step declares a gate that
 // runs inside the saga. A step whose spec cannot be resolved reports false, so
 // it runs inline.
-func (e *Engine) hasCompletionGates(conn *sql.DB, stepID int) bool {
+func (e *Engine) hasCompletionGates(conn store.LegacyDB, stepID int) bool {
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return false
@@ -138,32 +137,15 @@ const strandedSagaGraceMS = 30_000
 // detaches behaves exactly as before. Held and action sagas have their own
 // resume paths and are left alone. Each step is resumed under its saga lock,
 // so a live child and the sweep never both run a gate.
-func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error {
+func (e *Engine) ResumeStrandedSagas(conn store.LegacyDB, runID int, nowMS int64) error {
 	if LaunchDetachedSaga == nil {
 		return nil
 	}
-	rows, err := conn.Query(
-		`SELECT id FROM steps
-		  WHERE run_id = ? AND saga_stage IS NOT NULL AND saga_stage NOT IN ('', ?)
-		    AND kind != ? AND updated_at_ms < ?`,
-		runID, store.SagaHeld, workflow.ClassAction, nowMS-strandedSagaGraceMS)
+	ids, err := store.StoreOn(conn).StrandedSagaStepIDs(
+		runID, workflow.ClassAction, nowMS-strandedSagaGraceMS)
 	if err != nil {
-		return fmt.Errorf("listing stranded sagas: %w", err)
+		return err
 	}
-	var ids []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return fmt.Errorf("listing stranded sagas: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("listing stranded sagas: %w", err)
-	}
-	rows.Close()
 
 	var failed []error
 	for _, id := range ids {
