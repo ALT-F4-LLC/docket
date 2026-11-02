@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -82,7 +81,7 @@ type PruneResult struct {
 // the set refused and the set deleted are computed over one snapshot. A run that
 // reaches `done` between a check and a delete does not widen what was deleted:
 // it prunes on the next call, having been a live run for the whole of this one.
-func PruneEvents(conn *sql.DB, q PruneQuery) (*PruneResult, error) {
+func PruneEvents(conn store.LegacyDB, q PruneQuery) (*PruneResult, error) {
 	if err := validatePruneTarget(q); err != nil {
 		return nil, err
 	}

@@ -1,12 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The event seam. Every transition writes an event, in the
@@ -476,7 +476,7 @@ var eventKinds = map[string]bool{
 // cursor sound: with a plain rowid, deleting the newest event would let the
 // next insert reuse its number and a consumer holding that cursor would skip
 // the replacement. Monotonic-in-practice is not the same property as monotonic.
-func recordEvent(tx *sql.Tx, e eventRecord) error {
+func recordEvent(tx store.LegacyTx, e eventRecord) error {
 	// The closed set, enforced. A kind outside it is a programming
 	// error — a literal that got past the constants — and refusing it here is
 	// what keeps the attribution check from being vacuous. It fails the
@@ -498,26 +498,24 @@ func recordEvent(tx *sql.Tx, e eventRecord) error {
 	// resolves against the uncommitted row. A lookup through the pool would
 	// both miss that row and deadlock: internal/db caps the pool at one
 	// connection.
-	var stepID any
+	//
+	// `steps` is UNIQUE(run_id, issue_id, instance), not unique on
+	// (run_id, instance): two issues in one run running the same workflow both
+	// have an `implement@0`, so the lookup narrows by issue when the caller
+	// knows it.
+	st := store.TxOn(tx)
+	var stepID int
 	if e.Instance != "" && e.RunID != 0 {
-		var id int
-		err := tx.QueryRow(
-			`SELECT id FROM steps WHERE run_id = ? AND instance = ?`+
-				stepIssueClause(e.IssueID),
-			stepQueryArgs(e)...,
-		).Scan(&id)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			// A step-shaped event whose instance has no row: the identity is
-			// still recorded in `data` below, so the event is not lost. This is
-			// reachable for an instance named in a routing that never
-			// materialized, and dropping the event would be worse than
-			// recording it without the foreign key.
-		case err != nil:
-			return fmt.Errorf("resolving step %s for a %s event: %w", e.Instance, e.Kind, err)
-		default:
-			stepID = id
+		// A step-shaped event whose instance has no row leaves stepID zero: the
+		// identity is still recorded in `data` below, so the event is not lost.
+		// This is reachable for an instance named in a routing that never
+		// materialized, and dropping the event would be worse than recording it
+		// without the foreign key.
+		id, _, err := st.StepIDByInstanceTx(e.RunID, e.IssueID, e.Instance)
+		if err != nil {
+			return fmt.Errorf("a %s event: %w", e.Kind, err)
 		}
+		stepID = id
 	}
 
 	data, err := eventData(e)
@@ -525,20 +523,14 @@ func recordEvent(tx *sql.Tx, e eventRecord) error {
 		return err
 	}
 
-	atMS, err := monotonicAtMS(tx, e.atMS())
+	atMS, err := monotonicAtMS(st, e.atMS())
 	if err != nil {
 		return fmt.Errorf("stamping a %s event: %w", e.Kind, err)
 	}
 
-	_, err = tx.Exec(
-		`INSERT INTO events (at_ms, kind, run_id, step_id, issue_id, data)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		atMS, e.Kind, nullableID(e.RunID), stepID, nullableID(e.IssueID), data,
-	)
-	if err != nil {
-		return fmt.Errorf("recording a %s event: %w", e.Kind, err)
-	}
-	return nil
+	return st.InsertEventTx(store.NewEvent{
+		AtMS: atMS, Kind: e.Kind, RunID: e.RunID, StepID: stepID, IssueID: e.IssueID, Data: data,
+	})
 }
 
 // monotonicAtMS clamps an event's timestamp so `at_ms` never decreases as `seq`
@@ -568,18 +560,13 @@ func recordEvent(tx *sql.Tx, e eventRecord) error {
 // smaller lie than the inversion it replaces: it says "at or after the event
 // before it", which is true of every event, where the raw value said the event
 // happened before something that preceded it, which is true of none.
-func monotonicAtMS(tx *sql.Tx, atMS int64) (int64, error) {
-	var last sql.NullInt64
-	err := tx.QueryRow(
-		`SELECT at_ms FROM events ORDER BY seq DESC LIMIT 1`).Scan(&last)
-	if errors.Is(err, sql.ErrNoRows) {
-		return atMS, nil
-	}
+func monotonicAtMS(tx store.ReadTx, atMS int64) (int64, error) {
+	last, found, err := tx.LastEventAtMSTx()
 	if err != nil {
-		return 0, fmt.Errorf("reading the last event's timestamp: %w", err)
+		return 0, err
 	}
-	if last.Valid && last.Int64 > atMS {
-		return last.Int64, nil
+	if found && last > atMS {
+		return last, nil
 	}
 	return atMS, nil
 }
@@ -645,35 +632,6 @@ func eventData(e eventRecord) (string, error) {
 		return "", fmt.Errorf("recording the data for a %s event: %w", e.Kind, err)
 	}
 	return string(out), nil
-}
-
-// stepIssueClause narrows the instance lookup by issue when the caller knows
-// it. `steps` is UNIQUE(run_id, issue_id, instance) — NOT unique on
-// (run_id, instance) — so two issues in one run running the same workflow both
-// have an `implement@0`, and a lookup without the issue would resolve to
-// whichever came first.
-func stepIssueClause(issueID int) string {
-	if issueID == 0 {
-		return ``
-	}
-	return ` AND issue_id = ?`
-}
-
-func stepQueryArgs(e eventRecord) []any {
-	args := []any{e.RunID, e.Instance}
-	if e.IssueID != 0 {
-		args = append(args, e.IssueID)
-	}
-	return args
-}
-
-// nullableID maps a zero id to NULL, so an event with no run or no issue stores
-// NULL rather than a 0 that references nothing.
-func nullableID(id int) any {
-	if id == 0 {
-		return nil
-	}
-	return id
 }
 
 // eventRecord is one event's fields. It is a struct rather than a parameter
@@ -831,7 +789,7 @@ type TrustGrant struct {
 // reaches the table, refuses a grant whose Actor or Cwd is empty, BEFORE
 // anything is written. Guarding here rather than only at the CLI call site is
 // what makes the property hold for a future non-CLI writer too.
-func RecordTrustEvent(conn *sql.DB, kind string, grant TrustGrant, atMS int64) error {
+func RecordTrustEvent(conn store.LegacyDB, kind string, grant TrustGrant, atMS int64) error {
 	// THE UNATTRIBUTED-GRANT REFUSAL (DKT-595), ahead of the marshal so a
 	// refused event leaves no differently-shaped payload behind — the write
 	// below still emits every key unconditionally or does not happen at all.
@@ -1088,7 +1046,7 @@ type ProjectRegistration struct {
 // CLI's root hook, outside this package, and the alternative — letting the hook
 // write its own INSERT — would put a kind into the events table without passing
 // the closed-set check that makes the set closed.
-func RecordProjectRegisteredEvent(conn *sql.DB, reg ProjectRegistration, atMS int64) error {
+func RecordProjectRegisteredEvent(conn store.LegacyDB, reg ProjectRegistration, atMS int64) error {
 	data, err := json.Marshal(map[string]any{
 		"project_id": reg.ID,
 		"name":       reg.Name,

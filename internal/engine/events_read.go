@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -140,7 +139,7 @@ type EventQuery struct {
 //
 // The ordering is `seq ASC`, ALWAYS. There is no reverse mode: a cursor
 // feed that could run backwards is a cursor feed that skips.
-func ListEvents(conn *sql.DB, q EventQuery) (*EventPage, error) {
+func ListEvents(conn store.LegacyDB, q EventQuery) (*EventPage, error) {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
@@ -501,7 +500,7 @@ func EventKinds() []string {
 //
 // It is here rather than in the report because the attribution is this file's
 // subject, and a rollup computed beside the table cannot disagree with it.
-func ActorCounts(conn *sql.DB, runID int) (map[Actor]int, error) {
+func ActorCounts(conn store.LegacyDB, runID int) (map[Actor]int, error) {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("counting events by kind: %w", err)
@@ -545,7 +544,7 @@ func actorCountsTx(st store.ReadTx, runID int) (map[Actor]int, error) {
 // and a count-ordered list would reshuffle itself as a run progressed. An actor with
 // no events is OMITTED rather than shown as zero: a run with no gates has no
 // gate row, which is the same rule every other section in this document follows.
-func actorReportTx(tx *sql.Tx, runID int) ([]ActorCount, error) {
+func actorReportTx(tx store.LegacyReadTx, runID int) ([]ActorCount, error) {
 	counts, err := actorCountsTx(store.TxOn(tx), runID)
 	if err != nil {
 		return nil, err
@@ -565,7 +564,7 @@ func actorReportTx(tx *sql.Tx, runID int) ([]ActorCount, error) {
 // The refusal matters for a CURSOR feed specifically: `events list --run RUN-99`
 // over a missing run would otherwise return an empty page, and a consumer
 // polling it would wait forever on a run that was never there.
-func ResolveRunFilter(conn *sql.DB, ref string) (int, error) {
+func ResolveRunFilter(conn store.LegacyDB, ref string) (int, error) {
 	if ref == "" {
 		return 0, nil
 	}
@@ -584,7 +583,7 @@ func ResolveRunFilter(conn *sql.DB, ref string) (int, error) {
 // a filter over nothing would answer with a successful empty page. Only the
 // joinable id is accepted, never a `name@k#i` instance label, which collides
 // across issues in one run.
-func ResolveStepFilter(conn *sql.DB, ref string) (int, error) {
+func ResolveStepFilter(conn store.LegacyDB, ref string) (int, error) {
 	if ref == "" {
 		return 0, nil
 	}
@@ -630,7 +629,7 @@ type ActivationHead struct {
 // It reads the row directly rather than through ListEvents: that is a cursor
 // feed whose GONE probe refuses a zero cursor once anything was pruned, and
 // a status read must not fail because old events were retired.
-func LatestActivationHead(conn *sql.DB, runID int) (*ActivationHead, error) {
+func LatestActivationHead(conn store.LegacyDB, runID int) (*ActivationHead, error) {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the activation head: %w", err)
