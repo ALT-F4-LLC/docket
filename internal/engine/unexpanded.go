@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -38,7 +37,7 @@ type UnexpandedIssue struct {
 
 // UnexpandedIssues lists the run's bound issues that hold no step, in issue
 // order. It is a pure read.
-func UnexpandedIssues(conn *sql.DB, runID int) ([]UnexpandedIssue, error) {
+func UnexpandedIssues(conn store.LegacyDB, runID int) ([]UnexpandedIssue, error) {
 	return (&runReads{conn: conn, runID: runID}).unexpandedIssues()
 }
 

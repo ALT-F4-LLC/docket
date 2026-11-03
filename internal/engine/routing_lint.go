@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -91,7 +90,7 @@ type RoutingWarning struct {
 
 // buildRoutingWarningsTx lints the run's bound issues. It reads only the
 // activation snapshots, so it sees the run as the dry run computed it.
-func buildRoutingWarningsTx(tx *sql.Tx, runID, projectID int) ([]RoutingWarning, RoutingLintReport, error) {
+func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingWarning, RoutingLintReport, error) {
 	label, err := store.TxOn(tx).GetConfigTx(projectID, store.KeyRoutingSecurityLabel)
 	if err != nil {
 		return nil, RoutingLintReport{}, err
