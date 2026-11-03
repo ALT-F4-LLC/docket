@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -79,7 +78,7 @@ type IssueDiffRepin struct {
 // git subprocess) and refuses everything it can before the caller opens
 // one. spec is the step's pinned definition, nil for a materialized step.
 func (e *Engine) prepareIssueDiffRepin(
-	conn *sql.DB, step *store.Step, spec *workflow.Step, worktree string,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step, worktree string,
 ) (*IssueDiffRepin, error) {
 	// Only a tree-holding executor step records an issue.diff (as amended by
 	// DKT-75), so only one has a record to re-pin. A
@@ -189,7 +188,7 @@ func (e *Engine) prepareIssueDiffRepin(
 // applyIssueDiffRepin records a prepared re-pin inside the resolution's
 // transaction: the step's worktree, the superseding artifact, and the event.
 func applyIssueDiffRepin(
-	tx *sql.Tx, step *store.Step, repin *IssueDiffRepin, as string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, repin *IssueDiffRepin, as string, nowMS int64,
 ) error {
 	// The named checkout becomes the step's RECORDED worktree, exactly as
 	// `step record --worktree` persists it (stageZero): a rerun-gates resumed
@@ -197,9 +196,7 @@ func applyIssueDiffRepin(
 	// already names it. Persisted even when the diff is unchanged — the
 	// operator has just said where the tree is.
 	if step.WorkRoot != repin.Worktree {
-		if _, err := tx.Exec(
-			`UPDATE steps SET work_root = ? WHERE id = ?`, repin.Worktree, step.ID,
-		); err != nil {
+		if err := store.TxOn(tx).RepinStepWorkRootTx(step.ID, repin.Worktree); err != nil {
 			return fmt.Errorf("recording the re-pinned worktree for %s: %w", step.Instance, err)
 		}
 		step.WorkRoot = repin.Worktree
@@ -262,7 +259,7 @@ func applyIssueDiffRepin(
 // pointer says "this revises that" (DKT-70), and a step revises its own
 // record. Whether the issue's newest diff belongs to this step or to another
 // is the resolver's question, answered by ordinal and id as always.
-func stepLatestIssueDiff(conn *sql.DB, stepID int) (*store.Artifact, error) {
+func stepLatestIssueDiff(conn store.LegacyDB, stepID int) (*store.Artifact, error) {
 	artifacts, err := store.StoreOn(conn).ListStepArtifacts(stepID)
 	if err != nil {
 		return nil, err

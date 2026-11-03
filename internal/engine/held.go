@@ -1,9 +1,7 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -59,7 +57,7 @@ func (t holdTally) configured() bool {
 }
 
 // loadHoldTally resolves the configuration for a run's project.
-func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
+func loadHoldTally(conn store.LegacyDB, runID int) (holdTally, error) {
 	st := store.StoreOn(conn)
 	projectID, err := st.RunProjectID(runID)
 	if err != nil {
@@ -87,7 +85,7 @@ func loadHoldTally(conn *sql.DB, runID int) (holdTally, error) {
 // scheduler's snapshot, where a pool read would deadlock against the single
 // connection the snapshot holds. The project id is already loaded by the
 // caller that has the run.
-func loadHoldTallyTx(tx *sql.Tx, projectID int) (holdTally, error) {
+func loadHoldTallyTx(tx store.LegacyTx, projectID int) (holdTally, error) {
 	stx := store.TxOn(tx)
 	rule, err := stx.GetConfigTx(projectID, store.KeyVoteHoldRule)
 	if err != nil {
@@ -196,7 +194,7 @@ func heldClusterInstance(step *store.Step, element int) string {
 // `tally` is the instance's configured decider (see holdTally). Its zero value
 // mints `human` steps, which is the default and the whole of the prior
 // behavior.
-func enterHeld(tx *sql.Tx, step *store.Step, held []int, tally holdTally, nowMS int64) error {
+func enterHeld(tx store.LegacyTx, step *store.Step, held []int, tally holdTally, nowMS int64) error {
 	for _, element := range held {
 		if err := materializeHeldCluster(tx, step, element, tally, nowMS); err != nil {
 			return err
@@ -228,7 +226,7 @@ func enterHeld(tx *sql.Tx, step *store.Step, held []int, tally holdTally, nowMS 
 
 // materializeHeldCluster creates the gate step for one held cluster.
 func materializeHeldCluster(
-	tx *sql.Tx, step *store.Step, element int, tally holdTally, nowMS int64,
+	tx store.LegacyTx, step *store.Step, element int, tally holdTally, nowMS int64,
 ) error {
 	instance := heldClusterInstance(step, element)
 
@@ -305,7 +303,7 @@ func jsonInts(values []int) string {
 // instance that names no cluster, or a payload this build cannot read. A
 // held step must keep rendering in every one of those cases: the packet is
 // how the question reaches its decider at all.
-func heldClusterInput(tx *sql.Tx, sched *Scheduler, step *store.Step) (*ContextInput, error) {
+func heldClusterInput(tx store.LegacyTx, sched *Scheduler, step *store.Step) (*ContextInput, error) {
 	link, err := heldClusterLink(tx, sched, step)
 	if err != nil || link == nil {
 		return nil, err
@@ -365,7 +363,7 @@ type HeldClusterLink struct {
 // its decider at all, and a status verb must not fail because a hold's
 // provenance is unreadable.
 func heldClusterLink(
-	tx *sql.Tx, sched *Scheduler, step *store.Step,
+	tx store.LegacyTx, sched *Scheduler, step *store.Step,
 ) (*HeldClusterLink, error) {
 	if !step.Materialized {
 		return nil, nil
@@ -436,12 +434,8 @@ func heldClusterLink(
 }
 
 // heldStepExists reports whether the materialized step is already there.
-func heldStepExists(tx *sql.Tx, step *store.Step, instance string) (bool, error) {
-	var exists bool
-	err := tx.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM steps
-		                WHERE run_id = ? AND issue_id = ? AND instance = ?)`,
-		step.RunID, step.IssueID, instance).Scan(&exists)
+func heldStepExists(tx store.LegacyReadTx, step *store.Step, instance string) (bool, error) {
+	_, exists, err := store.TxOn(tx).StepIDByInstanceTx(step.RunID, step.IssueID, instance)
 	if err != nil {
 		return false, fmt.Errorf("probing for %s: %w", instance, err)
 	}
@@ -471,7 +465,7 @@ func heldStepExists(tx *sql.Tx, step *store.Step, instance string) (bool, error)
 // its own status, routing, and note, and resolveHeldPayload marks only the
 // approved clusters — so what routes is one decision while the record stays
 // per-cluster.
-func heldDecision(conn *sql.DB, step *store.Step) (resolved, approved bool, err error) {
+func heldDecision(conn store.LegacyDB, step *store.Step) (resolved, approved bool, err error) {
 	rows, err := heldClusterRows(conn, step)
 	if err != nil {
 		return false, false, err
@@ -481,10 +475,10 @@ func heldDecision(conn *sql.DB, step *store.Step) (resolved, approved bool, err 
 	allApproved := true
 	for _, r := range rows {
 		found = true
-		if !store.StepTerminal(r.status) {
+		if !store.StepTerminal(r.Status) {
 			return false, false, nil
 		}
-		if r.status != store.StepDone || !routingIs(r.routing.String, RoutingPass) {
+		if r.Status != store.StepDone || !routingIs(r.Routing, RoutingPass) {
 			allApproved = false
 		}
 	}
@@ -497,48 +491,19 @@ func heldDecision(conn *sql.DB, step *store.Step) (resolved, approved bool, err 
 	return true, allApproved, nil
 }
 
-// heldClusterRow is one row of a materialized hold's own steps — the whole-hold
-// row (the hold's identity) and every per-cluster row (its plural sibling), as
-// read by heldClusterRows.
-type heldClusterRow struct {
-	instance string
-	status   string
-	routing  sql.NullString
-}
-
 // heldClusterRows reads every materialized step of one hold — the whole-hold
-// instance and its `#<element>` siblings — for heldDecision and
-// parkedByRejectedHold, which ask two DIFFERENT questions of the same rows
-// (heldDecision reduces "resolved, and unanimously approved?"; parkedByRejectedHold
-// asks "is a REJECTION what parked this, specifically?") and so keep their own
-// scan loops; only the query and the row shape are shared here.
-func heldClusterRows(conn *sql.DB, step *store.Step) ([]heldClusterRow, error) {
-	prefix := heldStepInstance(step)
-	rows, err := conn.Query(
-		`SELECT instance, status, routing FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND (instance = ? OR instance LIKE ?)
-		  ORDER BY instance`,
-		step.RunID, step.IssueID, prefix, prefix+"#%")
+// instance (the hold's identity) and its `#<element>` siblings — for
+// heldDecision and parkedByRejectedHold, which ask two DIFFERENT questions of
+// the same rows (heldDecision reduces "resolved, and unanimously approved?";
+// parkedByRejectedHold asks "is a REJECTION what parked this, specifically?")
+// and so keep their own loops; only the read is shared here.
+func heldClusterRows(conn store.LegacyDB, step *store.Step) ([]store.InstanceStatusRouting, error) {
+	rows, err := store.StoreOn(conn).HoldInstances(step.RunID, step.IssueID, heldStepInstance(step))
 	if err != nil {
 		return nil, fmt.Errorf("reading the held decision for %s: %w",
 			step.Instance, err)
 	}
-	defer rows.Close()
-
-	var out []heldClusterRow
-	for rows.Next() {
-		var r heldClusterRow
-		if err := rows.Scan(&r.instance, &r.status, &r.routing); err != nil {
-			return nil, fmt.Errorf("reading a held decision for %s: %w",
-				step.Instance, err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading the held decision for %s: %w",
-			step.Instance, err)
-	}
-	return out, nil
+	return rows, nil
 }
 
 // heldClusterElements reports the payload indices whose cluster steps were
@@ -547,35 +512,23 @@ func heldClusterRows(conn *sql.DB, step *store.Step) ([]heldClusterRow, error) {
 // Only approved clusters are marked `operator_resolved` — that is what makes
 // the record per-cluster rather than a blanket stamp over everything that was
 // ever held.
-func heldClusterElements(tx *sql.Tx, step *store.Step) (map[int]bool, error) {
+func heldClusterElements(tx store.LegacyReadTx, step *store.Step) (map[int]bool, error) {
 	prefix := heldStepInstance(step)
 
-	rows, err := tx.Query(
-		`SELECT instance, status, routing FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND instance LIKE ?`,
-		step.RunID, step.IssueID, prefix+"#%")
+	rows, err := store.TxOn(tx).HoldClusterInstancesTx(step.RunID, step.IssueID, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("reading held clusters for %s: %w", step.Instance, err)
 	}
-	defer rows.Close()
 
 	approved := make(map[int]bool)
-	for rows.Next() {
-		var (
-			instance string
-			status   string
-			routing  sql.NullString
-		)
-		if err := rows.Scan(&instance, &status, &routing); err != nil {
-			return nil, fmt.Errorf("reading a held cluster for %s: %w", step.Instance, err)
-		}
-		element, ok := heldClusterElementOf(instance, prefix)
+	for _, r := range rows {
+		element, ok := heldClusterElementOf(r.Instance, prefix)
 		if !ok {
 			continue
 		}
-		approved[element] = status == store.StepDone && routingIs(routing.String, RoutingPass)
+		approved[element] = r.Status == store.StepDone && routingIs(r.Routing, RoutingPass)
 	}
-	return approved, rows.Err()
+	return approved, nil
 }
 
 // heldClusterElementOf recovers the element index from a per-cluster instance.
@@ -611,7 +564,7 @@ func heldClusterElementOf(instance, prefix string) (int, bool) {
 // Anything less would refuse `retry` on ordinary parks, which would be a
 // worse bug than the one being fixed: it would remove the least destructive
 // resolution from the cases where it genuinely works.
-func parkedByRejectedHold(conn *sql.DB, step *store.Step) (rejected bool, heldInstance string, err error) {
+func parkedByRejectedHold(conn store.LegacyDB, step *store.Step) (rejected bool, heldInstance string, err error) {
 	if step.Status != store.StepWaitingHuman {
 		return false, "", nil
 	}
@@ -629,13 +582,13 @@ func parkedByRejectedHold(conn *sql.DB, step *store.Step) (rejected bool, heldIn
 	}
 
 	for _, r := range rows {
-		if !store.StepTerminal(r.status) {
+		if !store.StepTerminal(r.Status) {
 			// The question is still open — the operator can still answer it,
 			// and `approve` is the verb that does.
 			continue
 		}
-		if r.status != store.StepDone || !routingIs(r.routing.String, RoutingPass) {
-			return true, r.instance, nil
+		if r.Status != store.StepDone || !routingIs(r.Routing, RoutingPass) {
+			return true, r.Instance, nil
 		}
 	}
 
@@ -693,36 +646,23 @@ func (r heldResolution) applies(i int) bool {
 // the aggregated field itself with the computed value it replaced in
 // `operator_set_from` — so a boolean is never the whole message.
 func resolveHeldPayload(
-	tx *sql.Tx, routingStep *store.Step, res heldResolution, nowMS int64,
+	tx store.LegacyTx, routingStep *store.Step, res heldResolution, nowMS int64,
 ) error {
-	var (
-		priorID int
-		kind    string
-		payload sql.NullString
-	)
 	// The engine records its own artifacts beside the declared emit
 	// (engineOwnedArtifactKinds: a gap, an issue comment, a recorded head), and
 	// an executor can add them; none is the held payload, and the newest of
 	// them is not the artifact to resolve.
-	args := []any{routingStep.ID}
-	for _, owned := range engineOwnedArtifactKinds {
-		args = append(args, owned)
+	prior, found, err := store.TxOn(tx).NewestStepArtifactExceptKindsTx(routingStep.ID, engineOwnedArtifactKinds)
+	if err != nil {
+		return fmt.Errorf("reading the held payload for %s: %w", routingStep.Instance, err)
 	}
-	err := tx.QueryRow(
-		`SELECT id, kind, payload FROM artifacts
-		  WHERE step_id = ? AND kind NOT IN (`+placeholders(len(engineOwnedArtifactKinds))+`)
-		  ORDER BY id DESC LIMIT 1`, args...,
-	).Scan(&priorID, &kind, &payload)
-	if errors.Is(err, sql.ErrNoRows) {
+	if !found {
 		// Nothing to resolve. The routing step will route over whatever it has,
 		// which is the honest outcome rather than a fabricated artifact.
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("reading the held payload for %s: %w", routingStep.Instance, err)
-	}
 
-	elements, err := parsePayload([]byte(payload.String))
+	elements, err := parsePayload([]byte(prior.Payload))
 	if err != nil {
 		return err
 	}
@@ -815,11 +755,11 @@ func resolveHeldPayload(
 		body += fmt.Sprintf(", %d operator-resolved", operatorResolved)
 	}
 	_, err = store.TxOn(tx).InsertArtifactTx(store.Artifact{
-		RunID: routingStep.RunID, StepID: routingStep.ID, Kind: kind,
+		RunID: routingStep.RunID, StepID: routingStep.ID, Kind: prior.Kind,
 		Body:       body,
 		Payload:    string(encoded),
 		SHA256:     artifactSHA256([]byte(body), encoded),
-		Supersedes: &priorID,
+		Supersedes: &prior.ID,
 	}, nowMS)
 	return err
 }
@@ -897,25 +837,22 @@ func thresholdMirrorFields(threshold map[string]string, field string) []string {
 }
 
 // routingStepOf returns the step a materialized `<step>-held@k` belongs to.
-func routingStepOf(conn *sql.DB, held *store.Step) (*store.Step, error) {
+func routingStepOf(conn store.LegacyDB, held *store.Step) (*store.Step, error) {
 	name, ok := workflow.RoutingStepNameOf(held.StepName)
 	if !ok {
 		return nil, validationErr("step %s is not a materialized held step", held.Instance)
 	}
-	var id int
-	err := conn.QueryRow(
-		`SELECT id FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND step_name = ? AND ordinal = ?`,
-		held.RunID, held.IssueID, name, held.Ordinal).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
+	st := store.StoreOn(conn)
+	id, found, err := st.StepIDAtOrdinal(held.RunID, held.IssueID, name, held.Ordinal)
+	if err != nil {
+		return nil, fmt.Errorf("reading the routing step for %s: %w", held.Instance, err)
+	}
+	if !found {
 		return nil, notFoundErr(store.ErrStepNotFound,
 			"step %s has no routing step %s@%d to resolve",
 			held.Instance, name, held.Ordinal)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("reading the routing step for %s: %w", held.Instance, err)
-	}
-	return store.StoreOn(conn).GetStep(id)
+	return st.GetStep(id)
 }
 
 // decideMaterializedStep is M-c's branch, and the only place `approve`/`reject`
@@ -925,7 +862,7 @@ func routingStepOf(conn *sql.DB, held *store.Step) (*store.Step, error) {
 // operator who never claimed it. Both require the run's conductor
 // capability, checked by DecideStepWith before this is reached (DKT-2465).
 func (e *Engine) decideMaterializedStep(
-	conn *sql.DB, held *store.Step, opts DecideOptions,
+	conn store.LegacyDB, held *store.Step, opts DecideOptions,
 ) error {
 	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
 	routingStep, err := routingStepOf(conn, held)
@@ -1056,7 +993,7 @@ func (e *Engine) decideMaterializedStep(
 // the AUTHOR'S: docket learns which values exist from the schema the run
 // pinned and holds no opinion about what any of them means.
 func heldValueField(
-	conn *sql.DB, routingStep *store.Step, value string,
+	conn store.LegacyDB, routingStep *store.Step, value string,
 ) (string, []string, error) {
 	defs, err := StepDefinitions(conn, routingStep.RunID)
 	if err != nil {
@@ -1192,7 +1129,7 @@ func materializedSpec(
 // routing step still gated, no downstream step ready, and warns about
 // nothing — the advisory fires when packets actually become consumable.
 func (e *Engine) HeldResolutionStaleTargets(
-	conn *sql.DB, heldStepID int, nowMS int64,
+	conn store.LegacyDB, heldStepID int, nowMS int64,
 ) []StaleTarget {
 	if e == nil || e.HeadFn == nil || e.IsAncestorFn == nil {
 		return nil
@@ -1222,7 +1159,7 @@ func (e *Engine) HeldResolutionStaleTargets(
 // answering with sched.Ready keeps this advisory's "which rows" aligned with
 // the offer verbs' rather than a second definition that could drift.
 func readyStaleTargetCandidates(
-	conn *sql.DB, runID int, defs map[int]*workflow.Definition, nowMS int64,
+	conn store.LegacyDB, runID int, defs map[int]*workflow.Definition, nowMS int64,
 ) ([]targetCandidate, error) {
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {

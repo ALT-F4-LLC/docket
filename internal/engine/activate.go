@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -358,7 +357,7 @@ type BlockingIssue struct {
 // path that does not exist aborts everything, leaving no run rows, no steps,
 // and no pins. Pinning is never partial, because a partially-pinned run is a
 // run that cannot reproduce itself and cannot say so.
-func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, error) {
+func Activate(conn store.LegacyDB, runID int, opts ActivateOptions) (*ActivateResult, error) {
 	// AUTO-REGISTRATION'S SCAN. It reads and hashes files, so it happens
 	// out here, before the transaction opens: holding a write lock across
 	// arbitrary filesystem latency buys nothing, and a malformed file is a
@@ -544,7 +543,7 @@ func Activate(conn *sql.DB, runID int, opts ActivateOptions) (*ActivateResult, e
 // activateTx is the transaction body. It is separate so every stage shares one
 // `tx` and an error at any stage rolls back all seven.
 func activateTx(
-	tx *sql.Tx,
+	tx store.LegacyTx,
 	runID int,
 	definitions []*boundDefinition,
 	filePins []store.Pin,
@@ -887,9 +886,8 @@ func activateTx(
 			gateDefs[i] = bound.definition
 		}
 	}
-	var projectIdentity string
-	if err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`,
-		store.DefaultProjectIDOr(run.ProjectID)).Scan(&projectIdentity); err != nil {
+	projectIdentity, err := st.ProjectIdentityTx(run.ProjectID)
+	if err != nil {
 		return nil, fmt.Errorf("reading the identity of run %s's project: %w", run.Ref(), err)
 	}
 	filePins = append(filePins,
@@ -994,11 +992,9 @@ func activateTx(
 	// re-activation it is every step a PRIOR activation already created —
 	// either way, ExpectedCostTotal minus this baseline is exactly what THIS
 	// activation added (DKT-517).
-	var baselineCost float64
-	if err := tx.QueryRow(
-		`SELECT COALESCE(SUM(expected_cost), 0) FROM steps WHERE run_id = ?`,
-		runID).Scan(&baselineCost); err != nil {
-		return nil, fmt.Errorf("summing baseline expected cost: %w", err)
+	baselineCost, err := st.RunExpectedCostTx(runID)
+	if err != nil {
+		return nil, err
 	}
 
 	// ---- Stages 4-6, per issue. --------------------------------------------
@@ -1133,10 +1129,9 @@ func activateTx(
 	// The run-wide expected-cost sum, read after expansion and inside the
 	// transaction, so a dry run's projection includes the steps it just
 	// provisionally created. See ExpectedCostTotal's own doc for why.
-	if err := tx.QueryRow(
-		`SELECT COALESCE(SUM(expected_cost), 0) FROM steps WHERE run_id = ?`,
-		runID).Scan(&result.ExpectedCostTotal); err != nil {
-		return nil, fmt.Errorf("summing expected cost: %w", err)
+	result.ExpectedCostTotal, err = st.RunExpectedCostTx(runID)
+	if err != nil {
+		return nil, err
 	}
 	result.ExpectedCostAdded = result.ExpectedCostTotal - baselineCost
 
@@ -1197,7 +1192,7 @@ type boundDefinition struct {
 // The parsed JSON is the PINNED INTERPRETATION: re-parsing the TOML
 // here would mean a parser change silently re-interpreting a definition a run
 // already pinned, which is the thing version pinning exists to prevent.
-func loadDefinitions(conn *sql.DB, projectID int) ([]*boundDefinition, error) {
+func loadDefinitions(conn store.LegacyDB, projectID int) ([]*boundDefinition, error) {
 	workflows, _, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{ProjectID: projectID})
 	if err != nil {
 		return nil, fmt.Errorf("reading registered workflows: %w", err)
@@ -1232,35 +1227,14 @@ func loadDefinitions(conn *sql.DB, projectID int) ([]*boundDefinition, error) {
 // reason it exists: internal/db caps the pool at one connection, so a pool read
 // from inside a transaction deadlocks rather than merely missing the uncommitted
 // rows.
-func loadDefinitionsTx(tx *sql.Tx, projectID int) ([]*boundDefinition, error) {
-	rows, err := tx.Query(
-		`SELECT id, name, version, description, source_path, source_sha256,
-		        body, parsed, created_at_ms, row_version, deprecated_at_ms
-		   FROM workflows WHERE project_id = ? ORDER BY name ASC, version DESC`,
-		store.DefaultProjectIDOr(projectID))
+func loadDefinitionsTx(tx store.LegacyReadTx, projectID int) ([]*boundDefinition, error) {
+	workflows, err := store.TxOn(tx).ProjectWorkflowsTx(projectID)
 	if err != nil {
 		return nil, fmt.Errorf("reading registered workflows: %w", err)
 	}
-	defer rows.Close()
 
-	var out []*boundDefinition
-	for rows.Next() {
-		var (
-			wf                      model.Workflow
-			description, sourcePath sql.NullString
-			deprecatedAt            sql.NullInt64
-		)
-		if err := rows.Scan(
-			&wf.ID, &wf.Name, &wf.Version, &description, &sourcePath,
-			&wf.SourceSHA256, &wf.Body, &wf.Parsed, &wf.CreatedAtMS, &wf.RowVersion,
-			&deprecatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("reading a registered workflow: %w", err)
-		}
-		wf.Description = description.String
-		wf.SourcePath = sourcePath.String
-		wf.DeprecatedAtMS = deprecatedAt.Int64
-
+	out := make([]*boundDefinition, 0, len(workflows))
+	for _, wf := range workflows {
 		// The PARSED form, restored — never a re-parse of `body`. The parsed
 		// JSON is the PINNED INTERPRETATION: re-parsing here would mean a
 		// parser change silently re-interpreting a definition a run already
@@ -1269,11 +1243,7 @@ func loadDefinitionsTx(tx *sql.Tx, projectID int) ([]*boundDefinition, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading stored definition %s: %w", wf.Ref(), err)
 		}
-		stored := wf
-		out = append(out, &boundDefinition{workflow: &stored, definition: def})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading registered workflows: %w", err)
+		out = append(out, &boundDefinition{workflow: wf, definition: def})
 	}
 
 	// The SAME stable candidate order loadDefinitions produces, so an
@@ -1486,7 +1456,7 @@ func orphanHint(definitions []*boundDefinition, origins *WorkflowOriginIndex) st
 // repo that names its classes differently. `holds_tree` is the declaration the
 // instance already makes for exactly this question.
 func lintUnscopedHolders(
-	tx *sql.Tx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
+	tx store.LegacyTx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 ) ([]ScopeWarning, error) {
 	var out []ScopeWarning
 	for _, ri := range runIssues {
@@ -1540,7 +1510,7 @@ func lintUnscopedHolders(
 // against, and guessing from the process cwd would make the answer depend on
 // where the operator happened to stand.
 func lintUnresolvableScopes(
-	tx *sql.Tx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
+	tx store.LegacyTx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 	execRoot string,
 ) ([]ScopeWarning, error) {
 	if execRoot == "" {
@@ -1598,7 +1568,7 @@ func lintUnresolvableScopes(
 // because there is no test for the scope to have omitted. A run with no
 // recorded exec root is skipped for lintUnresolvableScopes' reason.
 func lintOmittedSiblingTests(
-	tx *sql.Tx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
+	tx store.LegacyTx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 	execRoot string,
 ) ([]ScopeWarning, error) {
 	if execRoot == "" {
@@ -1726,7 +1696,7 @@ func globSegmentsMatch(glob, segs []string) bool {
 // non-retired set binding itself evaluated — so the lint can never name a
 // workflow the issue could not have bound even with the labels fixed.
 func lintDomainScopeMismatch(
-	tx *sql.Tx, runIssues []*store.RunIssue, issues map[int]*model.Issue,
+	tx store.LegacyTx, runIssues []*store.RunIssue, issues map[int]*model.Issue,
 	bindings map[int]*boundDefinition, definitions []*boundDefinition,
 ) ([]BindingWarning, error) {
 	candidates := bindableDefinitions(definitions)
@@ -1865,7 +1835,7 @@ func treeHolder(def *workflow.Definition) *workflow.Step {
 // It returns the DAG itself rather than the topological levels: the levels
 // prove acyclicity and nothing more, while stage 6 needs each issue's OWN
 // predecessor edges (DKT-1180 — see expandableIssues).
-func lintWorkDAG(tx *sql.Tx, issues map[int]*model.Issue) (*planner.DAG, error) {
+func lintWorkDAG(tx store.LegacyTx, issues map[int]*model.Issue) (*planner.DAG, error) {
 	list := make([]*model.Issue, 0, len(issues))
 	for _, issue := range issues {
 		list = append(list, issue)
@@ -1994,7 +1964,7 @@ type issueSnapshotFields struct {
 	Size string `json:"size,omitempty"`
 }
 
-func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (string, error) {
+func issueSnapshot(tx store.LegacyTx, issue *model.Issue, linked map[string][]int) (string, error) {
 	st := store.TxOn(tx)
 	scopeJSON, err := st.IssueScopeGlobsTx(issue.ID)
 	if err != nil {
@@ -2042,7 +2012,7 @@ func issueSnapshot(tx *sql.Tx, issue *model.Issue, linked map[string][]int) (str
 //
 // Extraction is LITERAL: no prose parsing. Nothing is executed here.
 func harvestFences(
-	tx *sql.Tx, runID int, ri *store.RunIssue, def *workflow.Definition,
+	tx store.LegacyTx, runID int, ri *store.RunIssue, def *workflow.Definition,
 ) (int, error) {
 	tags := def.FenceTags()
 	if len(tags) == 0 {
@@ -2071,7 +2041,7 @@ func harvestFences(
 // oversized closure discovered at claim time has already cost a dispatcher a
 // round trip, and one discovered at completion has cost the work.
 func expandIssue(
-	tx *sql.Tx,
+	tx store.LegacyTx,
 	run *model.Run,
 	ri *store.RunIssue,
 	issue *model.Issue,
@@ -2194,7 +2164,7 @@ func (c contextLimits) Warn(size int) bool {
 	return c.warnBytes > 0 && size > c.warnBytes
 }
 
-func contextCaps(conn *sql.DB, projectID int) (contextLimits, error) {
+func contextCaps(conn store.LegacyDB, projectID int) (contextLimits, error) {
 	warn, err := intConfig(conn, projectID, store.KeyContextWarnBytes)
 	if err != nil {
 		return contextLimits{}, err
@@ -2206,7 +2176,7 @@ func contextCaps(conn *sql.DB, projectID int) (contextLimits, error) {
 	return contextLimits{warnBytes: warn, errorBytes: errorBytes}, nil
 }
 
-func intConfig(conn *sql.DB, projectID int, key string) (int, error) {
+func intConfig(conn store.LegacyDB, projectID int, key string) (int, error) {
 	entry, err := store.StoreOn(conn).GetConfig(projectID, key)
 	if err != nil {
 		return 0, fmt.Errorf("reading %s: %w", key, err)
@@ -2273,10 +2243,9 @@ func readFilePins(paths []string, roots []string) ([]store.Pin, error) {
 			}
 			ref = path
 		}
-		out = append(out, store.Pin{
-			Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content),
-			Content: sql.NullString{String: string(content), Valid: true},
-		})
+		pin := store.Pin{Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256(content)}
+		pin.Content.String, pin.Content.Valid = string(content), true
+		out = append(out, pin)
 	}
 	return out, nil
 }
@@ -2284,6 +2253,6 @@ func readFilePins(paths []string, roots []string) ([]store.Pin, error) {
 // dispatchOpen is the open-dispatch refusal's seam. It is `false` today —
 // written as a helper rather than an inline `false` so a real check adds a
 // query behind it and the call site in activateTx never moves.
-func dispatchOpen(_ *sql.Tx, _ int) (bool, error) {
+func dispatchOpen(_ store.LegacyTx, _ int) (bool, error) {
 	return false, nil
 }

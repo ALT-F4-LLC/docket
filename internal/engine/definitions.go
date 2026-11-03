@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -22,17 +21,13 @@ import (
 // It is keyed by workflow id rather than by name because a run may legally bind
 // two issues to two different versions of the same pipeline, and the step row
 // records which one it was expanded from.
-func StepDefinitions(conn *sql.DB, runID int) (map[int]*workflow.Definition, error) {
-	rows, err := conn.Query(
-		`SELECT DISTINCT w.id, w.parsed
-		   FROM steps s JOIN workflows w ON w.id = s.workflow_id
-		  WHERE s.run_id = ?`, runID)
+func StepDefinitions(conn store.LegacyDB, runID int) (map[int]*workflow.Definition, error) {
+	st := store.StoreOn(conn)
+	stepWorkflows, err := st.RunStepWorkflows(runID)
 	if err != nil {
-		return nil, fmt.Errorf("reading step definitions: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	out, err := scanStepDefinitions(rows)
+	out, err := decodeStepDefinitions(stepWorkflows)
 	if err != nil {
 		return nil, err
 	}
@@ -41,42 +36,21 @@ func StepDefinitions(conn *sql.DB, runID int) (map[int]*workflow.Definition, err
 	// therefore no definitions above. Fall back to the bindings so readiness
 	// over a freshly-activated run whose later phases have not expanded still
 	// resolves `after` edges rather than treating every step as unknown.
-	if err := addBoundDefinitions(conn, runID, out); err != nil {
+	bound, err := st.RunBoundWorkflows(runID)
+	if err != nil {
 		return nil, err
 	}
-	return out, nil
-}
-
-// addBoundDefinitions fills in the definitions of workflows bound to the run's
-// issues but not represented among its expanded steps.
-func addBoundDefinitions(conn *sql.DB, runID int, out map[int]*workflow.Definition) error {
-	rows, err := conn.Query(
-		`SELECT DISTINCT w.id, w.parsed
-		   FROM run_issues ri JOIN workflows w ON w.id = ri.workflow_id
-		  WHERE ri.run_id = ? AND ri.workflow_id IS NOT NULL`, runID)
-	if err != nil {
-		return fmt.Errorf("reading bound definitions: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			id     int
-			parsed string
-		)
-		if err := rows.Scan(&id, &parsed); err != nil {
-			return fmt.Errorf("reading bound definition: %w", err)
-		}
-		if _, ok := out[id]; ok {
+	for _, w := range bound {
+		if _, ok := out[w.ID]; ok {
 			continue
 		}
-		def, err := workflow.FromCanonical([]byte(parsed))
+		def, err := workflow.FromCanonical([]byte(w.Parsed))
 		if err != nil {
-			return fmt.Errorf("reading stored definition %d: %w", id, err)
+			return nil, fmt.Errorf("reading stored definition %d: %w", w.ID, err)
 		}
-		out[id] = def
+		out[w.ID] = def
 	}
-	return rows.Err()
+	return out, nil
 }
 
 // stepSpec returns the definition of one step, from its run's pinned
@@ -97,25 +71,16 @@ func stepSpec(
 	return materializedSpec(def, step, tally)
 }
 
-// scanStepDefinitions decodes the (id, parsed) rows both readers produce.
-func scanStepDefinitions(rows *sql.Rows) (map[int]*workflow.Definition, error) {
-	out := make(map[int]*workflow.Definition)
-	for rows.Next() {
-		var (
-			id     int
-			parsed string
-		)
-		if err := rows.Scan(&id, &parsed); err != nil {
-			return nil, fmt.Errorf("reading step definition: %w", err)
-		}
-		def, err := workflow.FromCanonical([]byte(parsed))
+// decodeStepDefinitions decodes the stored parsed form of each workflow both
+// readers return, keyed by workflow id.
+func decodeStepDefinitions(workflows []store.ParsedWorkflow) (map[int]*workflow.Definition, error) {
+	out := make(map[int]*workflow.Definition, len(workflows))
+	for _, w := range workflows {
+		def, err := workflow.FromCanonical([]byte(w.Parsed))
 		if err != nil {
-			return nil, fmt.Errorf("reading stored definition %d: %w", id, err)
+			return nil, fmt.Errorf("reading stored definition %d: %w", w.ID, err)
 		}
-		out[id] = def
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading step definitions: %w", err)
+		out[w.ID] = def
 	}
 	return out, nil
 }
@@ -123,14 +88,10 @@ func scanStepDefinitions(rows *sql.Rows) (map[int]*workflow.Definition, error) {
 // StepDefinitionsTx is StepDefinitions inside a transaction, for readers that
 // must see rows the open transaction wrote — the dry run's, whose steps exist
 // only there and are about to be discarded.
-func StepDefinitionsTx(tx *sql.Tx, runID int) (map[int]*workflow.Definition, error) {
-	rows, err := tx.Query(
-		`SELECT DISTINCT w.id, w.parsed
-		   FROM steps s JOIN workflows w ON w.id = s.workflow_id
-		  WHERE s.run_id = ?`, runID)
+func StepDefinitionsTx(tx store.LegacyReadTx, runID int) (map[int]*workflow.Definition, error) {
+	stepWorkflows, err := store.TxOn(tx).RunStepWorkflowsTx(runID)
 	if err != nil {
-		return nil, fmt.Errorf("reading step definitions: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	return scanStepDefinitions(rows)
+	return decodeStepDefinitions(stepWorkflows)
 }
