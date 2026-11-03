@@ -283,6 +283,7 @@ type Store interface {
 	RunFenceCommands(runID, issueID int, tag string) (commands []db.FenceCommand, found bool, err error)
 	RunIssueSnapshot(runID, issueID int) (string, error)
 	RunProjectID(runID int) (int, error)
+	RunStepClasses(runID int) ([]string, error)
 	RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error)
 	RunStepProducers(runID int) ([]db.StepProducer, error)
 	RunStepWorkflows(runID int) ([]db.ParsedWorkflow, error)

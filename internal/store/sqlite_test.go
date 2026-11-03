@@ -299,6 +299,57 @@ func TestSQLiteReportAndLedgerQueries(t *testing.T) {
 	}
 }
 
+// TestSQLiteRunStepClasses reads a run's step classes through the Store: each
+// distinct non-null class of the run's own steps once, in class order, and
+// none with a nil error for a run with no classed step.
+func TestSQLiteRunStepClasses(t *testing.T) {
+	st := openMigratedSQLite(t)
+	project, err := st.EnsureProject("/repo/classes", "classes", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	wf, _, err := st.InsertWorkflow(&model.Workflow{
+		ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+	}, 1)
+	testsupport.Must(t, err, "InsertWorkflow: %v", err)
+	issue, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: project, Title: "classes subject", Status: model.StatusTodo,
+		Priority: model.PriorityNone, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+	newRun := func() int {
+		run, _, err := st.InsertRunWithContextIdempotent(project, "classes", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		return run.ID
+	}
+	run, otherRun, unclassedRun := newRun(), newRun(), newRun()
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the seeding transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	addStep := func(runID int, name, class string) {
+		t.Helper()
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: runID, IssueID: issue, WorkflowID: wf.ID, StepName: name, Instance: name + "@0",
+			Kind: "executor", Class: class, Status: db.StepPending,
+		}, 1), "InsertStepTx %s", name)
+	}
+	addStep(run, "review", "worker")
+	addStep(run, "implement", "worker")
+	addStep(run, "judge", "judge")
+	addStep(run, "gate", "")
+	addStep(otherRun, "implement", "elsewhere")
+	addStep(unclassedRun, "gate", "")
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+
+	want := []string{"judge", "worker"}
+	if got, err := st.RunStepClasses(run); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("RunStepClasses = (%q, %v), want (%q, nil): each once, no NULL, no other run's", got, err, want)
+	}
+	if got, err := st.RunStepClasses(unclassedRun); err != nil || len(got) != 0 {
+		t.Errorf("RunStepClasses of a run with only unclassed steps = (%q, %v), want (none, nil)", got, err)
+	}
+}
+
 // TestSQLiteRunLifecycleQueries reaches the run lifecycle and repin queries
 // through a Tx and a read snapshot, on a seeded run of two issues: the reads
 // return only the run, issue and kinds asked for, typed by the store aliases,

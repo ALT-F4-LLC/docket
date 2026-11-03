@@ -762,6 +762,10 @@ func (s *pgStore) RunProjectID(runID int) (int, error) {
 	return db.RunProjectID(s.db, runID)
 }
 
+func (s *pgStore) RunStepClasses(runID int) ([]string, error) {
+	return db.RunStepClasses(s.db, runID)
+}
+
 func (s *pgStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error) {
 	return db.RunStepEvents(s.db, runID, kinds...)
 }

@@ -288,6 +288,38 @@ func TestPgStoreStepEventDataContains(t *testing.T) {
 	ask(`a backslash, which is literal`, "gate-started", `te\sts`, false)
 }
 
+// TestPgStoreRunStepClasses reads a run's step classes through the Store:
+// each distinct non-null class of the run's own steps once, in class order,
+// and none with a nil error for a run with no classed step. It skips without
+// DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreRunStepClasses(t *testing.T) {
+	t.Run("distinct non-null classes of the run only", func(t *testing.T) {
+		f := newSagaFixture(t)
+		f.add(db.StepRow{StepName: "review", Class: "worker", Status: db.StepPending})
+		f.add(db.StepRow{StepName: "implement", Class: "worker", Status: db.StepPending})
+		f.add(db.StepRow{StepName: "judge", Class: "judge", Status: db.StepPending})
+		f.add(db.StepRow{StepName: "gate", Status: db.StepPending})
+		f.add(db.StepRow{RunID: f.otherRun, StepName: "implement", Class: "elsewhere", Status: db.StepPending})
+		testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+		want := []string{"judge", "worker"}
+		if got, err := f.st.RunStepClasses(f.run); err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("RunStepClasses = (%q, %v), want (%q, nil): each once, no NULL, no other run's", got, err, want)
+		}
+	})
+
+	t.Run("a run with no classed steps", func(t *testing.T) {
+		f := newSagaFixture(t)
+		f.add(db.StepRow{StepName: "gate", Status: db.StepPending})
+		f.add(db.StepRow{RunID: f.otherRun, StepName: "implement", Class: "elsewhere", Status: db.StepPending})
+		testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+		if got, err := f.st.RunStepClasses(f.run); err != nil || len(got) != 0 {
+			t.Errorf("RunStepClasses of a run with only unclassed steps = (%q, %v), want (none, nil)", got, err)
+		}
+	})
+}
+
 // TestPgStoreRunCostFloorTx sums a run's claim costs, each the claim's own
 // numeric expected_cost or else its step's declared one, plus the declared
 // cost of every open vote step. It skips without DOCKET_TEST_POSTGRES_DSN.

@@ -727,6 +727,10 @@ func (s *sqliteStore) RunProjectID(runID int) (int, error) {
 	return db.RunProjectID(s.writer, runID)
 }
 
+func (s *sqliteStore) RunStepClasses(runID int) ([]string, error) {
+	return db.RunStepClasses(s.writer, runID)
+}
+
 func (s *sqliteStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error) {
 	return db.RunStepEvents(s.writer, runID, kinds...)
 }
