@@ -978,3 +978,202 @@ func TestSQLiteHoldAndActivationQueries(t *testing.T) {
 		t.Errorf("HoldClusterInstancesTx of the sibling through a snapshot = (%+v, %v), want its one cluster row", got, err)
 	}
 }
+
+// TestSQLiteReapUsageAndFenceQueries reaches the reap, vote-usage and fence
+// reads through a Tx and then a read snapshot on seeded rows: each keeps its
+// run, step, kind, dispatch, proposal and seat filters, fences come back by
+// issue, tag and ordinal where they were written the other way, a missing
+// event reads as ErrNotFound, and a missing cast as not found.
+func TestSQLiteReapUsageAndFenceQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	project, err := st.EnsureProject("/repo/reap", "reap", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	wf, _, err := st.InsertWorkflow(&model.Workflow{
+		ProjectID: project, Name: "wf", Version: 1, SourceSHA256: "sha", Body: "body", Parsed: "{}",
+	}, 1)
+	testsupport.Must(t, err, "InsertWorkflow: %v", err)
+	newIssue := func(title string) int {
+		t.Helper()
+		id, _, err := st.CreateIssueIdempotent(&model.Issue{
+			ProjectID: project, Title: title, Status: model.StatusTodo,
+			Priority: model.PriorityNone, Kind: model.IssueKindTask,
+		}, nil, nil, "")
+		testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+		return id
+	}
+	issue, sibling := newIssue("reaped"), newIssue("sibling")
+	newRun := func() int {
+		t.Helper()
+		run, _, err := st.InsertRunWithContextIdempotent(project, "reap", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		testsupport.Must(t, st.AddRunIssue(run.ID, sibling), "AddRunIssue")
+		return run.ID
+	}
+	run, otherRun := newRun(), newRun()
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	add := func(name string) int {
+		t.Helper()
+		instance := name + "@0"
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: run, IssueID: issue, WorkflowID: wf.ID, StepName: name, Instance: instance,
+			Kind: "executor", Status: db.StepClaimed,
+		}, 1), "InsertStepTx %s", instance)
+		id, found, err := tx.StepIDByInstanceTx(run, issue, instance)
+		testsupport.Must(t, err, "StepIDByInstanceTx: %v", err)
+		if !found {
+			t.Fatalf("step %s was not found after its insert", instance)
+		}
+		return id
+	}
+	seed := func(e NewEvent) int64 {
+		t.Helper()
+		testsupport.Must(t, tx.InsertEventTx(e), "InsertEventTx %s", e.Kind)
+		seq, _, err := tx.MaxEventSeqTx()
+		testsupport.Must(t, err, "MaxEventSeqTx: %v", err)
+		return seq
+	}
+	admitted, early, offManifest, unclaimed := add("implement"), add("review"), add("verify"), add("fix")
+	seed(NewEvent{AtMS: 1, Kind: "step-claimed", RunID: run, StepID: early, Data: `{}`})
+	opened := seed(NewEvent{AtMS: 1, Kind: "dispatch-opened", RunID: run, Data: `{}`})
+	claim := seed(NewEvent{AtMS: 1, Kind: "step-claimed", RunID: run, StepID: admitted, Data: `{}`})
+	seed(NewEvent{AtMS: 1, Kind: "step-claimed", RunID: run, StepID: offManifest, Data: `{}`})
+	reaped := seed(NewEvent{AtMS: 1, Kind: "lease-reaped", RunID: run, StepID: admitted, Data: `{"forced": true}`})
+	dispatchID, err := tx.InsertDispatchTx(run, opened, 99999, 1000)
+	testsupport.Must(t, err, "InsertDispatchTx: %v", err)
+	for i, stepID := range []int{admitted, early, unclaimed} {
+		testsupport.Must(t, tx.InsertDispatchRowTx(dispatchID, DispatchRow{
+			Position: i, StepID: stepID, Instance: "row", RowJSON: `{}`, RowSHA256: "sha",
+		}), "InsertDispatchRowTx %d", i)
+	}
+	seed(NewEvent{AtMS: 1, Kind: "vote-opened", RunID: run, Data: `{"detail": "DKT-V7"}`})
+	seed(NewEvent{AtMS: 1, Kind: "vote-tallied", RunID: run, Data: `{"detail": "DKT-V8"}`})
+	seed(NewEvent{AtMS: 1, Kind: "vote-opened", RunID: run, StepID: early, Data: `{"detail": "DKT-V9"}`})
+	newest := seed(NewEvent{AtMS: 1, Kind: "vote-opened", RunID: otherRun, Data: `{"detail": "DKT-V10"}`})
+
+	now := time.Unix(1000, 0)
+	for _, id := range []int{7, 8} {
+		_, err := tx.InsertProposalWithID(&model.Proposal{
+			ID: id, ProjectID: project, Description: "vote", Criticality: model.CriticalityLow,
+			Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5, CreatedAt: now, UpdatedAt: now,
+		})
+		testsupport.Must(t, err, "InsertProposalWithID %d: %v", id, err)
+	}
+	for _, v := range []struct {
+		id, proposal int
+		voter        string
+	}{{70, 7, "seat-a"}, {71, 7, "seat-b"}, {80, 8, "seat-c"}} {
+		_, err := tx.InsertVoteWithID(&model.Vote{
+			ID: v.id, ProposalID: v.proposal, VoterName: v.voter,
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9, CreatedAt: now,
+		})
+		testsupport.Must(t, err, "InsertVoteWithID %d: %v", v.id, err)
+	}
+
+	for _, fence := range []RunFence{
+		{RunID: run, IssueID: sibling, Tag: "ac", Ordinal: 0, Command: "make c", SHA256: "c"},
+		{RunID: run, IssueID: issue, Tag: "tests", Ordinal: 1, Command: "make b2", SHA256: "b2"},
+		{RunID: run, IssueID: issue, Tag: "ac", Ordinal: 0, Command: "make a", SHA256: "a"},
+		{RunID: run, IssueID: issue, Tag: "tests", Ordinal: 0, Command: "make b1", SHA256: "b1"},
+		{RunID: otherRun, IssueID: issue, Tag: "ac", Ordinal: 0, Command: "make z", SHA256: "z"},
+	} {
+		testsupport.Must(t, tx.InsertFenceTx(fence), "InsertFenceTx %s#%d", fence.Tag, fence.Ordinal)
+	}
+	fences := []RunFence{
+		{RunID: run, IssueID: issue, Tag: "ac", Ordinal: 0, Command: "make a", SHA256: "a"},
+		{RunID: run, IssueID: issue, Tag: "tests", Ordinal: 0, Command: "make b1", SHA256: "b1"},
+		{RunID: run, IssueID: issue, Tag: "tests", Ordinal: 1, Command: "make b2", SHA256: "b2"},
+		{RunID: run, IssueID: sibling, Tag: "ac", Ordinal: 0, Command: "make c", SHA256: "c"},
+	}
+
+	check := func(via string, r ReadTx) {
+		t.Helper()
+		if data, err := r.EventDataTx(reaped); err != nil || data != `{"forced": true}` {
+			t.Errorf("EventDataTx of the reap through %s = (%q, %v), want its payload", via, data, err)
+		}
+		if data, err := r.EventDataTx(newest + 1); !errors.Is(err, ErrNotFound) || data != "" {
+			t.Errorf("EventDataTx past the newest seq through %s = (%q, %v), want (\"\", ErrNotFound)", via, data, err)
+		}
+
+		admittedCases := []struct {
+			name             string
+			dispatch, stepID int
+			reapedSeq        int64
+			want             bool
+		}{
+			{"a manifest step claimed after the open", dispatchID, admitted, reaped, true},
+			{"a reap at the claim's own seq", dispatchID, admitted, claim, false},
+			{"a manifest step last claimed before the open", dispatchID, early, reaped, false},
+			{"a step claimed after the open but off the manifest", dispatchID, offManifest, reaped, false},
+			{"a manifest step never claimed", dispatchID, unclaimed, reaped, false},
+			{"a dispatch that does not exist", dispatchID + 100, admitted, reaped, false},
+		}
+		for _, c := range admittedCases {
+			got, err := r.ClaimAdmittedByDispatchTx(c.dispatch, opened, c.stepID, "step-claimed", c.reapedSeq)
+			if err != nil || got != c.want {
+				t.Errorf("ClaimAdmittedByDispatchTx for %s through %s = (%v, %v), want (%v, nil)",
+					c.name, via, got, err, c.want)
+			}
+		}
+
+		for id, want := range map[int]bool{7: true, 8: true, 999: false} {
+			if got, err := r.ProposalExistsTx(id); err != nil || got != want {
+				t.Errorf("ProposalExistsTx(%d) through %s = (%v, %v), want (%v, nil)", id, via, got, err, want)
+			}
+		}
+		voteCases := []struct {
+			name      string
+			proposal  int
+			voter     string
+			wantID    int64
+			wantFound bool
+		}{
+			{"seat b's cast", 7, "seat-b", 71, true},
+			{"a seat that cast only on another proposal", 7, "seat-c", 0, false},
+			{"a proposal that does not exist", 999, "seat-a", 0, false},
+		}
+		for _, c := range voteCases {
+			id, found, err := r.VoteIDTx(c.proposal, c.voter)
+			if err != nil || found != c.wantFound || id != c.wantID {
+				t.Errorf("VoteIDTx for %s through %s = (%d, %v, %v), want (%d, %v, nil)",
+					c.name, via, id, found, err, c.wantID, c.wantFound)
+			}
+		}
+
+		if got, err := r.ListFencesTx(run); err != nil || !reflect.DeepEqual(got, fences) {
+			t.Errorf("ListFencesTx through %s = (%+v, %v), want (%+v, nil)", via, got, err, fences)
+		}
+		if got, err := r.ListFencesTx(otherRun + 100); err != nil || len(got) != 0 {
+			t.Errorf("ListFencesTx of a run with none through %s = (%+v, %v), want (none, nil)", via, got, err)
+		}
+
+		detailCases := []struct {
+			name   string
+			runID  int
+			detail string
+			want   bool
+		}{
+			{"the run's opened panel", run, "DKT-V7", true},
+			{"a panel the run only tallied", run, "DKT-V8", false},
+			{"a panel opened on a step", run, "DKT-V9", false},
+			{"a panel opened on another run", run, "DKT-V10", false},
+			{"the other run's opened panel", otherRun, "DKT-V10", true},
+		}
+		for _, c := range detailCases {
+			got, err := r.RunEventDetailExistsTx(c.runID, "vote-opened", c.detail)
+			if err != nil || got != c.want {
+				t.Errorf("RunEventDetailExistsTx for %s through %s = (%v, %v), want (%v, nil)", c.name, via, got, err, c.want)
+			}
+		}
+	}
+
+	check("a Tx", tx)
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	check("a read snapshot", snap)
+}

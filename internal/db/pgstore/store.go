@@ -911,6 +911,12 @@ func (t *pgTx) BudgetUnitTx(projectID int) (string, error) {
 	return db.BudgetUnitTx(t.tx, projectID)
 }
 
+func (t *pgTx) ClaimAdmittedByDispatchTx(
+	dispatchID int, openedSeq int64, stepID int, claimKind string, reapedSeq int64,
+) (bool, error) {
+	return db.ClaimAdmittedByDispatchTx(t.tx, dispatchID, openedSeq, stepID, claimKind, reapedSeq)
+}
+
 func (t *pgTx) ClaimEventsPrunedTx(q db.ClaimEventsPrunedQuery) (bool, error) {
 	return db.ClaimEventsPrunedTx(t.tx, q)
 }
@@ -945,6 +951,10 @@ func (t *pgTx) DispatchGraceTx(projectID int) (time.Duration, error) {
 
 func (t *pgTx) DispatchTTLTx(projectID int) (time.Duration, error) {
 	return db.DispatchTTLTx(t.tx, projectID)
+}
+
+func (t *pgTx) EventDataTx(seq int64) (string, error) {
+	return db.EventDataTx(t.tx, seq)
 }
 
 func (t *pgTx) EventKindCountsTx(runID int) (map[string]int, error) {
@@ -1083,6 +1093,10 @@ func (t *pgTx) ListEventsTx(f db.EventFilter, limit, tail int) ([]db.EventRow, e
 	return db.ListEventsTx(t.tx, f, limit, tail)
 }
 
+func (t *pgTx) ListFencesTx(runID int) ([]db.RunFence, error) {
+	return db.ListFencesTx(t.tx, runID)
+}
+
 func (t *pgTx) ListIssueStepsTx(runID, issueID int) ([]*db.Step, error) {
 	return db.ListIssueStepsTx(t.tx, runID, issueID)
 }
@@ -1183,6 +1197,10 @@ func (t *pgTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunSta
 	return db.PrunableEventRunsTx(t.tx, sel)
 }
 
+func (t *pgTx) ProposalExistsTx(proposalID int) (bool, error) {
+	return db.ProposalExistsTx(t.tx, proposalID)
+}
+
 func (t *pgTx) ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error) {
 	return db.ProposalStatusesTx(t.tx, ids)
 }
@@ -1242,6 +1260,10 @@ func (t *pgTx) RunCostFloorTx(runID int, claimEventKind, voteStepKind string) (f
 
 func (t *pgTx) RunEventDataTx(runID int, kinds ...string) ([]string, error) {
 	return db.RunEventDataTx(t.tx, runID, kinds...)
+}
+
+func (t *pgTx) RunEventDetailExistsTx(runID int, kind, detail string) (bool, error) {
+	return db.RunEventDetailExistsTx(t.tx, runID, kind, detail)
 }
 
 func (t *pgTx) RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error) {
@@ -1358,6 +1380,10 @@ func (t *pgTx) UnexpandedRunIssueCountTx(runID int) (int, error) {
 
 func (t *pgTx) UsageBudgetUnitTx(projectID int) (string, error) {
 	return db.UsageBudgetUnitTx(t.tx, projectID)
+}
+
+func (t *pgTx) VoteIDTx(proposalID int, voter string) (int64, bool, error) {
+	return db.VoteIDTx(t.tx, proposalID, voter)
 }
 
 func (t *pgTx) VoteRuleExistsTx(projectID int, rule string) (bool, error) {
