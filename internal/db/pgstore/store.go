@@ -1021,6 +1021,18 @@ func (t *pgTx) HoldClusterInstancesTx(runID, issueID int, holdInstance string) (
 	return db.HoldClusterInstancesTx(t.tx, runID, issueID, holdInstance)
 }
 
+func (t *pgTx) ImportMaxIDTx(table db.ImportTable) (int, error) {
+	return db.ImportMaxIDTx(t.tx, table)
+}
+
+func (t *pgTx) ImportRowExistsTx(table db.ImportTable, id int) (bool, error) {
+	return db.ImportRowExistsTx(t.tx, table, id)
+}
+
+func (t *pgTx) ImportRowOwnedTx(table db.ImportTable, id, projectID int) (bool, error) {
+	return db.ImportRowOwnedTx(t.tx, table, id, projectID)
+}
+
 func (t *pgTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
 }
@@ -1063,6 +1075,10 @@ func (t *pgTx) IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepI
 
 func (t *pgTx) IssueUnfinishedStepsTx(runID, issueID int) ([]db.UnfinishedStep, error) {
 	return db.IssueUnfinishedStepsTx(t.tx, runID, issueID)
+}
+
+func (t *pgTx) LabelIDByNameTx(projectID int, name string) (int, bool, error) {
+	return db.LabelIDByNameTx(t.tx, projectID, name)
 }
 
 func (t *pgTx) LastDispatchDeferralTx(q db.SourcedDeferralQuery) (int64, string, bool, error) {
@@ -1702,6 +1718,10 @@ func (t *pgTx) RepinStepWorkRootTx(stepID int, worktree string) error {
 
 func (t *pgTx) ResetStepRetryBudgetTx(id int, nowMS int64) error {
 	return db.ResetStepRetryBudgetTx(t.tx, id, nowMS)
+}
+
+func (t *pgTx) RestoreIssueParentTx(issueID, parentID int) error {
+	return db.RestoreIssueParentTx(t.tx, issueID, parentID)
 }
 
 func (t *pgTx) RetireStepTokenTx(id int) error {

@@ -977,6 +977,18 @@ func (t *sqliteTx) HoldClusterInstancesTx(runID, issueID int, holdInstance strin
 	return db.HoldClusterInstancesTx(t.tx, runID, issueID, holdInstance)
 }
 
+func (t *sqliteTx) ImportMaxIDTx(table db.ImportTable) (int, error) {
+	return db.ImportMaxIDTx(t.tx, table)
+}
+
+func (t *sqliteTx) ImportRowExistsTx(table db.ImportTable, id int) (bool, error) {
+	return db.ImportRowExistsTx(t.tx, table, id)
+}
+
+func (t *sqliteTx) ImportRowOwnedTx(table db.ImportTable, id, projectID int) (bool, error) {
+	return db.ImportRowOwnedTx(t.tx, table, id, projectID)
+}
+
 func (t *sqliteTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
 }
@@ -1019,6 +1031,10 @@ func (t *sqliteTx) IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.S
 
 func (t *sqliteTx) IssueUnfinishedStepsTx(runID, issueID int) ([]db.UnfinishedStep, error) {
 	return db.IssueUnfinishedStepsTx(t.tx, runID, issueID)
+}
+
+func (t *sqliteTx) LabelIDByNameTx(projectID int, name string) (int, bool, error) {
+	return db.LabelIDByNameTx(t.tx, projectID, name)
 }
 
 func (t *sqliteTx) LastDispatchDeferralTx(q db.SourcedDeferralQuery) (int64, string, bool, error) {
@@ -1627,6 +1643,10 @@ func (t *sqliteTx) RepinStepWorkRootTx(stepID int, worktree string) error {
 
 func (t *sqliteTx) ResetStepRetryBudgetTx(id int, nowMS int64) error {
 	return db.ResetStepRetryBudgetTx(t.tx, id, nowMS)
+}
+
+func (t *sqliteTx) RestoreIssueParentTx(issueID, parentID int) error {
+	return db.RestoreIssueParentTx(t.tx, issueID, parentID)
 }
 
 func (t *sqliteTx) RetireStepTokenTx(id int) error {

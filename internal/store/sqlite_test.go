@@ -1177,3 +1177,196 @@ func TestSQLiteReapUsageAndFenceQueries(t *testing.T) {
 	t.Cleanup(func() { snap.Rollback() })
 	check("a read snapshot", snap)
 }
+
+// TestSQLiteImportExportQueries reaches the import id probes and the label
+// lookup through a Tx and then a read snapshot, on one row per probed table
+// in each of two projects, the higher id written first: existence and the id
+// ceiling span projects, ownership follows a child row to its parent's
+// project, a table outside the closed set is refused, and a label name
+// resolves only in its own project. It then restores an issue's parent
+// through the Tx and requires its version, updated_at and activity log to
+// stay as imported.
+func TestSQLiteImportExportQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	owner, err := st.EnsureProject("/repo/owner", "owner", 1)
+	testsupport.Must(t, err, "EnsureProject owner: %v", err)
+	other, err := st.EnsureProject("/repo/other", "other", 1)
+	testsupport.Must(t, err, "EnsureProject other: %v", err)
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	inserted := func(what string, id int, ok bool, err error) {
+		t.Helper()
+		testsupport.Must(t, err, "inserting %s %d: %v", what, id, err)
+		if !ok {
+			t.Fatalf("inserting %s %d wrote no row", what, id)
+		}
+	}
+	imported := time.Unix(2000, 0).UTC()
+	for _, i := range []struct{ id, project int }{{20, other}, {15, owner}, {10, owner}} {
+		ok, err := tx.InsertIssueWithID(&model.Issue{
+			ID: i.id, ProjectID: i.project, Title: "imported", Status: model.StatusTodo,
+			Priority: model.PriorityNone, Kind: model.IssueKindTask, CreatedAt: imported, UpdatedAt: imported,
+		})
+		inserted("issue", i.id, ok, err)
+	}
+	for _, l := range []model.Label{{ID: 132, ProjectID: other, Name: "bug"}, {ID: 131, ProjectID: owner, Name: "bug"},
+		{ID: 130, ProjectID: owner, Name: "feature"}} {
+		ok, err := tx.InsertLabelWithID(&l)
+		inserted("label", l.ID, ok, err)
+	}
+	for _, c := range []model.Comment{{ID: 32, IssueID: 20}, {ID: 31, IssueID: 10}} {
+		c.Body, c.CreatedAt = "imported", imported
+		ok, err := tx.InsertCommentWithID(&c)
+		inserted("comment", c.ID, ok, err)
+	}
+	for _, r := range []model.Relation{
+		{ID: 42, SourceIssueID: 20, TargetIssueID: 10, RelationType: model.RelationBlocks},
+		{ID: 41, SourceIssueID: 10, TargetIssueID: 15, RelationType: model.RelationRelatesTo},
+	} {
+		r.CreatedAt = imported
+		ok, err := tx.InsertRelationWithID(&r)
+		inserted("relation", r.ID, ok, err)
+	}
+	for _, a := range []model.Activity{{ID: 52, IssueID: 20}, {ID: 51, IssueID: 10}} {
+		a.FieldChanged, a.CreatedAt = "status", imported
+		ok, err := tx.InsertActivityWithID(&a)
+		inserted("activity", a.ID, ok, err)
+	}
+	for _, p := range []struct{ id, project int }{{70, other}, {60, owner}} {
+		ok, err := tx.InsertProposalWithID(&model.Proposal{
+			ID: p.id, ProjectID: p.project, Description: "imported", Criticality: model.CriticalityLow,
+			Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5, CreatedAt: imported, UpdatedAt: imported,
+		})
+		inserted("proposal", p.id, ok, err)
+	}
+	for _, v := range []model.Vote{{ID: 82, ProposalID: 70}, {ID: 81, ProposalID: 60}} {
+		v.VoterName, v.Verdict, v.Confidence, v.DomainRelevance, v.CreatedAt = "seat", model.VerdictApprove, 0.9, 0.9, imported
+		ok, err := tx.InsertVoteWithID(&v)
+		inserted("vote", v.ID, ok, err)
+	}
+	for _, d := range []struct{ id, project int }{{100, other}, {90, owner}} {
+		ok, err := tx.InsertDocWithID(&model.Doc{
+			ID: d.id, ProjectID: d.project, Type: "adr", Status: "draft", Title: "imported",
+			CreatedAt: imported, UpdatedAt: imported,
+		})
+		inserted("doc", d.id, ok, err)
+	}
+	for _, r := range []model.DocRevision{{ID: 112, DocID: 100}, {ID: 111, DocID: 90}} {
+		r.RevisionNumber, r.Body, r.CreatedAt = 1, "imported", imported
+		ok, err := tx.InsertDocRevisionWithID(&r)
+		inserted("doc revision", r.ID, ok, err)
+	}
+	for _, c := range []model.DocComment{{ID: 122, DocID: 100}, {ID: 121, DocID: 90}} {
+		c.Body, c.CreatedAt = "imported", imported
+		ok, err := tx.InsertDocCommentWithID(&c)
+		inserted("doc comment", c.ID, ok, err)
+	}
+
+	// Each probed table's row in owner and its row in other. A child row's id
+	// differs from its parent's, so a probe that matched the wrong column
+	// would miss.
+	rows := []struct {
+		table          ImportTable
+		owned, foreign int
+	}{
+		{ImportIssues, 10, 20},
+		{ImportLabels, 131, 132},
+		{ImportComments, 31, 32},
+		{ImportIssueRelations, 41, 42},
+		{ImportActivityLog, 51, 52},
+		{ImportProposals, 60, 70},
+		{ImportVotes, 81, 82},
+		{ImportDocs, 90, 100},
+		{ImportDocRevisions, 111, 112},
+		{ImportDocComments, 121, 122},
+	}
+
+	check := func(via string, r ReadTx) {
+		t.Helper()
+		for _, row := range rows {
+			for id, want := range map[int]bool{row.owned: true, row.foreign: true, 999: false} {
+				if got, err := r.ImportRowExistsTx(row.table, id); err != nil || got != want {
+					t.Errorf("ImportRowExistsTx(%s, %d) through %s = (%v, %v), want (%v, nil)", row.table, id, via, got, err, want)
+				}
+			}
+			if got, err := r.ImportMaxIDTx(row.table); err != nil || got != row.foreign {
+				t.Errorf("ImportMaxIDTx(%s) through %s = (%d, %v), want (%d, nil)", row.table, via, got, err, row.foreign)
+			}
+			ownedCases := []struct {
+				id, project int
+				want        bool
+			}{
+				{row.owned, owner, true},
+				{row.foreign, other, true},
+				{row.foreign, owner, false},
+				{row.owned, other, false},
+				{999, owner, false},
+			}
+			for _, c := range ownedCases {
+				if got, err := r.ImportRowOwnedTx(row.table, c.id, c.project); err != nil || got != c.want {
+					t.Errorf("ImportRowOwnedTx(%s, %d, project %d) through %s = (%v, %v), want (%v, nil)",
+						row.table, c.id, c.project, via, got, err, c.want)
+				}
+			}
+		}
+		const unlisted = ImportTable("projects")
+		if _, err := r.ImportRowExistsTx(unlisted, owner); err == nil {
+			t.Errorf("ImportRowExistsTx(%s) through %s succeeded, want an unknown-table error", unlisted, via)
+		}
+		if _, err := r.ImportMaxIDTx(unlisted); err == nil {
+			t.Errorf("ImportMaxIDTx(%s) through %s succeeded, want an unknown-table error", unlisted, via)
+		}
+		if _, err := r.ImportRowOwnedTx(unlisted, owner, owner); err == nil {
+			t.Errorf("ImportRowOwnedTx(%s) through %s succeeded, want an unknown-table error", unlisted, via)
+		}
+
+		labelCases := []struct {
+			project   int
+			name      string
+			wantID    int
+			wantFound bool
+		}{
+			{owner, "bug", 131, true},
+			{other, "bug", 132, true},
+			{owner, "feature", 130, true},
+			{other, "feature", 0, false},
+			{owner, "absent", 0, false},
+		}
+		for _, c := range labelCases {
+			id, found, err := r.LabelIDByNameTx(c.project, c.name)
+			if err != nil || id != c.wantID || found != c.wantFound {
+				t.Errorf("LabelIDByNameTx(project %d, %q) through %s = (%d, %v, %v), want (%d, %v, nil)",
+					c.project, c.name, via, id, found, err, c.wantID, c.wantFound)
+			}
+		}
+	}
+
+	check("a Tx", tx)
+	child, err := tx.ActivationIssueTx(15)
+	testsupport.Must(t, err, "ActivationIssueTx before the restore: %v", err)
+	testsupport.Must(t, tx.RestoreIssueParentTx(15, 10), "RestoreIssueParentTx")
+	testsupport.Must(t, tx.RestoreIssueParentTx(999, 10), "RestoreIssueParentTx of an absent issue")
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	check("a read snapshot", snap)
+
+	restored, err := st.GetIssue(15)
+	testsupport.Must(t, err, "GetIssue after the restore: %v", err)
+	if restored.ParentID == nil || *restored.ParentID != 10 {
+		t.Errorf("issue 15 parent after RestoreIssueParentTx = %v, want 10", restored.ParentID)
+	}
+	if restored.Version != child.Version || !restored.UpdatedAt.Equal(imported) {
+		t.Errorf("issue 15 after RestoreIssueParentTx has version %d, updated_at %v; want the imported %d, %v",
+			restored.Version, restored.UpdatedAt, child.Version, imported)
+	}
+	if activity, err := st.GetActivity(15, 0); err != nil || len(activity) != 0 {
+		t.Errorf("activity of issue 15 after RestoreIssueParentTx = (%+v, %v), want none", activity, err)
+	}
+	if parent, err := st.GetIssue(10); err != nil || parent.ParentID != nil {
+		t.Errorf("issue 10 after RestoreIssueParentTx = (%+v, %v), want it still parentless", parent, err)
+	}
+}

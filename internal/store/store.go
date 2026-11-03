@@ -91,6 +91,23 @@ type (
 	StepArtifactRef       = db.StepArtifactRef
 )
 
+// The closed set of tables the import id probes accept, aliased as in
+// aliases.go so callers can name them without importing internal/db.
+type ImportTable = db.ImportTable
+
+const (
+	ImportIssues         = db.ImportIssues
+	ImportLabels         = db.ImportLabels
+	ImportComments       = db.ImportComments
+	ImportIssueRelations = db.ImportIssueRelations
+	ImportActivityLog    = db.ImportActivityLog
+	ImportProposals      = db.ImportProposals
+	ImportVotes          = db.ImportVotes
+	ImportDocs           = db.ImportDocs
+	ImportDocRevisions   = db.ImportDocRevisions
+	ImportDocComments    = db.ImportDocComments
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -336,6 +353,9 @@ type ReadTx interface {
 	GetStepTx(id int) (*db.Step, error)
 	HighestOrdinalsTx(runID, issueID int) (map[string]int, error)
 	HoldClusterInstancesTx(runID, issueID int, holdInstance string) ([]db.InstanceStatusRouting, error)
+	ImportMaxIDTx(table db.ImportTable) (int, error)
+	ImportRowExistsTx(table db.ImportTable, id int) (bool, error)
+	ImportRowOwnedTx(table db.ImportTable, id, projectID int) (bool, error)
 	IssueDependenciesDoneTx(issueID int) (bool, error)
 	IssueDescriptionTx(issueID int) (string, error)
 	IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error)
@@ -347,6 +367,7 @@ type ReadTx interface {
 	IssueStatusTx(issueID int) (model.Status, error)
 	IssueStepsBelowOrdinalTx(runID, issueID, ordinal int) ([]db.StepInstanceRef, error)
 	IssueUnfinishedStepsTx(runID, issueID int) ([]db.UnfinishedStep, error)
+	LabelIDByNameTx(projectID int, name string) (id int, found bool, err error)
 	LastDispatchDeferralTx(q db.SourcedDeferralQuery) (seq int64, data string, found bool, err error)
 	LastEventAtMSTx() (atMS int64, found bool, err error)
 	LastEventSeqTx() (int64, error)
@@ -508,6 +529,7 @@ type Tx interface {
 	RepinPinTx(runID int, kind, ref, oldSHA, newSHA string) (int, error)
 	RepinStepWorkRootTx(stepID int, worktree string) error
 	ResetStepRetryBudgetTx(id int, nowMS int64) error
+	RestoreIssueParentTx(issueID, parentID int) error
 	RetireStepTokenTx(id int) error
 	SetConfigTx(projectID int, key, value string) (prior string, err error)
 	SetIssueResolutionTx(issueID int, resolution string) error
