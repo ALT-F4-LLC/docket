@@ -391,6 +391,25 @@ func IssueStepRuns(db *sql.DB, issueID int) ([]int, error) {
 	})
 }
 
+// RunStepClasses reads the distinct non-null classes of a run's steps, in
+// class order: the classes whose lease TTLs the run's scheduler resolves. A
+// run with no classed step yields none and a nil error.
+func RunStepClasses(db *sql.DB, runID int) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT DISTINCT class FROM steps WHERE run_id = ? AND class IS NOT NULL ORDER BY class`,
+		runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading step classes: %w", err)
+	}
+	return scanRows(rows, "step classes", func(r *sql.Rows) (string, error) {
+		var class string
+		if err := r.Scan(&class); err != nil {
+			return "", fmt.Errorf("reading step class: %w", err)
+		}
+		return class, nil
+	})
+}
+
 // ListRunStepsTx is ListRunSteps inside a transaction — the reader for the
 // transaction-side questions asked about a whole run, which must see one
 // consistent snapshot of it. The readiness predicate asks whether

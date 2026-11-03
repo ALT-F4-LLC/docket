@@ -1891,3 +1891,35 @@ func TestActivationQueriesRunBoundWorkflows(t *testing.T) {
 		t.Errorf("a run whose issues are unbound = (%+v, %v), want (none, nil)", got, err)
 	}
 }
+
+func TestStepListQueriesRunStepClasses(t *testing.T) {
+	t.Run("distinct non-null classes of the run only", func(t *testing.T) {
+		f := newRoutingFixture(t)
+		f.add(StepRow{StepName: "implement", Class: "worker"})
+		f.add(StepRow{StepName: "fix", Class: "worker"})
+		f.add(StepRow{StepName: "review", Class: "judge"})
+		f.add(StepRow{StepName: "gate"})
+		f.add(StepRow{RunID: f.otherRun, StepName: "implement", Class: "elsewhere"})
+		testsupport.Must(t, f.tx.Commit(), "Commit")
+
+		got, err := RunStepClasses(f.db, f.run)
+		testsupport.Must(t, err, "RunStepClasses: %v", err)
+		want := []string{"judge", "worker"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("the run's step classes = %q, want %q (each once, no NULL, no other run's)",
+				got, want)
+		}
+	})
+
+	t.Run("a run with no classed steps", func(t *testing.T) {
+		f := newRoutingFixture(t)
+		f.add(StepRow{StepName: "gate"})
+		f.add(StepRow{RunID: f.otherRun, StepName: "implement", Class: "elsewhere"})
+		testsupport.Must(t, f.tx.Commit(), "Commit")
+
+		got, err := RunStepClasses(f.db, f.run)
+		if err != nil || len(got) != 0 {
+			t.Errorf("a run with only unclassed steps = (%q, %v), want (none, nil)", got, err)
+		}
+	})
+}
