@@ -1714,8 +1714,35 @@ func TestActivationQueriesProjectIdentityTx(t *testing.T) {
 	if err != nil || got != "" {
 		t.Errorf("the default project's identity = (%q, %v), want (\"\", nil)", got, err)
 	}
+	got, err = ProjectIdentityTx(f.tx, 0)
+	if err != nil || got != "" {
+		t.Errorf("project 0's identity = (%q, %v), want the default project's (\"\", nil)", got, err)
+	}
 	if _, err := ProjectIdentityTx(f.tx, 999); !errors.Is(err, ErrNotFound) {
 		t.Errorf("a missing project's error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestActivationQueriesRepinStepWorkRootTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "implement", Status: StepDone})
+	sibling := f.add(StepRow{StepName: "review", Status: StepPending})
+	f.exec(`UPDATE steps SET work_root = '/old' WHERE id IN (?, ?)`, step, sibling)
+
+	testsupport.Must(t, RepinStepWorkRootTx(f.tx, step, "/repinned"), "RepinStepWorkRootTx")
+	roots := map[int]string{}
+	for _, id := range []int{step, sibling} {
+		var root string
+		testsupport.Must(t, f.tx.QueryRow(`SELECT work_root FROM steps WHERE id = ?`, id).Scan(&root),
+			"reading step %d's work_root", id)
+		roots[id] = root
+	}
+	if want := map[int]string{step: "/repinned", sibling: "/old"}; !reflect.DeepEqual(roots, want) {
+		t.Errorf("work roots after the re-pin = %v, want %v (only the re-pinned step moves)", roots, want)
+	}
+
+	if err := RepinStepWorkRootTx(f.tx, 999, "/repinned"); !errors.Is(err, ErrStepNotFound) {
+		t.Errorf("re-pinning a missing step = %v, want ErrStepNotFound", err)
 	}
 }
 

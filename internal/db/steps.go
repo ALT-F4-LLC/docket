@@ -2147,10 +2147,11 @@ func StepIDAtOrdinal(
 	return id, true, nil
 }
 
-// ProjectIdentityTx reads a project's identity, or returns ErrNotFound.
+// ProjectIdentityTx reads a project's identity (0 is the default project), or
+// returns ErrNotFound.
 func ProjectIdentityTx(tx *sql.Tx, projectID int) (string, error) {
 	var identity string
-	err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`, projectID).Scan(&identity)
+	err := tx.QueryRow(`SELECT identity FROM projects WHERE id = ?`, projectOrDefault(projectID)).Scan(&identity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -2158,6 +2159,13 @@ func ProjectIdentityTx(tx *sql.Tx, projectID int) (string, error) {
 		return "", fmt.Errorf("reading the identity of project %d: %w", projectID, err)
 	}
 	return identity, nil
+}
+
+// RepinStepWorkRootTx records the worktree an issue-diff re-pin names as the
+// step's recorded worktree, or returns ErrStepNotFound. It writes the same
+// column as SetStepWorkRootTx and shares its implementation.
+func RepinStepWorkRootTx(tx *sql.Tx, stepID int, worktree string) error {
+	return SetStepWorkRootTx(tx, stepID, worktree)
 }
 
 // RunExpectedCostTx sums the declared `expected_cost` of every step in the
