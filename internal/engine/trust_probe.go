@@ -188,7 +188,7 @@ func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e 
 		return row
 	}
 
-	match := lookupProbeEntry(e)
+	match := lookupProbeEntry(e, worktree.Dir)
 	if !match.Matched {
 		row.LogTail = match.Reason
 		return row
@@ -235,19 +235,25 @@ func spawnProbeGate(match trust.Match, repoRoot string, spec dexec.Spec) (dexec.
 	return dexec.Run(spec)
 }
 
-// lookupProbeEntry holds one roster entry to the same Lookup the record-time
-// with its reason and returns the argv that must execute. The pin that
-// authorizes the spawn is checked again by spawnProbeGate.
-// pin that authorizes the spawn is checked again by spawnProbeGate.
+// lookupProbeEntry holds one roster entry to the same match rules the
+// record-time gate runs under. A refusal comes back unmatched with its reason;
+// a match carries the argv that must execute. The argv[0] pin that authorizes
+// the spawn is checked again by spawnProbeGate.
 //
-// The snapshot holds only this entry, so Lookup cannot select a different
+// root is the directory the gate will spawn in: the throwaway worktree, never
+// the shared checkout. LookupAt re-hashes every declared file of the entry
+// under root, so an entry that declares files is verified against the bytes
+// the gate will read, and Lookup, which refuses such an entry for want of a
+// root, is not used.
+//
+// The snapshot holds only this entry, so LookupAt cannot select a different
 // entry of the same name. The entry is marked global because the caller
 // already filtered the roster by repo binding; repeating that check here
 // would need an identity the probe does not hold.
-func lookupProbeEntry(e trust.Entry) trust.Match {
+func lookupProbeEntry(e trust.Entry, root string) trust.Match {
 	e.Global = true
 	snapshot := &trust.Store{Entries: []trust.Entry{e}}
-	return snapshot.Lookup("", e.Name, nil)
+	return snapshot.LookupAt("", e.Name, nil, root)
 }
 
 // tailLines returns the last n non-empty-trimmed lines of s, the Go

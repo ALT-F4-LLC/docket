@@ -592,3 +592,145 @@ func TestProbeTrustSurvivesPinnedSymlinkFlip(t *testing.T) {
 		t.Error("a refused pinned entry must fail the probe")
 	}
 }
+
+// commitProbeFile writes rel with body in repo and commits it, so the probe's
+// throwaway worktree (a checkout of HEAD) holds the file. It returns the
+// SHA-256 of body, the value `trust add` stores as a declared file's pin.
+func commitProbeFile(t *testing.T, repo, rel, body string) string {
+	t.Helper()
+	writeFile(t, repo, rel, body)
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "add " + rel}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitEnv()
+		out, err := cmd.CombinedOutput()
+		testsupport.Must(t, err, "git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestProbeTrustVerifiesDeclaredFilesUnderTheWorktree is the regression test
+// for an entry that declares files: the probe hashes them under the throwaway
+// worktree, so the entry matches and runs. Through Lookup, which has no root,
+// the same entry was refused with "this lookup was given no root".
+func TestProbeTrustVerifiesDeclaredFilesUnderTheWorktree(t *testing.T) {
+	repo := probeRepo(t)
+	pin := commitProbeFile(t, repo, "gate/sourced.conf", "sourced\n")
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, scriptPin := markerScript(t, marker)
+
+	entries := []trust.Entry{{
+		Name: "declares", Argv: []string{script}, Argv0SHA256: scriptPin,
+		DeclaredFiles: []trust.DeclaredFile{{Path: "gate/sourced.conf", SHA256: pin}},
+	}}
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 1 {
+		t.Fatalf("want 1 gate row, got %+v", result.Gates)
+	}
+	g := result.Gates[0]
+	if strings.Contains(g.LogTail, "was given no root") {
+		t.Fatalf("declared files were not hashed under the worktree: %q", g.LogTail)
+	}
+	if g.Exit == nil || *g.Exit != 0 {
+		t.Errorf("an entry whose declared files match must run and pass: %+v", g)
+	}
+	assertMarker(t, marker, true)
+	if !result.Passed {
+		t.Errorf("want passed, got %+v", result)
+	}
+}
+
+// TestProbeTrustRefusesDeclaredFileModifiedInSharedCheckout: the probe hashes
+// the worktree's committed bytes, never the shared checkout's. A declared file
+// edited but not committed there, and pinned at its edited bytes, does not match
+// the worktree, so the entry is refused with the changed-since-trusted reason
+// and nothing runs.
+func TestProbeTrustRefusesDeclaredFileModifiedInSharedCheckout(t *testing.T) {
+	repo := probeRepo(t)
+	commitProbeFile(t, repo, "gate/sourced.conf", "committed\n")
+	writeFile(t, repo, "gate/sourced.conf", "edited, uncommitted\n")
+	dirty := sha256.Sum256([]byte("edited, uncommitted\n"))
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, scriptPin := markerScript(t, marker)
+
+	entries := []trust.Entry{{
+		Name: "declares", Argv: []string{script}, Argv0SHA256: scriptPin,
+		DeclaredFiles: []trust.DeclaredFile{{Path: "gate/sourced.conf", SHA256: hex.EncodeToString(dirty[:])}},
+	}}
+	assertDeclaredFileRefused(t, repo, entries, marker, "gate/sourced.conf")
+}
+
+// TestProbeTrustRefusesDeclaredFileWithWrongSHA: a declared file pinned to a
+// sha256 its committed bytes do not hash to is refused and nothing runs.
+func TestProbeTrustRefusesDeclaredFileWithWrongSHA(t *testing.T) {
+	repo := probeRepo(t)
+	commitProbeFile(t, repo, "gate/sourced.conf", "committed\n")
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, scriptPin := markerScript(t, marker)
+
+	entries := []trust.Entry{{
+		Name: "declares", Argv: []string{script}, Argv0SHA256: scriptPin,
+		DeclaredFiles: []trust.DeclaredFile{{Path: "gate/sourced.conf", SHA256: strings.Repeat("0", 64)}},
+	}}
+	assertDeclaredFileRefused(t, repo, entries, marker, "gate/sourced.conf")
+}
+
+// assertDeclaredFileRefused probes entries and requires one row refused with
+// the changed-since-trusted reason naming declared, with Exit nil, the marker
+// absent, and the probe failed.
+func assertDeclaredFileRefused(t *testing.T, repo string, entries []trust.Entry, marker, declared string) {
+	t.Helper()
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 1 {
+		t.Fatalf("want 1 gate row, got %+v", result.Gates)
+	}
+	g := result.Gates[0]
+	if g.Exit != nil {
+		t.Errorf("a declared-file mismatch must not be spawned: %+v", g)
+	}
+	for _, want := range []string{"declared file " + declared, "changed since it was trusted"} {
+		if !strings.Contains(g.LogTail, want) {
+			t.Errorf("row reason %q does not contain %q", g.LogTail, want)
+		}
+	}
+	assertMarker(t, marker, false)
+	if result.Passed {
+		t.Error("a declared-file mismatch must fail the probe")
+	}
+}
+
+// TestProbeTrustIgnoresDirtySharedCheckoutWhenHeadMatchesThePin: the gate
+// spawns in the clean-HEAD worktree and reads those bytes, so a declared file
+// edited but not committed in the shared checkout does not matter when the pin
+// matches the committed bytes. Only drift under the root the gate spawns in
+// counts.
+func TestProbeTrustIgnoresDirtySharedCheckoutWhenHeadMatchesThePin(t *testing.T) {
+	repo := probeRepo(t)
+	pin := commitProbeFile(t, repo, "gate/sourced.conf", "committed\n")
+	writeFile(t, repo, "gate/sourced.conf", "edited, uncommitted\n")
+	marker := filepath.Join(t.TempDir(), "ran")
+	script, scriptPin := markerScript(t, marker)
+
+	entries := []trust.Entry{{
+		Name: "declares", Argv: []string{script}, Argv0SHA256: scriptPin,
+		DeclaredFiles: []trust.DeclaredFile{{Path: "gate/sourced.conf", SHA256: pin}},
+	}}
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust: %v", err)
+
+	if len(result.Gates) != 1 {
+		t.Fatalf("want 1 gate row, got %+v", result.Gates)
+	}
+	if g := result.Gates[0]; g.Exit == nil || *g.Exit != 0 {
+		t.Errorf("a pin that matches the worktree's bytes must run, whatever the shared checkout holds: %+v", g)
+	}
+	assertMarker(t, marker, true)
+	if !result.Passed {
+		t.Errorf("want passed, got %+v", result)
+	}
+}
