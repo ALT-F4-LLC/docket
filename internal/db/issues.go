@@ -1910,3 +1910,117 @@ func FrozenIssueBindings(db *sql.DB, issueID int) ([]FrozenIssueBinding, error) 
 		return b, nil
 	})
 }
+
+// ImportTable names a table the import id remap and the join-row guard probe
+// by id. The set is closed: the probes interpolate the name into SQL, so they
+// accept only the constants below and refuse any other value.
+type ImportTable string
+
+const (
+	ImportIssues         ImportTable = "issues"
+	ImportLabels         ImportTable = "labels"
+	ImportComments       ImportTable = "comments"
+	ImportIssueRelations ImportTable = "issue_relations"
+	ImportActivityLog    ImportTable = "activity_log"
+	ImportProposals      ImportTable = "proposals"
+	ImportVotes          ImportTable = "votes"
+	ImportDocs           ImportTable = "docs"
+	ImportDocRevisions   ImportTable = "doc_revisions"
+	ImportDocComments    ImportTable = "doc_comments"
+)
+
+// importOwnedProbes holds, per import table, the query that reports whether
+// the row with an id belongs to a project; it takes (id, projectID). Root
+// tables carry project_id; child tables reach it through their parent. Its
+// keys are the closed set of ImportTable values.
+var importOwnedProbes = map[ImportTable]string{
+	ImportIssues: `SELECT EXISTS(SELECT 1 FROM issues WHERE id = ? AND project_id = ?)`,
+	ImportLabels: `SELECT EXISTS(SELECT 1 FROM labels WHERE id = ? AND project_id = ?)`,
+	ImportComments: `SELECT EXISTS(SELECT 1 FROM comments c JOIN issues i ON i.id = c.issue_id
+		WHERE c.id = ? AND i.project_id = ?)`,
+	ImportIssueRelations: `SELECT EXISTS(SELECT 1 FROM issue_relations r JOIN issues i ON i.id = r.source_issue_id
+		WHERE r.id = ? AND i.project_id = ?)`,
+	ImportActivityLog: `SELECT EXISTS(SELECT 1 FROM activity_log a JOIN issues i ON i.id = a.issue_id
+		WHERE a.id = ? AND i.project_id = ?)`,
+	ImportProposals: `SELECT EXISTS(SELECT 1 FROM proposals WHERE id = ? AND project_id = ?)`,
+	ImportVotes: `SELECT EXISTS(SELECT 1 FROM votes v JOIN proposals p ON p.id = v.proposal_id
+		WHERE v.id = ? AND p.project_id = ?)`,
+	ImportDocs: `SELECT EXISTS(SELECT 1 FROM docs WHERE id = ? AND project_id = ?)`,
+	ImportDocRevisions: `SELECT EXISTS(SELECT 1 FROM doc_revisions r JOIN docs d ON d.id = r.doc_id
+		WHERE r.id = ? AND d.project_id = ?)`,
+	ImportDocComments: `SELECT EXISTS(SELECT 1 FROM doc_comments c JOIN docs d ON d.id = c.doc_id
+		WHERE c.id = ? AND d.project_id = ?)`,
+}
+
+// ownedProbe returns table's ownership query, or an error when table is not
+// one of the ImportTable constants. Every import probe calls it before
+// putting table into SQL.
+func (table ImportTable) ownedProbe() (string, error) {
+	probe, ok := importOwnedProbes[table]
+	if !ok {
+		return "", fmt.Errorf("unknown import table %q", string(table))
+	}
+	return probe, nil
+}
+
+// ImportRowExistsTx reports whether table holds a row with id, in any project.
+func ImportRowExistsTx(tx *sql.Tx, table ImportTable, id int) (bool, error) {
+	if _, err := table.ownedProbe(); err != nil {
+		return false, err
+	}
+	var exists bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM `+string(table)+` WHERE id = ?)`, id).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probing %s id %d: %w", table, id, err)
+	}
+	return exists, nil
+}
+
+// ImportMaxIDTx returns the highest id in table across every project, or 0
+// when the table is empty.
+func ImportMaxIDTx(tx *sql.Tx, table ImportTable) (int, error) {
+	if _, err := table.ownedProbe(); err != nil {
+		return 0, err
+	}
+	var ceiling int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM ` + string(table)).Scan(&ceiling); err != nil {
+		return 0, fmt.Errorf("reading the id ceiling for %s: %w", table, err)
+	}
+	return ceiling, nil
+}
+
+// ImportRowOwnedTx reports whether the row of table with id belongs to
+// projectID. An absent row is not owned.
+func ImportRowOwnedTx(tx *sql.Tx, table ImportTable, id, projectID int) (bool, error) {
+	probe, err := table.ownedProbe()
+	if err != nil {
+		return false, err
+	}
+	var owned bool
+	if err := tx.QueryRow(probe, id, projectID).Scan(&owned); err != nil {
+		return false, fmt.Errorf("probing %s id %d for project %d: %w", table, id, projectID, err)
+	}
+	return owned, nil
+}
+
+// LabelIDByNameTx returns the id of projectID's label called name. found is
+// false when the project has no label of that name.
+func LabelIDByNameTx(tx *sql.Tx, projectID int, name string) (id int, found bool, err error) {
+	err = tx.QueryRow(`SELECT id FROM labels WHERE project_id = ? AND name = ?`, projectID, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("probing label %q in project %d: %w", name, projectID, err)
+	}
+	return id, true, nil
+}
+
+// RestoreIssueParentTx writes parentID into issueID's parent_id as an import
+// restores it: version, updated_at, and the activity log stay as imported. An
+// absent issue changes nothing and is not an error.
+func RestoreIssueParentTx(tx *sql.Tx, issueID, parentID int) error {
+	if _, err := tx.Exec(`UPDATE issues SET parent_id = ? WHERE id = ?`, parentID, issueID); err != nil {
+		return fmt.Errorf("setting parent_id for issue %d: %w", issueID, err)
+	}
+	return nil
+}

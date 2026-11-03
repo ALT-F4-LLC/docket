@@ -988,3 +988,194 @@ func TestIssueQueriesFrozenIssueBindingsLiveStepsFollowStepTerminal(t *testing.T
 		t.Errorf("FrozenIssueBindings = %+v, want one binding with LiveSteps %d", got, wantLive)
 	}
 }
+
+// importProbeRow is one seeded row pair of an import-probed table: the id of
+// the row project 1 owns and the id of the row project 2 owns. Child-table ids
+// differ from their parents' ids, so a probe matching the wrong column misses.
+type importProbeRow struct {
+	table          ImportTable
+	owned, foreign int
+}
+
+var importProbeRows = []importProbeRow{
+	{ImportIssues, 10, 20},
+	{ImportLabels, 131, 132},
+	{ImportComments, 31, 32},
+	{ImportIssueRelations, 41, 42},
+	{ImportActivityLog, 51, 52},
+	{ImportProposals, 60, 70},
+	{ImportVotes, 81, 82},
+	{ImportDocs, 90, 100},
+	{ImportDocRevisions, 111, 112},
+	{ImportDocComments, 121, 122},
+}
+
+// seedImportProbeRows gives each import-probed table one row in project 1
+// and one in project 2, with the ids importProbeRows lists. The higher id of
+// each pair is inserted first, so a table's newest row is not its highest id.
+func seedImportProbeRows(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, stmt := range []string{
+		`INSERT INTO projects (id, identity, name) VALUES (2, 'other', 'other')`,
+		`INSERT INTO issues (id, project_id, title, created_at, updated_at) VALUES
+			(20, 2, 'foreign', 't', 't'), (10, 1, 'owned', 't', 't')`,
+		`INSERT INTO labels (id, project_id, name) VALUES (132, 2, 'bug'), (131, 1, 'bug')`,
+		`INSERT INTO comments (id, issue_id, body, created_at) VALUES (32, 20, 'b', 't'), (31, 10, 'b', 't')`,
+		`INSERT INTO issue_relations (id, source_issue_id, target_issue_id, relation_type, created_at) VALUES
+			(42, 20, 10, 'blocks', 't'), (41, 10, 20, 'relates_to', 't')`,
+		`INSERT INTO activity_log (id, issue_id, field_changed, created_at) VALUES
+			(52, 20, 'status', 't'), (51, 10, 'status', 't')`,
+		`INSERT INTO proposals (id, project_id, description, required_voters, created_at, updated_at) VALUES
+			(70, 2, 'p', 1, 't', 't'), (60, 1, 'p', 1, 't', 't')`,
+		`INSERT INTO votes (id, proposal_id, voter_name, verdict, confidence, domain_relevance, created_at) VALUES
+			(82, 70, 'v', 'approve', 1, 1, 't'), (81, 60, 'v', 'approve', 1, 1, 't')`,
+		`INSERT INTO docs (id, project_id, type, title, created_at, updated_at) VALUES
+			(100, 2, 'adr', 'd', 't', 't'), (90, 1, 'adr', 'd', 't', 't')`,
+		`INSERT INTO doc_revisions (id, doc_id, revision_number, body, created_at) VALUES
+			(112, 100, 1, 'b', 't'), (111, 90, 1, 'b', 't')`,
+		`INSERT INTO doc_comments (id, doc_id, body, created_at) VALUES (122, 100, 'b', 't'), (121, 90, 'b', 't')`,
+	} {
+		mustExec(t, db, stmt)
+	}
+}
+
+func TestImportExportQueriesImportRowExistsTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	tx := beginEventTx(t, db)
+
+	for _, r := range importProbeRows {
+		for id, want := range map[int]bool{r.owned: true, r.foreign: true, 999: false} {
+			got, err := ImportRowExistsTx(tx, r.table, id)
+			testsupport.Must(t, err, "ImportRowExistsTx(%s, %d): %v", r.table, id, err)
+			if got != want {
+				t.Errorf("ImportRowExistsTx(%s, %d) = %v, want %v", r.table, id, got, want)
+			}
+		}
+	}
+	if got, err := ImportRowExistsTx(tx, ImportComments, 10); err != nil || got {
+		t.Errorf("ImportRowExistsTx(comments, an issue's id) = %v, %v; want false, nil", got, err)
+	}
+	for _, table := range []ImportTable{"projects", "issues WHERE 1=1 OR", ""} {
+		if _, err := ImportRowExistsTx(tx, table, 10); err == nil {
+			t.Errorf("ImportRowExistsTx(%q) succeeded, want an unknown-table error", table)
+		}
+	}
+}
+
+func TestImportExportQueriesImportMaxIDTx(t *testing.T) {
+	db := newIdemDB(t)
+	empty, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	for _, r := range importProbeRows {
+		got, err := ImportMaxIDTx(empty, r.table)
+		testsupport.Must(t, err, "ImportMaxIDTx(%s) on an empty table: %v", r.table, err)
+		if got != 0 {
+			t.Errorf("ImportMaxIDTx(%s) on an empty table = %d, want 0", r.table, got)
+		}
+	}
+	testsupport.Must(t, empty.Rollback(), "Rollback")
+
+	seedImportProbeRows(t, db)
+	tx := beginEventTx(t, db)
+	for _, r := range importProbeRows {
+		got, err := ImportMaxIDTx(tx, r.table)
+		testsupport.Must(t, err, "ImportMaxIDTx(%s): %v", r.table, err)
+		if want := max(r.owned, r.foreign); got != want {
+			t.Errorf("ImportMaxIDTx(%s) = %d, want %d", r.table, got, want)
+		}
+	}
+	if _, err := ImportMaxIDTx(tx, "projects"); err == nil {
+		t.Error("ImportMaxIDTx(projects) succeeded, want an unknown-table error")
+	}
+}
+
+func TestImportExportQueriesImportRowOwnedTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	tx := beginEventTx(t, db)
+
+	for _, r := range importProbeRows {
+		cases := []struct {
+			id, project int
+			want        bool
+		}{
+			{r.owned, 1, true},
+			{r.foreign, 2, true},
+			{r.foreign, 1, false},
+			{r.owned, 2, false},
+			{999, 1, false},
+		}
+		for _, c := range cases {
+			got, err := ImportRowOwnedTx(tx, r.table, c.id, c.project)
+			testsupport.Must(t, err, "ImportRowOwnedTx(%s, %d, %d): %v", r.table, c.id, c.project, err)
+			if got != c.want {
+				t.Errorf("ImportRowOwnedTx(%s, id %d, project %d) = %v, want %v", r.table, c.id, c.project, got, c.want)
+			}
+		}
+	}
+	if _, err := ImportRowOwnedTx(tx, "projects", 1, 1); err == nil {
+		t.Error("ImportRowOwnedTx(projects) succeeded, want an unknown-table error")
+	}
+}
+
+func TestImportExportQueriesLabelIDByNameTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	mustExec(t, db, `INSERT INTO labels (id, project_id, name) VALUES (133, 1, 'feature')`)
+	tx := beginEventTx(t, db)
+
+	cases := []struct {
+		project   int
+		name      string
+		wantID    int
+		wantFound bool
+	}{
+		{1, "bug", 131, true},
+		{2, "bug", 132, true},
+		{1, "feature", 133, true},
+		{2, "feature", 0, false},
+		{1, "absent", 0, false},
+		{3, "bug", 0, false},
+	}
+	for _, c := range cases {
+		id, found, err := LabelIDByNameTx(tx, c.project, c.name)
+		if err != nil {
+			t.Fatalf("LabelIDByNameTx(%d, %q): %v", c.project, c.name, err)
+		}
+		if id != c.wantID || found != c.wantFound {
+			t.Errorf("LabelIDByNameTx(%d, %q) = %d, %v; want %d, %v", c.project, c.name, id, found, c.wantID, c.wantFound)
+		}
+	}
+}
+
+func TestImportExportQueriesRestoreIssueParentTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	mustExec(t, db, `INSERT INTO issues (id, project_id, title, created_at, updated_at, version)
+		VALUES (30, 1, 'child', 'created', 'stamped', 4)`)
+	tx := beginEventTx(t, db)
+
+	testsupport.Must(t, RestoreIssueParentTx(tx, 30, 10), "RestoreIssueParentTx")
+	testsupport.Must(t, RestoreIssueParentTx(tx, 999, 10), "RestoreIssueParentTx(absent issue)")
+
+	rows, err := tx.Query(`SELECT id, COALESCE(parent_id, 0), updated_at, version FROM issues ORDER BY id`)
+	testsupport.Must(t, err, "reading issues: %v", err)
+	defer rows.Close()
+	type issueRow struct {
+		id, parent int
+		updatedAt  string
+		version    int
+	}
+	var got []issueRow
+	for rows.Next() {
+		var r issueRow
+		testsupport.Must(t, rows.Scan(&r.id, &r.parent, &r.updatedAt, &r.version), "scanning issues")
+		got = append(got, r)
+	}
+	testsupport.Must(t, rows.Err(), "iterating issues")
+	want := []issueRow{{10, 0, "t", 1}, {20, 0, "t", 1}, {30, 10, "stamped", 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("issues after RestoreIssueParentTx = %+v, want %+v", got, want)
+	}
+}
