@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -48,7 +47,7 @@ type UnfiledCondition struct {
 // run's open dispatch began, in proposal order with each vote's seats in name
 // order. A vote counts when a run issue is linked to it, it is no longer open,
 // and it was last updated at or after the dispatch opened.
-func unfiledConditions(conn *sql.DB, runID int, openedSeq int64) ([]UnfiledCondition, error) {
+func unfiledConditions(conn store.LegacyDB, runID int, openedSeq int64) ([]UnfiledCondition, error) {
 	var openedMS int64
 	if err := conn.QueryRow(`SELECT at_ms FROM events WHERE seq = ?`, openedSeq).Scan(&openedMS); err != nil {
 		return nil, fmt.Errorf("reading when the dispatch opened: %w", err)
@@ -116,7 +115,7 @@ func unfiledConditionsReason(found []UnfiledCondition) string {
 // check must not pass because it could not look. An unfiled condition with no
 // waiver refuses CONFLICT; a waiver on a bound run needs the conductor token
 // and a named writer, and is refused before the close writes anything.
-func conditionsVerdict(conn *sql.DB, runID int, waiver ConditionsWaiver) ([]UnfiledCondition, error) {
+func conditionsVerdict(conn store.LegacyDB, runID int, waiver ConditionsWaiver) ([]UnfiledCondition, error) {
 	open, ok, err := readOpenDispatch(conn, runID)
 	if err != nil {
 		return nil, err
@@ -175,7 +174,7 @@ func conditionsWaiverText(waived []UnfiledCondition, reason string) string {
 // up to done under the open dispatch, and a close that committed must not
 // then be reported as failed. conditionsVerdict already checked the writer,
 // the token, and the note's size.
-func recordConditionsWaiverTx(tx *sql.Tx, runID int, waiver ConditionsWaiver, waived []UnfiledCondition, nowMS int64) error {
+func recordConditionsWaiverTx(tx store.LegacyTx, runID int, waiver ConditionsWaiver, waived []UnfiledCondition, nowMS int64) error {
 	text := conditionsWaiverText(waived, waiver.Reason)
 	under := Authority{Kind: AuthorityConductor}
 	id, err := store.TxOn(tx).InsertRunNoteTx(store.RunNote{
