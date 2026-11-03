@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -46,7 +46,7 @@ func runRunHoldIssue(cmd *cobra.Command, args []string, w *output.Writer) error 
 	if err != nil {
 		return cmdErr(fmt.Errorf("invalid issue ID %q: %w", args[1], err), output.ErrValidation)
 	}
-	if _, err := db.GetRun(conn, runID); errors.Is(err, db.ErrRunNotFound) {
+	if _, err := store.StoreOn(conn).GetRun(runID); errors.Is(err, store.ErrRunNotFound) {
 		return cmdErr(fmt.Errorf("run %s not found", model.FormatRunID(runID)), output.ErrNotFound)
 	} else if err != nil {
 		return cmdErr(err, output.ErrGeneral)
