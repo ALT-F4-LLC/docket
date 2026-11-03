@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -35,7 +34,7 @@ type RetryEligible struct {
 // first needs it, instead of once per list (the relations read scans the
 // whole issue_relations table).
 type runReads struct {
-	conn  *sql.DB
+	conn  store.LegacyDB
 	runID int
 
 	steps     []*store.Step
@@ -45,7 +44,7 @@ type runReads struct {
 }
 
 // runReadsFromSteps shares a step list a caller already loaded.
-func runReadsFromSteps(conn *sql.DB, runID int, steps []*store.Step) *runReads {
+func runReadsFromSteps(conn store.LegacyDB, runID int, steps []*store.Step) *runReads {
 	return &runReads{conn: conn, runID: runID, steps: steps, stepsRead: true}
 }
 
@@ -74,7 +73,7 @@ func (r *runReads) directionalRelations() ([]model.Relation, error) {
 // RunAdvisories is `run status`'s pair of advisory lists, the unexpanded
 // issues and the retry-eligible parks, read over one step list and one
 // relations scan.
-func RunAdvisories(conn *sql.DB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+func RunAdvisories(conn store.LegacyDB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
 	reads := &runReads{conn: conn, runID: runID}
 	unexpanded, err := reads.unexpandedIssues()
 	if err != nil {
@@ -93,7 +92,7 @@ func RunAdvisories(conn *sql.DB, runID int) ([]UnexpandedIssue, []RetryEligible,
 // last changed after the park, in step order. A prerequisite that was already
 // met before the park cannot be what the park waits on. A pure read: `run status` renders it, and `dispatch open` renders it
 // and records the event.
-func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
+func RetryEligibleParks(conn store.LegacyDB, runID int) ([]RetryEligible, error) {
 	return (&runReads{conn: conn, runID: runID}).retryEligibleParks()
 }
 
@@ -221,7 +220,7 @@ func notBeforePark(at time.Time, parkMS int64) bool {
 // new park is signalled afresh. The parks already recorded are read in one
 // query over the run, and the missing events commit in one transaction; a
 // failure to record is returned without hiding the list.
-func recordRetryEligible(conn *sql.DB, reads *runReads, nowMS int64) ([]RetryEligible, error) {
+func recordRetryEligible(conn store.LegacyDB, reads *runReads, nowMS int64) ([]RetryEligible, error) {
 	eligible, err := reads.retryEligibleParks()
 	if err != nil || len(eligible) == 0 {
 		return eligible, err
@@ -277,32 +276,19 @@ type retryEligiblePark struct{ stepID, rowVersion int }
 
 // recordedRetryEligible is the set of parks the run's park-retry-eligible
 // events already name.
-func recordedRetryEligible(conn *sql.DB, runID int) (map[retryEligiblePark]bool, error) {
-	rows, err := conn.Query(
-		`SELECT step_id, data FROM events WHERE run_id = ? AND kind = ?`,
-		runID, EventParkRetryEligible)
+func recordedRetryEligible(conn store.LegacyDB, runID int) (map[retryEligiblePark]bool, error) {
+	events, err := store.StoreOn(conn).RunStepEvents(runID, EventParkRetryEligible)
 	if err != nil {
 		return nil, fmt.Errorf("reading retry-eligible events: %w", err)
 	}
-	defer rows.Close()
 	seen := make(map[retryEligiblePark]bool)
-	for rows.Next() {
-		var (
-			stepID sql.NullInt64
-			raw    string
-		)
-		if err := rows.Scan(&stepID, &raw); err != nil {
-			return nil, fmt.Errorf("reading a retry-eligible event: %w", err)
-		}
+	for _, e := range events {
 		var data struct {
 			RowVersion int `json:"row_version"`
 		}
-		if stepID.Valid && json.Unmarshal([]byte(raw), &data) == nil {
-			seen[retryEligiblePark{int(stepID.Int64), data.RowVersion}] = true
+		if json.Unmarshal([]byte(e.Data), &data) == nil {
+			seen[retryEligiblePark{e.StepID, data.RowVersion}] = true
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading retry-eligible events: %w", err)
 	}
 	return seen, nil
 }
