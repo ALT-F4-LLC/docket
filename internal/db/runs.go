@@ -870,7 +870,17 @@ func InsertFenceTx(tx *sql.Tx, f RunFence) error {
 
 // ListFences returns a run's harvested commands in a stable order.
 func ListFences(db *sql.DB, runID int) ([]RunFence, error) {
-	rows, err := db.Query(
+	return listFences(db, runID)
+}
+
+// ListFencesTx is ListFences inside the caller's transaction, for a dry run
+// whose harvested rows exist only in the transaction it will discard.
+func ListFencesTx(tx *sql.Tx, runID int) ([]RunFence, error) {
+	return listFences(tx, runID)
+}
+
+func listFences(q rowsQuerier, runID int) ([]RunFence, error) {
+	rows, err := q.Query(
 		`SELECT run_id, issue_id, tag, ordinal, command, sha256
 		   FROM run_fences WHERE run_id = ? ORDER BY issue_id, tag, ordinal`,
 		runID,
@@ -1208,4 +1218,79 @@ func RunStepEventSeqsTx(tx *sql.Tx, runID int) ([]StepEventSeq, error) {
 		}
 		return e, nil
 	})
+}
+
+// EventDataTx returns the payload of the event at seq verbatim, or
+// ErrNotFound when no event has that seq.
+func EventDataTx(tx *sql.Tx, seq int64) (string, error) {
+	var data string
+	err := tx.QueryRow(`SELECT data FROM events WHERE seq = ?`, seq).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the event at seq %d: %w", seq, err)
+	}
+	return data, nil
+}
+
+// ClaimAdmittedByDispatchTx reports whether the step is a row of the
+// dispatch's manifest and its newest claimKind event before reapedSeq comes
+// after openedSeq: the claim a reap ended was taken under that dispatch.
+func ClaimAdmittedByDispatchTx(
+	tx *sql.Tx, dispatchID int, openedSeq int64, stepID int, claimKind string, reapedSeq int64,
+) (bool, error) {
+	var admitted bool
+	if err := tx.QueryRow(
+		`SELECT EXISTS(
+		   SELECT 1 FROM dispatch_rows dr
+		    WHERE dr.dispatch_id = ? AND dr.step_id = ?)
+		 AND COALESCE((SELECT MAX(seq) FROM events
+		                WHERE kind = ? AND step_id = ? AND seq < ?), 0) > ?`,
+		dispatchID, stepID, claimKind, stepID, reapedSeq, openedSeq,
+	).Scan(&admitted); err != nil {
+		return false, fmt.Errorf("reading the claim reaped at seq %d: %w", reapedSeq, err)
+	}
+	return admitted, nil
+}
+
+// ProposalExistsTx reports whether a proposal with the id exists.
+func ProposalExistsTx(tx *sql.Tx, proposalID int) (bool, error) {
+	var n int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM proposals WHERE id = ?`, proposalID,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("resolving proposal %s: %w", model.FormatProposalID(proposalID), err)
+	}
+	return n > 0, nil
+}
+
+// VoteIDTx returns the id of the voter's cast on the proposal. found is false
+// when that seat has no cast there.
+func VoteIDTx(tx *sql.Tx, proposalID int, voter string) (id int64, found bool, err error) {
+	err = tx.QueryRow(
+		`SELECT id FROM votes WHERE proposal_id = ? AND voter_name = ?`,
+		proposalID, voter).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolving the %q seat on %s: %w",
+			voter, model.FormatProposalID(proposalID), err)
+	}
+	return id, true, nil
+}
+
+// RunEventDetailExistsTx reports whether the run logged a run-level event (one
+// naming no step) of the kind whose payload's `detail` equals detail.
+func RunEventDetailExistsTx(tx *sql.Tx, runID int, kind, detail string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM events
+		  WHERE run_id = ? AND kind = ? AND step_id IS NULL
+		    AND json_extract(data, '$.detail') = ?)`,
+		runID, kind, detail).Scan(&exists); err != nil {
+		return false, fmt.Errorf("reading %s's %s events: %w", model.FormatRunID(runID), kind, err)
+	}
+	return exists, nil
 }

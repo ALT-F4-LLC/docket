@@ -2,9 +2,12 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -363,4 +366,172 @@ func TestRunLifecycleQueriesRunUnfinishedStepCountTx(t *testing.T) {
 	ask("the run's unfinished steps", f.run, 2)
 	ask("a run whose steps are all terminal", f.otherRun, 0)
 	ask("a run with no steps", 999, 0)
+}
+
+func TestRunSideQueriesEventDataTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "implement", Status: StepClaimed})
+	forced := f.event("lease-reaped", step, `{"forced":true}`)
+	expired := f.event("lease-reaped", step, `{"forced":false}`)
+
+	for seq, want := range map[int64]string{forced: `{"forced":true}`, expired: `{"forced":false}`} {
+		got, err := EventDataTx(f.tx, seq)
+		if err != nil || got != want {
+			t.Errorf("the payload at seq %d = (%q, %v), want (%q, nil)", seq, got, err, want)
+		}
+	}
+	got, err := EventDataTx(f.tx, expired+1)
+	if !errors.Is(err, ErrNotFound) || got != "" {
+		t.Errorf("a seq the log never reached = (%q, %v), want (\"\", ErrNotFound)", got, err)
+	}
+}
+
+func TestRunSideQueriesClaimAdmittedByDispatchTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	admitted := f.add(StepRow{StepName: "implement", Status: StepClaimed})
+	early := f.add(StepRow{StepName: "review", Status: StepClaimed})
+	offManifest := f.add(StepRow{StepName: "verify", Status: StepClaimed})
+	unclaimed := f.add(StepRow{StepName: "fix", Status: StepPending})
+	f.event("step-claimed", early, `{}`)
+	opened := lifecycleEvent(f, NewEvent{AtMS: 1, Kind: "dispatch-opened", RunID: f.run, Data: `{}`})
+	claim := f.event("step-claimed", admitted, `{}`)
+	f.event("step-claimed", offManifest, `{}`)
+	f.event("step-recorded", early, `{}`)
+	reaped := f.event("lease-reaped", admitted, `{}`)
+
+	dispatchID, err := InsertDispatchTx(f.tx, f.run, opened, 99999, 1000)
+	testsupport.Must(t, err, "InsertDispatchTx: %v", err)
+	for i, stepID := range []int{admitted, early, unclaimed} {
+		testsupport.Must(t, InsertDispatchRowTx(f.tx, dispatchID, DispatchRow{
+			Position: i, StepID: stepID, Instance: "row", RowJSON: `{}`, RowSHA256: "sha",
+		}), "InsertDispatchRowTx %d", i)
+	}
+
+	ask := func(name string, dispatchID, stepID int, reapedSeq int64, want bool) {
+		t.Helper()
+		got, err := ClaimAdmittedByDispatchTx(f.tx, dispatchID, opened, stepID, "step-claimed", reapedSeq)
+		if err != nil || got != want {
+			t.Errorf("%s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	ask("a manifest step claimed after the open", dispatchID, admitted, reaped, true)
+	ask("a reap at the claim's own seq", dispatchID, admitted, claim, false)
+	ask("a manifest step last claimed before the open", dispatchID, early, reaped, false)
+	ask("a step claimed after the open but off the manifest", dispatchID, offManifest, reaped, false)
+	ask("a manifest step never claimed", dispatchID, unclaimed, reaped, false)
+	ask("a dispatch that does not exist", 999, admitted, reaped, false)
+}
+
+// seedSideQueryVotes stores proposals 7 and 8 and their casts: seats a and b
+// on 7, seat c on 8.
+func seedSideQueryVotes(f *routingFixture) {
+	f.t.Helper()
+	now := time.Unix(1000, 0)
+	for _, id := range []int{7, 8} {
+		_, err := InsertProposalWithID(f.tx, &model.Proposal{
+			ID: id, Description: "vote", Criticality: model.CriticalityLow,
+			Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.5,
+			CreatedAt: now, UpdatedAt: now,
+		})
+		testsupport.Must(f.t, err, "InsertProposalWithID %d: %v", id, err)
+	}
+	for _, v := range []struct {
+		id, proposal int
+		voter        string
+	}{{70, 7, "seat-a"}, {71, 7, "seat-b"}, {80, 8, "seat-c"}} {
+		_, err := InsertVoteWithID(f.tx, &model.Vote{
+			ID: v.id, ProposalID: v.proposal, VoterName: v.voter,
+			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.9, CreatedAt: now,
+		})
+		testsupport.Must(f.t, err, "InsertVoteWithID %d: %v", v.id, err)
+	}
+}
+
+func TestRunSideQueriesProposalExistsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	seedSideQueryVotes(f)
+
+	for id, want := range map[int]bool{7: true, 8: true, 999: false} {
+		got, err := ProposalExistsTx(f.tx, id)
+		if err != nil || got != want {
+			t.Errorf("proposal %d exists = (%v, %v), want (%v, nil)", id, got, err, want)
+		}
+	}
+}
+
+func TestRunSideQueriesVoteIDTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	seedSideQueryVotes(f)
+
+	ask := func(name string, proposalID int, voter string, wantID int64, wantFound bool) {
+		t.Helper()
+		id, found, err := VoteIDTx(f.tx, proposalID, voter)
+		if err != nil || found != wantFound || id != wantID {
+			t.Errorf("%s = (%d, %v, %v), want (%d, %v, nil)", name, id, found, err, wantID, wantFound)
+		}
+	}
+	ask("seat a's cast", 7, "seat-a", 70, true)
+	ask("seat b's cast", 7, "seat-b", 71, true)
+	ask("a seat that cast only on another proposal", 7, "seat-c", 0, false)
+	ask("a proposal that does not exist", 999, "seat-a", 0, false)
+}
+
+func TestRunSideQueriesListFencesTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	for _, fence := range []RunFence{
+		{RunID: f.run, IssueID: f.otherIssue, Tag: "ac", Ordinal: 0, Command: "make c", SHA256: "c"},
+		{RunID: f.run, IssueID: f.issue, Tag: "tests", Ordinal: 1, Command: "make b2", SHA256: "b2"},
+		{RunID: f.run, IssueID: f.issue, Tag: "ac", Ordinal: 0, Command: "make a", SHA256: "a"},
+		{RunID: f.run, IssueID: f.issue, Tag: "tests", Ordinal: 0, Command: "make b1", SHA256: "b1"},
+		{RunID: f.otherRun, IssueID: f.issue, Tag: "ac", Ordinal: 0, Command: "make z", SHA256: "z"},
+	} {
+		testsupport.Must(t, InsertFenceTx(f.tx, fence), "InsertFenceTx %s#%d", fence.Tag, fence.Ordinal)
+	}
+	lo, hi := f.issue, f.otherIssue
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	byIssue := map[int][]RunFence{
+		f.issue: {
+			{RunID: f.run, IssueID: f.issue, Tag: "ac", Ordinal: 0, Command: "make a", SHA256: "a"},
+			{RunID: f.run, IssueID: f.issue, Tag: "tests", Ordinal: 0, Command: "make b1", SHA256: "b1"},
+			{RunID: f.run, IssueID: f.issue, Tag: "tests", Ordinal: 1, Command: "make b2", SHA256: "b2"},
+		},
+		f.otherIssue: {
+			{RunID: f.run, IssueID: f.otherIssue, Tag: "ac", Ordinal: 0, Command: "make c", SHA256: "c"},
+		},
+	}
+	want := append(append([]RunFence{}, byIssue[lo]...), byIssue[hi]...)
+
+	got, err := ListFencesTx(f.tx, f.run)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("the run's fences = (%+v, %v), want (%+v, nil)", got, err, want)
+	}
+	got, err = ListFencesTx(f.tx, 999)
+	if err != nil || len(got) != 0 {
+		t.Errorf("a run with no fences = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
+func TestRunSideQueriesRunEventDetailExistsTx(t *testing.T) {
+	f := newRoutingFixture(t)
+	step := f.add(StepRow{StepName: "review", Status: StepDone})
+	lifecycleEvent(f, NewEvent{AtMS: 1, Kind: "vote-opened", RunID: f.run, Data: `{"detail":"DKT-V7"}`})
+	lifecycleEvent(f, NewEvent{AtMS: 1, Kind: "vote-tallied", RunID: f.run, Data: `{"detail":"DKT-V8"}`})
+	lifecycleEvent(f, NewEvent{AtMS: 1, Kind: "vote-opened", RunID: f.run, StepID: step, Data: `{"detail":"DKT-V9"}`})
+	lifecycleEvent(f, NewEvent{AtMS: 1, Kind: "vote-opened", RunID: f.otherRun, Data: `{"detail":"DKT-V10"}`})
+
+	ask := func(name string, runID int, detail string, want bool) {
+		t.Helper()
+		got, err := RunEventDetailExistsTx(f.tx, runID, "vote-opened", detail)
+		if err != nil || got != want {
+			t.Errorf("%s = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	ask("the run's opened panel", f.run, "DKT-V7", true)
+	ask("a panel the run only tallied", f.run, "DKT-V8", false)
+	ask("a panel opened on a step", f.run, "DKT-V9", false)
+	ask("a panel opened on another run", f.run, "DKT-V10", false)
+	ask("the other run's opened panel", f.otherRun, "DKT-V10", true)
+	ask("a panel no run opened", f.run, "DKT-V11", false)
 }
