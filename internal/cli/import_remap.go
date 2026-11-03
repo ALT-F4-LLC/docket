@@ -1,10 +1,8 @@
 package cli
 
 import (
-	"database/sql"
-	"fmt"
-
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // Import-time ID remapping (v12, closing the silent-drop trap).
@@ -38,61 +36,61 @@ import (
 // export, and those rows are skipped rather than remapped. Import a foreign
 // export into a fresh project instead, which is the consolidation path.
 type importRemap struct {
-	tx *sql.Tx
+	tx store.ReadTx
 	// remapped counts the ids reassigned; a label matched by name is not one.
 	remapped int
 }
 
 // remapExportForImport rewrites data in place for import into projectID.
 // It returns how many rows were reassigned.
-func remapExportForImport(tx *sql.Tx, data *model.ExportData, projectID int) (int, error) {
-	r := &importRemap{tx: tx}
+func remapExportForImport(tx store.LegacyTx, data *model.ExportData, projectID int) (int, error) {
+	r := &importRemap{tx: store.TxOn(tx)}
 
 	labelMap, err := r.labelMap(data.Labels, projectID)
 	if err != nil {
 		return 0, err
 	}
-	issueMap, err := r.tableMap("issues", ownedIssue, projectID,
+	issueMap, err := r.tableMap(store.ImportIssues, projectID,
 		ids(data.Issues, func(i *model.Issue) int { return i.ID }))
 	if err != nil {
 		return 0, err
 	}
-	commentMap, err := r.tableMap("comments", ownedComment, projectID,
+	commentMap, err := r.tableMap(store.ImportComments, projectID,
 		ids(data.Comments, func(c *model.Comment) int { return c.ID }))
 	if err != nil {
 		return 0, err
 	}
-	relationMap, err := r.tableMap("issue_relations", ownedRelation, projectID,
+	relationMap, err := r.tableMap(store.ImportIssueRelations, projectID,
 		ids(data.Relations, func(rel model.Relation) int { return rel.ID }))
 	if err != nil {
 		return 0, err
 	}
-	activityMap, err := r.tableMap("activity_log", ownedActivity, projectID,
+	activityMap, err := r.tableMap(store.ImportActivityLog, projectID,
 		ids(data.ActivityLog, func(a *model.Activity) int { return a.ID }))
 	if err != nil {
 		return 0, err
 	}
-	proposalMap, err := r.tableMap("proposals", ownedProposal, projectID,
+	proposalMap, err := r.tableMap(store.ImportProposals, projectID,
 		ids(data.Proposals, func(p *model.Proposal) int { return p.ID }))
 	if err != nil {
 		return 0, err
 	}
-	voteMap, err := r.tableMap("votes", ownedVote, projectID,
+	voteMap, err := r.tableMap(store.ImportVotes, projectID,
 		ids(data.Votes, func(v *model.Vote) int { return v.ID }))
 	if err != nil {
 		return 0, err
 	}
-	docMap, err := r.tableMap("docs", ownedDoc, projectID,
+	docMap, err := r.tableMap(store.ImportDocs, projectID,
 		ids(data.Docs, func(d *model.Doc) int { return d.ID }))
 	if err != nil {
 		return 0, err
 	}
-	revisionMap, err := r.tableMap("doc_revisions", ownedDocRevision, projectID,
+	revisionMap, err := r.tableMap(store.ImportDocRevisions, projectID,
 		ids(data.DocRevisions, func(rev *model.DocRevision) int { return rev.ID }))
 	if err != nil {
 		return 0, err
 	}
-	docCommentMap, err := r.tableMap("doc_comments", ownedDocComment, projectID,
+	docCommentMap, err := r.tableMap(store.ImportDocComments, projectID,
 		ids(data.DocComments, func(c *model.DocComment) int { return c.ID }))
 	if err != nil {
 		return 0, err
@@ -182,44 +180,21 @@ func ids[T any](rows []T, id func(T) int) []int {
 	return out
 }
 
-// Ownership probes: does the row with this id belong to THIS project? Root
-// tables carry project_id; child tables reach it through their parent. Each
-// takes (id, projectID).
-const (
-	ownedIssue   = `SELECT EXISTS(SELECT 1 FROM issues WHERE id = ? AND project_id = ?)`
-	ownedComment = `SELECT EXISTS(SELECT 1 FROM comments c JOIN issues i ON i.id = c.issue_id
-		WHERE c.id = ? AND i.project_id = ?)`
-	ownedRelation = `SELECT EXISTS(SELECT 1 FROM issue_relations r JOIN issues i ON i.id = r.source_issue_id
-		WHERE r.id = ? AND i.project_id = ?)`
-	ownedActivity = `SELECT EXISTS(SELECT 1 FROM activity_log a JOIN issues i ON i.id = a.issue_id
-		WHERE a.id = ? AND i.project_id = ?)`
-	ownedProposal = `SELECT EXISTS(SELECT 1 FROM proposals WHERE id = ? AND project_id = ?)`
-	ownedVote     = `SELECT EXISTS(SELECT 1 FROM votes v JOIN proposals p ON p.id = v.proposal_id
-		WHERE v.id = ? AND p.project_id = ?)`
-	ownedDoc         = `SELECT EXISTS(SELECT 1 FROM docs WHERE id = ? AND project_id = ?)`
-	ownedDocRevision = `SELECT EXISTS(SELECT 1 FROM doc_revisions r JOIN docs d ON d.id = r.doc_id
-		WHERE r.id = ? AND d.project_id = ?)`
-	ownedDocComment = `SELECT EXISTS(SELECT 1 FROM doc_comments c JOIN docs d ON d.id = c.doc_id
-		WHERE c.id = ? AND d.project_id = ?)`
-)
-
 // tableMap returns fresh ids for every source id that already exists in the
 // destination table as ANOTHER project's row. A source id held by this
 // project's own row is kept: it is the same row, and the restore skips it.
 // Fresh ids start past both the destination's max and the document's own max,
 // so they collide with neither existing rows nor document rows that keep
 // their ids.
-func (r *importRemap) tableMap(table, ownedSQL string, projectID int, sourceIDs []int) (map[int]int, error) {
+func (r *importRemap) tableMap(table store.ImportTable, projectID int, sourceIDs []int) (map[int]int, error) {
 	if len(sourceIDs) == 0 {
 		return nil, nil
 	}
 
-	var dbMax sql.NullInt64
-	if err := r.tx.QueryRow(
-		`SELECT MAX(id) FROM ` + table).Scan(&dbMax); err != nil {
-		return nil, fmt.Errorf("reading the id ceiling for %s: %w", table, err)
+	next, err := r.tx.ImportMaxIDTx(table)
+	if err != nil {
+		return nil, err
 	}
-	next := int(dbMax.Int64)
 	for _, id := range sourceIDs {
 		if id > next {
 			next = id
@@ -229,17 +204,16 @@ func (r *importRemap) tableMap(table, ownedSQL string, projectID int, sourceIDs 
 
 	out := map[int]int{}
 	for _, id := range sourceIDs {
-		var exists bool
-		if err := r.tx.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM `+table+` WHERE id = ?)`, id).Scan(&exists); err != nil {
-			return nil, fmt.Errorf("probing %s id %d: %w", table, id, err)
+		exists, err := r.tx.ImportRowExistsTx(table, id)
+		if err != nil {
+			return nil, err
 		}
 		if !exists {
 			continue
 		}
-		var owned bool
-		if err := r.tx.QueryRow(ownedSQL, id, projectID).Scan(&owned); err != nil {
-			return nil, fmt.Errorf("probing %s id %d for project %d: %w", table, id, projectID, err)
+		owned, err := r.tx.ImportRowOwnedTx(table, id, projectID)
+		if err != nil {
+			return nil, err
 		}
 		if owned {
 			continue
@@ -264,23 +238,20 @@ func (r *importRemap) labelMap(labels []*model.Label, projectID int) (map[int]in
 	byName := map[int]int{}
 	var unresolved []int
 	for _, l := range labels {
-		var existing sql.NullInt64
-		err := r.tx.QueryRow(
-			`SELECT id FROM labels WHERE project_id = ? AND name = ?`, projectID, l.Name).Scan(&existing)
-		switch {
-		case err == sql.ErrNoRows:
+		existing, found, err := r.tx.LabelIDByNameTx(projectID, l.Name)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			unresolved = append(unresolved, l.ID)
 			continue
-		case err != nil:
-			return nil, fmt.Errorf("probing label %q in project %d: %w", l.Name, projectID, err)
 		}
-		if int(existing.Int64) != l.ID {
-			byName[l.ID] = int(existing.Int64)
+		if existing != l.ID {
+			byName[l.ID] = existing
 		}
 	}
 
-	fresh, err := r.tableMap("labels",
-		`SELECT EXISTS(SELECT 1 FROM labels WHERE id = ? AND project_id = ?)`, projectID, unresolved)
+	fresh, err := r.tableMap(store.ImportLabels, projectID, unresolved)
 	if err != nil {
 		return nil, err
 	}
