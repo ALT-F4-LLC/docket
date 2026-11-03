@@ -1,9 +1,7 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -53,7 +51,7 @@ type recordedHead struct {
 // worktree is the shared checkout (a step may record it; it keeps the live-tree
 // behavior, because its head legitimately moves as work is
 // integrated.
-func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (recordedHead, bool) {
+func (e *Engine) captureRecordedHead(conn store.LegacyDB, runID int, worktree string) (recordedHead, bool) {
 	return e.captureRecordedHeadIn(runExecRoot(conn, runID), worktree)
 }
 
@@ -101,17 +99,17 @@ func resolvedDir(path string) string {
 	return filepath.Clean(path)
 }
 
-// rowQuerier is the single-row read recordedHeadOfErr needs, satisfied by
-// *sql.Tx and *sql.DB.
-type rowQuerier interface {
-	QueryRow(query string, args ...any) *sql.Row
+// recordedHeadConn is the handle a recorded-head read runs on: the database,
+// or a transaction whose own uncommitted rows the read must see.
+type recordedHeadConn interface {
+	store.LegacyDB | store.LegacyTx
 }
 
 // recordedHeadOf is the head recorded for the step's CURRENT worktree. It
 // swallows a read error as "no record", the refusal direction for its
 // callers; a stage that would fall back to the live worktree on "no record"
 // uses recordedHeadOfErr and propagates the error instead.
-func recordedHeadOf(conn rowQuerier, step *store.Step) (recordedHead, bool) {
+func recordedHeadOf[C recordedHeadConn](conn C, step *store.Step) (recordedHead, bool) {
 	rec, ok, err := recordedHeadOfErr(conn, step)
 	return rec, ok && err == nil
 }
@@ -120,21 +118,27 @@ func recordedHeadOf(conn rowQuerier, step *store.Step) (recordedHead, bool) {
 // absence of a record: ok is false only when no row exists or the newest row
 // is cleared or names another worktree, and any other failure to read the
 // row is returned, so a caller retries rather than measures a different tree.
-func recordedHeadOfErr(conn rowQuerier, step *store.Step) (recordedHead, bool, error) {
-	var payload sql.NullString
-	err := conn.QueryRow(
-		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
-		  ORDER BY id DESC LIMIT 1`,
-		step.ID, RecordedHeadArtifactKind).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return recordedHead{}, false, nil
+func recordedHeadOfErr[C recordedHeadConn](conn C, step *store.Step) (recordedHead, bool, error) {
+	var (
+		payload string
+		found   bool
+		err     error
+	)
+	switch c := any(conn).(type) {
+	case store.LegacyDB:
+		payload, found, err = store.StoreOn(c).NewestStepPayload(step.ID, RecordedHeadArtifactKind)
+	case store.LegacyTx:
+		payload, found, err = store.TxOn(c).NewestStepPayloadTx(step.ID, RecordedHeadArtifactKind)
 	}
 	if err != nil {
 		return recordedHead{}, false, fmt.Errorf(
 			"reading the recorded head for %s: %w", step.Instance, err)
 	}
+	if !found {
+		return recordedHead{}, false, nil
+	}
 	var rec recordedHead
-	if json.Unmarshal([]byte(payload.String), &rec) != nil ||
+	if json.Unmarshal([]byte(payload), &rec) != nil ||
 		rec.Head == "" || rec.Worktree != step.WorkRoot {
 		return recordedHead{}, false, nil
 	}
@@ -161,7 +165,7 @@ func worktreeClean(dir string) bool {
 // none reproduces it, a cleared record (an empty head) that supersedes any
 // earlier one: recordedHeadOf reads the newest row and honors only a head.
 func insertRecordedHeadTx(
-	tx *sql.Tx, step *store.Step, rec recordedHead, have bool, worktree string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, rec recordedHead, have bool, worktree string, nowMS int64,
 ) error {
 	if !have {
 		rec = recordedHead{Worktree: worktree}
@@ -196,7 +200,7 @@ func commitInRepo(dir, sha string) bool {
 // record when it has one. A re-claimed step that records without a worktree
 // keeps its earlier work_root, so the first attempt's head would otherwise
 // stand for the second attempt.
-func clearRecordedHeadIfAnyTx(tx *sql.Tx, step *store.Step, nowMS int64) error {
+func clearRecordedHeadIfAnyTx(tx store.LegacyTx, step *store.Step, nowMS int64) error {
 	if step.WorkRoot == "" {
 		return nil
 	}
