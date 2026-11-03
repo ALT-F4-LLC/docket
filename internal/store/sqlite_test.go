@@ -793,3 +793,188 @@ func TestSQLiteDispatchAndGuardQueries(t *testing.T) {
 		t.Errorf("LastEventSeqTx through a snapshot = (%d, %v), want (%d, nil)", seq, err, newest)
 	}
 }
+
+// TestSQLiteHoldAndActivationQueries reaches the hold, activation and
+// definition queries through the pool, a Tx and a read snapshot on seeded
+// rows: each read keeps its run, issue, project and kind filters, list reads
+// come back in instance, id or name-then-version order where the rows were
+// written the other way, and missing rows read as not found.
+func TestSQLiteHoldAndActivationQueries(t *testing.T) {
+	st := openMigratedSQLite(t)
+	home, err := st.EnsureProject("/repo/hold", "hold", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	away, err := st.EnsureProject("/repo/away", "away", 1)
+	testsupport.Must(t, err, "EnsureProject: %v", err)
+	workflow := func(project int, name string, version int) int {
+		t.Helper()
+		wf, _, err := st.InsertWorkflow(&model.Workflow{
+			ProjectID: project, Name: name, Version: version, SourceSHA256: "sha", Body: "body",
+			Parsed: `{"name": "` + name + `@` + strconv.Itoa(version) + `"}`,
+		}, 1)
+		testsupport.Must(t, err, "InsertWorkflow %s@%d: %v", name, version, err)
+		return wf.ID
+	}
+	beta1, alpha1, alpha2 := workflow(home, "beta", 1), workflow(home, "alpha", 1), workflow(home, "alpha", 2)
+	elsewhereWF := workflow(away, "gamma", 1)
+	newIssue := func(title string) int {
+		t.Helper()
+		id, _, err := st.CreateIssueIdempotent(&model.Issue{
+			ProjectID: home, Title: title, Status: model.StatusTodo,
+			Priority: model.PriorityNone, Kind: model.IssueKindTask,
+		}, nil, nil, "")
+		testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+		return id
+	}
+	issue, sibling := newIssue("held"), newIssue("sibling")
+	newRun := func() int {
+		t.Helper()
+		run, _, err := st.InsertRunWithContextIdempotent(home, "hold", 0, 1, db.RunContext{}, "")
+		testsupport.Must(t, err, "InsertRunWithContextIdempotent: %v", err)
+		testsupport.Must(t, st.AddRunIssue(run.ID, issue), "AddRunIssue")
+		testsupport.Must(t, st.AddRunIssue(run.ID, sibling), "AddRunIssue")
+		return run.ID
+	}
+	run, otherRun, emptyRun := newRun(), newRun(), newRun()
+
+	tx, err := st.Begin()
+	testsupport.Must(t, err, "opening the write transaction: %v", err)
+	t.Cleanup(func() { tx.Rollback() })
+	add := func(runID, issueID, workflowID int, instance, name string, ordinal int, cost float64) int {
+		t.Helper()
+		testsupport.Must(t, tx.InsertStepTx(db.StepRow{
+			RunID: runID, IssueID: issueID, WorkflowID: workflowID, StepName: name, Ordinal: ordinal,
+			Instance: instance, Kind: "executor", Status: db.StepPending, ExpectedCost: cost,
+		}, 1), "InsertStepTx %s", instance)
+		id, found, err := tx.StepIDByInstanceTx(runID, issueID, instance)
+		testsupport.Must(t, err, "StepIDByInstanceTx: %v", err)
+		if !found {
+			t.Fatalf("step %s was not found after its insert", instance)
+		}
+		return id
+	}
+	review := add(run, issue, alpha2, "review@1", "review", 1, 0.5)
+	add(run, issue, alpha2, "review@1#2", "review", 1, 0.25)
+	add(run, issue, beta1, "hold#2", "hold", 2, 1)
+	routedCluster := add(run, issue, beta1, "hold#1", "hold", 2, 0)
+	add(run, issue, beta1, "hold", "hold", 2, 2)
+	add(run, issue, beta1, "holdout", "holdout", 2, 0)
+	add(run, sibling, alpha1, "hold#1", "hold", 2, 0)
+	add(otherRun, issue, elsewhereWF, "hold", "hold", 2, 8)
+	add(otherRun, issue, elsewhereWF, "review@1", "review", 1, 0)
+	testsupport.Must(t, tx.SetStepRoutingTx(routedCluster, "pass", "held", db.StepDone, "", 2), "SetStepRoutingTx")
+	testsupport.Must(t, tx.BindRunIssueTx(&db.RunIssue{RunID: run, IssueID: issue, WorkflowID: &alpha2}), "BindRunIssueTx")
+	testsupport.Must(t, tx.BindRunIssueTx(&db.RunIssue{RunID: run, IssueID: sibling, WorkflowID: &beta1}), "BindRunIssueTx")
+	testsupport.Must(t, tx.BindRunIssueTx(&db.RunIssue{RunID: otherRun, IssueID: issue, WorkflowID: &elsewhereWF}),
+		"BindRunIssueTx")
+	for _, a := range []db.Artifact{
+		{RunID: run, StepID: review, Kind: "change-summary", Body: "b", Payload: `{"n": 1}`, SHA256: "s1"},
+		{RunID: run, StepID: review, Kind: "change-summary", Body: "b", Payload: `{"n": 2}`, SHA256: "s2"},
+		{RunID: run, StepID: review, Kind: "gate-log", Body: "b", SHA256: "s3"},
+	} {
+		_, err := tx.InsertArtifactTx(a, 1)
+		testsupport.Must(t, err, "InsertArtifactTx %s: %v", a.Kind, err)
+	}
+
+	routed, err := tx.GetStepTx(routedCluster)
+	testsupport.Must(t, err, "GetStepTx: %v", err)
+	if routed.Routing == "" {
+		t.Fatalf("the routed cluster row stored no routing record, so the routing column went unchecked")
+	}
+	cluster := []InstanceStatusRouting{
+		{Instance: "hold#1", Status: db.StepDone, Routing: routed.Routing},
+		{Instance: "hold#2", Status: db.StepPending},
+	}
+	if got, err := tx.HoldClusterInstancesTx(run, issue, "hold"); err != nil || !reflect.DeepEqual(got, cluster) {
+		t.Errorf("HoldClusterInstancesTx = (%+v, %v), want (%+v, nil)", got, err, cluster)
+	}
+
+	art, found, err := tx.NewestStepArtifactExceptKindsTx(review, []string{"gate-log"})
+	if err != nil || !found || art.Kind != "change-summary" || art.Payload != `{"n": 2}` {
+		t.Errorf("NewestStepArtifactExceptKindsTx past gate-log = (%+v, %v, %v), want the newest change-summary",
+			art, found, err)
+	}
+	if art, found, err := tx.NewestStepArtifactExceptKindsTx(review, nil); err != nil || !found ||
+		art.Kind != "gate-log" || art.Payload != "" {
+		t.Errorf("NewestStepArtifactExceptKindsTx with no exceptions = (%+v, %v, %v), want the gate-log with no payload",
+			art, found, err)
+	}
+	if art, found, err := tx.NewestStepArtifactExceptKindsTx(routedCluster, nil); err != nil || found || art.ID != 0 {
+		t.Errorf("NewestStepArtifactExceptKindsTx of a step with none = (%+v, %v, %v), want (zero, false, nil)",
+			art, found, err)
+	}
+
+	if cost, err := tx.RunExpectedCostTx(run); err != nil || cost != 3.75 {
+		t.Errorf("RunExpectedCostTx = (%v, %v), want (3.75, nil)", cost, err)
+	}
+	if cost, err := tx.RunExpectedCostTx(emptyRun); err != nil || cost != 0 {
+		t.Errorf("RunExpectedCostTx of a run with no steps = (%v, %v), want (0, nil)", cost, err)
+	}
+
+	testsupport.Must(t, tx.RepinStepWorkRootTx(review, "/wt/repinned"), "RepinStepWorkRootTx")
+	if step, err := tx.GetStepTx(review); err != nil || step.WorkRoot != "/wt/repinned" {
+		t.Errorf("work root after RepinStepWorkRootTx = (%+v, %v), want /wt/repinned", step, err)
+	}
+	if err := tx.RepinStepWorkRootTx(999999, "/wt"); !errors.Is(err, ErrStepNotFound) {
+		t.Errorf("RepinStepWorkRootTx of a missing step: err = %v, want ErrStepNotFound", err)
+	}
+
+	stepWorkflows := []ParsedWorkflow{
+		{ID: beta1, Parsed: `{"name": "beta@1"}`}, {ID: alpha1, Parsed: `{"name": "alpha@1"}`},
+		{ID: alpha2, Parsed: `{"name": "alpha@2"}`},
+	}
+	if got, err := tx.RunStepWorkflowsTx(run); err != nil || !reflect.DeepEqual(got, stepWorkflows) {
+		t.Errorf("RunStepWorkflowsTx = (%+v, %v), want (%+v, nil)", got, err, stepWorkflows)
+	}
+	testsupport.Must(t, tx.Commit(), "committing the seeded rows")
+
+	whole := append([]InstanceStatusRouting{{Instance: "hold", Status: db.StepPending}}, cluster...)
+	if got, err := st.HoldInstances(run, issue, "hold"); err != nil || !reflect.DeepEqual(got, whole) {
+		t.Errorf("HoldInstances = (%+v, %v), want (%+v, nil)", got, err, whole)
+	}
+	if got, err := st.HoldInstances(emptyRun, issue, "hold"); err != nil || len(got) != 0 {
+		t.Errorf("HoldInstances of a run with no hold = (%+v, %v), want (none, nil)", got, err)
+	}
+	if id, found, err := st.StepIDAtOrdinal(run, issue, "review", 1); err != nil || !found || id != review {
+		t.Errorf("StepIDAtOrdinal = (%d, %v, %v), want (%d, true, nil): the lowest id", id, found, err, review)
+	}
+	if id, found, err := st.StepIDAtOrdinal(run, sibling, "review", 1); err != nil || found || id != 0 {
+		t.Errorf("StepIDAtOrdinal of an issue with none = (%d, %v, %v), want (0, false, nil)", id, found, err)
+	}
+	if got, err := st.RunStepWorkflows(run); err != nil || !reflect.DeepEqual(got, stepWorkflows) {
+		t.Errorf("RunStepWorkflows = (%+v, %v), want (%+v, nil)", got, err, stepWorkflows)
+	}
+	bound := []ParsedWorkflow{{ID: beta1, Parsed: `{"name": "beta@1"}`}, {ID: alpha2, Parsed: `{"name": "alpha@2"}`}}
+	if got, err := st.RunBoundWorkflows(run); err != nil || !reflect.DeepEqual(got, bound) {
+		t.Errorf("RunBoundWorkflows = (%+v, %v), want (%+v, nil)", got, err, bound)
+	}
+	if got, err := st.RunBoundWorkflows(emptyRun); err != nil || len(got) != 0 {
+		t.Errorf("RunBoundWorkflows of a run with no bound issue = (%+v, %v), want (none, nil)", got, err)
+	}
+
+	snap, err := st.BeginReadSnapshot()
+	testsupport.Must(t, err, "opening the read snapshot: %v", err)
+	t.Cleanup(func() { snap.Rollback() })
+	if identity, err := snap.ProjectIdentityTx(home); err != nil || identity != "/repo/hold" {
+		t.Errorf("ProjectIdentityTx = (%q, %v), want (/repo/hold, nil)", identity, err)
+	}
+	def, err := st.GetProject(DefaultProjectID)
+	testsupport.Must(t, err, "GetProject default: %v", err)
+	if identity, err := snap.ProjectIdentityTx(0); err != nil || identity != def.Identity {
+		t.Errorf("ProjectIdentityTx(0) = (%q, %v), want the default project's (%q, nil)", identity, err, def.Identity)
+	}
+	if _, err := snap.ProjectIdentityTx(away + 100); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ProjectIdentityTx of a missing project: err = %v, want ErrNotFound", err)
+	}
+	wfs, err := snap.ProjectWorkflowsTx(home)
+	testsupport.Must(t, err, "ProjectWorkflowsTx: %v", err)
+	var listed []string
+	for _, wf := range wfs {
+		listed = append(listed, wf.Name+"@"+strconv.Itoa(wf.Version))
+	}
+	if want := []string{"alpha@2", "alpha@1", "beta@1"}; !reflect.DeepEqual(listed, want) {
+		t.Errorf("ProjectWorkflowsTx = %v, want %v: by name, newest version first, this project only", listed, want)
+	}
+	if got, err := snap.HoldClusterInstancesTx(run, sibling, "hold"); err != nil || len(got) != 1 || got[0].Instance != "hold#1" {
+		t.Errorf("HoldClusterInstancesTx of the sibling through a snapshot = (%+v, %v), want its one cluster row", got, err)
+	}
+}

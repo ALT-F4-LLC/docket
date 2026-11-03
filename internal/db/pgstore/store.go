@@ -426,6 +426,10 @@ func (s *pgStore) HeartbeatStep(id int, token string, ttlMS, nowMS int64) (*mode
 	return db.HeartbeatStep(s.db, id, token, ttlMS, nowMS)
 }
 
+func (s *pgStore) HoldInstances(runID, issueID int, holdInstance string) ([]db.InstanceStatusRouting, error) {
+	return db.HoldInstances(s.db, runID, issueID, holdInstance)
+}
+
 func (s *pgStore) HydrateDocs(issues []*model.Issue) error {
 	return db.HydrateDocs(s.db, issues)
 }
@@ -730,6 +734,10 @@ func (s *pgStore) RestoreWorkflow(projectID int, name string, version int) (*mod
 	return db.RestoreWorkflow(s.db, projectID, name, version)
 }
 
+func (s *pgStore) RunBoundWorkflows(runID int) ([]db.ParsedWorkflow, error) {
+	return db.RunBoundWorkflows(s.db, runID)
+}
+
 func (s *pgStore) RunBudgetFactsFor(runID int) (db.RunBudgetFacts, error) {
 	return db.RunBudgetFactsFor(s.db, runID)
 }
@@ -760,6 +768,10 @@ func (s *pgStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, err
 
 func (s *pgStore) RunStepProducers(runID int) ([]db.StepProducer, error) {
 	return db.RunStepProducers(s.db, runID)
+}
+
+func (s *pgStore) RunStepWorkflows(runID int) ([]db.ParsedWorkflow, error) {
+	return db.RunStepWorkflows(s.db, runID)
 }
 
 func (s *pgStore) SchemaVersion() (int, error) {
@@ -798,6 +810,10 @@ func (s *pgStore) StepArtifactCount(stepID int, kind string) (int, error) {
 // is jsonb here, which LIKE cannot compare, so it matches the text form.
 // ILIKE with no escape character keeps SQLite's LIKE semantics: ASCII case
 // folded, and a backslash in text is a literal.
+func (s *pgStore) StepIDAtOrdinal(runID, issueID int, stepName string, ordinal int) (int, bool, error) {
+	return db.StepIDAtOrdinal(s.db, runID, issueID, stepName, ordinal)
+}
+
 func (s *pgStore) StepEventDataContains(runID, stepID int, kind, text string) (bool, error) {
 	var found bool
 	err := s.db.QueryRow(
@@ -991,6 +1007,10 @@ func (t *pgTx) HighestOrdinalsTx(runID, issueID int) (map[string]int, error) {
 	return db.HighestOrdinalsTx(t.tx, runID, issueID)
 }
 
+func (t *pgTx) HoldClusterInstancesTx(runID, issueID int, holdInstance string) ([]db.InstanceStatusRouting, error) {
+	return db.HoldClusterInstancesTx(t.tx, runID, issueID, holdInstance)
+}
+
 func (t *pgTx) IssueDependenciesDoneTx(issueID int) (bool, error) {
 	return db.IssueDependenciesDoneTx(t.tx, issueID)
 }
@@ -1111,6 +1131,10 @@ func (t *pgTx) NewestIssueArtifactUpToTx(runID, issueID int, kind string, ordina
 	return db.NewestIssueArtifactUpToTx(t.tx, runID, issueID, kind, ordinal)
 }
 
+func (t *pgTx) NewestStepArtifactExceptKindsTx(stepID int, exceptKinds []string) (db.StepArtifactRef, bool, error) {
+	return db.NewestStepArtifactExceptKindsTx(t.tx, stepID, exceptKinds)
+}
+
 func (t *pgTx) NewestStepNameArtifactTx(r db.StepArtifactRange) (db.StepArtifact, bool, error) {
 	return db.NewestStepNameArtifactTx(t.tx, r)
 }
@@ -1145,6 +1169,14 @@ func (t *pgTx) PinnedArtifactTx(id int) (db.PinnedArtifact, error) {
 
 func (t *pgTx) PriorDispatchClosesTx(runID int, closedKind string) ([]string, error) {
 	return db.PriorDispatchClosesTx(t.tx, runID, closedKind)
+}
+
+func (t *pgTx) ProjectIdentityTx(projectID int) (string, error) {
+	return db.ProjectIdentityTx(t.tx, projectID)
+}
+
+func (t *pgTx) ProjectWorkflowsTx(projectID int) ([]*model.Workflow, error) {
+	return db.ProjectWorkflowsTx(t.tx, projectID)
 }
 
 func (t *pgTx) PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error) {
@@ -1224,6 +1256,10 @@ func (t *pgTx) RunEverDispatchedTx(runID int) (bool, error) {
 	return db.RunEverDispatchedTx(t.tx, runID)
 }
 
+func (t *pgTx) RunExpectedCostTx(runID int) (float64, error) {
+	return db.RunExpectedCostTx(t.tx, runID)
+}
+
 func (t *pgTx) RunHasIssueTx(runID, issueID int) (bool, error) {
 	return db.RunHasIssueTx(t.tx, runID, issueID)
 }
@@ -1258,6 +1294,10 @@ func (t *pgTx) RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, erro
 
 func (t *pgTx) RunStepRollupTx(runID int) (db.RunStepRollup, error) {
 	return db.RunStepRollupTx(t.tx, runID)
+}
+
+func (t *pgTx) RunStepWorkflowsTx(runID int) ([]db.ParsedWorkflow, error) {
+	return db.RunStepWorkflowsTx(t.tx, runID)
 }
 
 func (t *pgTx) RunUnfinishedStepCountTx(runID int) (int, error) {
@@ -1628,6 +1668,10 @@ func (t *pgTx) ReMintStepTokenTx(id int, owner string, nowMS int64) (string, err
 
 func (t *pgTx) RepinPinTx(runID int, kind, ref, oldSHA, newSHA string) (int, error) {
 	return db.RepinPinTx(t.tx, runID, kind, ref, oldSHA, newSHA)
+}
+
+func (t *pgTx) RepinStepWorkRootTx(stepID int, worktree string) error {
+	return db.RepinStepWorkRootTx(t.tx, stepID, worktree)
 }
 
 func (t *pgTx) ResetStepRetryBudgetTx(id int, nowMS int64) error {

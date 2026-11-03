@@ -83,6 +83,14 @@ type (
 	GateStepState = db.GateStepState
 )
 
+// The hold, activation and definition query rows, aliased as in aliases.go so
+// callers can read them without importing internal/db.
+type (
+	InstanceStatusRouting = db.InstanceStatusRouting
+	ParsedWorkflow        = db.ParsedWorkflow
+	StepArtifactRef       = db.StepArtifactRef
+)
+
 // Store is a handle on one Docket database. It is safe for concurrent use.
 type Store interface {
 	// Begin opens a write transaction. The caller must Commit or Rollback it.
@@ -174,6 +182,7 @@ type Store interface {
 	HasGateResult(stepID int, gate string) (bool, error)
 	HeartbeatIssue(id int, token string, ttlMS int64, nowMS int64) (*model.Lease, error)
 	HeartbeatStep(id int, token string, ttlMS, nowMS int64) (*model.Lease, error)
+	HoldInstances(runID, issueID int, holdInstance string) ([]db.InstanceStatusRouting, error)
 	HydrateDocs(issues []*model.Issue) error
 	HydrateLinkedIssues(docIDs []int) (map[int][]model.IssueRef, error)
 	IdempotencyKeyOf(scope string, entityID int) (string, bool, error)
@@ -250,6 +259,7 @@ type Store interface {
 	RemoveRunIssue(runID, issueID int) error
 	RestoreSchema(projectID int, name string, version int) (*model.Schema, error)
 	RestoreWorkflow(projectID int, name string, version int) (*model.Workflow, error)
+	RunBoundWorkflows(runID int) ([]db.ParsedWorkflow, error)
 	RunBudgetFactsFor(runID int) (db.RunBudgetFacts, error)
 	RunConductorHash(id int) (string, error)
 	RunEventSpanMS(runID int, kinds ...string) (first, last int64, found bool, err error)
@@ -258,6 +268,7 @@ type Store interface {
 	RunProjectID(runID int) (int, error)
 	RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error)
 	RunStepProducers(runID int) ([]db.StepProducer, error)
+	RunStepWorkflows(runID int) ([]db.ParsedWorkflow, error)
 	SchemaVersion() (int, error)
 	SetConfig(projectID int, key, value string) error
 	SetIssueFiles(issueID int, filePaths []string, changedBy string) error
@@ -267,6 +278,7 @@ type Store interface {
 	StaleTargetWaiversForRun(runID int) ([]db.StaleTargetWaiver, error)
 	StepArtifactCount(stepID int, kind string) (int, error)
 	StepEventDataContains(runID, stepID int, kind, text string) (bool, error)
+	StepIDAtOrdinal(runID, issueID int, stepName string, ordinal int) (id int, found bool, err error)
 	StepInputCount(stepID int) (int, error)
 	StepStatusCounts(runID int) ([]model.StatusCount, error)
 	StrandedSagaStepIDs(runID int, excludedKind string, updatedBeforeMS int64) ([]int, error)
@@ -321,6 +333,7 @@ type ReadTx interface {
 	GetSchemaTx(projectID int, name string, version int) (*model.Schema, error)
 	GetStepTx(id int) (*db.Step, error)
 	HighestOrdinalsTx(runID, issueID int) (map[string]int, error)
+	HoldClusterInstancesTx(runID, issueID int, holdInstance string) ([]db.InstanceStatusRouting, error)
 	IssueDependenciesDoneTx(issueID int) (bool, error)
 	IssueDescriptionTx(issueID int) (string, error)
 	IssueHasParkedOrHeldStepTx(runID, issueID int) (bool, error)
@@ -351,6 +364,7 @@ type ReadTx interface {
 	LoopGrantsTx(runID, issueID int) (int, error)
 	MaxEventSeqTx() (seq int64, found bool, err error)
 	NewestIssueArtifactUpToTx(runID, issueID int, kind string, ordinal int) (hash, body string, found bool, err error)
+	NewestStepArtifactExceptKindsTx(stepID int, exceptKinds []string) (db.StepArtifactRef, bool, error)
 	NewestStepNameArtifactTx(r db.StepArtifactRange) (db.StepArtifact, bool, error)
 	NewestStepPayloadTx(stepID int, kind string) (payload string, found bool, err error)
 	NextActionOrdinalTx(stepID int, action string) (int, error)
@@ -360,6 +374,8 @@ type ReadTx interface {
 	PendingInstancesUpToTx(runID, issueID int, stepName string, ordinal int) ([]db.StepInstanceRef, error)
 	PinnedArtifactTx(id int) (db.PinnedArtifact, error)
 	PriorDispatchClosesTx(runID int, closedKind string) ([]string, error)
+	ProjectIdentityTx(projectID int) (string, error)
+	ProjectWorkflowsTx(projectID int) ([]*model.Workflow, error)
 	PrunableEventRunsTx(sel db.EventPruneSelection) ([]db.EventRunStatus, error)
 	ProposalStatusesTx(ids []int) (map[int]model.ProposalStatus, error)
 	ProposalStatusTx(id int) (status model.ProposalStatus, found bool, err error)
@@ -374,6 +390,7 @@ type ReadTx interface {
 	RunEventsTx(runID int, kinds ...string) ([]db.RunEvent, error)
 	RunEventIssueIDsTx(runID int, kind string) (map[int]bool, error)
 	RunEverDispatchedTx(runID int) (bool, error)
+	RunExpectedCostTx(runID int) (float64, error)
 	RunHasIssueTx(runID, issueID int) (bool, error)
 	RunIssueEventsTx(runID int, kind string) ([]db.IssueEvent, error)
 	RunIssueSnapshotsTx(runID, issueID int) (body, snapshot string, err error)
@@ -383,6 +400,7 @@ type ReadTx interface {
 	RunStepEventSeqsTx(runID int) ([]db.StepEventSeq, error)
 	RunStepEventsTx(runID int, kinds ...string) ([]db.StepEvent, error)
 	RunStepRollupTx(runID int) (db.RunStepRollup, error)
+	RunStepWorkflowsTx(runID int) ([]db.ParsedWorkflow, error)
 	RunUnfinishedStepCountTx(runID int) (int, error)
 	RunWorktreesTx(runID, issueID int) ([]string, error)
 	StepArtifactPayloadsTx(r db.StepArtifactRange) ([]db.OrdinalPayload, error)
@@ -482,6 +500,7 @@ type Tx interface {
 	ReleaseStepLeaseTx(id int, nowMS int64) error
 	ReMintStepTokenTx(id int, owner string, nowMS int64) (token string, err error)
 	RepinPinTx(runID int, kind, ref, oldSHA, newSHA string) (int, error)
+	RepinStepWorkRootTx(stepID int, worktree string) error
 	ResetStepRetryBudgetTx(id int, nowMS int64) error
 	RetireStepTokenTx(id int) error
 	SetConfigTx(projectID int, key, value string) (prior string, err error)
