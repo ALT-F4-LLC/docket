@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"maps"
@@ -33,7 +32,7 @@ import (
 // refreshUnderDispatchTx describes the open dispatch's rows of one issue for a
 // refresh event: the dispatch id and the instances re-rendered. It returns nil
 // when no dispatch is open, or the issue has no row in it.
-func refreshUnderDispatchTx(tx *sql.Tx, runID, issueID int) (map[string]any, error) {
+func refreshUnderDispatchTx(tx store.LegacyTx, runID, issueID int) (map[string]any, error) {
 	st := store.TxOn(tx)
 	open, err := st.OpenDispatchTx(runID)
 	if errors.Is(err, store.ErrNoOpenDispatch) {

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 	"unicode"
@@ -154,7 +153,7 @@ func stepCommentKey(artifactID int) string {
 // this same transaction, in a scope no verb accepts a caller's key for, so a
 // key already recorded is never legitimate: it refuses the recording rather
 // than letting the artifact record with its comment skipped.
-func postStepCommentTx(tx *sql.Tx, step *store.Step, artifactID int, body []byte) error {
+func postStepCommentTx(tx store.LegacyTx, step *store.Step, artifactID int, body []byte) error {
 	_, inserted, err := store.CreateCommentIdempotentTx(tx, &model.Comment{
 		IssueID: step.IssueID,
 		Body:    string(body),
