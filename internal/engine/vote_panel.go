@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -29,7 +28,7 @@ import (
 // RecordConductorPanelOpened records a step-less panel's vote-opened on every
 // run that attributes it and has not recorded it yet. `vote link` calls it
 // once the link exists; a panel no run attributes records nothing.
-func RecordConductorPanelOpened(conn *sql.DB, proposalID int) error {
+func RecordConductorPanelOpened(conn store.LegacyDB, proposalID int) error {
 	runs, err := conductorPanelRuns(conn, proposalID)
 	if err != nil {
 		return err
@@ -46,7 +45,7 @@ func RecordConductorPanelOpened(conn *sql.DB, proposalID int) error {
 // onto every run that attributes it. The caller passes only a step-less
 // panel: a vote step's own proposal is announced by its step, and CastVote
 // settles step-boundness before the vote commits.
-func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *store.CastVoteResult) error {
+func recordConductorPanelEvents(conn store.LegacyDB, proposalID int, result *store.CastVoteResult) error {
 	runs, err := conductorPanelRuns(conn, proposalID)
 	if err != nil || len(runs) == 0 {
 		return err
@@ -77,7 +76,7 @@ func recordConductorPanelEvents(conn *sql.DB, proposalID int, result *store.Cast
 // is the run report's attribution rule (conversationalRunProposalIDs), asked
 // from the panel's side. A vote step's own proposal has none here: its step
 // already announces it.
-func conductorPanelRuns(conn *sql.DB, proposalID int) ([]store.ProposalRunLink, error) {
+func conductorPanelRuns(conn store.LegacyDB, proposalID int) ([]store.ProposalRunLink, error) {
 	stepBound, err := IsVoteStepProposal(conn, proposalID)
 	if err != nil || stepBound {
 		return nil, err
@@ -95,7 +94,7 @@ func conductorPanelRuns(conn *sql.DB, proposalID int) ([]store.ProposalRunLink, 
 // is non-empty. The existence check shares the write-locked transaction
 // (internal/db opens every Begin immediate) with the write, so neither a later
 // cast nor a concurrent one opens the panel a second time.
-func recordPanelRunEvents(conn *sql.DB, run store.ProposalRunLink, proposalID int, tally string) error {
+func recordPanelRunEvents(conn store.LegacyDB, run store.ProposalRunLink, proposalID int, tally string) error {
 	pid := model.FormatProposalID(proposalID)
 	tx, err := conn.Begin()
 	if err != nil {
@@ -103,12 +102,8 @@ func recordPanelRunEvents(conn *sql.DB, run store.ProposalRunLink, proposalID in
 	}
 	defer tx.Rollback()
 
-	var opened bool
-	if err := tx.QueryRow(
-		`SELECT EXISTS (SELECT 1 FROM events
-		  WHERE run_id = ? AND kind = ? AND step_id IS NULL
-		    AND json_extract(data, '$.detail') = ?)`,
-		run.RunID, EventVoteOpened, pid).Scan(&opened); err != nil {
+	opened, err := store.TxOn(tx).RunEventDetailExistsTx(run.RunID, EventVoteOpened, pid)
+	if err != nil {
 		return fmt.Errorf("reading whether %s opened on %s: %w", pid, model.FormatRunID(run.RunID), err)
 	}
 	if !opened {

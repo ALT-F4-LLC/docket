@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -59,7 +58,7 @@ type VoteBackfillRow struct {
 // is: a half-applied batch would strand its remainder behind the ledger's
 // unique key on a re-run.
 func (e *Engine) BackfillVoteUsage(
-	conn *sql.DB, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
+	conn store.LegacyDB, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
 ) error {
 	if len(rows) == 0 {
 		return validationErr("no usage rows to back-fill; pass at least one " +
@@ -74,15 +73,13 @@ func (e *Engine) BackfillVoteUsage(
 		return fmt.Errorf("beginning the back-fill: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	var proposalCount int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM proposals WHERE id = ?`, proposalID,
-	).Scan(&proposalCount); err != nil {
-		return fmt.Errorf("resolving proposal %s: %w",
-			model.FormatProposalID(proposalID), err)
+	exists, err := st.ProposalExistsTx(proposalID)
+	if err != nil {
+		return err
 	}
-	if proposalCount == 0 {
+	if !exists {
 		return notFoundErr(store.ErrNotFound, "proposal %s not found",
 			model.FormatProposalID(proposalID))
 	}
@@ -99,24 +96,19 @@ func (e *Engine) BackfillVoteUsage(
 			return validationErr("--voter is required on every row; a vote " +
 				"usage row attaches to a named seat's cast")
 		}
-		var voteID int64
-		err := tx.QueryRow(
-			`SELECT id FROM votes WHERE proposal_id = ? AND voter_name = ?`,
-			proposalID, r.Voter).Scan(&voteID)
-		if errors.Is(err, sql.ErrNoRows) {
+		voteID, found, err := st.VoteIDTx(proposalID, r.Voter)
+		if err != nil {
+			return err
+		}
+		if !found {
 			return validationErr(
 				"%q has no cast on %s; vote usage attaches to a seat's cast, "+
 					"and a seat that never cast has nothing to attach to",
 				r.Voter, model.FormatProposalID(proposalID))
 		}
-		if err != nil {
-			return fmt.Errorf("resolving the %q seat on %s: %w",
-				r.Voter, model.FormatProposalID(proposalID), err)
-		}
 		seats[r.Voter] = voteID
 	}
 
-	st := store.TxOn(tx)
 	for _, r := range rows {
 		if err := store.ValidateUnitName(r.Unit); err != nil {
 			return validationErr("voter %q: %s", r.Voter, err)
@@ -297,7 +289,7 @@ type BackfillOutcome struct {
 // batch whatever the step's status, because the shape is a property of the
 // input and not of the step.
 func (e *Engine) BackfillUsage(
-	conn *sql.DB, runID int, rows []BackfillRow, source string,
+	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
 	onDuplicate string, nowMS int64,
 ) (*BackfillOutcome, error) {
 	if len(rows) == 0 {

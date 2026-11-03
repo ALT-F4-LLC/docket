@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,7 +81,7 @@ func (s *Scheduler) writeClassOf(class string) bool {
 // A class with no declared `max` inserts NOTHING. That is the dormant path,
 // and it is structural: a repo with no `[limits]` never creates a `reap_acks`
 // row and therefore never holds anything.
-func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]string, error) {
+func reapExpiredTx(tx store.LegacyTx, sched *Scheduler, runID int, nowMS int64) ([]string, error) {
 	var reaped []string
 	for _, step := range sched.Steps() {
 		if !sched.Expired(step) {
@@ -107,7 +106,7 @@ func reapExpiredTx(tx *sql.Tx, sched *Scheduler, runID int, nowMS int64) ([]stri
 // DKT-2450) and why — which is how a reader distinguishes them, the same
 // data.reason discipline that separates a budget pause from an operator's.
 func reapOneTx(
-	tx *sql.Tx, sched *Scheduler, runID int, step *store.Step, data string, nowMS int64,
+	tx store.LegacyTx, sched *Scheduler, runID int, step *store.Step, data string, nowMS int64,
 ) error {
 	st := store.TxOn(tx)
 	{
@@ -222,7 +221,7 @@ type ForceReapOptions struct {
 // an executor could fail — see the exemption below, and
 // db.ExemptStepAttemptFromBudgetTx for why it is a +1 nudge of the base and
 // never a touch of `attempt` itself.
-func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
+func ForceReapStepWith(conn store.LegacyDB, stepID int, opts ForceReapOptions) error {
 	reason, nowMS := opts.Reason, opts.NowMS
 	if reason == "" {
 		return validationErr(
@@ -321,7 +320,7 @@ func ForceReapStepWith(conn *sql.DB, stepID int, opts ForceReapOptions) error {
 //     NAMING THE SEQ. This is the forgery point — an ack must name a real reap,
 //     and the run scope is half of that: an ack naming another run's reap is a
 //     forgery in exactly the way naming a non-reap is.
-func ackReapsTx(tx *sql.Tx, runID int, seqs []int64, ackedBy string, nowMS int64) error {
+func ackReapsTx(tx store.LegacyTx, runID int, seqs []int64, ackedBy string, nowMS int64) error {
 	st := store.TxOn(tx)
 	for _, seq := range seqs {
 		result, err := st.AckReapTx(runID, seq, ackedBy, nowMS)
@@ -379,7 +378,7 @@ func ackReapsTx(tx *sql.Tx, runID int, seqs []int64, ackedBy string, nowMS int64
 // The dormant path is one indexed lookup on `idx_reap_acks_open`, a PARTIAL
 // index on `acked_at_ms IS NULL`, returning no row and short-circuiting before
 // any class arithmetic.
-func loadReapHold(tx *sql.Tx, runID int) (map[string]int, []store.ReapAck, error) {
+func loadReapHold(tx store.LegacyTx, runID int) (map[string]int, []store.ReapAck, error) {
 	open, err := store.TxOn(tx).UnacknowledgedReapsTx(runID)
 	if err != nil {
 		return nil, nil, err
@@ -506,16 +505,16 @@ func ReapHoldReason(reaps []store.ReapAck) string {
 // and the wave is over. A forced reap keeps its hold (somebody asserted the
 // holder was gone, and that assertion is what a panel reviews), and so does a
 // claim admitted under any other dispatch.
-func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *store.Dispatch, nowMS int64) error {
-	reaps, err := store.TxOn(tx).UnacknowledgedReapsTx(runID)
+func ackSameDispatchReapsTx(tx store.LegacyTx, runID int, open *store.Dispatch, nowMS int64) error {
+	st := store.TxOn(tx)
+	reaps, err := st.UnacknowledgedReapsTx(runID)
 	if err != nil {
 		return err
 	}
 	var seqs []int64
 	for _, r := range reaps {
-		var data string
-		if err := tx.QueryRow(`SELECT data FROM events WHERE seq = ?`, r.ReapedSeq).
-			Scan(&data); err != nil {
+		data, err := st.EventDataTx(r.ReapedSeq)
+		if err != nil {
 			return fmt.Errorf("reading reap %d: %w", r.ReapedSeq, err)
 		}
 		var payload struct {
@@ -525,15 +524,9 @@ func ackSameDispatchReapsTx(tx *sql.Tx, runID int, open *store.Dispatch, nowMS i
 		if json.Unmarshal([]byte(data), &payload) != nil || payload.Forced {
 			continue
 		}
-		var admitted bool
-		if err := tx.QueryRow(
-			`SELECT EXISTS(
-			   SELECT 1 FROM dispatch_rows dr
-			    WHERE dr.dispatch_id = ? AND dr.step_id = ?)
-			 AND COALESCE((SELECT MAX(seq) FROM events
-			                WHERE kind = ? AND step_id = ? AND seq < ?), 0) > ?`,
-			open.ID, r.StepID, EventStepClaimed, r.StepID, r.ReapedSeq, open.OpenedSeq,
-		).Scan(&admitted); err != nil {
+		admitted, err := st.ClaimAdmittedByDispatchTx(
+			open.ID, open.OpenedSeq, r.StepID, EventStepClaimed, r.ReapedSeq)
+		if err != nil {
 			return fmt.Errorf("reading reap %d's claim: %w", r.ReapedSeq, err)
 		}
 		if admitted {

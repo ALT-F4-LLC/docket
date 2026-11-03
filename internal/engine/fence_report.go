@@ -1,11 +1,11 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -34,35 +34,13 @@ import (
 // discipline the runner applies at the gate: a report assembled from several
 // reads could disagree with itself mid-render.
 func BuildFenceReport(
-	conn *sql.DB, runID int, loadStore func() (*trust.Store, error), identityPath string,
+	conn store.LegacyDB, runID int, loadStore func() (*trust.Store, error), identityPath string,
 ) ([]FenceReport, error) {
-	rows, err := conn.Query(
-		`SELECT f.issue_id, f.tag, f.ordinal, f.command
-		   FROM run_fences f WHERE f.run_id = ?
-		  ORDER BY f.issue_id, f.tag, f.ordinal`, runID)
+	fences, err := listRunFences(conn, runID)
 	if err != nil {
-		return nil, fmt.Errorf("reading harvested commands: %w", err)
-	}
-	defer rows.Close()
-
-	type harvested struct {
-		issueID int
-		tag     string
-		ordinal int
-		command string
-	}
-	var all []harvested
-	for rows.Next() {
-		var h harvested
-		if err := rows.Scan(&h.issueID, &h.tag, &h.ordinal, &h.command); err != nil {
-			return nil, fmt.Errorf("reading a harvested command: %w", err)
-		}
-		all = append(all, h)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(all) == 0 {
+	if len(fences) == 0 {
 		return nil, nil
 	}
 
@@ -72,18 +50,43 @@ func BuildFenceReport(
 	if err != nil {
 		return nil, err
 	}
+	return fenceReports(fences, gateByTag, loadStore, identityPath), nil
+}
 
-	store, storeErr := loadStore()
+// listRunFences reads the run's harvested commands through a read snapshot of
+// the pool. The snapshot is closed before it returns, so the caller can go on
+// reading through the pool.
+func listRunFences(conn store.LegacyDB, runID int) ([]store.RunFence, error) {
+	snap, err := store.StoreOn(conn).BeginReadSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("reading harvested commands: %w", err)
+	}
+	defer snap.Rollback()
+
+	fences, err := snap.ListFencesTx(runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading harvested commands: %w", err)
+	}
+	return fences, nil
+}
+
+// fenceReports resolves each harvested command against one read of the trust
+// store, in the order the fences arrive.
+func fenceReports(
+	fences []store.RunFence, gateByTag map[string]string,
+	loadStore func() (*trust.Store, error), identityPath string,
+) []FenceReport {
+	trustStore, storeErr := loadStore()
 	identity, identityErr := trust.RepoIdentity(identityPath)
 
-	out := make([]FenceReport, 0, len(all))
-	for _, h := range all {
+	out := make([]FenceReport, 0, len(fences))
+	for _, f := range fences {
 		report := FenceReport{
-			Issue:   model.FormatID(h.issueID),
-			Gate:    gateByTag[h.tag],
-			Tag:     h.tag,
-			Ordinal: h.ordinal,
-			Command: h.command,
+			Issue:   model.FormatID(f.IssueID),
+			Gate:    gateByTag[f.Tag],
+			Tag:     f.Tag,
+			Ordinal: f.Ordinal,
+			Command: f.Command,
 		}
 
 		switch {
@@ -93,11 +96,11 @@ func BuildFenceReport(
 			report.Reason = fmt.Sprintf("the repo path could not be resolved: %v", identityErr)
 		default:
 			report.Matched, report.Entry, report.Reason =
-				matchFenceCommand(store, identity, report.Gate, h.command)
+				matchFenceCommand(trustStore, identity, report.Gate, f.Command)
 		}
 		out = append(out, report)
 	}
-	return out, nil
+	return out
 }
 
 // matchFenceCommand resolves one command exactly as the runner will.
@@ -127,7 +130,7 @@ func matchFenceCommand(
 
 // gateNamesByTag maps a fence tag to the gate that harvests it, across the
 // run's pinned workflow definitions.
-func gateNamesByTag(conn *sql.DB, runID int) (map[string]string, error) {
+func gateNamesByTag(conn store.LegacyDB, runID int) (map[string]string, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -190,39 +193,12 @@ func RenderFenceReport(w interface{ Write([]byte) (int, error) }, reports []Fenc
 // buildFenceReportTx is BuildFenceReport against an open transaction, for the
 // dry run — whose harvested rows exist only inside the transaction it is about
 // to discard, and so cannot be read through the pool.
-func buildFenceReportTx(tx *sql.Tx, runID int) ([]FenceReport, error) {
-	rows, err := tx.Query(
-		`SELECT issue_id, tag, ordinal, command FROM run_fences
-		  WHERE run_id = ? ORDER BY issue_id, tag, ordinal`, runID)
+func buildFenceReportTx(tx store.LegacyTx, runID int) ([]FenceReport, error) {
+	fences, err := store.TxOn(tx).ListFencesTx(runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading harvested commands: %w", err)
 	}
-	var (
-		issueIDs []int
-		tags     []string
-		ordinals []int
-		commands []string
-	)
-	for rows.Next() {
-		var (
-			issueID, ordinal int
-			tag, command     string
-		)
-		if err := rows.Scan(&issueID, &tag, &ordinal, &command); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("reading a harvested command: %w", err)
-		}
-		issueIDs = append(issueIDs, issueID)
-		tags = append(tags, tag)
-		ordinals = append(ordinals, ordinal)
-		commands = append(commands, command)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
-	if len(commands) == 0 {
+	if len(fences) == 0 {
 		return nil, nil
 	}
 
@@ -230,35 +206,11 @@ func buildFenceReportTx(tx *sql.Tx, runID int) ([]FenceReport, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	store, storeErr := trust.Load()
-	identity, identityErr := trust.RepoIdentity(resolvePaths().Identity)
-
-	out := make([]FenceReport, 0, len(commands))
-	for i := range commands {
-		report := FenceReport{
-			Issue:   model.FormatID(issueIDs[i]),
-			Gate:    gateByTag[tags[i]],
-			Tag:     tags[i],
-			Ordinal: ordinals[i],
-			Command: commands[i],
-		}
-		switch {
-		case storeErr != nil:
-			report.Reason = fmt.Sprintf("the trust store could not be read: %v", storeErr)
-		case identityErr != nil:
-			report.Reason = fmt.Sprintf("the repo path could not be resolved: %v", identityErr)
-		default:
-			report.Matched, report.Entry, report.Reason =
-				matchFenceCommand(store, identity, report.Gate, commands[i])
-		}
-		out = append(out, report)
-	}
-	return out, nil
+	return fenceReports(fences, gateByTag, trust.Load, resolvePaths().Identity), nil
 }
 
 // gateNamesByTagTx is gateNamesByTag inside a transaction.
-func gateNamesByTagTx(tx *sql.Tx, runID int) (map[string]string, error) {
+func gateNamesByTagTx(tx store.LegacyTx, runID int) (map[string]string, error) {
 	defs, err := StepDefinitionsTx(tx, runID)
 	if err != nil {
 		return nil, err
