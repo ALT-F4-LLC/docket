@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"database/sql"
-
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
@@ -41,7 +39,7 @@ import (
 // Errors are engine faults, exactly as next.go classifies them: next already
 // routes a step that cannot run per its `on_fail`, so anything failing here is
 // a database the next verb would hit too, and reporting beats proceeding.
-func (e *Engine) DriveRunLifecycles(conn *sql.DB, runID int, nowMS int64) error {
+func (e *Engine) DriveRunLifecycles(conn store.LegacyDB, runID int, nowMS int64) error {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return err
@@ -88,7 +86,7 @@ func (e *Engine) DriveRunLifecycles(conn *sql.DB, runID int, nowMS int64) error 
 // and a second copy could disagree with it. A proposal with no such key is an
 // ad-hoc, operator-created ballot bound to no step; there is nothing to
 // route, and the call is a no-op rather than an error.
-func (e *Engine) DriveVoteProposal(conn *sql.DB, proposalID int, nowMS int64) error {
+func (e *Engine) DriveVoteProposal(conn store.LegacyDB, proposalID int, nowMS int64) error {
 	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return err
@@ -104,7 +102,7 @@ func (e *Engine) DriveVoteProposal(conn *sql.DB, proposalID int, nowMS int64) er
 }
 
 // runStepCount bounds DriveRunLifecycles' cascade (see its doc comment).
-func runStepCount(conn *sql.DB, runID int) (int, error) {
+func runStepCount(conn store.LegacyDB, runID int) (int, error) {
 	counts, err := store.StoreOn(conn).StepStatusCounts(runID)
 	if err != nil {
 		return 0, err

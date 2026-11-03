@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -94,7 +92,7 @@ type ReadySteps struct {
 // The reap and the readiness computation share ONE transaction, and in that
 // order: a step reaped by this call must be offered by this call, or a
 // dispatcher would have to poll twice to see work that is already available.
-func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+func (e *Engine) NextSteps(conn store.LegacyDB, runID int, limit int, nowMS int64) (*ReadySteps, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -386,7 +384,7 @@ func offeredClassCaps(caps map[string]ClassCap, rows []model.StepRow) (map[strin
 // that cannot run per its `on_fail`, so anything reaching here is an engine
 // fault — a database the next step would hit too — and reporting it is more
 // useful than continuing over it.
-func (e *Engine) driveActionSteps(conn *sql.DB, ready []*store.Step, nowMS int64) (bool, error) {
+func (e *Engine) driveActionSteps(conn store.LegacyDB, ready []*store.Step, nowMS int64) (bool, error) {
 	routed := false
 	for _, step := range ready {
 		if step.Kind != workflow.ClassAction || step.InSaga() {
@@ -438,7 +436,7 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*store.Step, nowMS int64
 // `ready` for real and can un-defer an aggregate that readies a step this
 // call never saw.
 func (e *Engine) driveVoteSteps(
-	conn *sql.DB, defs map[int]*workflow.Definition, candidates, ready []*store.Step,
+	conn store.LegacyDB, defs map[int]*workflow.Definition, candidates, ready []*store.Step,
 	tally holdTally, nowMS int64,
 ) (map[voteStepKey]int, bool, error) {
 	openable := make(map[int]bool, len(ready))
@@ -720,12 +718,12 @@ type StepListEntry struct {
 // ids, correct exactly as long as the store was quiet. READ-ONLY: the
 // scheduler loads in a transaction that is always rolled back, and no reap
 // runs.
-func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) {
+func RunStepList(conn store.LegacyDB, runID int, nowMS int64) ([]StepListEntry, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s's steps: %w", model.FormatRunID(runID), err)
 	}
@@ -769,7 +767,7 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 // run is scheduled on its own, because readiness is a question about one run's
 // graph; the rows are then concatenated in run order. READ-ONLY, like
 // RunStepList.
-func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, error) {
+func IssueStepList(conn store.LegacyDB, issueID int, nowMS int64) ([]StepListEntry, error) {
 	runIDs, err := store.StoreOn(conn).IssueStepRuns(issueID)
 	if err != nil {
 		return nil, err
@@ -803,12 +801,12 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 // exactly the divergence the effective-status discipline exists to prevent.
 // READ-ONLY, like every effective-status computation: the transaction is always rolled
 // back and no reap runs.
-func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.StatusCount, error) {
+func EffectiveStatusCounts(conn store.LegacyDB, runID int, nowMS int64) ([]model.StatusCount, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"counting %s's step statuses: %w", model.FormatRunID(runID), err)
@@ -947,7 +945,7 @@ func (t ttlConfig) forClass(limit workflow.Limit, class string) time.Duration {
 // The per-class values are read ONCE per verb rather than per row: a run with
 // four `review` siblings would otherwise issue four identical config lookups,
 // and the values cannot change mid-call anyway.
-func loadTTLConfig(conn *sql.DB, runID int) (ttlConfig, error) {
+func loadTTLConfig(conn store.LegacyDB, runID int) (ttlConfig, error) {
 	// The RUN's project scopes the TTL policy (v12): the same class can carry
 	// different TTLs in different projects, and a verb operating on another
 	// project's run must apply that project's numbers.
@@ -961,29 +959,16 @@ func loadTTLConfig(conn *sql.DB, runID int) (ttlConfig, error) {
 		return ttlConfig{}, fmt.Errorf("reading the default lease TTL: %w", err)
 	}
 
-	rows, err := conn.Query(
-		`SELECT DISTINCT class FROM steps WHERE run_id = ? AND class IS NOT NULL`, runID)
+	classes, err := st.RunStepClasses(runID)
 	if err != nil {
-		return ttlConfig{}, fmt.Errorf("reading step classes: %w", err)
+		return ttlConfig{}, err
 	}
-	defer rows.Close()
 
 	perClass := make(map[string]time.Duration)
-	var classes []string
-	for rows.Next() {
-		var class string
-		if err := rows.Scan(&class); err != nil {
-			return ttlConfig{}, fmt.Errorf("reading step class: %w", err)
-		}
-		if class != "" {
-			classes = append(classes, class)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return ttlConfig{}, fmt.Errorf("reading step classes: %w", err)
-	}
-
 	for _, class := range classes {
+		if class == "" {
+			continue
+		}
 		ttl, err := st.LeaseTTL(projectID, class)
 		if err != nil {
 			return ttlConfig{}, fmt.Errorf("reading the lease TTL for class %q: %w", class, err)
