@@ -42,6 +42,81 @@ func TestAbsentFromProductionBinary(t *testing.T) {
 	}
 }
 
+// TestStoreImportBoundary holds the persistence boundary: only internal/db
+// (with its subpackages) and internal/store may import internal/db directly,
+// and no package under internal/engine or internal/cli may import
+// database/sql directly. Reaching either transitively through internal/store
+// is the intended shape, so only each package's direct, non-test imports
+// count.
+func TestStoreImportBoundary(t *testing.T) {
+	const (
+		dbPkg     = "github.com/ALT-F4-LLC/docket/internal/db"
+		storePkg  = "github.com/ALT-F4-LLC/docket/internal/store"
+		enginePkg = "github.com/ALT-F4-LLC/docket/internal/engine"
+		cliPkg    = "github.com/ALT-F4-LLC/docket/internal/cli"
+	)
+
+	pkgs := listDirectImports(t, FindGo(t), RepoRoot(t), "./internal/...", "./cmd/...")
+
+	// Positive control: internal/store's direct import of internal/db must
+	// be visible, or the query cannot report a violation either.
+	storeFound := false
+	for _, p := range pkgs {
+		if p.path == storePkg {
+			storeFound = p.imports[dbPkg]
+		}
+	}
+	if !storeFound {
+		t.Fatal("control import internal/store -> internal/db not reported by go list; the query proves nothing")
+	}
+
+	for _, p := range pkgs {
+		if p.imports[dbPkg] && !isPackageOrSub(p.path, dbPkg) && p.path != storePkg {
+			t.Errorf("%s imports %s directly; only internal/db and internal/store may", p.path, dbPkg)
+		}
+		if p.imports["database/sql"] && (isPackageOrSub(p.path, enginePkg) || isPackageOrSub(p.path, cliPkg)) {
+			t.Errorf("%s imports database/sql directly; go through internal/store instead", p.path)
+		}
+	}
+}
+
+type packageImports struct {
+	path    string
+	imports map[string]bool
+}
+
+// listDirectImports runs `go list` and returns each matched package with the
+// set of its direct imports from non-test files.
+func listDirectImports(t *testing.T, goBin, root string, patterns ...string) []packageImports {
+	t.Helper()
+
+	args := append([]string{"list", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}"}, patterns...)
+	cmd := exec.Command(goBin, args...)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list %s: %v", strings.Join(patterns, " "), err)
+	}
+
+	var pkgs []packageImports
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		p := packageImports{path: fields[0], imports: make(map[string]bool)}
+		for _, imp := range fields[1:] {
+			p.imports[imp] = true
+		}
+		pkgs = append(pkgs, p)
+	}
+	return pkgs
+}
+
+func isPackageOrSub(pkg, root string) bool {
+	return pkg == root || strings.HasPrefix(pkg, root+"/")
+}
+
 // listDeps runs `go list -deps` and returns the set of import paths in the
 // target's full dependency graph.
 func listDeps(t *testing.T, goBin, root string, args ...string) map[string]bool {
