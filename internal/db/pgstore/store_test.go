@@ -380,13 +380,6 @@ func TestPgStoreReportAndLedgerQueries(t *testing.T) {
 	if got, err := f.st.RunStepEvents(f.run, "step-claimed", "step-recorded"); err != nil || !reflect.DeepEqual(got, wantStepEvents) {
 		t.Errorf("RunStepEvents = (%+v, %v), want (%+v, nil)", got, err, wantStepEvents)
 	}
-	wantProducers := []db.StepProducer{
-		{StepID: implement, Instance: "implement@0", Executor: "claude", IssueID: f.issue},
-		{StepID: review, Instance: "review@0", IssueID: f.issue},
-	}
-	if got, err := f.st.RunStepProducers(f.run); err != nil || !reflect.DeepEqual(got, wantProducers) {
-		t.Errorf("RunStepProducers = (%+v, %v), want (%+v, nil)", got, err, wantProducers)
-	}
 	if first, last, found, err := f.st.RunEventSpanMS(f.run, "step-claimed", "issue-done"); err != nil || !found || first != 10 || last != 40 {
 		t.Errorf("RunEventSpanMS = (%d, %d, %v, %v), want (10, 40, true, nil)", first, last, found, err)
 	}

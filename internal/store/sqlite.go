@@ -735,10 +735,6 @@ func (s *sqliteStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent,
 	return db.RunStepEvents(s.writer, runID, kinds...)
 }
 
-func (s *sqliteStore) RunStepProducers(runID int) ([]db.StepProducer, error) {
-	return db.RunStepProducers(s.writer, runID)
-}
-
 func (s *sqliteStore) RunStepWorkflows(runID int) ([]db.ParsedWorkflow, error) {
 	return db.RunStepWorkflows(s.writer, runID)
 }

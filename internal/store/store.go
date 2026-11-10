@@ -56,9 +56,8 @@ type (
 // The report and ledger query rows, aliased as in aliases.go so callers can
 // read them without importing internal/db.
 type (
-	IssueEvent   = db.IssueEvent
-	StepEvent    = db.StepEvent
-	StepProducer = db.StepProducer
+	IssueEvent = db.IssueEvent
+	StepEvent  = db.StepEvent
 )
 
 // The run lifecycle and repin query rows, aliased as in aliases.go so callers
@@ -285,7 +284,6 @@ type Store interface {
 	RunProjectID(runID int) (int, error)
 	RunStepClasses(runID int) ([]string, error)
 	RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, error)
-	RunStepProducers(runID int) ([]db.StepProducer, error)
 	RunStepWorkflows(runID int) ([]db.ParsedWorkflow, error)
 	SchemaVersion() (int, error)
 	SetConfig(projectID int, key, value string) error
