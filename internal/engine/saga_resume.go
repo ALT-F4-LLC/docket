@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
@@ -26,11 +27,28 @@ import (
 // The two halves are both necessary. A `gate-started` with no result is the
 // crash window. A result with no start cannot happen — the event commits first,
 // which is the entire reason the saga orders them that way.
+//
+// Both halves read the step's CURRENT claim only. A retried step keeps every
+// earlier attempt's events and rows, and either one read across attempts
+// misjudges the gate: an old start with no new result would park every retry,
+// and an old result would hide the new attempt's interrupted gate.
 func gateWasStartedButNotRecorded(conn store.LegacyDB, step *store.Step, gate string) (bool, error) {
 	st := store.StoreOn(conn)
-	started, err := st.StepEventDataContains(step.RunID, step.ID, EventGateStarted, gate)
+	events, err := st.RunStepEvents(step.RunID, EventStepClaimed, EventGateStarted)
 	if err != nil {
 		return false, fmt.Errorf("probing for an interrupted gate: %w", err)
+	}
+	started := false
+	for _, ev := range events {
+		if ev.StepID != step.ID {
+			continue
+		}
+		switch {
+		case ev.Kind == EventStepClaimed:
+			started = false
+		case strings.Contains(ev.Data, gate):
+			started = true
+		}
 	}
 	if !started {
 		return false, nil
