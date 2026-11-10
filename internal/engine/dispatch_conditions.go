@@ -3,7 +3,6 @@ package engine
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -20,9 +19,6 @@ import (
 // So a close refuses while a vote sealed during the dispatch holds an
 // approve-with-concerns cast and has no linked issue labelled `tribunal`.
 // `--no-conditions REASON` waives it, and REASON is recorded as a run note.
-
-// tribunalLabel is the label a filed seat condition carries.
-const tribunalLabel = "tribunal"
 
 // noConditionsVerb names the waiver in a conductor refusal.
 const noConditionsVerb = "dispatch close --no-conditions"
@@ -48,54 +44,27 @@ type UnfiledCondition struct {
 // order. A vote counts when a run issue is linked to it, it is no longer open,
 // and it was last updated at or after the dispatch opened.
 func unfiledConditions(conn store.LegacyDB, runID int, openedSeq int64) ([]UnfiledCondition, error) {
-	var openedMS int64
-	if err := conn.QueryRow(`SELECT at_ms FROM events WHERE seq = ?`, openedSeq).Scan(&openedMS); err != nil {
+	st := store.StoreOn(conn)
+	openedMS, err := st.EventAtMS(openedSeq)
+	if err != nil {
 		return nil, fmt.Errorf("reading when the dispatch opened: %w", err)
 	}
-	// proposals.updated_at is kept to the second, so a seal stamped earlier in
-	// the second the dispatch opened counts as sealed during it: the window
-	// fails closed.
-	since := time.UnixMilli(openedMS).UTC().Format(time.RFC3339)
-
 	// One row per (vote, seat): a voter name is unvalidated text, so the seats
 	// are assembled here rather than split out of a joined string.
-	rows, err := conn.Query(
-		`SELECT p.id, v.voter_name
-		   FROM proposals p
-		   JOIN votes v ON v.proposal_id = p.id AND v.verdict = ?
-		  WHERE p.status != ?
-		    AND p.updated_at >= ?
-		    AND p.id IN (SELECT pi.proposal_id FROM proposal_issues pi
-		                   JOIN run_issues ri ON ri.issue_id = pi.issue_id
-		                  WHERE ri.run_id = ?)
-		    AND NOT EXISTS (SELECT 1 FROM proposal_issues pt
-		                      JOIN issue_labels il ON il.issue_id = pt.issue_id
-		                      JOIN labels l ON l.id = il.label_id
-		                     WHERE pt.proposal_id = p.id AND l.name = ?)
-		  ORDER BY p.id, v.voter_name`,
-		string(model.VerdictApproveWithConcerns), string(model.ProposalStatusOpen),
-		since, runID, tribunalLabel)
+	seats, err := st.UnfiledSeatConditions(runID, openedMS)
 	if err != nil {
-		return nil, fmt.Errorf("reading unfiled seat conditions: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 	var out []UnfiledCondition
-	for rows.Next() {
-		var (
-			id    int
-			voter string
-		)
-		if err := rows.Scan(&id, &voter); err != nil {
-			return nil, fmt.Errorf("reading an unfiled seat condition: %w", err)
-		}
-		proposal := model.FormatProposalID(id)
+	for _, seat := range seats {
+		proposal := model.FormatProposalID(seat.ProposalID)
 		if n := len(out); n > 0 && out[n-1].Proposal == proposal {
-			out[n-1].Voters = append(out[n-1].Voters, voter)
+			out[n-1].Voters = append(out[n-1].Voters, seat.Voter)
 			continue
 		}
-		out = append(out, UnfiledCondition{Proposal: proposal, Voters: []string{voter}})
+		out = append(out, UnfiledCondition{Proposal: proposal, Voters: []string{seat.Voter}})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // unfiledConditionsReason words the refusal: each vote, its seats, and the two
