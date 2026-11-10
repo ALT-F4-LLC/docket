@@ -1996,6 +1996,76 @@ func TestActivateWarnsWhenScopeOmitsSiblingTest(t *testing.T) {
 	}
 }
 
+// TestSmallScopeLint pins the small-label sizing lint: an issue labelled
+// `small` rides a track whose diff-scope gate admits at most two paths in one
+// directory, so a scope declaring more distinct paths than that is mislabelled
+// before it runs. The dry run names the issue and leaves its binding alone.
+func TestSmallScopeLint(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		labels    []string
+		globs     string
+		warn      bool
+		reasonHas []string
+	}{
+		{"three paths", []string{"small"},
+			`["internal/engine/a.go","internal/engine/b.go","internal/engine/c.go"]`, true,
+			[]string{"3 scope paths", "drop the `small` label", "narrow the scope"}},
+		{"source beside its test plus a third path", []string{"small"},
+			`["internal/engine/activate.go","internal/engine/activate_test.go","internal/engine/run.go"]`, true,
+			[]string{"3 scope paths", "internal/engine/activate.go", "internal/engine/activate_test.go",
+				"drop the `small` label"}},
+		{"two paths in one directory", []string{"small"},
+			`["internal/engine/activate.go","internal/engine/activate_test.go"]`, false, nil},
+		{"a repeated path counts once", []string{"small"},
+			`["internal/engine/a.go","internal/engine/a.go","internal/engine/b.go"]`, false, nil},
+		{"three paths without the small label", nil,
+			`["internal/engine/a.go","internal/engine/b.go","internal/engine/c.go"]`, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			wf := registerFixture(t, conn)
+
+			issue := createIssue(t, conn, "a sized change", "body", "task", tc.labels)
+			err := db.SetIssueScopeGlobs(conn, issue, tc.globs)
+			testsupport.Must(t, err, "setting scope: %v", err)
+			run := startRun(t, conn, issue)
+
+			result, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+			testsupport.Must(t, err, "dry run: %v — the lint warns, it does not refuse", err)
+
+			if len(result.BoundIssues) != 1 || result.BoundIssues[0].Workflow != wf.Ref() {
+				t.Fatalf("bound issues = %+v, want the one issue bound to %s — the lint "+
+					"must not change routing", result.BoundIssues, wf.Ref())
+			}
+			if !tc.warn {
+				if len(result.ScopeWarnings) != 0 {
+					t.Errorf("scope warnings = %+v, want none for scope %s",
+						result.ScopeWarnings, tc.globs)
+				}
+				return
+			}
+			if len(result.ScopeWarnings) != 1 {
+				t.Fatalf("scope warnings = %+v, want exactly one for scope %s",
+					result.ScopeWarnings, tc.globs)
+			}
+			warning := result.ScopeWarnings[0]
+			if warning.IssueID != model.FormatID(issue) {
+				t.Errorf("warning names %q, want %q", warning.IssueID, model.FormatID(issue))
+			}
+			if warning.Workflow != wf.Ref() {
+				t.Errorf("warning names workflow %q, want %q", warning.Workflow, wf.Ref())
+			}
+			for _, want := range tc.reasonHas {
+				if !strings.Contains(warning.Reason, want) {
+					t.Errorf("warning reason %q does not contain %q", warning.Reason, want)
+				}
+			}
+			assertNothingWritten(t, conn)
+		})
+	}
+}
+
 // TestScopeWarningRidesOnDryRun is the placement that matters most. `--dry-run`
 // exists so an operator sees what a run WOULD bind before committing to it, and
 // a hazard visible only after the commit is one the dry run failed to report.

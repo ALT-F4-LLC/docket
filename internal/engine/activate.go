@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -798,6 +799,15 @@ func activateTx(
 		return nil, err
 	}
 	result.ScopeWarnings = append(result.ScopeWarnings, siblings...)
+
+	// The small-label sizing lint: a `small` issue whose scope already outgrows
+	// what the small track's diff-scope gate admits is mislabelled, and without
+	// this the gate refuses only after a writer has done the work.
+	oversized, err := lintOversizedSmallScopes(tx, runIssues, issues, bindings)
+	if err != nil {
+		return nil, err
+	}
+	result.ScopeWarnings = append(result.ScopeWarnings, oversized...)
 
 	// The label-vs-scope lint (DKT-1182): an issue whose scope says one pipeline
 	// owns it while its labels bound it to another. Binding refuses zero matches
@@ -1617,6 +1627,76 @@ func lintOmittedSiblingTests(
 					file, sibling),
 			})
 		}
+	}
+	return out, nil
+}
+
+// smallScopeMaxPaths is the most distinct paths a `small` issue's change may
+// touch: scripts/qa/diff-scope.sh's small track refuses a larger footprint.
+const smallScopeMaxPaths = 2
+
+// lintOversizedSmallScopes reports every issue labelled `small` whose scope
+// declares more than smallScopeMaxPaths distinct entries. When the scope pairs
+// a Go source file with its _test.go sibling, the reason names that pair: it
+// alone fills the small track's budget, which is the planning shape that
+// produced most oversized small issues.
+//
+// Each entry counts as one path, glob or literal, so a glob that matches many
+// files under-reports rather than guessing at what the change will touch.
+func lintOversizedSmallScopes(
+	tx store.LegacyTx, runIssues []*store.RunIssue, issues map[int]*model.Issue,
+	bindings map[int]*boundDefinition,
+) ([]ScopeWarning, error) {
+	var out []ScopeWarning
+	for _, ri := range runIssues {
+		issue := issues[ri.IssueID]
+		if issue == nil || !slices.Contains(issue.Labels, "small") {
+			continue
+		}
+		raw, err := store.TxOn(tx).IssueScopeGlobsTx(ri.IssueID)
+		if err != nil {
+			return nil, fmt.Errorf("reading scope for %s: %w",
+				model.FormatID(ri.IssueID), err)
+		}
+		if raw == "" {
+			continue
+		}
+		var globs []string
+		if err := json.Unmarshal([]byte(raw), &globs); err != nil {
+			continue
+		}
+		distinct := make(map[string]bool, len(globs))
+		for _, g := range globs {
+			distinct[g] = true
+		}
+		if len(distinct) <= smallScopeMaxPaths {
+			continue
+		}
+
+		pairing := ""
+		for _, file := range globs {
+			if !strings.HasSuffix(file, ".go") || strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			if sibling := strings.TrimSuffix(file, ".go") + "_test.go"; distinct[sibling] {
+				pairing = fmt.Sprintf(", including %s beside its test %s", file, sibling)
+				break
+			}
+		}
+
+		workflowRef := ""
+		if bound := bindings[ri.IssueID]; bound != nil {
+			workflowRef = bound.workflow.Ref()
+		}
+		out = append(out, ScopeWarning{
+			IssueID:  model.FormatID(ri.IssueID),
+			Workflow: workflowRef,
+			Reason: fmt.Sprintf(
+				"labelled small but declares %d scope paths%s; the small track's "+
+					"diff-scope gate admits at most %d paths in one directory, so "+
+					"drop the `small` label and size the issue, or narrow the scope",
+				len(distinct), pairing, smallScopeMaxPaths),
+		})
 	}
 	return out, nil
 }
