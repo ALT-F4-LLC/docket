@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -45,12 +47,18 @@ import (
 
 // IssueDiffRepin is what one re-pin did, as the verb reports it.
 type IssueDiffRepin struct {
-	// Worktree is the checkout the diff and target were recomputed from.
+	// Worktree is the checkout the new body was computed in: the named
+	// checkout for the `--worktree` re-pin, the run's shared checkout for a
+	// range re-pin (an annotation, a done step's own range), which reads no
+	// worktree.
 	Worktree string `json:"worktree"`
 	// FromSHA is the target the step's previous issue.diff record named — the
 	// stale one — or "" when the step had recorded no diff at all.
 	FromSHA string `json:"from_sha,omitempty"`
-	// ToSHA is the re-pinned target: Worktree's HEAD at re-pin time.
+	// ToSHA is the target the new record names: Worktree's HEAD for the
+	// `--worktree` re-pin, the integrated sha for an annotation, and the
+	// unchanged head for a done step's own-range re-pin, where it equals
+	// FromSHA.
 	ToSHA string `json:"to_sha"`
 	// Artifact is the `ARTIFACT-N` the re-pin recorded, and Supersedes the
 	// step's previous issue.diff artifact it revises. Both empty on an
@@ -65,8 +73,9 @@ type IssueDiffRepin struct {
 
 	body, payload string
 	supersededID  int
-	// rangeFrom is the commit an annotation's full-range re-pin starts after
-	// (DKT-4269); "" for a re-pin of one commit.
+	// rangeFrom is the commit a range re-pin's patch starts after: an
+	// annotation's integrated range (DKT-4269) or a done step's own range;
+	// "" for a re-pin of one commit.
 	rangeFrom string
 	// recorded is the commit the re-pinned checkout holds, captured like a
 	// record's (DKT-4250); haveRecorded is false when the checkout holds work a
@@ -266,17 +275,19 @@ func recordIssueDiffRepinTx(
 const ResolutionOwnRange = "own-range"
 
 // RepinIssueDiffRange re-records a DONE step's `issue.diff` over the step's own
-// range: the combined patch from its newest record's `round_base` (its `base`
-// when no round_base was recorded) to that record's `head`, scoped like every
-// issue.diff, as a new artifact superseding that record.
+// range, scoped like every issue.diff, as a new artifact superseding the
+// step's newest record. The range ends at the newest record's `head` and
+// starts at the bound the step's own record of that head names (see
+// stepOwnRangeRecord).
 //
 // It is the re-pin for a step `step resolve --worktree` cannot reach: resolve
-// applies only to a parked step. A rerun-gates on a hand-integrated step can
-// re-write the record's body from the whole-branch base while its head and
-// bases still name the step's own commits; this re-derives the body from
-// those recorded commits, reading no worktree, so the step's recorded
-// worktree and recorded head stay as they were. An identical body records
-// nothing and reports Unchanged.
+// applies only to a parked step. A rerun-gates on a hand-integrated step walks
+// the routing stage again and re-cuts the body for the same head from whatever
+// base resolves then, the whole-branch one once the worktree is swept, and
+// records that base beside it; this re-derives the body from the commits the
+// step recorded, reading no worktree, so the step's recorded worktree and
+// recorded head stay as they were. An identical body records nothing and
+// reports Unchanged.
 func (e *Engine) RepinIssueDiffRange(
 	conn store.LegacyDB, stepID int, by Attribution, token string, nowMS int64,
 ) (*IssueDiffRepin, error) {
@@ -311,33 +322,41 @@ func (e *Engine) RepinIssueDiffRange(
 				"that holds the tree does — so it has no range to re-record",
 			step.Instance)
 	}
-	prior, err := stepLatestIssueDiff(conn, step.ID)
+	prior, own, err := stepOwnRangeRecord(conn, step)
 	if err != nil {
 		return nil, err
 	}
-	if prior == nil {
-		return nil, validationErr("step %s recorded no issue.diff to re-record", step.Instance)
-	}
-	// The new record keeps every field of the one it supersedes (head, bases,
-	// worktree, an annotation's writer chain) and adds the range it was cut from.
+	// The new record restores the fields of the step's own record of the head
+	// (head, bases, worktree, an annotation's writer chain), not those of a
+	// re-cut that named another base, and adds the range it was cut from.
 	fields := map[string]any{}
-	if err := json.Unmarshal([]byte(prior.Payload), &fields); err != nil {
+	if err := json.Unmarshal([]byte(own.Payload), &fields); err != nil {
 		return nil, validationErr(
 			"step %s's issue.diff record ARTIFACT-%d has no readable payload: %v",
-			step.Instance, prior.ID, err)
+			step.Instance, own.ID, err)
 	}
 	field := func(key string) string { s, _ := fields[key].(string); return s }
-	head, from := field("head"), field("round_base")
+	head, from := field("head"), field("range_from")
+	if from == "" {
+		from = field("round_base")
+	}
 	if from == "" {
 		from = field("base")
+	}
+	if from == "" {
+		return nil, validationErr(
+			"step %s's first record of head %.12s, ARTIFACT-%d, names no range_from, "+
+				"round_base, or base, so there is no recorded range to re-record; a "+
+				"later record's base is not used, since a re-cut names whatever base "+
+				"resolved when it ran", step.Instance, head, own.ID)
 	}
 	// Both are handed to git as revisions, so they are held to the shape of a
 	// commit id first, as the integration annotation holds its writer chain.
 	if !hexCommitID.MatchString(head) || !hexCommitID.MatchString(from) {
 		return nil, validationErr(
 			"step %s's issue.diff record ARTIFACT-%d does not name its range as "+
-				"commit ids (head %q, round_base or base %q), so there is no range "+
-				"to re-record", step.Instance, prior.ID, head, from)
+				"commit ids (head %q, range start %q), so there is no range "+
+				"to re-record", step.Instance, own.ID, head, from)
 	}
 	if e.RangePatchFn == nil {
 		return nil, conflictErr(
@@ -405,4 +424,45 @@ func stepLatestIssueDiff(conn store.LegacyDB, stepID int) (*store.Artifact, erro
 		}
 	}
 	return latest, nil
+}
+
+// stepOwnRangeRecord returns the step's newest issue.diff record, the one a
+// range re-pin supersedes, and the record that names the step's own range for
+// that record's head: the OLDEST of the step's records naming the same head.
+//
+// Every engine writer records the base it cut its body from, so a later record
+// at the same head is a re-cut of the same commit whose base is whatever
+// resolved when it ran (a rerun-gates after the worktree is swept falls back to
+// the run's pinned commit); its base describes that cut, not the step's
+// change. The first record of a head was cut when that head was handed back,
+// and a re-pin that moves the head (the `--worktree` re-pin, an integration
+// annotation) starts a new first record, so a sanctioned move keeps its range.
+func stepOwnRangeRecord(conn store.LegacyDB, step *store.Step) (newest, own *store.Artifact, err error) {
+	artifacts, err := store.StoreOn(conn).ListStepArtifacts(step.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var records []*store.Artifact
+	for _, a := range artifacts {
+		if a.Kind == ArtifactKindIssueDiff {
+			records = append(records, a)
+		}
+	}
+	if len(records) == 0 {
+		return nil, nil, validationErr("step %s recorded no issue.diff to re-record", step.Instance)
+	}
+	slices.SortFunc(records, func(a, b *store.Artifact) int { return cmp.Compare(a.ID, b.ID) })
+	newest = records[len(records)-1]
+	head := handBackHead(newest.Payload)
+	if head == "" {
+		return nil, nil, validationErr(
+			"step %s's newest issue.diff record ARTIFACT-%d names no head commit, "+
+				"so there is no range to re-record", step.Instance, newest.ID)
+	}
+	for _, a := range records[:len(records)-1] {
+		if handBackHead(a.Payload) == head {
+			return newest, a, nil
+		}
+	}
+	return newest, newest, nil
 }
