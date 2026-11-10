@@ -219,6 +219,10 @@ func (s *sqliteStore) EnsureProjectCreated(identity, name string, nowMS int64) (
 	return db.EnsureProjectCreated(s.writer, identity, name, nowMS)
 }
 
+func (s *sqliteStore) EventAtMS(seq int64) (int64, error) {
+	return db.EventAtMS(s.writer, seq)
+}
+
 func (s *sqliteStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.writer)
 }
@@ -789,6 +793,10 @@ func (s *sqliteStore) StepStatusCounts(runID int) ([]model.StatusCount, error) {
 
 func (s *sqliteStore) StrandedSagaStepIDs(runID int, excludedKind string, updatedBeforeMS int64) ([]int, error) {
 	return db.StrandedSagaStepIDs(s.writer, runID, excludedKind, updatedBeforeMS)
+}
+
+func (s *sqliteStore) UnfiledSeatConditions(runID int, sinceMS int64) ([]db.UnfiledSeatCondition, error) {
+	return db.UnfiledSeatConditions(s.writer, runID, sinceMS)
 }
 
 func (s *sqliteStore) UnlinkDocIssue(docID, issueID int) error {

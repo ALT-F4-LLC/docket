@@ -78,8 +78,9 @@ type (
 // The dispatch and guard query inputs and rows, aliased as in aliases.go so
 // callers can build and read them without importing internal/db.
 type (
-	GateStepQuery = db.GateStepQuery
-	GateStepState = db.GateStepState
+	GateStepQuery        = db.GateStepQuery
+	GateStepState        = db.GateStepState
+	UnfiledSeatCondition = db.UnfiledSeatCondition
 )
 
 // The hold, activation and definition query rows, aliased as in aliases.go so
@@ -155,6 +156,7 @@ type Store interface {
 	DetachFiles(issueID int, filePaths []string, changedBy string) error
 	EnsureProject(identity, name string, nowMS int64) (int, error)
 	EnsureProjectCreated(identity, name string, nowMS int64) (int, bool, error)
+	EventAtMS(seq int64) (int64, error)
 	EventsRetain() (time.Duration, error)
 	FirstIssueEventDataAfter(q db.IssueEventAfterQuery) (data string, found bool, err error)
 	FirstRecorderAfterMetadata(q db.FirstRecorderAfterQuery) (metadata string, found bool, err error)
@@ -298,6 +300,7 @@ type Store interface {
 	StepInputCount(stepID int) (int, error)
 	StepStatusCounts(runID int) ([]model.StatusCount, error)
 	StrandedSagaStepIDs(runID int, excludedKind string, updatedBeforeMS int64) ([]int, error)
+	UnfiledSeatConditions(runID int, sinceMS int64) ([]db.UnfiledSeatCondition, error)
 	UnlinkDocIssue(docID, issueID int) error
 	UnlinkProposalIssue(proposalID, issueID int) error
 	UpdateDoc(id int, upd db.DocUpdate) (int, error)

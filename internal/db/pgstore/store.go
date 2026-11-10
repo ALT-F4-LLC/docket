@@ -254,6 +254,10 @@ func (s *pgStore) EnsureProjectCreated(identity, name string, nowMS int64) (int,
 	return db.EnsureProjectCreated(s.db, identity, name, nowMS)
 }
 
+func (s *pgStore) EventAtMS(seq int64) (int64, error) {
+	return db.EventAtMS(s.db, seq)
+}
+
 func (s *pgStore) EventsRetain() (time.Duration, error) {
 	return db.EventsRetain(s.db)
 }
@@ -841,6 +845,10 @@ func (s *pgStore) StepStatusCounts(runID int) ([]model.StatusCount, error) {
 
 func (s *pgStore) StrandedSagaStepIDs(runID int, excludedKind string, updatedBeforeMS int64) ([]int, error) {
 	return db.StrandedSagaStepIDs(s.db, runID, excludedKind, updatedBeforeMS)
+}
+
+func (s *pgStore) UnfiledSeatConditions(runID int, sinceMS int64) ([]db.UnfiledSeatCondition, error) {
+	return db.UnfiledSeatConditions(s.db, runID, sinceMS)
 }
 
 func (s *pgStore) UnlinkDocIssue(docID, issueID int) error {

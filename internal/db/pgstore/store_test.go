@@ -791,6 +791,80 @@ func TestPgStoreDispatchAndGuardQueries(t *testing.T) {
 	}
 }
 
+// TestPgStoreDispatchConditionQueries reaches the dispatch-conditions reads,
+// whose helper SQL the PostgreSQL store shares, through the pool: an event's
+// at_ms by seq, with a seq past the log reading as ErrNotFound, and the
+// approve-with-concerns casts on the run's sealed votes since a stamp that no
+// tribunal issue files, in proposal then voter order. It skips without
+// DOCKET_TEST_POSTGRES_DSN.
+func TestPgStoreDispatchConditionQueries(t *testing.T) {
+	f := newSagaFixture(t)
+	project, err := f.st.RunProjectID(f.run)
+	testsupport.Must(t, err, "RunProjectID: %v", err)
+	tribunal, _, err := f.st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: project, Title: "tribunal", Status: model.StatusTodo,
+		Priority: model.PriorityNone, Kind: model.IssueKindTask,
+	}, []string{"tribunal"}, nil, "")
+	testsupport.Must(t, err, "CreateIssueIdempotent: %v", err)
+	work := f.issue
+
+	since := time.Unix(5000, 0)
+	testsupport.Must(t, f.tx.InsertEventTx(db.NewEvent{AtMS: since.UnixMilli(), Kind: "dispatch-opened", RunID: f.run, Data: `{}`}),
+		"InsertEventTx")
+	opened, err := f.tx.LastEventSeqTx()
+	testsupport.Must(t, err, "LastEventSeqTx: %v", err)
+	voteID := 0
+	propose := func(id int, status model.ProposalStatus, updated time.Time, issues []int, casts map[string]model.Verdict) {
+		t.Helper()
+		_, err := f.tx.InsertProposalWithID(&model.Proposal{
+			ID: id, ProjectID: project, Description: "vote", Criticality: model.CriticalityLow, Status: status,
+			RequiredVoters: 1, Threshold: 0.5, CreatedAt: since.Add(-time.Hour), UpdatedAt: updated,
+		})
+		testsupport.Must(t, err, "InsertProposalWithID %d: %v", id, err)
+		for _, issue := range issues {
+			_, err := f.tx.InsertProposalIssueLink(id, issue)
+			testsupport.Must(t, err, "InsertProposalIssueLink %d: %v", id, err)
+		}
+		for voter, verdict := range casts {
+			voteID++
+			_, err := f.tx.InsertVoteWithID(&model.Vote{
+				ID: voteID, ProposalID: id, VoterName: voter, Verdict: verdict,
+				Confidence: 0.9, DomainRelevance: 0.9, CreatedAt: since,
+			})
+			testsupport.Must(t, err, "InsertVoteWithID %d: %v", voteID, err)
+		}
+	}
+	concerns, sealed := model.VerdictApproveWithConcerns, model.ProposalStatusApproved
+	propose(20, sealed, since.Add(time.Minute), []int{work}, map[string]model.Verdict{"seat-c": concerns})
+	propose(10, sealed, since, []int{work}, map[string]model.Verdict{
+		"seat-z": concerns, "seat-a": concerns, "seat-m": model.VerdictApprove,
+	})
+	propose(30, model.ProposalStatusOpen, since.Add(time.Minute), []int{work},
+		map[string]model.Verdict{"seat-open": concerns})
+	propose(40, sealed, since.Add(-time.Second), []int{work}, map[string]model.Verdict{"seat-early": concerns})
+	propose(50, sealed, since.Add(time.Minute), []int{work, tribunal}, map[string]model.Verdict{"seat-filed": concerns})
+	testsupport.Must(t, f.tx.Commit(), "committing the seeded rows")
+
+	if got, err := f.st.EventAtMS(opened); err != nil || got != since.UnixMilli() {
+		t.Errorf("EventAtMS of the opened event = (%d, %v), want (%d, nil)", got, err, since.UnixMilli())
+	}
+	if got, err := f.st.EventAtMS(opened + 1); !errors.Is(err, db.ErrNotFound) || got != 0 {
+		t.Errorf("EventAtMS past the log = (%d, %v), want (0, ErrNotFound)", got, err)
+	}
+	want := []db.UnfiledSeatCondition{
+		{ProposalID: 10, Voter: "seat-a"},
+		{ProposalID: 10, Voter: "seat-z"},
+		{ProposalID: 20, Voter: "seat-c"},
+	}
+	if got, err := f.st.UnfiledSeatConditions(f.run, since.UnixMilli()); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("UnfiledSeatConditions = (%+v, %v), want (%+v, nil): open, pre-since, tribunal-filed "+
+			"proposals and plain approvals excluded", got, err, want)
+	}
+	if got, err := f.st.UnfiledSeatConditions(f.otherRun+1, since.UnixMilli()); err != nil || len(got) != 0 {
+		t.Errorf("UnfiledSeatConditions of a run with no issues = (%+v, %v), want (none, nil)", got, err)
+	}
+}
+
 // TestPgStoreHoldAndActivationQueries runs the hold, activation and definition
 // queries, whose helper SQL the PostgreSQL store shares, against seeded rows:
 // each read keeps its run, issue, project and kind filters, list reads come
