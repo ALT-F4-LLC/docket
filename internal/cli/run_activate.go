@@ -242,6 +242,27 @@ type activateResult struct {
 	ConductorToken string `json:"conductor_token,omitempty"`
 }
 
+// warnScopeWarnings prints the scope lints on the warning channel. Each
+// warning's Reason names its own remedy except the unscoped-holder lint's, so
+// that one alone gains the `--scope` remedy: an operator reading "no scope is
+// declared" needs to know that scope is set on the ISSUE, not in the workflow
+// named beside it.
+//
+// engine.ScopeWarning carries no kind, so the unscoped-holder warning is
+// recognized by the opening of the Reason lintUnscopedHolders writes.
+func warnScopeWarnings(w *output.Writer, warnings []engine.ScopeWarning) {
+	for _, warning := range warnings {
+		line := warning.IssueID + ": " + warning.Reason
+		if warning.Workflow != "" {
+			line = warning.IssueID + " is bound to " + warning.Workflow + " and " + warning.Reason
+		}
+		if strings.HasPrefix(warning.Reason, "no scope is declared") {
+			line += "; declare one with `docket issue edit " + warning.IssueID + " --scope GLOB`"
+		}
+		w.Warn("%s", line)
+	}
+}
+
 func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
 
@@ -282,16 +303,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.Bytes, warning.Cap)
 	}
 
-	// The unscoped-holder lint, on the same channel and for the same reason. It
-	// names the remedy as well as the fact: an operator reading "declares no
-	// scope" needs to know that scope is set on the ISSUE, not in the workflow
-	// that happens to be named beside it.
-	for _, warning := range result.ScopeWarnings {
-		w.Warn("%s is bound to %s and %s; declare one with "+
-			"`docket issue edit %s --scope GLOB`",
-			warning.IssueID, warning.Workflow, warning.Reason,
-			warning.IssueID)
-	}
+	warnScopeWarnings(w, result.ScopeWarnings)
 
 	// The label-vs-scope lint (DKT-1182), same channel again. It names the
 	// remedy the same way: the binding follows the LABELS, so an operator who

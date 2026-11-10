@@ -167,3 +167,55 @@ func TestRunActivateJSONCarriesANewPolicyPin(t *testing.T) {
 		}
 	})
 }
+
+// TestRunActivateScopeWarningsNameEachWarningsOwnRemedy: the human-mode scope
+// warnings print the `--scope` remedy only for an issue that declares no scope,
+// since the other scope lints' reasons already name their remedy, and a warning
+// with no bound workflow leaves no gap where the workflow name would be.
+func TestRunActivateScopeWarningsNameEachWarningsOwnRemedy(t *testing.T) {
+	// The reasons are the engine lints' wording, spelled here rather than
+	// borrowed so the test pins what an operator actually reads.
+	warnings := []engine.ScopeWarning{
+		{
+			IssueID:  "DKT-1",
+			Workflow: "standard-change@1",
+			Reason: "no scope is declared, so its \"implement\" step holds the " +
+				"tree without excluding, or being excluded by, any other issue",
+		},
+		{
+			IssueID: "DKT-2",
+			Reason: "none of its declared scope paths resolves under /repo — the " +
+				"issue may belong to a different repository; re-home it with " +
+				"`docket issue move --project` or fix the scope",
+		},
+		{
+			IssueID: "DKT-3",
+			Reason: "scope names a.go but not its existing test a_test.go — a fix " +
+				"that must change the test cannot land; add the test to the issue's scope",
+		},
+	}
+	stderr := &bytes.Buffer{}
+	warnScopeWarnings(&output.Writer{Stdout: &bytes.Buffer{}, Stderr: stderr}, warnings)
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != len(warnings) {
+		t.Fatalf("want one line per warning (%d), got %d:\n%s", len(warnings), len(lines), stderr)
+	}
+	for i, w := range warnings {
+		if !strings.Contains(lines[i], w.IssueID) || !strings.Contains(lines[i], w.Reason) {
+			t.Fatalf("line %d does not carry %s and its reason: %q", i, w.IssueID, lines[i])
+		}
+	}
+
+	if want := "declare one with `docket issue edit DKT-1 --scope GLOB`"; !strings.Contains(lines[0], want) {
+		t.Errorf("no-scope warning lacks %q: %q", want, lines[0])
+	}
+	for _, line := range lines[1:] {
+		if strings.Contains(line, "declare one with") {
+			t.Errorf("warning appends the no-scope remedy to a reason naming its own: %q", line)
+		}
+		if strings.Contains(line, "  ") {
+			t.Errorf("warning with no workflow leaves a doubled space: %q", line)
+		}
+	}
+}
