@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -211,7 +212,14 @@ func applyIssueDiffRepin(
 	if repin.Unchanged {
 		return nil
 	}
+	return recordIssueDiffRepinTx(tx, step, repin, map[string]any{"resolution": as}, nowMS)
+}
 
+// recordIssueDiffRepinTx inserts the re-pin's superseding issue.diff artifact
+// and its `issue-diff-repinned` event; event carries the caller's own fields.
+func recordIssueDiffRepinTx(
+	tx store.LegacyTx, step *store.Step, repin *IssueDiffRepin, event map[string]any, nowMS int64,
+) error {
 	var supersedes *int
 	if repin.supersededID != 0 {
 		id := repin.supersededID
@@ -234,14 +242,15 @@ func applyIssueDiffRepin(
 	// Both shas, the checkout, both artifacts, and the resolution the re-pin
 	// rode on — the facts a reader comparing a packet against the executor's
 	// recorded commit needs to see where the two parted.
-	data, err := json.Marshal(map[string]any{
-		"from_sha":   repin.FromSHA,
-		"to_sha":     repin.ToSHA,
-		"worktree":   repin.Worktree,
-		"artifact":   repin.Artifact,
-		"supersedes": repin.Supersedes,
-		"resolution": as,
-	})
+	event["from_sha"] = repin.FromSHA
+	event["to_sha"] = repin.ToSHA
+	event["worktree"] = repin.Worktree
+	event["artifact"] = repin.Artifact
+	event["supersedes"] = repin.Supersedes
+	if repin.rangeFrom != "" {
+		event["range_from"] = repin.rangeFrom
+	}
+	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("recording the re-pin of %s: %w", step.Instance, err)
 	}
@@ -250,6 +259,128 @@ func applyIssueDiffRepin(
 		Instance: step.Instance, IssueID: step.IssueID,
 		Data: string(data), AtMS: nowMS,
 	})
+}
+
+// ResolutionOwnRange is the `resolution` an `issue-diff-repinned` event
+// carries when a done step's diff was re-recorded over its own range.
+const ResolutionOwnRange = "own-range"
+
+// RepinIssueDiffRange re-records a DONE step's `issue.diff` over the step's own
+// range: the combined patch from its newest record's `round_base` (its `base`
+// when no round_base was recorded) to that record's `head`, scoped like every
+// issue.diff, as a new artifact superseding that record.
+//
+// It is the re-pin for a step `step resolve --worktree` cannot reach: resolve
+// applies only to a parked step. A rerun-gates on a hand-integrated step can
+// re-write the record's body from the whole-branch base while its head and
+// bases still name the step's own commits; this re-derives the body from
+// those recorded commits, reading no worktree, so the step's recorded
+// worktree and recorded head stay as they were. An identical body records
+// nothing and reports Unchanged.
+func (e *Engine) RepinIssueDiffRange(
+	conn store.LegacyDB, stepID int, by Attribution, token string, nowMS int64,
+) (*IssueDiffRepin, error) {
+	const verb = "issue.diff range re-pin"
+	if err := by.require(verb); err != nil {
+		return nil, err
+	}
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
+		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := authorizeConductor(conn, step.RunID, token, verb); err != nil {
+		return nil, err
+	}
+	if step.Status != store.StepDone {
+		return nil, conflictErr(
+			"step %s is %s, not done; a parked step's issue.diff is re-pinned "+
+				"with `step resolve --worktree`, and a live step's lands with its record",
+			step.Instance, step.Status)
+	}
+	defs, err := StepDefinitions(conn, step.RunID)
+	if err != nil {
+		return nil, err
+	}
+	spec := workflow.StepByName(defs[step.WorkflowID], step.StepName)
+	if !isExecutorStep(step) || spec == nil || !stepHoldsTree(spec) {
+		return nil, validationErr(
+			"step %s records no issue.diff of its own — only an executor step "+
+				"that holds the tree does — so it has no range to re-record",
+			step.Instance)
+	}
+	prior, err := stepLatestIssueDiff(conn, step.ID)
+	if err != nil {
+		return nil, err
+	}
+	if prior == nil {
+		return nil, validationErr("step %s recorded no issue.diff to re-record", step.Instance)
+	}
+	// The new record keeps every field of the one it supersedes (head, bases,
+	// worktree, an annotation's writer chain) and adds the range it was cut from.
+	fields := map[string]any{}
+	if err := json.Unmarshal([]byte(prior.Payload), &fields); err != nil {
+		return nil, validationErr(
+			"step %s's issue.diff record ARTIFACT-%d has no readable payload: %v",
+			step.Instance, prior.ID, err)
+	}
+	field := func(key string) string { s, _ := fields[key].(string); return s }
+	head, from := field("head"), field("round_base")
+	if from == "" {
+		from = field("base")
+	}
+	// Both are handed to git as revisions, so they are held to the shape of a
+	// commit id first, as the integration annotation holds its writer chain.
+	if !hexCommitID.MatchString(head) || !hexCommitID.MatchString(from) {
+		return nil, validationErr(
+			"step %s's issue.diff record ARTIFACT-%d does not name its range as "+
+				"commit ids (head %q, round_base or base %q), so there is no range "+
+				"to re-record", step.Instance, prior.ID, head, from)
+	}
+	if e.RangePatchFn == nil {
+		return nil, conflictErr(
+			"cannot re-record %s: this engine has no range patch wired", step.Instance)
+	}
+	scope, err := snapshotScope(conn, step.RunID, step.IssueID)
+	if err != nil {
+		return nil, err
+	}
+	execRoot := runExecRoot(conn, step.RunID)
+	body, err := e.RangePatchFn(execRoot, from, head, scope)
+	if err != nil {
+		return nil, fmt.Errorf("computing the patch of %.12s..%.12s for %s: %w",
+			from, head, step.Instance, err)
+	}
+	fields["range_from"] = from
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("recording the re-pin of %s: %w", step.Instance, err)
+	}
+	repin := &IssueDiffRepin{
+		Worktree: execRoot, FromSHA: head, ToSHA: head,
+		body: body, payload: string(payload),
+		supersededID: prior.ID, rangeFrom: from,
+		Unchanged: prior.Body == body,
+	}
+	if repin.Unchanged {
+		return repin, nil
+	}
+
+	tx, err := conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("re-pinning %s: %w", step.Instance, err)
+	}
+	defer tx.Rollback()
+	event := map[string]any{"resolution": ResolutionOwnRange, "actor": by.Actor, "cwd": by.Cwd}
+	if err := recordIssueDiffRepinTx(tx, step, repin, event, nowMS); err != nil {
+		return nil, err
+	}
+	if err := commitWrite(tx); err != nil {
+		return nil, fmt.Errorf("re-pinning %s: %w", step.Instance, err)
+	}
+	return repin, nil
 }
 
 // stepLatestIssueDiff is the newest `issue.diff` artifact THIS step recorded,
