@@ -440,37 +440,48 @@ func measurePreGate(
 	return rows, nil
 }
 
-// pendingPastClaimBudget replaces the claim's measurement of a target sha with
-// a pending row when the claim's budget, not the gate, ended it: the last
-// attempt ran until the budget was spent and did not pass. Such a process was
-// stopped, so its exit is the kill's and not the gate's. For a target sha, the
-// gate's complete result is a detached run's to measure under the entry's own
-// timeout, so the claim records `skipped` with no exit and says the
-// measurement is pending rather than recording the kill as a failure.
+// pendingPastClaimBudget replaces every row the claim's budget, not the gate,
+// ended with a pending row: `skipped`, no exit, saying the measurement of the
+// target sha is pending, rather than recording the budget's kill as a failure.
 //
-// The caller decides "the budget is spent" after the run returns, so a gate
-// that fails on its own in the instant the budget ends also reads as pending:
-// the claim records no verdict it cannot attribute to the gate.
+// The budget's rows are the gate's trailing non-pass rows, walked from the
+// end. A row with no exit spawned nothing and keeps its own record (a fence
+// line skipped before its spawn, an unmatched line). A row with exit -1 and no
+// duration is an attempt exec never started because the deadline had passed
+// (a flaky re-attempt, a later fence line). The first row that ran is the
+// attempt the budget stopped; rows before it exited on their own before the
+// budget ended, so they measured the gate and stay as recorded.
+//
+// The caller decides "the budget is spent" after the run returns, so an
+// attempt that fails on its own in the instant the budget ends also reads as
+// pending: the claim records no verdict it cannot attribute to the gate.
 func pendingPastClaimBudget(rows []GateResultRow, targetSHA string) []GateResultRow {
-	if len(rows) == 0 {
-		return rows
-	}
-	last := rows[len(rows)-1]
-	if last.Exit == nil || last.Verdict == VerdictPass {
-		return rows
-	}
-	rows[len(rows)-1] = GateResultRow{
-		Gate: last.Gate, Ordinal: last.Ordinal, Argv: last.Argv,
-		DurationMS: last.DurationMS, Verdict: VerdictSkipped,
-		Reason: fmt.Sprintf(
-			"the measurement is pending: the claim's %s pre-gate budget ended "+
-				"before this gate finished, so the claim stopped it and records no "+
-				"result for it; a complete result for %.12s comes only from a "+
-				"detached pre-gate run under the entry's own timeout, and none had "+
-				"been recorded when this claim ran",
-			claimPreGateBudget, targetSHA),
-		TrustEntry: last.TrustEntry, StubEntry: last.StubEntry,
-		ArgvSHA256: last.ArgvSHA256, Prefix: last.Prefix,
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
+		if r.Verdict == VerdictPass {
+			break
+		}
+		if r.Exit == nil {
+			continue
+		}
+		started := *r.Exit != -1 || r.DurationMS > 0
+		what := "was spent before this attempt could start"
+		if started {
+			what = "ended while this gate ran, so the claim stopped it"
+		}
+		r.Exit = nil
+		r.Verdict = VerdictSkipped
+		r.Reason = fmt.Sprintf(
+			"the measurement of %.12s is pending: the claim's %s pre-gate budget %s, "+
+				"and the claim records no result for it; no detached pre-gate result for this "+
+				"target had been recorded when the claim ran, and no detached run "+
+				"measures a claimed step, so this gate's result comes only from "+
+				"running it outside the claim",
+			targetSHA, claimPreGateBudget, what)
+		rows[i] = r
+		if started {
+			break
+		}
 	}
 	return rows
 }
