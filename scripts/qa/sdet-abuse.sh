@@ -98,7 +98,19 @@ echo "--- running the matched abuse-case tests ---"
 # Run ONLY the abuse-case tests, not the whole suite: `tests` is its own gate
 # and re-running it here would make one failure surface as two.
 if [ -n "$matches" ]; then
-  if ! go test -run "Test[A-Za-z0-9_]*($pattern)" ./... 2>&1; then
+  go_test_status=0
+  go test -run "Test[A-Za-z0-9_]*($pattern)" ./... 2>&1 || go_test_status=$?
+  if [ "$go_test_status" -eq 127 ]; then
+    cat >&2 <<'EOF'
+
+sdet-abuse FAILED: tooling failure, a command was not found (exit 127).
+
+The abuse-case tests did not run, so this is not a security signal. Fix the
+environment (PATH, toolchain) named in the error above and rerun the gate.
+EOF
+    exit 1
+  fi
+  if [ "$go_test_status" -ne 0 ]; then
     cat >&2 <<'EOF'
 
 sdet-abuse FAILED: an abuse-case test did not pass.
