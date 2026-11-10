@@ -198,7 +198,10 @@ var claimPreGateBudget = 60 * time.Second
 // whole. Only a COMPLETE measurement qualifies — a process ran and exited —
 // and only for the sha this claim resolved: a result for an earlier target, a
 // run that measured nothing, or a run still in flight leaves the gate on the
-// budgeted path below, unchanged. The claim never waits on a detached run.
+// budgeted path below. The claim never waits on a detached run: on that path,
+// a gate measuring a target sha that the budget ends before it finishes
+// records the measurement as pending, never the budget's kill as its result
+// (pendingPastClaimBudget).
 func runPreGates(
 	conn store.LegacyDB, e *Engine, step *store.Step, gates []workflow.Gate,
 	targetSHA, workRoot string, nowMS int64,
@@ -398,6 +401,9 @@ func measurePreGate(
 		if err != nil {
 			return nil, err
 		}
+		if !m.deadline.IsZero() && m.targetSHA != "" && !time.Now().Before(m.deadline) {
+			rows = pendingPastClaimBudget(rows, m.targetSHA)
+		}
 	}
 
 	// Mark every row as a pre-gate result BEFORE recording, so the
@@ -432,6 +438,41 @@ func measurePreGate(
 		return nil, errPreGateRecordDeclined
 	}
 	return rows, nil
+}
+
+// pendingPastClaimBudget replaces the claim's measurement of a target sha with
+// a pending row when the claim's budget, not the gate, ended it: the last
+// attempt ran until the budget was spent and did not pass. Such a process was
+// stopped, so its exit is the kill's and not the gate's. For a target sha, the
+// gate's complete result is a detached run's to measure under the entry's own
+// timeout, so the claim records `skipped` with no exit and says the
+// measurement is pending rather than recording the kill as a failure.
+//
+// The caller decides "the budget is spent" after the run returns, so a gate
+// that fails on its own in the instant the budget ends also reads as pending:
+// the claim records no verdict it cannot attribute to the gate.
+func pendingPastClaimBudget(rows []GateResultRow, targetSHA string) []GateResultRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	last := rows[len(rows)-1]
+	if last.Exit == nil || last.Verdict == VerdictPass {
+		return rows
+	}
+	rows[len(rows)-1] = GateResultRow{
+		Gate: last.Gate, Ordinal: last.Ordinal, Argv: last.Argv,
+		DurationMS: last.DurationMS, Verdict: VerdictSkipped,
+		Reason: fmt.Sprintf(
+			"the measurement is pending: the claim's %s pre-gate budget ended "+
+				"before this gate finished, so the claim stopped it and records no "+
+				"result for it; a complete result for %.12s comes only from a "+
+				"detached pre-gate run under the entry's own timeout, and none had "+
+				"been recorded when this claim ran",
+			claimPreGateBudget, targetSHA),
+		TrustEntry: last.TrustEntry, StubEntry: last.StubEntry,
+		ArgvSHA256: last.ArgvSHA256, Prefix: last.Prefix,
+	}
+	return rows
 }
 
 // recordUnbindablePreGate records one pre-gate as `skipped`, spawning nothing,

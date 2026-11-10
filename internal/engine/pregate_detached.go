@@ -41,7 +41,9 @@ import (
 // rows keyed by (step, target sha). The claim finds them
 // (reusableDetachedPreGates) and serves them instead of spawning; a target
 // that moved, a run still in flight, or a run that measured nothing leaves the
-// claim on its budgeted path, unchanged. The claim never waits.
+// claim on its budgeted path, where a gate the budget ends before it finishes
+// records a pending row rather than the kill (pendingPastClaimBudget). The
+// claim never waits.
 //
 // WHY THE TARGET IS RECONSTRUCTED EVEN WHEN A WORKTREE STILL STANDS. The row
 // is keyed by the sha, so the sha is what it measures: a live worktree may
@@ -64,10 +66,11 @@ import (
 // costs one child that exits at the lock.
 //
 // THE SCHEDULER HOLDS THE STEP WHILE THE RUN IS IN FLIGHT. The claim never
-// waits, so a claim that arrives while the child is still measuring runs the
-// gate on its budgeted path and records the cut — the exact row this file
-// exists to replace, and for a verify step whose evidence IS that gate's exit, no
-// evidence at all. So a pending pre-gated step whose (step, target) lock is
+// waits, so a claim that arrives while the child is still measuring would run
+// the gate on its budgeted path and, for a gate the budget cannot hold, record
+// a pending row in place of the result the child is about to record — for a
+// verify step whose evidence IS that gate's exit, no evidence at all. So a
+// pending pre-gated step whose (step, target) lock is
 // held right now is not ready (ready.go, CondPreGatePending): `next` and
 // `dispatch open` do not offer it, the staged closure does not stage it, and a
 // claim is refused rather than served a budget-cut row. The hold is the same
