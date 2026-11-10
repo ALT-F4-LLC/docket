@@ -774,10 +774,6 @@ func (s *pgStore) RunStepEvents(runID int, kinds ...string) ([]db.StepEvent, err
 	return db.RunStepEvents(s.db, runID, kinds...)
 }
 
-func (s *pgStore) RunStepProducers(runID int) ([]db.StepProducer, error) {
-	return db.RunStepProducers(s.db, runID)
-}
-
 func (s *pgStore) RunStepWorkflows(runID int) ([]db.ParsedWorkflow, error) {
 	return db.RunStepWorkflows(s.db, runID)
 }

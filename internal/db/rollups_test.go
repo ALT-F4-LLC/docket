@@ -142,27 +142,6 @@ func TestReportQueriesLatestIssueEvent(t *testing.T) {
 	}
 }
 
-func TestReportQueriesRunStepProducers(t *testing.T) {
-	f := newRoutingFixture(t)
-	hinted := f.add(StepRow{StepName: "implement", Executor: "claude", Status: StepDone})
-	bare := f.add(StepRow{IssueID: f.otherIssue, StepName: "aggregate", Kind: "action", Status: StepDone})
-	f.add(StepRow{RunID: f.otherRun, StepName: "implement", Executor: "codex", Status: StepDone})
-	db := sagaPool(f)
-
-	got, err := RunStepProducers(db, f.run)
-	want := []StepProducer{
-		{StepID: hinted, Instance: "implement@0", Executor: "claude", IssueID: f.issue},
-		{StepID: bare, Instance: "aggregate@0", IssueID: f.otherIssue},
-	}
-	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Errorf("the run's producers = (%+v, %v), want (%+v, nil)", got, err, want)
-	}
-	got, err = RunStepProducers(db, 999)
-	if err != nil || len(got) != 0 {
-		t.Errorf("a run with no steps = (%+v, %v), want (none, nil)", got, err)
-	}
-}
-
 func TestReportQueriesRunEventSpanMS(t *testing.T) {
 	f := newRoutingFixture(t)
 	for _, e := range []NewEvent{

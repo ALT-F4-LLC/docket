@@ -843,32 +843,6 @@ func LatestIssueEvent(db *sql.DB, issueID int, kind string) (event IssueEvent, f
 	return event, true, nil
 }
 
-// StepProducer is the identity the run report attributes a step's output to.
-type StepProducer struct {
-	StepID   int
-	Instance string
-	// Executor is the step's declared executor hint, "" when it declares none.
-	Executor string
-	IssueID  int
-}
-
-// RunStepProducers returns every step of a run, ordered by id.
-func RunStepProducers(db *sql.DB, runID int) ([]StepProducer, error) {
-	rows, err := db.Query(
-		`SELECT id, instance, COALESCE(executor, ''), issue_id FROM steps
-		  WHERE run_id = ? ORDER BY id`, runID)
-	if err != nil {
-		return nil, fmt.Errorf("reading the step producers of %s: %w", model.FormatRunID(runID), err)
-	}
-	return scanRows(rows, "step producers", func(r *sql.Rows) (StepProducer, error) {
-		var p StepProducer
-		if err := r.Scan(&p.StepID, &p.Instance, &p.Executor, &p.IssueID); err != nil {
-			return p, fmt.Errorf("reading a step producer of %s: %w", model.FormatRunID(runID), err)
-		}
-		return p, nil
-	})
-}
-
 // RunEventSpanMS returns the at_ms of a run's earliest and latest events of
 // the given kinds. found is false when the run has none.
 func RunEventSpanMS(db *sql.DB, runID int, kinds ...string) (first, last int64, found bool, err error) {
