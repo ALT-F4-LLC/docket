@@ -38,8 +38,9 @@ import (
 // empty turns the lint off.
 //
 // WHAT THE LINT DOES NOT SEE. An empty list is not a clearance. The overlap
-// check compares the issues' DECLARED scope strings after taking each glob's
-// literal prefix: no path normalization (`./x`, `a/../b`, case), no writer diff,
+// check compares the issues' attached file paths as exact strings when both
+// issues list files, and otherwise their DECLARED scope strings after taking
+// each glob's literal prefix: no path normalization (`./x`, `a/../b`, case), no writer diff,
 // no symlink targets, and only security-labelled issues bound in the same run.
 // The lexicon is a case-folded substring match on the title, scope and body in
 // which dashes, whitespace and format characters read as a space. A
@@ -109,9 +110,9 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 		return nil, RoutingLintReport{}, err
 	}
 	type bound struct {
+		declaredPaths
 		id       int
 		title    string
-		scope    []string
 		body     string
 		security bool
 	}
@@ -123,8 +124,12 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 				return nil, RoutingLintReport{}, fmt.Errorf("reading the snapshot of %s: %w", model.FormatID(ri.IssueID), err)
 			}
 		}
+		paths := declaredPaths{scope: snap.Scope}
+		if snap.Files != nil {
+			paths.files = *snap.Files
+		}
 		issues = append(issues, bound{
-			id: ri.IssueID, title: snap.Title, scope: snap.Scope, body: ri.BodySnapshot,
+			declaredPaths: paths, id: ri.IssueID, title: snap.Title, body: ri.BodySnapshot,
 			security: slices.Contains(snap.Labels, label.Value),
 		})
 	}
@@ -147,7 +152,7 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 		}
 		var overlaps, found []string
 		for _, other := range issues {
-			if other.security && scopesOverlap(issue.scope, other.scope) {
+			if other.security && scopesOverlap(issue.declaredPaths, other.declaredPaths) {
 				overlaps = append(overlaps, model.FormatID(other.id))
 			}
 		}
@@ -230,16 +235,34 @@ func hasLiteralPrefixGlob(scope []string) bool {
 	return false
 }
 
-// scopesOverlap reports whether any glob of a shares paths with any glob of b,
-// by the engine's own conservative test (globsIntersect). A glob with no
-// literal prefix (`**`, `**/x.go`) intersects everything, which makes it no
-// signal here, so it is skipped.
-func scopesOverlap(a, b []string) bool {
-	for _, ga := range a {
+// declaredPaths is what an issue says it edits: its scope globs and its
+// attached files.
+type declaredPaths struct {
+	scope []string
+	files []string
+}
+
+// scopesOverlap reports whether a and b declare a common path. When both list
+// files, only a shared file counts: two globs that intersect over files
+// neither issue edits are no signal. When either lists none, it falls back to
+// whether any glob of a shares paths with any glob of b, by the engine's own
+// conservative test (globsIntersect). A glob with no literal prefix (`**`,
+// `**/x.go`) intersects everything, which makes it no signal here, so it is
+// skipped.
+func scopesOverlap(a, b declaredPaths) bool {
+	if len(a.files) > 0 && len(b.files) > 0 {
+		for _, f := range a.files {
+			if slices.Contains(b.files, f) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, ga := range a.scope {
 		if literalPrefix(ga) == "" {
 			continue
 		}
-		for _, gb := range b {
+		for _, gb := range b.scope {
 			if literalPrefix(gb) != "" && globsIntersect(ga, gb) {
 				return true
 			}

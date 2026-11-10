@@ -201,3 +201,49 @@ func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
 		t.Errorf("a real activation carried a lint report: %+v", *result3.RoutingLint)
 	}
 }
+
+// fileOverlapRun binds a security-labelled issue and an unlabelled one whose
+// scope globs intersect, each with the given attached files.
+func fileOverlapRun(t *testing.T, conn *sql.DB, securityFiles, otherFiles []string) (run *model.Run, security, other int) {
+	t.Helper()
+	registerFixture(t, conn)
+	security = createIssue(t, conn, "harden the exec resolver", "path handling", "task", []string{"security"})
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, security, `["internal/exec/**"]`), "declaring scope")
+	testsupport.Must(t, db.AttachFiles(conn, security, securityFiles, ""), "attaching files")
+	other = createIssue(t, conn, "Tidy the exec package", "naming", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, other, `["internal/exec/**"]`), "declaring scope")
+	testsupport.Must(t, db.AttachFiles(conn, other, otherFiles, ""), "attaching files")
+	return startRun(t, conn, security, other), security, other
+}
+
+func TestRoutingLintSkipsGlobOverlapWithNoSharedFile(t *testing.T) {
+	conn := mustDB(t)
+	run, _, other := fileOverlapRun(t, conn,
+		[]string{"internal/exec/resolve.go"}, []string{"internal/exec/names.go"})
+
+	if w, flagged := dryRunWarnings(t, conn, run.ID)[model.FormatID(other)]; flagged {
+		t.Errorf("flagged although the files lists share no path: %+v", w)
+	}
+}
+
+func TestRoutingLintFlagsSharedFileOverlap(t *testing.T) {
+	conn := mustDB(t)
+	run, security, other := fileOverlapRun(t, conn,
+		[]string{"internal/exec/resolve.go"}, []string{"internal/exec/names.go", "internal/exec/resolve.go"})
+
+	w := dryRunWarnings(t, conn, run.ID)[model.FormatID(other)]
+	if len(w.Overlaps) != 1 || w.Overlaps[0] != model.FormatID(security) {
+		t.Errorf("shared file not flagged against %s: %+v", model.FormatID(security), w)
+	}
+}
+
+func TestRoutingLintFallsBackToScopeWithoutFiles(t *testing.T) {
+	conn := mustDB(t)
+	run, security, other := fileOverlapRun(t, conn, []string{"internal/exec/resolve.go"}, nil)
+
+	w := dryRunWarnings(t, conn, run.ID)[model.FormatID(other)]
+	if len(w.Overlaps) != 1 || w.Overlaps[0] != model.FormatID(security) {
+		t.Errorf("intersecting scopes not flagged against %s when one issue lists no files: %+v",
+			model.FormatID(security), w)
+	}
+}
