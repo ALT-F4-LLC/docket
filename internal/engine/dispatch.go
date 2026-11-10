@@ -1230,6 +1230,9 @@ type targetCandidate struct {
 	instance string
 	issue    string
 	sha      string
+	// base bounds the step's own change below: the patch question judges
+	// base..sha, or the unbounded HEAD..sha when the record names none.
+	base string
 }
 
 // staleTargetCandidates collects, from an offer's READY steps, every one that
@@ -1257,10 +1260,15 @@ func staleTargetCandidates(
 			}
 			artifacts = loaded
 		}
-		sha, _, err := resolvedTargetFor(tx, sched, step, spec, artifacts)
+		issue, linked, err := contextIssue(tx, step.RunID, step.IssueID)
 		if err != nil {
 			return nil, err
 		}
+		inputs, err := resolveInputs(tx, sched, step, spec, issue.BodySnapshot, artifacts, linked)
+		if err != nil {
+			return nil, err
+		}
+		sha, _ := resolveTarget(inputs)
 		if sha == "" {
 			continue
 		}
@@ -1268,9 +1276,33 @@ func staleTargetCandidates(
 			instance: step.Instance,
 			issue:    model.FormatID(step.IssueID),
 			sha:      sha,
+			base:     ownRangeBase(inputs),
 		})
 	}
 	return out, nil
+}
+
+// ownRangeBase lifts, from the same round record resolveTarget reads, the
+// commit the step's own change starts from: `round_base` when the round
+// recorded one, else `base`, else "" (no bound).
+func ownRangeBase(inputs []ContextInput) string {
+	for _, in := range inputs {
+		if in.Kind != ArtifactKindIssueDiff || in.Payload == "" {
+			continue
+		}
+		var record struct {
+			RoundBase string `json:"round_base"`
+			Base      string `json:"base"`
+		}
+		if json.Unmarshal([]byte(in.Payload), &record) != nil {
+			continue
+		}
+		if record.RoundBase != "" {
+			return record.RoundBase
+		}
+		return record.Base
+	}
+	return ""
 }
 
 func consumesIssueDiff(spec *workflow.Step) bool {
@@ -1397,13 +1429,23 @@ func (e *Engine) staleTargets(
 	cache := make(map[string]verdict, len(candidates))
 	var out []StaleTarget
 	for _, c := range candidates {
-		v, seen := cache[c.sha]
+		// Keyed by sha AND base: the same tip judged over two recorded ranges
+		// asks two different patch questions.
+		key := c.sha + "@" + c.base
+		v, seen := cache[key]
 		if !seen {
 			v.ancestor, v.known = e.IsAncestorFn(execRoot, c.sha)
 			if v.known && !v.ancestor && e.PatchContainedFn != nil {
 				// DKT-1033: the patch question first — it is the one about
 				// the work rather than the tip.
 				v.contained, v.patchKnown = e.PatchContainedFn(execRoot, c.sha)
+			}
+			if v.patchKnown && !v.contained && c.base != "" && e.StepPatchContainedFn != nil {
+				// The whole HEAD..sha line includes commits the step stacked
+				// on; only its own range (base..sha) decides, so a missing
+				// inherited commit does not accuse a hand-picked integration
+				// of the step's change.
+				v.contained, v.patchKnown, _ = e.StepPatchContainedFn(execRoot, c.sha, c.base)
 			}
 			if v.known && !v.ancestor && !(v.patchKnown && v.contained) &&
 				e.TreeMatchFn != nil {
@@ -1421,7 +1463,7 @@ func (e *Engine) staleTargets(
 				exists, existsKnown := e.ObjectExistsFn(execRoot, c.sha)
 				v.absent = existsKnown && !exists
 			}
-			cache[c.sha] = v
+			cache[key] = v
 		}
 		if v.known && v.ancestor {
 			continue

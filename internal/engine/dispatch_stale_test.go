@@ -1157,3 +1157,140 @@ func TestGitPatchContainedInHead(t *testing.T) {
 			"true) — the shape it must no longer call a divergence", match, known)
 	}
 }
+
+// The patch question is about the STEP'S OWN change: the commits from its
+// recorded `round_base` (its `base` when no round_base was recorded) to its
+// recorded head. A writer chain stacked on earlier commits the shared branch
+// never carried must not make a hand-picked integration of that change read as
+// stale, and a range the branch does not carry must still warn.
+func TestStaleTargetsJudgeOnlyTheStepsOwnRange(t *testing.T) {
+	cases := []struct {
+		name string
+		// pickOwn integrates the step's own commit; otherwise only the
+		// inherited commit lands, and the step's own change is uncarried.
+		pickOwn bool
+		// payload builds the round record from the root, inherited, and own
+		// commits.
+		payload func(root, inherited, own string) string
+		stale   bool
+	}{
+		{
+			name:    "a cherry-picked range bounded by the recorded base",
+			pickOwn: true,
+			payload: func(_, inherited, own string) string {
+				return fmt.Sprintf(`{"head":%q,"base":%q}`, own, inherited)
+			},
+		},
+		{
+			name:    "a cherry-picked range bounded by round_base over a wider base",
+			pickOwn: true,
+			payload: func(root, inherited, own string) string {
+				return fmt.Sprintf(`{"head":%q,"base":%q,"round_base":%q}`, own, root, inherited)
+			},
+		},
+		{
+			name:    "an uncarried range",
+			pickOwn: false,
+			payload: func(_, inherited, own string) string {
+				return fmt.Sprintf(`{"head":%q,"base":%q}`, own, inherited)
+			},
+			stale: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := exec.LookPath("git"); err != nil {
+				t.Skip("git is not installed")
+			}
+			conn := mustDB(t)
+			run, _ := activatedRun(t, conn)
+			e := testEngine()
+
+			repo := t.TempDir()
+			gitRun(t, repo, "init", "-q")
+			writeFile(t, repo, "internal/work.txt", "original\n")
+			writeFile(t, repo, "internal/inherited.txt", "original\n")
+			gitRun(t, repo, "add", "-A")
+			gitRun(t, repo, "commit", "-q", "-m", "base")
+			root := gitRun(t, repo, "rev-parse", "HEAD")
+			shared := gitRun(t, repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+			// The writer chain: an inherited commit the step stacked on, then
+			// the step's own change.
+			gitRun(t, repo, "checkout", "-q", "-b", "executor")
+			writeFile(t, repo, "internal/inherited.txt", "an earlier writer's change\n")
+			gitRun(t, repo, "add", "-A")
+			gitRun(t, repo, "commit", "-q", "-m", "inherited work")
+			inherited := gitRun(t, repo, "rev-parse", "HEAD")
+			writeFile(t, repo, "internal/work.txt", "the step's own change\n")
+			gitRun(t, repo, "add", "-A")
+			gitRun(t, repo, "commit", "-q", "-m", "the step's own work")
+			own := gitRun(t, repo, "rev-parse", "HEAD")
+
+			execSQL(t, conn, `UPDATE runs SET exec_root = ? WHERE id = ?`, repo, run.ID)
+			implementID := stepIDByInstance(t, conn, "implement@0")
+			claim, err := ClaimStep(conn, implementID, ClaimOptions{Owner: "w", NowMS: nowMS})
+			testsupport.Must(t, err, "claim implement: %v", err)
+			err = e.CompleteStep(conn, implementID, CompleteOptions{
+				Token:    claim.Token,
+				Artifact: []byte("the change summary"),
+				WorkDir:  repo,
+				NowMS:    nowMS,
+			})
+			testsupport.Must(t, err, "complete implement: %v", err)
+			execSQL(t, conn,
+				`UPDATE artifacts SET payload = ? WHERE step_id = ? AND kind = ?`,
+				c.payload(root, inherited, own), implementID, ArtifactKindIssueDiff)
+
+			gitRun(t, repo, "checkout", "-q", shared)
+			writeFile(t, repo, "internal/unrelated.txt", "another issue's work\n")
+			gitRun(t, repo, "add", "-A")
+			gitRun(t, repo, "commit", "-q", "-m", "an unrelated integration")
+			if c.pickOwn {
+				gitRun(t, repo, "cherry-pick", own)
+			} else {
+				gitRun(t, repo, "cherry-pick", inherited)
+			}
+
+			// THE PREMISES. Ancestry is a definitive NO, and the tree probe
+			// cannot acquit on its own, so only the patch probe decides.
+			if ancestor, known := gitAncestorOfHead(repo, own); !known || ancestor {
+				t.Fatalf("premise broken: ancestry = (%v, %v), want a definitive NO",
+					ancestor, known)
+			}
+			if match, known := gitTouchedPathsMatchHead(repo, own); match || !known {
+				t.Fatalf("premise broken: the tree probe = (%v, %v), want a measured NO",
+					match, known)
+			}
+			if c.pickOwn {
+				// The whole chain is NOT carried: judging it would accuse.
+				if marks := gitOutput(t, repo, "cherry", "HEAD", own); !strings.Contains(marks, "+ "+inherited) {
+					t.Fatalf("premise broken: `git cherry HEAD <own>` = %q, want the "+
+						"inherited commit marked uncarried", marks)
+				}
+			}
+
+			m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
+			testsupport.Must(t, err, "dispatch open: %v", err)
+			if !c.stale {
+				if len(m.StaleTargets) != 0 {
+					t.Fatalf("the step's own range is carried, yet rows were flagged "+
+						"stale — the check judged the whole writer chain: %+v", m.StaleTargets)
+				}
+				return
+			}
+			if len(m.StaleTargets) == 0 {
+				t.Fatal("the step's own range is not carried, and no row was flagged")
+			}
+			for _, s := range m.StaleTargets {
+				if s.TargetSHA != own {
+					t.Errorf("%s target_sha = %q, want the recorded head %q", s.Instance, s.TargetSHA, own)
+				}
+				if !strings.Contains(s.Reason, "no commit on the shared branch") {
+					t.Errorf("%s reason %q does not say the patch was measured missing",
+						s.Instance, s.Reason)
+				}
+			}
+		})
+	}
+}
