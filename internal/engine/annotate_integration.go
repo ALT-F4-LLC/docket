@@ -64,7 +64,9 @@ import (
 // THE SHA MUST CARRY THE WRITER'S WORK (DKT-4269). Ancestry alone says the sha
 // is on the branch, so the engine also establishes that the sha's line holds a
 // patch-equivalent of every commit of the writer's chain (IntegrationRangeFn),
-// and refuses, recording nothing, when one is missing. The re-recorded diff is
+// and refuses, recording nothing, when one is missing. The chain is the step's
+// own change: its recorded `round_base` to its head, or `base` when the record
+// has no round delta (stepOwnChain). The re-recorded diff is
 // then the combined patch of the integrated range (RangePatchFn), scoped the
 // way every `issue.diff` is, so a writer integrated as a range of picks shows
 // every file and not the last commit's. With no range probe wired, the re-record
@@ -217,10 +219,11 @@ func (e *Engine) AnnotateIntegration(
 
 	// DKT-4269: ancestry says the sha is on the branch, not that it carries the
 	// writer's work. The engine also establishes that the sha holds a
-	// patch-equivalent of every commit of the writer's chain, and re-pins over
+	// patch-equivalent of every commit of the step's own chain, from its
+	// recorded `round_base` (else `base`) to its head, and re-pins over
 	// the whole integrated range, so a multi-commit writer's reviewers see
 	// every file instead of the last commit's.
-	writerHead, writerBase := writerChain(prior.Payload, from)
+	writerHead, writerBase := stepOwnChain(prior.Payload, from)
 	// The chain is passed to git as revisions, so it is held to the shape of a
 	// commit id before any argument is built from it, as `step integrate` holds
 	// it: a value that began with "-" would be an option, not a revision. The
@@ -414,6 +417,22 @@ func writerChain(payload, head string) (writerHead, writerBase string) {
 		return record.WriterHead, record.WriterBase
 	}
 	return head, record.Base
+}
+
+// stepOwnChain narrows the writer chain to the step's own change: a round
+// record's `round_base` bounds the commits this step made, where `base` can
+// sit below earlier rounds' or other work's commits on the same branch. Only
+// the writer's own record carries `round_base`; an annotation's record carries
+// the narrowed `writer_base` forward instead.
+func stepOwnChain(payload, head string) (writerHead, writerBase string) {
+	writerHead, writerBase = writerChain(payload, head)
+	var record struct {
+		RoundBase string `json:"round_base"`
+	}
+	if payload != "" && json.Unmarshal([]byte(payload), &record) == nil && record.RoundBase != "" {
+		writerBase = record.RoundBase
+	}
+	return writerHead, writerBase
 }
 
 func missingCommits(missing []string) string {
