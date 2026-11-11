@@ -33,7 +33,11 @@ func IssueClose(ctx context.Context, env verb.Env, in verb.IssueCloseInput) (ver
   the project identity input (identity string and whether it is anchored), and
   the build information `Handshake` reports. The CLI fills it from its config
   and connection; the daemon fills it from its own store and the request's
-  `Docket-Project` header.
+  `Docket-Project` header. The daemon's source for the author is an open
+  question: no request field, header, or daemon code defines one today. The
+  proto's `author` fields appear only on result messages and as the
+  `DocListRequest` filter, and `docs/design/connect-api-v1.md` names no author
+  input.
 - `In` holds values, never flags or files. A token, a file's content and a
   JSON document arrive as fields, following the field conventions in
   `docs/design/connect-api-v1.md`. Reading stdin, opening a client path,
@@ -156,7 +160,9 @@ The order:
    `internal/api/client` and `internal/api/codec`; `Service`, `unary` and
    `Handshake` land, and `MetaHandler` and `DaemonVersion` go. Files: the
    `internal/api` package, `internal/cli/root.go`,
-   `internal/cli/root_test.go`, `internal/daemon/window_test.go`. It waits on the store work's step for
+   `internal/cli/root_test.go`, `internal/daemon/serve.go`,
+   `internal/daemon/serve_test.go`, `internal/daemon/window_test.go`. It
+   waits on the store work's step for
    `internal/cli/root.go`.
 2. **Foundation.** `Env`, `Error`, ref parsing, project resolution and
    lease/CAS translation land in `internal/verb`, and the shared CLI helpers
