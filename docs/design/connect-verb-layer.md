@@ -34,7 +34,10 @@ func IssueClose(ctx context.Context, env verb.Env, in verb.IssueCloseInput) (ver
   the build information `Handshake` reports. The CLI fills it from its config
   and connection; the daemon fills it from its own store and the request's
   `Docket-Project` header. The daemon's source for the author is an open
-  question: no request field, header, or daemon code defines one today. The
+  question: no request field, header, or daemon code defines a general one
+  today. Only `VoteCreateRequest.created_by` and `VoteCastRequest.voter`
+  carry a per-verb value, which the CLI defaults from `config.DefaultAuthor()`;
+  verbs such as `IssueCommentAddRequest` and `DocCreateRequest` have none. The
   proto's `author` fields appear only on result messages and as the
   `DocListRequest` filter, and `docs/design/connect-api-v1.md` names no author
   input.
