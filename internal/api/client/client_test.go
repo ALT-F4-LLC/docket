@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -48,5 +49,37 @@ func TestNewClientRejectsUnknownEnum(t *testing.T) {
 	}
 	if got := res.Msg.GetItems()[0].GetStatus(); got != "active" {
 		t.Errorf("status = %q, want %q", got, "active")
+	}
+}
+
+// countingDaemon answers Handshake and counts the calls it receives.
+type countingDaemon struct {
+	docketv1connect.UnimplementedDocketServiceHandler
+	handshakes *atomic.Int32
+}
+
+func (d countingDaemon) Handshake(context.Context, *connect.Request[docketv1.HandshakeRequest]) (*connect.Response[docketv1.HandshakeResponse], error) {
+	d.handshakes.Add(1)
+	return connect.NewResponse(&docketv1.HandshakeResponse{DaemonVersion: "counted"}), nil
+}
+
+func TestConnectCallsHandshakeOnce(t *testing.T) {
+	var handshakes atomic.Int32
+	path, handler := docketv1connect.NewDocketServiceHandler(countingDaemon{handshakes: &handshakes})
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	_, meta, err := Connect(context.Background(), server.Client(), server.URL, slog.New(slog.DiscardHandler))
+
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if got := handshakes.Load(); got != 1 {
+		t.Errorf("handshake calls = %d, want exactly 1 per connect", got)
+	}
+	if got := meta.GetDaemonVersion(); got != "counted" {
+		t.Errorf("daemon_version = %q, want the daemon's %q", got, "counted")
 	}
 }

@@ -2,11 +2,13 @@
 package client
 
 import (
+	"context"
 	"log/slog"
 
 	"connectrpc.com/connect"
 
 	"github.com/ALT-F4-LLC/docket/internal/api/codec"
+	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
 
@@ -18,4 +20,15 @@ func NewClient(httpClient connect.HTTPClient, baseURL string, logger *slog.Logge
 		connect.WithProtoJSON(),
 		connect.WithInterceptors(codec.StrictValidation(logger)),
 	)
+}
+
+// Connect returns a client for the daemon at baseURL after one Handshake,
+// with the daemon's handshake response for the caller to check its build.
+func Connect(ctx context.Context, httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) (docketv1connect.DocketServiceClient, *docketv1.HandshakeResponse, error) {
+	client := NewClient(httpClient, baseURL, logger)
+	res, err := client.Handshake(ctx, connect.NewRequest(&docketv1.HandshakeRequest{}))
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, res.Msg, nil
 }
