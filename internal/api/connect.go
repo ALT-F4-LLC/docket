@@ -9,6 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/codec"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
@@ -35,12 +36,7 @@ func handlerOptions(logger *slog.Logger) connect.HandlerOption {
 	)
 }
 
-// NewClient returns a client for the daemon at baseURL that speaks the strict
-// protojson codec: a response carrying a state-machine value this client does
-// not know fails with the INCOMPATIBLE docket code.
+// NewClient forwards to client.NewClient while callers move to that package.
 func NewClient(httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) docketv1connect.DocketServiceClient {
-	return docketv1connect.NewDocketServiceClient(httpClient, baseURL,
-		connect.WithProtoJSON(),
-		connect.WithInterceptors(codec.StrictValidation(logger)),
-	)
+	return client.NewClient(httpClient, baseURL, logger)
 }
