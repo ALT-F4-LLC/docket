@@ -16,12 +16,12 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 )
 
-// serveHosted serves the meta handler behind the client window cfg declares
-// and returns a client for it.
+// serveHosted serves the Service behind the client window cfg declares and
+// returns a client for it.
 func serveHosted(t *testing.T, cfg config.DaemonConfig) docketv1connect.DocketServiceClient {
 	t.Helper()
 	logger := slog.New(slog.DiscardHandler)
-	path, handler := api.NewHandler(WithClientWindow(api.MetaHandler{}, cfg), logger)
+	path, handler := api.NewHandler(WithClientWindow(api.NewService(nil, "dev"), cfg), logger)
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
 	server := httptest.NewServer(mux)

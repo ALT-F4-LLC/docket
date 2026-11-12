@@ -37,7 +37,7 @@ func serveHostedDaemon() int {
 		logger.Error("the hosted daemon cannot start", "err", err)
 		return failed
 	}
-	srv, err := daemon.ListenHosted(*cfg, logger)
+	srv, err := daemon.ListenHosted(*cfg, cli.Version(), logger)
 	if err != nil {
 		logger.Error("the hosted daemon cannot start", "config", cfg.Path, "err", err)
 		return failed

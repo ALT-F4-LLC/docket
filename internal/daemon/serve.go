@@ -11,10 +11,11 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/config"
 )
 
-// ListenHosted builds the hosted daemon's Connect service from cfg, with
-// Handshake gated on cfg's client window, and binds it with ListenHTTPS.
-func ListenHosted(cfg config.DaemonConfig, logger *slog.Logger) (*Server, error) {
-	path, handler := api.NewHandler(WithClientWindow(api.MetaHandler{}, cfg), logger)
+// ListenHosted builds the hosted daemon's Connect service from cfg, reporting
+// build as its version, with Handshake gated on cfg's client window, and binds
+// it with ListenHTTPS.
+func ListenHosted(cfg config.DaemonConfig, build string, logger *slog.Logger) (*Server, error) {
+	path, handler := api.NewHandler(WithClientWindow(api.NewService(nil, build), cfg), logger)
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
 	return ListenHTTPS(cfg, mux)

@@ -30,8 +30,8 @@ func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // TestHostedEntrypointAnswersHandshake: the hosted entrypoint, configured
 // from the daemon config on disk, answers a Handshake over HTTPS inside the
-// config's client window, refuses one outside it, and stops serving once its
-// context ends.
+// config's client window with the build version its caller passed, refuses
+// one outside it, and stops serving once its context ends.
 func TestHostedEntrypointAnswersHandshake(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -39,8 +39,9 @@ func TestHostedEntrypointAnswersHandshake(t *testing.T) {
 	secret := testSecret(t)
 	writeDaemonConfigWindow(t, xdg, certFile, keyFile, secret, 1, 1)
 	logger := slog.New(slog.DiscardHandler)
+	const build = "v9.8.7-hosted"
 
-	srv, err := ListenHosted(loadDaemonConfig(t), logger)
+	srv, err := ListenHosted(loadDaemonConfig(t), build, logger)
 	if err != nil {
 		t.Fatalf("ListenHosted: %v", err)
 	}
@@ -69,8 +70,8 @@ func TestHostedEntrypointAnswersHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handshake inside the window: %v", err)
 	}
-	if got := res.Msg.GetDaemonVersion(); got != api.DaemonVersion {
-		t.Errorf("daemon version = %q, want %q", got, api.DaemonVersion)
+	if got := res.Msg.GetDaemonVersion(); got != build {
+		t.Errorf("daemon version = %q, want the build passed to ListenHosted %q", got, build)
 	}
 	if got := handshakeAs(t, client, 2); got != output.ErrIncompatible {
 		t.Errorf("Handshake outside the window [1, 1]: code = %q, want %q", got, output.ErrIncompatible)
@@ -103,7 +104,7 @@ func TestHostedEntrypointClientWindow(t *testing.T) {
 	writeDaemonConfigWindow(t, xdg, certFile, keyFile, secret, 2, 4)
 	logger := slog.New(slog.DiscardHandler)
 
-	srv, err := ListenHosted(loadDaemonConfig(t), logger)
+	srv, err := ListenHosted(loadDaemonConfig(t), "dev", logger)
 	if err != nil {
 		t.Fatalf("ListenHosted: %v", err)
 	}
