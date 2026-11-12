@@ -2,7 +2,7 @@ module github.com/ALT-F4-LLC/docket
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	connectrpc.com/connect v1.21.1
