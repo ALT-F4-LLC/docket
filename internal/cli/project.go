@@ -1,15 +1,17 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
-	"sort"
-	"strconv"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -46,22 +48,22 @@ func (r projectListResult) CollectionTruncated() bool { return false }
 var _ output.Collection = projectListResult{}
 
 var projectListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List the store's projects",
-	Args:  cobra.NoArgs,
+	Use:         "list",
+	Short:       "List the store's projects",
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		projects, err := store.StoreOn(getDB(cmd)).ListProjects()
+		result, err := verb.ProjectList(cmd.Context(), projectVerbEnv(cmd), verb.ProjectListInput{})
 		if err != nil {
-			return cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		current := getProjectID(cmd)
-		views := make([]projectView, 0, len(projects))
-		for _, p := range projects {
+		views := make([]projectView, 0, len(result.Projects))
+		for _, p := range result.Projects {
 			views = append(views, projectView{
 				ID: p.ID, Name: p.Name, Prefix: p.Prefix,
-				Identity: p.Identity, Current: p.ID == current,
+				Identity: p.Identity, Current: p.ID == result.Current,
 			})
 		}
 
@@ -98,55 +100,26 @@ the prefix, and a bare number always works — references in old commit
 messages and other projects' run records never go stale.
 
 1-8 letters; DOC, RUN, and STEP are reserved for their own entities.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		st := store.StoreOn(getDB(cmd))
-
-		prefix := strings.ToUpper(strings.TrimSpace(args[0]))
-		if err := model.ValidateProjectPrefix(prefix); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-
-		projectID := getProjectID(cmd)
-
-		// DKT-60: no two projects may display the same prefix. The prefix is a
-		// project's ONLY discriminator in a listing, an event feed, or a run
-		// report, so a shared one makes every id in the store ambiguous about
-		// who owns it — which is exactly what happened when registration wrote
-		// a hardcoded DKT for every row.
-		holder, err := st.PrefixHolder(prefix, projectID)
+		env := projectVerbEnv(cmd)
+		result, err := verb.ProjectSetPrefix(cmd.Context(), env, verb.ProjectSetPrefixInput{Prefix: args[0]})
+		recordProjectRegistration(cmd, env, result.Registered)
 		if err != nil {
-			return cmdErr(err, output.ErrGeneral)
-		}
-		if holder != 0 {
-			other, gerr := st.GetProject(holder)
-			name := fmt.Sprintf("project %d", holder)
-			if gerr == nil {
-				name = fmt.Sprintf("%q (%s)", other.Name, other.Identity)
-			}
-			return cmdErr(fmt.Errorf(
-				"prefix %s is already held by %s: two projects sharing a prefix "+
-					"makes every id in the store ambiguous about its owner",
-				prefix, name), output.ErrConflict)
-		}
-
-		if err := st.SetProjectPrefix(projectID, prefix); err != nil {
-			return cmdErr(fmt.Errorf("setting the prefix: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
 		// The rest of THIS invocation renders in the new voice too — the
 		// confirmation below is the first output that should carry it.
-		model.SetDisplayPrefix(prefix)
+		project := result.Project
+		model.SetDisplayPrefix(project.Prefix)
 
-		project, err := st.GetProject(projectID)
-		if err != nil {
-			return cmdErr(fmt.Errorf("re-reading the project: %w", err), output.ErrGeneral)
-		}
 		w.Success(projectView{
 			ID: project.ID, Name: project.Name, Prefix: project.Prefix,
 			Identity: project.Identity, Current: true,
-		}, fmt.Sprintf("Issues here now read as %s-N (the number stays the store-wide id)", prefix))
+		}, fmt.Sprintf("Issues here now read as %s-N (the number stays the store-wide id)", project.Prefix))
 		return nil
 	},
 }
@@ -177,38 +150,18 @@ It REFUSES a project that any issue, run, document, proposal, workflow, schema,
 or label still references, and refuses the default project outright. So it can
 remove junk and cannot remove history. To empty a project first, re-home its
 issues with 'docket issue move --project'.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		target, err := resolveProjectRef(conn, args[0])
+		env := projectVerbEnv(cmd)
+		result, err := verb.ProjectDelete(cmd.Context(), env, verb.ProjectDeleteInput{Project: args[0]})
+		recordProjectRegistration(cmd, env, result.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		st := store.StoreOn(conn)
-		if err := st.DeleteProject(target.ID); err != nil {
-			switch {
-			case errors.Is(err, store.ErrProjectIsDefault):
-				return cmdErr(fmt.Errorf(
-					"project %q is the default project and cannot be deleted: "+
-						"every pre-tenancy row in this store belongs to it",
-					target.Name), output.ErrValidation)
-			case errors.Is(err, store.ErrProjectInUse):
-				counts, cerr := st.ProjectRefCounts(target.ID)
-				if cerr != nil {
-					return cmdErr(cerr, output.ErrGeneral)
-				}
-				return cmdErr(fmt.Errorf(
-					"project %q still holds %s: re-home them with "+
-						"`docket issue move --project` before deleting it",
-					target.Name, describeRefCounts(counts)), output.ErrConflict)
-			default:
-				return cmdErr(fmt.Errorf("deleting the project: %w", err), output.ErrGeneral)
-			}
-		}
-
+		target := result.Project
 		w.Success(projectDeleteResult{
 			ID: target.ID, Name: target.Name, Identity: target.Identity, Deleted: true,
 		}, fmt.Sprintf("Deleted project %q (%s)", target.Name, target.Identity))
@@ -216,153 +169,47 @@ issues with 'docket issue move --project'.`,
 	},
 }
 
-// resolveProjectRef finds the project a `--project` value (or a `project
-// delete` argument) names — by identity path, row id, name, or display PREFIX.
-//
-// It is the ONE resolver behind every project-addressing surface. There used to
-// be two — this one and `issue move`'s — and they diverged: `issue move
-// --project FLX` worked while `issue list --project FLX` answered NOT_FOUND
-// (DKT-453). A second copy of a resolution ladder is a second set of keys, and
-// which surface accepts which key is not something a caller can be expected to
-// remember.
-//
-// FOUR KEYS, because `project list` prints three columns — NAME, PREFIX,
-// IDENTITY — and any of them reads as the way to say which project this is.
-// The PREFIX matters most: it is the only project discriminator an issue id
-// carries (FLX-141), so it is the identifier a caller has actually SEEN before
-// typing it, and it was the one key the resolver refused. A RUN-37
-// conductor reached for it first, got NOT_FOUND, and fell back to listing every
-// project's issues unfiltered.
-//
-// AMBIGUITY IS REFUSED, NOT RESOLVED. Identity is unique (the column's
-// constraint) and a row id names one row; NAME is not unique at all — it is a
-// directory basename — and PREFIX is unique by construction (db.availablePrefix
-// hands out a free one, `project set-prefix` refuses a held one) but nothing
-// makes an imported or hand-edited store obey that. When a key names more than
-// one project the candidates are listed instead: the entire point of the flag is
-// to say WHICH project, so picking the lowest id would answer a question nobody
-// asked.
-//
-// Name and prefix match case-insensitively — a prefix is displayed uppercase and
-// typed however it is typed — but an EXACT match wins outright, so two rows
-// differing only in case each still resolve by their own spelling.
+// projectVerbEnv builds the verb.Env the project commands run in.
+func projectVerbEnv(cmd *cobra.Command) verb.Env {
+	cwd, _ := os.Getwd()
+	env := verb.Env{
+		Store:  store.StoreOn(getDB(cmd)),
+		Author: config.DefaultAuthor(),
+		Cwd:    cwd,
+	}
+	if cfg := getCfg(cmd); cfg != nil {
+		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}
+	}
+	return env
+}
+
+// recordProjectRegistration writes the project-registered event (DKT-61) for
+// a project a verb registered on first contact, as the root hook does for
+// the commands whose project it resolves. A failure is reported, not
+// returned: the project exists either way.
+func recordProjectRegistration(cmd *cobra.Command, env verb.Env, registered *model.Project) {
+	if registered == nil {
+		return
+	}
+	if err := engine.RecordProjectRegisteredEvent(getDB(cmd), engine.ProjectRegistration{
+		ID: registered.ID, Name: registered.Name, Identity: registered.Identity,
+		Cwd: env.Cwd, Verb: commandPath(cmd), Prefix: registered.Prefix,
+	}, time.Now().UnixMilli()); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"docket: registered project %q but could not record the event: %v\n",
+			registered.Name, err)
+	}
+}
+
+// resolveProjectRef forwards to verb.ResolveProjectRef for the CLI surfaces
+// that address a project by `--project`.
 func resolveProjectRef(conn store.LegacyDB, ref string) (*model.Project, error) {
-	projects, err := store.StoreOn(conn).ListProjects()
-	if err != nil {
-		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
-	}
-
-	// The identity path is the canonical key and is unique, so it is tried first
-	// and can never be ambiguous.
-	for _, p := range projects {
-		if p.Identity == ref {
-			return p, nil
-		}
-	}
-
-	// A numeric ref is a row id and nothing else: names are directory basenames
-	// and prefixes are letters only (model.ValidateProjectPrefix), so falling
-	// through to them would only make the miss message vaguer.
-	if id, err := strconv.Atoi(ref); err == nil {
-		for _, p := range projects {
-			if p.ID == id {
-				return p, nil
-			}
-		}
-		return nil, cmdErr(fmt.Errorf("no project with id %d", id), output.ErrNotFound)
-	}
-
-	matching := func(field func(*model.Project) string) []*model.Project {
-		var exact, folded []*model.Project
-		for _, p := range projects {
-			switch value := field(p); {
-			case value == "":
-			case value == ref:
-				exact = append(exact, p)
-			case strings.EqualFold(value, ref):
-				folded = append(folded, p)
-			}
-		}
-		if len(exact) > 0 {
-			return exact
-		}
-		return folded
-	}
-
-	for _, key := range []struct {
-		verb  string
-		field func(*model.Project) string
-	}{
-		{"names", func(p *model.Project) string { return p.Name }},
-		{"is the prefix of", func(p *model.Project) string { return p.Prefix }},
-	} {
-		switch hits := matching(key.field); len(hits) {
-		case 0:
-		case 1:
-			return hits[0], nil
-		default:
-			return nil, cmdErr(fmt.Errorf(
-				"%q %s %d projects — address one by id or identity: %s",
-				ref, key.verb, len(hits), describeProjectCandidates(hits)),
-				output.ErrValidation)
-		}
-	}
-
-	return nil, cmdErr(fmt.Errorf(
-		"no project named %q; `docket project list` shows what this store holds "+
-			"(its NAME, PREFIX, and IDENTITY columns all resolve here)",
-		ref), output.ErrNotFound)
+	return fromVerb(verb.ResolveProjectRef(store.StoreOn(conn), ref))
 }
 
-// describeProjectCandidates renders the candidates an ambiguous ref is refused
-// with: the id to address one by, plus the name and identity that say which
-// checkout each one is. Whichever key was ambiguous repeats across the list, so
-// both of the others are printed — one of them is always the discriminator.
-func describeProjectCandidates(ps []*model.Project) string {
-	out := make([]string, 0, len(ps))
-	for _, p := range ps {
-		where := p.Identity
-		if where == "" {
-			where = "unclaimed"
-		}
-		out = append(out, fmt.Sprintf("%d (%s, %s)", p.ID, projectDisplayName(p), where))
-	}
-	return strings.Join(out, ", ")
-}
-
-// projectDisplayName picks the most human name a project row carries.
+// projectDisplayName forwards to verb.ProjectDisplayName.
 func projectDisplayName(p *model.Project) string {
-	if p.Name != "" {
-		return p.Name
-	}
-	if p.Identity != "" {
-		return p.Identity
-	}
-	return strconv.Itoa(p.ID)
-}
-
-// describeRefCounts renders "3 issues, 1 run" for the refusal message. The
-// counts are named because "still has rows" leaves the operator to go find
-// which ones.
-func describeRefCounts(counts map[string]int) string {
-	if len(counts) == 0 {
-		return "rows"
-	}
-	tables := make([]string, 0, len(counts))
-	for table := range counts {
-		tables = append(tables, table)
-	}
-	sort.Strings(tables)
-
-	parts := make([]string, 0, len(tables))
-	for _, table := range tables {
-		noun := strings.TrimSuffix(table, "s")
-		if counts[table] != 1 {
-			noun = table
-		}
-		parts = append(parts, fmt.Sprintf("%d %s", counts[table], noun))
-	}
-	return strings.Join(parts, ", ")
+	return verb.ProjectDisplayName(p)
 }
 
 func init() {
