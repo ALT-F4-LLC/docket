@@ -5,8 +5,7 @@ import (
 	"os"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -33,33 +32,27 @@ record of how many times the issue has been claimed survives.
 
 Releasing is the orderly counterpart to letting a lease expire. Both return the
 issue to the pool; releasing does it now and without waiting out the TTL.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := issueArg(args[0])
-		if err != nil {
-			return err
-		}
 
 		token, err := readToken(os.Stdin)
 		if err != nil {
 			return err
 		}
 
-		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		lease, err := store.StoreOn(conn).ReleaseIssue(id, token, model.NowMS())
+		res, err := verb.IssueRelease(cmd.Context(), verbEnv(cmd), verb.IssueReleaseInput{
+			Issue: args[0], Token: token,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			if e := leaseError(err, label); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("releasing lease: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
 		w.Success(
-			releaseResponse{Issue: model.FormatID(id), Attempt: lease.Attempt},
-			fmt.Sprintf("Released %s", model.FormatID(id)),
+			releaseResponse{Issue: model.FormatID(res.Issue), Attempt: res.Lease.Attempt},
+			fmt.Sprintf("Released %s", model.FormatID(res.Issue)),
 		)
 
 		return nil

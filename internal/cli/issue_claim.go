@@ -2,11 +2,15 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -75,51 +79,32 @@ A lease that expires without release returns the issue to the unclaimed pool:
 the next claim wins, and the attempt counter records that a claim was made. No
 reaper runs and no read verb ever writes — expiry is resolved by the claim
 itself.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-		st := store.StoreOn(conn)
 
-		id, err := issueArg(args[0])
-		if err != nil {
-			return err
-		}
-
-		owner, err := cmd.Flags().GetString("owner")
-		if err != nil || owner == "" {
-			return cmdErr(
-				fmt.Errorf("--owner is required: it identifies the lease holder"),
-				output.ErrValidation,
-			)
-		}
-
+		owner, _ := cmd.Flags().GetString("owner")
 		class, _ := cmd.Flags().GetString("class")
-
-		ttl, err := resolveTTL(cmd, conn, class)
+		ttl, err := ttlFlag(cmd)
 		if err != nil {
 			return err
 		}
 
-		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		token, lease, err := st.ClaimIssue(id, owner, ttl.Milliseconds(), model.NowMS())
+		res, err := verb.IssueClaim(cmd.Context(), verbEnv(cmd), verb.IssueClaimInput{
+			Issue: args[0], Owner: owner, TTL: ttl, Class: class,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			if e := leaseError(err, label); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("claiming issue: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		version, err := st.GetVersion("issues", id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("reading issue version: %w", err), output.ErrGeneral)
-		}
-
+		id, token, lease := res.Issue, res.Token, res.Lease
 		resp := claimResponse{
 			Issue:          model.FormatID(id),
 			Token:          token,
 			LeaseExpiresMS: lease.ExpiresMS,
-			version:        version,
+			version:        res.Version,
 			attempt:        lease.Attempt,
 		}
 
@@ -145,28 +130,48 @@ itself.`,
 	},
 }
 
-// resolveTTL returns the lease TTL: an explicit --ttl wins, else the effective
-// per-class configuration (which falls back to lease.ttl.default).
-func resolveTTL(cmd *cobra.Command, conn store.LegacyDB, class string) (time.Duration, error) {
-	if cmd.Flags().Changed("ttl") {
-		ttl, err := cmd.Flags().GetDuration("ttl")
-		if err != nil {
-			return 0, cmdErr(err, output.ErrValidation)
-		}
-		if ttl <= 0 {
-			return 0, cmdErr(
-				fmt.Errorf("--ttl must be positive, got %s", ttl),
-				output.ErrValidation,
-			)
-		}
-		return ttl, nil
+// ttlFlag returns the explicit --ttl, or nil when it was not given so the
+// verb takes the configured TTL for --class.
+func ttlFlag(cmd *cobra.Command) (*time.Duration, error) {
+	if !cmd.Flags().Changed("ttl") {
+		return nil, nil
 	}
-
-	ttl, err := store.StoreOn(conn).LeaseTTL(getProjectID(cmd), class)
+	ttl, err := cmd.Flags().GetDuration("ttl")
 	if err != nil {
-		return 0, cmdErr(fmt.Errorf("resolving lease TTL: %w", err), output.ErrGeneral)
+		return nil, cmdErr(err, output.ErrValidation)
 	}
-	return ttl, nil
+	return &ttl, nil
+}
+
+// verbEnv builds the Env an internal/verb call runs in: this invocation's
+// store, author, working directory and project identity. A command wired
+// without the root hook has no config and runs in the default project.
+func verbEnv(cmd *cobra.Command) verb.Env {
+	cwd, _ := os.Getwd()
+	env := verb.Env{
+		Store:  store.StoreOn(getDB(cmd)),
+		Author: config.DefaultAuthor(),
+		Cwd:    cwd,
+	}
+	if cfg := getCfg(cmd); cfg != nil {
+		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}
+	}
+	return env
+}
+
+// recordProjectRegistration records the project-registered event for a
+// project an issue lease verb registered, as the root hook does for the
+// projects it registers. A failed write is reported and does not fail the
+// command: the project exists either way.
+func recordProjectRegistration(cmd *cobra.Command, reg *engine.ProjectRegistration) {
+	if reg == nil {
+		return
+	}
+	if err := engine.RecordProjectRegisteredEvent(getDB(cmd), *reg, time.Now().UnixMilli()); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"docket: registered project %q but could not record the event: %v\n",
+			reg.Name, err)
+	}
 }
 
 func init() {
