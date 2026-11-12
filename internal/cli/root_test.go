@@ -327,18 +327,14 @@ func TestLocalDaemonSameBuildIsSilent(t *testing.T) {
 	}
 }
 
-// TestCommandSetupSetsDaemonVersion: command setup hands the cli build
-// version to the daemon half, so a daemon served from this binary reports it.
-func TestCommandSetupSetsDaemonVersion(t *testing.T) {
+// TestVersionReportsBuild: Version returns the build version the binary was
+// built with, so a caller outside the cli package can hand it on.
+func TestVersionReportsBuild(t *testing.T) {
 	const build = "v2.0.1-setup+dd44"
 	setBuilds(t, build, "dev")
 
-	if _, err := runRootVerb(t, versionCmd, "version"); err != nil {
-		t.Fatalf("docket version: %v", err)
-	}
-
-	if api.DaemonVersion != build {
-		t.Errorf("api.DaemonVersion = %q after command setup, want the cli build %q", api.DaemonVersion, build)
+	if got := Version(); got != build {
+		t.Errorf("Version() = %q, want the build version %q", got, build)
 	}
 }
 

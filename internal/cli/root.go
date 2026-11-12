@@ -30,6 +30,9 @@ var (
 	buildDate = "unknown"
 )
 
+// Version returns the build version this binary was built with.
+func Version() string { return version }
+
 type contextKey string
 
 const (
@@ -166,9 +169,6 @@ var rootCmd = &cobra.Command{
 	Short:   "Local-first CLI issue tracker",
 	Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, buildDate),
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// A daemon served from this binary reports this binary's build.
-		api.DaemonVersion = version
-
 		// Reject an unknown --json value up front, so it can never degrade
 		// silently into human output further down.
 		rawJSON, _ := cmd.Flags().GetString("json")
