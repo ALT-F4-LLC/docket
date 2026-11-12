@@ -6,34 +6,26 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
 var docCommentListCmd = &cobra.Command{
-	Use:   "list [id]",
-	Short: "List comments on a document",
-	Args:  cobra.ExactArgs(1),
+	Use:         "list [id]",
+	Short:       "List comments on a document",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runDocCommentList)
 	},
 }
 
 func runDocCommentList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
-	id, err := model.ParseDocID(args[0])
+	listed, err := verb.DocCommentList(cmd.Context(), verbEnv(cmd), verb.DocCommentListInput{Doc: args[0]})
 	if err != nil {
-		return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
+		return verbErr(err)
 	}
-
-	comments, err := st.ListDocComments(id)
-	if err != nil {
-		if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
-			return e
-		}
-		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
+	comments := listed.Comments
 
 	if w.JSONMode {
 		w.Success(comments, "")
@@ -41,9 +33,10 @@ func runDocCommentList(cmd *cobra.Command, args []string, w *output.Writer) erro
 	}
 
 	if len(comments) == 0 {
+		docID := model.FormatDocID(listed.DocID)
 		msg := render.EmptyState(
-			fmt.Sprintf("No comments on %s", model.FormatDocID(id)),
-			fmt.Sprintf("Add one with: docket doc comment add %s -m \"...\"", model.FormatDocID(id)),
+			fmt.Sprintf("No comments on %s", docID),
+			fmt.Sprintf("Add one with: docket doc comment add %s -m \"...\"", docID),
 			w.QuietMode,
 		)
 		w.Success(nil, msg)

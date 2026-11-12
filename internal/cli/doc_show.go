@@ -2,14 +2,12 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -74,90 +72,50 @@ func (s docShowResult) MarshalJSON() ([]byte, error) {
 }
 
 var docShowCmd = &cobra.Command{
-	Use:   "show [id]",
-	Short: "Show document details",
-	Args:  cobra.ExactArgs(1),
+	Use:         "show [id]",
+	Short:       "Show document details",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runDocShow)
 	},
 }
 
 func runDocShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
-	id, err := model.ParseDocID(args[0])
-	if err != nil {
-		return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
-	}
-
+	in := verb.DocShowInput{Doc: args[0]}
 	if cmd.Flags().Changed("rev") {
 		rev, _ := cmd.Flags().GetInt("rev")
-		return runDocShowRevision(st, w, args[0], id, rev)
+		in.Rev = &rev
 	}
 
-	doc, err := st.GetDoc(id)
+	shown, err := verb.DocShow(cmd.Context(), verbEnv(cmd), in)
 	if err != nil {
-		if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
-			return e
+		return verbErr(err)
+	}
+
+	if shown.Revision != nil {
+		var message string
+		if !w.JSONMode {
+			message = render.RenderDocRevisionHistory([]*model.DocRevision{shown.Revision})
 		}
-		return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
-	}
-
-	revisions, err := st.ListDocRevisions(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching revisions: %w", err), output.ErrGeneral)
-	}
-
-	comments, err := st.ListDocComments(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
-
-	linkedIssuesByDoc, err := st.HydrateLinkedIssues([]int{id})
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
-	}
-	linkedIssues := linkedIssuesByDoc[id]
-
-	linkedProposals, err := st.GetDocProposals(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
+		w.Success(shown.Revision, message)
+		return nil
 	}
 
 	result := docShowResult{
-		Doc:             doc,
-		Revisions:       revisions,
-		Comments:        comments,
-		LinkedIssues:    linkedIssues,
-		LinkedProposals: linkedProposals,
+		Doc:             shown.Doc,
+		Revisions:       shown.Revisions,
+		Comments:        shown.Comments,
+		LinkedIssues:    shown.LinkedIssues,
+		LinkedProposals: shown.LinkedProposals,
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = render.RenderDocDetail(doc, revisions, comments, linkedIssues, linkedProposals)
+		message = render.RenderDocDetail(shown.Doc, shown.Revisions, shown.Comments,
+			shown.LinkedIssues, shown.LinkedProposals)
 	}
 	w.Success(result, message)
-
-	return nil
-}
-
-func runDocShowRevision(st store.Store, w *output.Writer, idArg string, id, rev int) error {
-	revision, err := st.GetDocRevision(id, rev)
-	if err != nil {
-		if errors.Is(err, store.ErrValidation) {
-			return cmdErr(err, output.ErrValidation)
-		}
-		if e := notFound(err, fmt.Sprintf("doc %s revision %d", idArg, rev)); e != nil {
-			return e
-		}
-		return cmdErr(fmt.Errorf("fetching revision: %w", err), output.ErrGeneral)
-	}
-
-	var message string
-	if !w.JSONMode {
-		message = render.RenderDocRevisionHistory([]*model.DocRevision{revision})
-	}
-	w.Success(revision, message)
 
 	return nil
 }

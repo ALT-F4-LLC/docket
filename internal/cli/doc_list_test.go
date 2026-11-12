@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -288,6 +290,57 @@ func TestDocShowJSON_StillCarriesTheBody(t *testing.T) {
 	}
 	if string(env.Data.Revisions) == "[]" {
 		t.Error("doc show revisions = [], want the create revision")
+	}
+}
+
+// TestDocReadCommandsOwnTheirProject: doc list, doc show and doc comment list
+// resolve their project through internal/verb, so the root hook must skip its
+// eager resolution for them.
+func TestDocReadCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{docListCmd, docShowCmd, docCommentListCmd} {
+		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
+			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
+		}
+	}
+}
+
+// TestDocListScopesToTheConfiguredProject: with the root hook's resolution
+// skipped, the listing's project comes from the invocation's config identity.
+func TestDocListScopesToTheConfiguredProject(t *testing.T) {
+	conn := newTestDB(t)
+	// The first identity registered adopts the default project; the second
+	// gets a row of its own.
+	first, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "EnsureProject(first): %v", err)
+	other, err := db.EnsureProject(conn, "/repos/other", "other", 1)
+	testsupport.Must(t, err, "EnsureProject(other): %v", err)
+	for projectID, title := range map[int]string{first: "first doc", other: "other doc"} {
+		_, err := db.CreateDoc(conn, &model.Doc{
+			ProjectID: projectID, Type: "note", Status: "draft", Title: title, Author: "tester",
+		})
+		testsupport.Must(t, err, "CreateDoc(%q): %v", title, err)
+	}
+
+	cmd := docListCmdWithDB(conn)
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey,
+		&config.Config{Identity: "/repos/other", Anchored: true}))
+	w, buf := bufWriter(true)
+	if err := runDocList(cmd, nil, w); err != nil {
+		t.Fatalf("runDocList: %v", err)
+	}
+
+	var env struct {
+		Data struct {
+			Items []struct {
+				Title string `json:"title"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(env.Data.Items) != 1 || env.Data.Items[0].Title != "other doc" {
+		t.Errorf("doc list from /repos/other = %+v, want only [other doc]", env.Data.Items)
 	}
 }
 
