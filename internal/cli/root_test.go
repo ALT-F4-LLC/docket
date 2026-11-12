@@ -251,21 +251,21 @@ func TestDaemonClientIgnoresEnvironmentProxy(t *testing.T) {
 	}
 }
 
-// setBuilds stands in for the ldflags-stamped client build and the build a
-// daemon reports, restoring both when the test ends.
-func setBuilds(t *testing.T, client, daemon string) {
+// setClientBuild stands in for the ldflags-stamped client build, restoring it
+// when the test ends.
+func setClientBuild(t *testing.T, client string) {
 	t.Helper()
-	previousClient, previousDaemon := version, api.DaemonVersion
-	version, api.DaemonVersion = client, daemon
-	t.Cleanup(func() { version, api.DaemonVersion = previousClient, previousDaemon })
+	previous := version
+	version = client
+	t.Cleanup(func() { version = previous })
 }
 
-// runLocalDaemonCommand serves the real meta handler as the local daemon,
-// runs a command that connects to it, and returns the command's stderr and
-// error.
-func runLocalDaemonCommand(t *testing.T) (string, error) {
+// runLocalDaemonCommand serves the real daemon service, reporting daemonBuild,
+// as the local daemon, runs a command that connects to it, and returns the
+// command's stderr and error.
+func runLocalDaemonCommand(t *testing.T, daemonBuild string) (string, error) {
 	t.Helper()
-	path, handler := api.NewHandler(api.MetaHandler{}, discardLogger)
+	path, handler := api.NewHandler(api.NewService(nil, daemonBuild), discardLogger)
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
 	daemon := httptest.NewServer(mux)
@@ -290,9 +290,9 @@ func runLocalDaemonCommand(t *testing.T) (string, error) {
 // one stderr warning naming both builds, and the command still succeeds.
 func TestLocalDaemonBuildMismatchWarnsOnce(t *testing.T) {
 	const client, daemon = "v1.4.0-client+aa11", "v1.3.9-daemon+bb22"
-	setBuilds(t, client, daemon)
+	setClientBuild(t, client)
 
-	stderr, err := runLocalDaemonCommand(t)
+	stderr, err := runLocalDaemonCommand(t, daemon)
 
 	if err != nil {
 		t.Errorf("command error = %v, want nil (exit 0) on a build mismatch", err)
@@ -315,9 +315,9 @@ func TestLocalDaemonBuildMismatchWarnsOnce(t *testing.T) {
 // gets no warning.
 func TestLocalDaemonSameBuildIsSilent(t *testing.T) {
 	const build = "v1.4.0-same+cc33"
-	setBuilds(t, build, build)
+	setClientBuild(t, build)
 
-	stderr, err := runLocalDaemonCommand(t)
+	stderr, err := runLocalDaemonCommand(t, build)
 
 	if err != nil {
 		t.Errorf("command error = %v, want nil", err)
@@ -331,7 +331,7 @@ func TestLocalDaemonSameBuildIsSilent(t *testing.T) {
 // built with, so a caller outside the cli package can hand it on.
 func TestVersionReportsBuild(t *testing.T) {
 	const build = "v2.0.1-setup+dd44"
-	setBuilds(t, build, "dev")
+	setClientBuild(t, build)
 
 	if got := Version(); got != build {
 		t.Errorf("Version() = %q, want the build version %q", got, build)

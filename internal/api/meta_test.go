@@ -23,24 +23,6 @@ func serve(t *testing.T, svc docketv1connect.DocketServiceHandler) *httptest.Ser
 	return server
 }
 
-func TestHandshakeReturnsDaemonVersion(t *testing.T) {
-	const build = "v9.8.7-meta-test+4f1c"
-	previous := DaemonVersion
-	DaemonVersion = build
-	t.Cleanup(func() { DaemonVersion = previous })
-	server := serve(t, MetaHandler{})
-	client := NewClient(server.Client(), server.URL, discardLogger)
-
-	res, err := client.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{}))
-
-	if err != nil {
-		t.Fatalf("Handshake: %v", err)
-	}
-	if got := res.Msg.GetDaemonVersion(); got != build {
-		t.Errorf("daemon_version = %q, want %q", got, build)
-	}
-}
-
 func TestServiceHandshakeReportsBuildVersion(t *testing.T) {
 	const build = "v4.5.6-service-test+9a2e"
 	server := serve(t, NewService(nil, build))

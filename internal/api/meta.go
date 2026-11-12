@@ -10,21 +10,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
 
-// DaemonVersion is the daemon build version Handshake reports. The CLI sets
-// it from its own build version during command setup.
-var DaemonVersion = "dev"
-
-// MetaHandler serves Handshake, the RPC a client calls before any verb. A
-// daemon service embeds it; every other RPC stays unimplemented here.
-type MetaHandler struct {
-	docketv1connect.UnimplementedDocketServiceHandler
-}
-
-// Handshake reports the daemon's build version.
-func (MetaHandler) Handshake(context.Context, *connect.Request[docketv1.HandshakeRequest]) (*connect.Response[docketv1.HandshakeResponse], error) {
-	return connect.NewResponse(&docketv1.HandshakeResponse{DaemonVersion: DaemonVersion}), nil
-}
-
 // Handshake reports the build version the Service was built with.
 func (s *Service) Handshake(ctx context.Context, req *connect.Request[docketv1.HandshakeRequest]) (*connect.Response[docketv1.HandshakeResponse], error) {
 	return unary(ctx, s, req, decodeHandshake, handshake, encodeHandshake)
