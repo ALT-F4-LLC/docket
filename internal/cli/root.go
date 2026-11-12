@@ -281,17 +281,24 @@ var rootCmd = &cobra.Command{
 		// Resolve this invocation's project (v12): the store is shared, and
 		// which rows this command reads and writes is decided ONCE, here, from
 		// the identity config.Resolve derived — never re-derived downstream.
-		projectID, err := resolveInvocationProject(cmd, conn, cfg)
-		if err != nil {
-			return err
-		}
+		// A command annotated verbOwnsProject resolves its own project through
+		// internal/verb, so it gets neither a project nor its display prefix
+		// from here.
+		_, verbOwnsProject := cmd.Annotations["verbOwnsProject"]
+		if !verbOwnsProject {
+			projectID, err := resolveInvocationProject(cmd, conn, cfg)
+			if err != nil {
+				return err
+			}
 
-		// The project's display prefix, installed process-wide before any
-		// command formats an id: `VOR-42` and `DKT-42` are the same issue —
-		// the number is the global identity — but the board reads in the
-		// project's own voice.
-		if prefix, err := st.ProjectPrefix(projectID); err == nil {
-			model.SetDisplayPrefix(prefix)
+			// The project's display prefix, installed process-wide before any
+			// command formats an id: `VOR-42` and `DKT-42` are the same issue —
+			// the number is the global identity — but the board reads in the
+			// project's own voice.
+			if prefix, err := st.ProjectPrefix(projectID); err == nil {
+				model.SetDisplayPrefix(prefix)
+			}
+			ctx = context.WithValue(ctx, projectKey, projectID)
 		}
 
 		// The store's whole prefix roster, so id PARSING accepts exactly the
@@ -350,7 +357,7 @@ var rootCmd = &cobra.Command{
 
 		ctx = context.WithValue(ctx, dbKey, conn)
 		ctx = context.WithValue(ctx, readerDBKey, readerDB)
-		cmd.SetContext(context.WithValue(ctx, projectKey, projectID))
+		cmd.SetContext(ctx)
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {

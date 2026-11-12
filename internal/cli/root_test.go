@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -370,5 +371,68 @@ func TestPersistentPostRunClosesHandles(t *testing.T) {
 		if err := handle.Ping(); err == nil || err.Error() != closed {
 			t.Errorf("%s handle Ping after teardown = %v, want %q", name, err, closed)
 		}
+	}
+}
+
+// TestRootSkipsProjectResolutionForVerbOwnedProject: a command annotated
+// verbOwnsProject resolves its own project, so the root hook opens the store
+// but does not resolve one. From a directory that is not a repository, against
+// the global store, the same command unannotated is refused by eager
+// resolution; annotated, it runs.
+func TestRootSkipsProjectResolutionForVerbOwnedProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("DOCKET_PATH", "")
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir(filepath.Join(home, ".docket"), 0o700); err != nil {
+		t.Fatalf("creating the global store directory: %v", err)
+	}
+	conn, err := store.OpenSQLiteDB(filepath.Join(home, ".docket", "issues.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLiteDB: %v", err)
+	}
+	if err := store.StoreOn(conn).Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	conn.Close()
+
+	run := func(t *testing.T, annotations map[string]string) (ran, hasProject bool, err error) {
+		t.Helper()
+		probe := &cobra.Command{
+			Use:         "verb-owned-project-probe",
+			Annotations: annotations,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				ran = true
+				getDB(cmd)
+				_, hasProject = cmd.Context().Value(projectKey).(int)
+				return nil
+			},
+		}
+		rootCmd.AddCommand(probe)
+		defer rootCmd.RemoveCommand(probe)
+		rootCmd.SetArgs([]string{"verb-owned-project-probe"})
+		defer rootCmd.SetArgs(nil)
+		err = rootCmd.Execute()
+		return ran, hasProject, err
+	}
+
+	ran, _, err := run(t, nil)
+	if err == nil || !strings.Contains(err.Error(), "not a git worktree") {
+		t.Fatalf("unannotated probe: err = %v, want the eager-resolution refusal", err)
+	}
+	if ran {
+		t.Fatal("unannotated probe ran despite the eager-resolution refusal")
+	}
+
+	ran, hasProject, err := run(t, map[string]string{"verbOwnsProject": ""})
+	if err != nil {
+		t.Fatalf("annotated probe: %v, want no eager-resolution error", err)
+	}
+	if !ran {
+		t.Fatal("annotated probe did not run")
+	}
+	if hasProject {
+		t.Error("annotated probe carries an eagerly resolved project")
 	}
 }
