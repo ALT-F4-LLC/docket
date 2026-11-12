@@ -9,6 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/ALT-F4-LLC/docket/internal/api/codec"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
 
@@ -30,7 +31,7 @@ const requestMaxBytes = 8 << 20
 func handlerOptions(logger *slog.Logger) connect.HandlerOption {
 	return connect.WithHandlerOptions(
 		connect.WithReadMaxBytes(requestMaxBytes),
-		connect.WithInterceptors(strictValidation(logger)),
+		connect.WithInterceptors(codec.StrictValidation(logger)),
 	)
 }
 
@@ -40,6 +41,6 @@ func handlerOptions(logger *slog.Logger) connect.HandlerOption {
 func NewClient(httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) docketv1connect.DocketServiceClient {
 	return docketv1connect.NewDocketServiceClient(httpClient, baseURL,
 		connect.WithProtoJSON(),
-		connect.WithInterceptors(strictValidation(logger)),
+		connect.WithInterceptors(codec.StrictValidation(logger)),
 	)
 }
