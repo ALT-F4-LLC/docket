@@ -118,13 +118,14 @@ func collectionWithFixup[T any](
 	}
 }
 
-// exportCollections is the export document, stated once, in the order an import
-// has to write it: every row's foreign keys point only at collections listed
-// above it. Export reads in the same order because reads are independent of
-// each other, and one order is one fewer thing to keep straight.
+// exportCollections is the export document, stated in the order an import has
+// to write it: every row's foreign keys point only at collections listed above
+// it.
 //
-// A collection added here is exported, imported, and covered by the round-trip
-// test at once. There is no second list to remember.
+// The export command reads through internal/verb's own table; fetch here reads
+// a project back for the import round-trip tests. A collection added to the
+// document must be added to both tables, and each table's coverage test fails
+// until it is.
 var exportCollections = []exportCollection{
 	collection(
 		"labels",
