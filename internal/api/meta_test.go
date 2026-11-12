@@ -41,6 +41,21 @@ func TestHandshakeReturnsDaemonVersion(t *testing.T) {
 	}
 }
 
+func TestServiceHandshakeReportsBuildVersion(t *testing.T) {
+	const build = "v4.5.6-service-test+9a2e"
+	server := serve(t, NewService(nil, build))
+	client := NewClient(server.Client(), server.URL, discardLogger)
+
+	res, err := client.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{}))
+
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	if got := res.Msg.GetDaemonVersion(); got != build {
+		t.Errorf("daemon_version = %q, want the NewService build %q", got, build)
+	}
+}
+
 // countingDaemon answers Handshake and counts the calls it receives.
 type countingDaemon struct {
 	docketv1connect.UnimplementedDocketServiceHandler
