@@ -1,11 +1,10 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -62,16 +61,9 @@ func idempotencyKeyOf(cmd *cobra.Command) (string, error) {
 	return key, nil
 }
 
-// casError maps a CAS failure to its CLI error code. A version mismatch is
-// CONFLICT (exit 4); a missing row stays NOT_FOUND (exit 2), delegated to
-// notFound rather than re-implementing its db.ErrNotFound check. Anything
-// else passes through unchanged.
+// casError maps a CAS failure to its CLI error code: a version mismatch is
+// CONFLICT (exit 4) and a missing row NOT_FOUND (exit 2). It returns nil for
+// any other error, which the caller wraps itself.
 func casError(err error, label string) error {
-	if errors.Is(err, store.ErrVersionConflict) {
-		return cmdErr(
-			fmt.Errorf("%s was modified by another writer (version mismatch)", label),
-			output.ErrConflict,
-		)
-	}
-	return notFound(err, label)
+	return verbErr(verb.CASError(err, label))
 }

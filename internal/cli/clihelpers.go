@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
@@ -62,11 +63,23 @@ func watchable(cmd *cobra.Command, args []string, run func(*cobra.Command, []str
 // --issue flag — and a single parameter that already holds the raw text
 // covers all three without the helper needing to know which.
 func issueArg(source string) (int, error) {
-	id, err := model.ParseID(source)
-	if err != nil {
-		return 0, cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
+	return fromVerb(verb.ParseIssueRef(source))
+}
+
+// fromVerb carries a verb call's result across to the CLI, re-coding a
+// *verb.Error as the *CmdError Execute renders.
+func fromVerb[T any](v T, err error) (T, error) {
+	return v, verbErr(err)
+}
+
+// verbErr re-codes a *verb.Error as a *CmdError with the same code and cause.
+// Any other error, nil included, passes through unchanged.
+func verbErr(err error) error {
+	var ve *verb.Error
+	if errors.As(err, &ve) {
+		return cmdErr(ve.Err, ve.Code)
 	}
-	return id, nil
+	return err
 }
 
 // notFound re-wraps store.ErrNotFound as the NOT_FOUND error every call site
@@ -157,11 +170,7 @@ func resolveParentIssue(conn store.LegacyDB, ref string, childProjectID int) (*m
 // EMPTY ref (required vs. optional vs. falling through to ParseRunID's own
 // error), which is what actually differs between the three.
 func parseRunFlag(ref string) (int, error) {
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return 0, cmdErr(fmt.Errorf("invalid run ID: %w", err), output.ErrValidation)
-	}
-	return runID, nil
+	return fromVerb(verb.ParseRunRef(ref))
 }
 
 // hydrateIssueAssociations fills an issue's labels, files, and docs from their

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 )
 
 // TokenEnvVar is the environment variable carrying a capability token.
@@ -109,28 +109,9 @@ func errMissingToken() error {
 	)
 }
 
-// leaseError maps a lease refusal to its CLI error code, per the lease refusal
-// matrix. Anything else passes through unchanged, as casError does.
-//
-// The error texts never echo the presented token: a token that leaks into a
-// log line or a CI transcript is a live capability.
+// leaseError maps a lease refusal, or a missing row, to its CLI error code per
+// the lease refusal matrix, and returns nil for any other error, which the
+// caller wraps itself.
 func leaseError(err error, label string) error {
-	switch {
-	case errors.Is(err, store.ErrLeaseHeld):
-		return cmdErr(
-			fmt.Errorf("%s is already claimed by another holder", label),
-			output.ErrConflict,
-		)
-	case errors.Is(err, store.ErrNotHolder):
-		return cmdErr(
-			fmt.Errorf("%s: the supplied token does not hold this lease", label),
-			output.ErrAuth,
-		)
-	case errors.Is(err, store.ErrLeaseExpired):
-		return cmdErr(
-			fmt.Errorf("%s: the lease has expired; claim it again to continue", label),
-			output.ErrStaleLease,
-		)
-	}
-	return notFound(err, label)
+	return verbErr(verb.LeaseError(err, label))
 }

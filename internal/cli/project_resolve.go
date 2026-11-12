@@ -9,8 +9,8 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -142,60 +142,36 @@ func commandPath(cmd *cobra.Command) string {
 	return strings.Join(parts, " ")
 }
 
-// resolveInvocationProject answers "which project is this?" and registers one
-// only when both parts of the rule above hold.
+// projectPolicy classifies cmd for verb.ResolveProject: a read never
+// registers, a run-addressed write carries on unregistered when its identity
+// is unanchored, and any other write is refused there.
+func projectPolicy(cmd *cobra.Command) verb.ProjectPolicy {
+	switch {
+	case !commandMayRegisterProject(cmd):
+		return verb.ProjectReadOnly
+	case commandUsesAmbientProject(cmd):
+		return verb.ProjectMayRegister
+	default:
+		return verb.ProjectRunAddressed
+	}
+}
+
+// resolveInvocationProject answers "which project is this?" through
+// verb.ResolveProject, which registers one only when both parts of the rule
+// above hold, and records the registration event when it does.
 func resolveInvocationProject(
 	cmd *cobra.Command, conn store.LegacyDB, cfg *config.Config,
 ) (int, error) {
-	// An empty identity is the documented pre-v12 fallback and predates the
-	// dimension entirely: it means "this store is not multi-tenant", and the
-	// default row is the whole store.
-	if cfg.Identity == "" {
-		return store.DefaultProjectID, nil
-	}
-
 	st := store.StoreOn(conn)
-
-	// THE LOOKUP COMES FIRST, unconditionally. Whatever is already registered
-	// keeps resolving — including rows minted by the defect this guards against,
-	// which must stay reachable so they can be inspected and deleted.
-	id, found, err := st.LookupProject(cfg.Identity)
+	cwd, _ := os.Getwd()
+	env := verb.Env{
+		Store:   st,
+		Cwd:     cwd,
+		Project: verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored},
+	}
+	id, created, err := env.ResolveProject(projectPolicy(cmd))
 	if err != nil {
-		return 0, fmt.Errorf("resolving the project: %w", err)
-	}
-	if found {
-		return id, nil
-	}
-
-	// Part 2: a read observes, and finds nothing here to observe.
-	if !commandMayRegisterProject(cmd) {
-		return store.UnregisteredProjectID, nil
-	}
-
-	// Part 1: an unanchored identity never registers.
-	if !cfg.Anchored {
-		// A verb whose behavior depends on the ambient project is refused BY
-		// NAME here, because both alternatives are worse: an opaque foreign-key
-		// error at the INSERT, or the row quietly landing in a project the
-		// operator never named. A run-addressed verb carries on — it reads its
-		// project from the run, which is DKT-58's own first ask.
-		if commandUsesAmbientProject(cmd) {
-			cwd, _ := os.Getwd()
-			return 0, cmdErr(fmt.Errorf(
-				"cannot tell which project `docket %s` belongs to: %s is not a "+
-					"git worktree and has no docket project.\n"+
-					"Run from inside the repository, or create a repo-local "+
-					"store there with `docket init --local`",
-				commandPath(cmd), cwd), output.ErrValidation)
-		}
-		return store.UnregisteredProjectID, nil
-	}
-
-	name := filepath.Base(cfg.Identity)
-	nowMS := time.Now().UnixMilli()
-	id, created, err := st.EnsureProjectCreated(cfg.Identity, name, nowMS)
-	if err != nil {
-		return 0, fmt.Errorf("resolving the project: %w", err)
+		return 0, verbErr(err)
 	}
 
 	if created {
@@ -204,12 +180,12 @@ func resolveInvocationProject(
 		// the verb to an event-write error would be a worse trade than an
 		// unattributed row — but it is reported, because a silently missing
 		// registration event is the exact gap this kind was added to close.
-		cwd, _ := os.Getwd()
+		name := filepath.Base(cfg.Identity)
 		prefix, _ := st.ProjectPrefix(id)
 		if err := engine.RecordProjectRegisteredEvent(conn, engine.ProjectRegistration{
 			ID: id, Name: name, Identity: cfg.Identity,
 			Cwd: cwd, Verb: commandPath(cmd), Prefix: prefix,
-		}, nowMS); err != nil {
+		}, time.Now().UnixMilli()); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"docket: registered project %q but could not record the event: %v\n",
 				name, err)
