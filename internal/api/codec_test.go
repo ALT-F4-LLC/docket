@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -90,7 +91,7 @@ func callRunStatus(t *testing.T, status string) (*connect.Response[docketv1.RunS
 	mux.Handle(path, handler)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	client := NewClient(server.Client(), server.URL, discardLogger)
+	client := client.NewClient(server.Client(), server.URL, discardLogger)
 	return client.RunStatus(context.Background(), connect.NewRequest(&docketv1.RunStatusRequest{}))
 }
 

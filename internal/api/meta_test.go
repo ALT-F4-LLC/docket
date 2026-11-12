@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
@@ -25,7 +26,7 @@ func serve(t *testing.T, svc docketv1connect.DocketServiceHandler) *httptest.Ser
 func TestServiceHandshakeReportsBuildVersion(t *testing.T) {
 	const build = "v4.5.6-service-test+9a2e"
 	server := serve(t, NewService(nil, build))
-	client := NewClient(server.Client(), server.URL, discardLogger)
+	client := client.NewClient(server.Client(), server.URL, discardLogger)
 
 	res, err := client.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{}))
 

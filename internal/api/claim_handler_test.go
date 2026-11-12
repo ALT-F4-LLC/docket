@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -48,7 +49,7 @@ func (c *recordingClaimer) ClaimStepRendered(stepID int, opts engine.ClaimOption
 func claimClient(t *testing.T, claimer stepClaimer) docketv1connect.DocketServiceClient {
 	t.Helper()
 	server := serve(t, ClaimHandler{claimer: claimer})
-	return NewClient(server.Client(), server.URL, discardLogger)
+	return client.NewClient(server.Client(), server.URL, discardLogger)
 }
 
 // validClaim is a request every boundary check accepts.
@@ -254,7 +255,7 @@ func activatedClaimDB(t *testing.T) (conn *sql.DB, first, second int) {
 func engineClaimClient(t *testing.T, conn *sql.DB) docketv1connect.DocketServiceClient {
 	t.Helper()
 	server := serve(t, NewClaimHandler(engine.NewEngine(), conn))
-	return NewClient(server.Client(), server.URL, discardLogger)
+	return client.NewClient(server.Client(), server.URL, discardLogger)
 }
 
 func claimRequest(stepID int, owner, secret string) *connect.Request[docketv1.StepClaimRequest] {
