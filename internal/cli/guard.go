@@ -245,14 +245,18 @@ that audit event.`,
 		in.UsageJoin, _ = cmd.Flags().GetBool("usage-join")
 		in.AllProjects, _ = cmd.Flags().GetBool("all-projects")
 
-		// --active refuses any --rows, so it is never read there: a missing
-		// file must not turn the refusal into NOT_FOUND, and stdin stays
-		// untouched.
+		// The rows are read only once the request is known to be well formed:
+		// --active refuses any --rows, and the --run path refuses a missing or
+		// malformed run or acknowledgment first. A missing file must not turn
+		// either refusal into NOT_FOUND, and stdin stays untouched.
 		if in.Active {
 			if path, _ := cmd.Flags().GetString("rows"); path != "" {
 				in.Rows = []byte{}
 			}
 		} else {
+			if _, err := verb.ParseGuardSpawnRun(in); err != nil {
+				return verbErr(err)
+			}
 			rows, err := readProposedRows(cmd)
 			if err != nil {
 				return err
@@ -266,20 +270,6 @@ that audit event.`,
 		}
 		return emitGuard(cmd, decision)
 	},
-}
-
-// optionalRunFlag resolves an OPTIONAL `--run` flag.
-//
-// An absent flag is run 0, meaning "every non-terminal run". A present but
-// malformed one is a VALIDATION_ERROR, because a caller that typed the
-// reference wrong should learn that rather than silently widening to every
-// run.
-func optionalRunFlag(cmd *cobra.Command) (int, error) {
-	ref, _ := cmd.Flags().GetString("run")
-	if ref == "" {
-		return 0, nil
-	}
-	return parseRunFlag(ref)
 }
 
 // readProposedRows reads `--rows FILE`, or stdin for "-".
