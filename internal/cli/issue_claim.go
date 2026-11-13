@@ -2,14 +2,11 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
@@ -141,22 +138,6 @@ func ttlFlag(cmd *cobra.Command) (*time.Duration, error) {
 		return nil, cmdErr(err, output.ErrValidation)
 	}
 	return &ttl, nil
-}
-
-// verbEnv builds the Env an internal/verb call runs in: this invocation's
-// store, author, working directory and project identity. A command wired
-// without the root hook has no config and runs in the default project.
-func verbEnv(cmd *cobra.Command) verb.Env {
-	cwd, _ := os.Getwd()
-	env := verb.Env{
-		Store:  store.StoreOn(getDB(cmd)),
-		Author: config.DefaultAuthor(),
-		Cwd:    cwd,
-	}
-	if cfg := getCfg(cmd); cfg != nil {
-		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}
-	}
-	return env
 }
 
 // recordProjectRegistration records the project-registered event for a
