@@ -78,11 +78,12 @@ func ScopeEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
 //
 // Every error is swallowed to nil, matching OverridePassSkipsInterposedTargets:
 // an advisory that cannot be computed must never fail the verb that already
-// succeeded.
+// succeeded. A Store with no SQLite handle is the one exception: it gets one
+// warning naming store.SQLDB's refusal, so the guard cannot read as clear.
 func ScopeEditFrozenForActiveRunsStore(storage store.Store, issueID int) []string {
 	conn, err := store.SQLDB(storage)
 	if err != nil {
-		panic(err)
+		return []string{"scope advisory not computed: " + err.Error()}
 	}
 	st := store.StoreOn(conn)
 	live, err := liveIssueScope(st, issueID)
@@ -145,11 +146,12 @@ func DescriptionEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []stri
 // The description has no live reader at all — a packet's REQUEST and
 // issue.body both render `run_issues.body_snapshot` — so, unlike the scope
 // advisory, there is no half of the edit that already took effect to report.
-// It is advisory-only and swallows every error to nil for the same reasons.
+// It is advisory-only and swallows every error to nil for the same reasons,
+// with the same exception for a Store with no SQLite handle.
 func DescriptionEditFrozenForActiveRunsStore(storage store.Store, issueID int) []string {
 	conn, err := store.SQLDB(storage)
 	if err != nil {
-		panic(err)
+		return []string{"description advisory not computed: " + err.Error()}
 	}
 	st := store.StoreOn(conn)
 	description, _, err := st.IssueDeclaration(issueID)

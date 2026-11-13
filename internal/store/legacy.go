@@ -122,12 +122,19 @@ func SQLTx(tx ReadTx) (*sql.Tx, bool) {
 
 // SQLDB returns the *sql.DB under a SQLite Store, and an error for any other
 // implementation. It is how an internal/engine Store form reaches the SQLite
-// handle; nothing outside internal/engine and internal/store calls it.
+// handle; nothing outside internal/engine and internal/store calls it, which
+// an internal/engine test checks across the module's non-test files.
 //
 // For a Store from OpenSQLite it returns the writer pool, db.Open's
 // single-connection pool whose Begin is BEGIN IMMEDIATE; for one from StoreOn
 // it returns the wrapped *sql.DB. Either way the engine body sees the same
 // handle its LegacyDB form passed before.
+//
+// Limit: on an OpenSQLite Store, an engine read that opens
+// BeginSQLiteReadSnapshot on this handle runs on the writer connection, not
+// the Store's reader connection. Reads therefore queue behind writes, and a
+// read snapshot fails once a held write outlasts its wait. The limit goes
+// when the body reads through Store methods instead of this handle.
 //
 // Naming rule: the Store form of an exported engine function or method that
 // takes a store.LegacyDB is its name with the suffix Store, on the same
@@ -137,13 +144,17 @@ func SQLTx(tx ReadTx) (*sql.Tx, bool) {
 // SQLDB; the LegacyDB form keeps its name and signature, and its body is one
 // statement calling the Store form with StoreOn.
 //
-// On a Store that is not SQLite, such as internal/db/pgstore's, a Store form
-// that returns an error returns SQLDB's error before reading or writing
-// anything. Doctor, ScopeEditFrozenForActiveRuns,
-// DescriptionEditFrozenForActiveRuns and OverridePassSkipsInterposedTargets
-// return no error, so their Store forms panic with it instead: an empty
-// result there would read as "nothing frozen" or "nothing skipped", and a
-// freeze guard must fail closed.
+// On a Store that is not SQLite, such as internal/db/pgstore's, every Store
+// form stops at SQLDB's error before reading or writing anything. A form that
+// returns an error returns that error. A form with no error result returns a
+// non-empty result carrying the error's text instead, because an empty result
+// would read as "nothing frozen", "nothing skipped" or "nothing stale", and
+// these guards must fail closed without failing a verb that already
+// committed. Five forms have no error result: Doctor reports one FAIL "store"
+// check; ScopeEditFrozenForActiveRuns, DescriptionEditFrozenForActiveRuns and
+// OverridePassSkipsInterposedTargets return one warning; and
+// Engine.HeldResolutionStaleTargets returns one StaleTarget whose Reason
+// carries it.
 //
 // The retarget in docs/design/sql-handle-migration.md points LegacyDB at
 // Store and removes the LegacyDB forms; SQLDB goes once no engine body passes

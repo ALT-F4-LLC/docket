@@ -95,10 +95,12 @@ func Doctor(conn store.LegacyDB, opts DoctorOptions) *DoctorReport {
 // DoctorStore runs all seven checks and reports one row each, without
 // short-circuiting on an early failure (AC1): a conductor deciding whether to
 // attach needs every answer in one call, not the first one that went wrong.
+// On a Store with no SQLite handle it reports one FAIL `store` row carrying
+// store.SQLDB's refusal instead.
 func DoctorStore(storage store.Store, opts DoctorOptions) *DoctorReport {
 	conn, err := store.SQLDB(storage)
 	if err != nil {
-		panic(err)
+		return &DoctorReport{Checks: []DoctorCheck{{Check: "store", Verdict: DoctorFail, Detail: err.Error()}}}
 	}
 	checks := []DoctorCheck{
 		checkDoctorSeat(opts.Cwd),

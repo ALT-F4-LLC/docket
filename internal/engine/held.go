@@ -1128,7 +1128,9 @@ func (e *Engine) HeldResolutionStaleTargets(
 // far less than one that blocks. For the same reason every failure inside —
 // an unreadable step, a snapshot that cannot load — returns nil rather than
 // an error: absence of evidence is not staleness, and a divergence probe must
-// not turn a resolution that succeeded into a verb that failed.
+// not turn a resolution that succeeded into a verb that failed. A Store with
+// no SQLite handle is the one exception: it gets one StaleTarget whose Reason
+// names store.SQLDB's refusal, so the advisory cannot read as clear.
 //
 // nil for any step that is not materialized, so the ordinary resolve/approve
 // paths on declared steps stay exactly as they were. A resolution that does
@@ -1140,7 +1142,7 @@ func (e *Engine) HeldResolutionStaleTargetsStore(
 ) []StaleTarget {
 	conn, err := store.SQLDB(storage)
 	if err != nil {
-		panic(err)
+		return []StaleTarget{{Reason: "stale-target advisory not computed: " + err.Error()}}
 	}
 	if e == nil || e.HeadFn == nil || e.IsAncestorFn == nil {
 		return nil

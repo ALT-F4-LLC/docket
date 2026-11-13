@@ -1059,7 +1059,7 @@ func OverridePassSkipsInterposedTargets(conn store.LegacyDB, stepID int) []strin
 func OverridePassSkipsInterposedTargetsStore(storage store.Store, stepID int) []string {
 	conn, err := store.SQLDB(storage)
 	if err != nil {
-		panic(err)
+		return []string{"override-pass advisory not computed: " + err.Error()}
 	}
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
