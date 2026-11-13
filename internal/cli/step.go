@@ -166,11 +166,6 @@ claimed.`,
 			costMultiplier = &m
 		}
 
-		recoverySecret, err := readRecoverySecret(cmd.InOrStdin())
-		if err != nil {
-			return err
-		}
-
 		// `claim --render` returns the packet instead of the bundle, in the
 		// same call — and the render is part of the claim SAGA (DKT-804): a
 		// packet that cannot render refuses BEFORE the lease is taken, so a
@@ -180,11 +175,21 @@ claimed.`,
 		templatePath, _ := cmd.Flags().GetString("template")
 		executor, _ := cmd.Flags().GetString("executor")
 
-		res, err := verb.StepClaim(cmd.Context(), verbEnv(cmd), verb.StepClaimInput{
+		in := verb.StepClaimInput{
 			Step: args[0], Owner: owner, TTL: ttl, Metadata: metadata,
-			CostMultiplier: costMultiplier, RecoverySecret: recoverySecret,
-			Render: render, Template: templatePath, Executor: executor,
-		})
+			CostMultiplier: costMultiplier, Render: render,
+			Template: templatePath, Executor: executor,
+		}
+		// The flags are refused before the recovery secret is read, so a
+		// claim invalid both ways reports the flag.
+		if err := in.Validate(); err != nil {
+			return verbErr(err)
+		}
+		if in.RecoverySecret, err = readRecoverySecret(cmd.InOrStdin()); err != nil {
+			return err
+		}
+
+		res, err := verb.StepClaim(cmd.Context(), verbEnv(cmd), in)
 		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
 			if res.Claim != nil {
@@ -1962,10 +1967,10 @@ func emitResolvedState(
 
 // renderStepState is emitResolvedState over a row already read.
 func renderStepState(
-	w *output.Writer, row model.StepRow, verb string,
+	w *output.Writer, row model.StepRow, action string,
 	stale []engine.StaleTarget, repin *engine.IssueDiffRepin,
 ) {
-	message := fmt.Sprintf("%s %s (%s)", verb, row.Step, row.Status)
+	message := fmt.Sprintf("%s %s (%s)", action, row.Step, row.Status)
 	if repin != nil {
 		message += "; " + repinClause(repin)
 	}

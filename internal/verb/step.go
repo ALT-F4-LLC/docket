@@ -34,6 +34,36 @@ type StepClaimInput struct {
 	Executor string
 }
 
+// Validate refuses what StepClaim refuses before it reads the store: a
+// malformed step reference, a missing owner, or a TTL or cost multiplier that
+// is not positive. A transport that reads RecoverySecret from a file calls it
+// first, so a request that is invalid both ways reports the request's fault.
+func (in StepClaimInput) Validate() error {
+	_, err := in.validate()
+	return err
+}
+
+func (in StepClaimInput) validate() (int, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return 0, err
+	}
+	if in.Owner == "" {
+		return 0, newError(
+			errors.New("--owner is required: it identifies the lease holder"),
+			output.ErrValidation)
+	}
+	if err := checkTTL(in.TTL); err != nil {
+		return 0, err
+	}
+	if in.CostMultiplier != nil && *in.CostMultiplier <= 0 {
+		return 0, newError(fmt.Errorf(
+			"--cost-multiplier must be positive, got %g", *in.CostMultiplier),
+			output.ErrValidation)
+	}
+	return id, nil
+}
+
 // StepClaimResult is a claim whose lease committed. Packet is set only for a
 // rendered claim.
 type StepClaimResult struct {
@@ -54,26 +84,13 @@ type StepClaimResult struct {
 //
 // It takes its project from the step it is handed, so it is run-addressed.
 func StepClaim(ctx context.Context, env Env, in StepClaimInput) (StepClaimResult, error) {
-	id, err := parseStepRef(in.Step)
+	id, err := in.validate()
 	if err != nil {
-		return StepClaimResult{}, err
-	}
-	if in.Owner == "" {
-		return StepClaimResult{}, newError(
-			errors.New("--owner is required: it identifies the lease holder"),
-			output.ErrValidation)
-	}
-	if err := checkTTL(in.TTL); err != nil {
 		return StepClaimResult{}, err
 	}
 	var costMultiplier float64
 	if in.CostMultiplier != nil {
 		costMultiplier = *in.CostMultiplier
-		if costMultiplier <= 0 {
-			return StepClaimResult{}, newError(fmt.Errorf(
-				"--cost-multiplier must be positive, got %g", costMultiplier),
-				output.ErrValidation)
-		}
 	}
 
 	registered, err := resolveRunAddressedProject(env, "step claim")
@@ -330,7 +347,7 @@ func stepRow(env Env, id int) (model.StepRow, error) {
 
 // stepError maps an engine or lease failure on step id to its error code:
 // the lease refusal matrix first, then a missing step, then the engine's own
-// taxonomy. Anything else is a general failure carrying the cause unchanged.
+// taxonomy.
 func stepError(err error, id int) error {
 	label := "step " + model.FormatStepID(id)
 	if e := LeaseError(err, label); e != nil {
@@ -339,6 +356,14 @@ func stepError(err error, id int) error {
 	if errors.Is(err, store.ErrStepNotFound) {
 		return newError(fmt.Errorf("%s not found", label), output.ErrNotFound)
 	}
+	return engineError(err)
+}
+
+// engineError maps an engine failure to its error code by the engine's own
+// taxonomy, then the store's not-found sentinels. Anything else is a general
+// failure carrying the cause unchanged. It names no noun, so every verb whose
+// failures come from the engine maps them through this one table.
+func engineError(err error) error {
 	if code, ok := engine.CodeOf(err); ok {
 		switch code {
 		case engine.CodeValidation:

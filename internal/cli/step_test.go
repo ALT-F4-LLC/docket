@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -563,5 +565,118 @@ func TestStepClaimCommandWritesTheMetadataFlag(t *testing.T) {
 	if !strings.Contains(step.Metadata, `"tier_requested":"a"`) {
 		t.Errorf("metadata = %q, want the claim's bag — the flag was parsed and dropped",
 			step.Metadata)
+	}
+}
+
+// TestStepClaimRefusesItsFlagsBeforeTheRecoverySecret keeps the refusal a
+// claim invalid both ways reports: the flag, as before the command called
+// internal/verb, not the group-readable secret file on stdin.
+func TestStepClaimRefusesItsFlagsBeforeTheRecoverySecret(t *testing.T) {
+	conn, stepID := claimableStep(t)
+	readable := secretFile(t, testRecoverySecret, 0o644)
+
+	cases := []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"no owner", nil, "--owner is required"},
+		{"non-positive ttl", map[string]string{"owner": "worker-1", "ttl": "-1s"}, "--ttl must be positive"},
+		{"non-positive cost multiplier", map[string]string{"owner": "worker-1", "cost-multiplier": "0"},
+			"--cost-multiplier must be positive"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for name, value := range c.flags {
+				testsupport.Must(t, stepClaimCmd.Flags().Set(name, value), "setting --%s", name)
+			}
+			stepClaimCmd.SetIn(openStdin(t, readable))
+			t.Cleanup(func() { stepClaimCmd.SetIn(nil) })
+
+			_, err := runLeaseCommandOutput(t, conn, nil, stepClaimCmd, model.FormatStepID(stepID))
+			if errCode(t, err) != output.ErrValidation || !strings.HasPrefix(err.Error(), c.want) {
+				t.Errorf("error = %v, want a VALIDATION_ERROR starting %q", err, c.want)
+			}
+			assertUnclaimed(t, conn, stepID)
+		})
+	}
+}
+
+// TestStepLeaseCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each step lease command
+// resolved its own project, including for a command refused after it
+// registered the project.
+func TestStepLeaseCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	conn, stepID := claimableStep(t)
+	ref := model.FormatStepID(stepID)
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+
+	testsupport.Must(t, stepClaimCmd.Flags().Set("owner", "worker-1"), "set --owner")
+	claimed := runLeaseCommand(t, conn, anchored("/repos/step-claim"), stepClaimCmd, ref)
+	token, _ := claimed["token"].(string)
+	t.Setenv(TokenEnvVar, token)
+	runLeaseCommand(t, conn, anchored("/repos/step-heartbeat"), stepHeartbeatCmd, ref)
+	runLeaseCommand(t, conn, anchored("/repos/step-fail"), stepFailCmd, ref)
+
+	// The failure retired the token, so this completion is refused after it
+	// registers its project.
+	artifact := filepath.Join(t.TempDir(), "artifact.md")
+	testsupport.Must(t, os.WriteFile(artifact, []byte("result"), 0o600), "writing the artifact")
+	testsupport.Must(t, stepCompleteCmd.Flags().Set("artifact-file", artifact), "set --artifact-file")
+	if _, err := runLeaseCommandOutput(t, conn, anchored("/repos/step-complete"), stepCompleteCmd, ref); err == nil {
+		t.Fatal("step complete with a retired token succeeded, want AUTH_ERROR")
+	}
+
+	want := map[string]string{
+		"/repos/step-claim":     "step claim",
+		"/repos/step-heartbeat": "step heartbeat",
+		"/repos/step-fail":      "step fail",
+		"/repos/step-complete":  "step complete",
+	}
+	got := registrationEvents(t, conn)
+	if len(got) != len(want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+	for identity, verb := range want {
+		if got[identity] != verb {
+			t.Errorf("%s registered by %q, want %q", identity, got[identity], verb)
+		}
+	}
+}
+
+// TestStepClaimCommandDeliversTheTokenOfAnIncompleteClaim drives a claim
+// whose lease commits and whose authoritative render then fails: the template
+// indexes past the packet's files only once the step reads claimed. The
+// command exits 0 with the live token and the failure in claim_error.
+func TestStepClaimCommandDeliversTheTokenOfAnIncompleteClaim(t *testing.T) {
+	conn, stepID := claimableStep(t)
+	template := filepath.Join(t.TempDir(), "packet.tmpl")
+	testsupport.Must(t, os.WriteFile(template, []byte(
+		`{{.Step.Step}}{{if eq .Step.Status "claimed"}}{{index .Files 99}}{{end}}`), 0o600),
+		"writing the template")
+
+	testsupport.Must(t, stepClaimCmd.Flags().Set("owner", "worker-1"), "set --owner")
+	testsupport.Must(t, stepClaimCmd.Flags().Set("render", "true"), "set --render")
+	testsupport.Must(t, stepClaimCmd.Flags().Set("template", template), "set --template")
+	out, err := runLeaseCommandOutput(t, conn, nil, stepClaimCmd, model.FormatStepID(stepID))
+	if err != nil {
+		t.Fatalf("a claim whose lease committed was reported as a failure: %v", err)
+	}
+
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Token      string `json:"token"`
+			ClaimError string `json:"claim_error"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(out), &envelope), "payload is not JSON: %q", out)
+	if !envelope.OK || !strings.Contains(envelope.Data.ClaimError, "index out of range") {
+		t.Errorf("envelope = %s, want ok with the render failure in claim_error", out)
+	}
+	if err := db.AuthorizeStepRead(conn, stepID, envelope.Data.Token, model.NowMS()); err != nil {
+		t.Errorf("the delivered token does not hold the committed lease: %v", err)
 	}
 }
