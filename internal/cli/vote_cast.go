@@ -1,18 +1,15 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -37,17 +34,13 @@ type voteCastResult struct {
 // of silently dropping every caster's value.
 func newVoteCastCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cast <id>",
-		Short: "Cast a vote on a proposal",
-		Args:  cobra.ExactArgs(1),
+		Use:         "cast <id>",
+		Short:       "Cast a vote on a proposal",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{"verbOwnsProject": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := getWriter(cmd)
-			conn := getDB(cmd)
-
-			proposalID, err := model.ParseProposalID(args[0])
-			if err != nil {
-				return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-			}
+			env := verbEnv(cmd)
 
 			voter, _ := cmd.Flags().GetString("voter")
 			role, _ := cmd.Flags().GetString("role")
@@ -68,9 +61,9 @@ func newVoteCastCmd() *cobra.Command {
 				return cmdErr(fmt.Errorf("--summary and --summary-file are mutually exclusive; pass one"), output.ErrValidation)
 			}
 
-			// Default voter to git user.name.
+			// Default voter to git user.name, before the form shows it.
 			if voter == "" {
-				voter = config.DefaultAuthor()
+				voter = env.Author
 			}
 
 			// JSON mode: require all mandatory flags.
@@ -252,47 +245,26 @@ func newVoteCastCmd() *cobra.Command {
 				summary = strings.TrimRight(string(data), "\n")
 			}
 
-			// Parse and validate --findings-json.
-			var findingsJSON *model.Findings
-			if findingsJSONRaw != "" {
-				var f model.Findings
-				if err := json.Unmarshal([]byte(findingsJSONRaw), &f); err != nil {
-					return cmdErr(fmt.Errorf("--findings-json is not valid JSON: %w", err), output.ErrValidation)
-				}
-				findingsJSON = &f
-			}
-
-			// Evidence references are resolved against the proposal's run BEFORE
-			// the cast records (DKT-2451): a cast has no amend path, and a
-			// reference that resolves against nothing must refuse here, by
-			// name, rather than land as a citation nobody can follow. Findings
-			// citing nothing pass through untouched, exactly as before.
-			if err := engine.ValidateCastEvidence(store.StoreOn(conn), proposalID, findingsJSON); err != nil {
-				return runErr(err)
-			}
-
-			// Validate ranges.
-			if confidence < 0.0 || confidence > 1.0 {
-				return cmdErr(fmt.Errorf("--confidence must be in [0.0, 1.0]"), output.ErrValidation)
-			}
-			if domainRelevance < 0.0 || domainRelevance > 1.0 {
-				return cmdErr(fmt.Errorf("--domain-relevance must be in [0.0, 1.0]"), output.ErrValidation)
-			}
-
-			// Validate verdict.
-			if err := model.ValidateVerdict(model.Verdict(verdict)); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-
-			// Parse and validate --metadata: an opaque KV bag the casting seat
-			// asserts about itself (which model and effort level cast this vote,
-			// DKT-71), never a fact core verifies or reads a key out of.
-			metadata, err := parseVoteMetadata(metadataRaw)
-			if err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-
 			usageRaw, _ := cmd.Flags().GetString("usage")
+			res, err := verb.VoteCast(cmd.Context(), env, verb.VoteCastInput{
+				Proposal:        args[0],
+				Voter:           voter,
+				Role:            role,
+				Verdict:         verdict,
+				Confidence:      confidence,
+				DomainRelevance: domainRelevance,
+				Findings:        findings,
+				FindingsJSON:    findingsJSONRaw,
+				Summary:         summary,
+				Metadata:        metadataRaw,
+				Usage:           usageRaw,
+			})
+			recordRegisteredProject(cmd, env, res.Registered)
+			result := res.Cast
+			if result == nil {
+				return verbErr(err)
+			}
+
 			// A SEAT THAT REPORTS NOTHING IS TOLD SO (DKT-257). `--usage` stays
 			// optional — a person casting a vote by hand has no token count to
 			// give, and refusing them would make governance harder to use in
@@ -301,7 +273,7 @@ func newVoteCastCmd() *cobra.Command {
 			// steps; a conductor-side seat of identical shape recorded nothing,
 			// and the only difference was where the ballot executed.
 			//
-			// stderr, not a refusal: the cast is valid and the vote must land.
+			// stderr, not a refusal: the cast is valid and the vote landed.
 			//
 			// The note does NOT claim the spend is unrecoverable (DKT-519).
 			// It once ended "nothing else will supply it later", which is
@@ -320,78 +292,11 @@ func newVoteCastCmd() *cobra.Command {
 						"never claimed, so the step ledger cannot hold it; record "+
 						"it later with `docket vote backfill-usage %s` if a ledger "+
 						"outside the seat holds it.\n",
-					model.FormatProposalID(proposalID))
-			}
-			usage, err := parseVoteUsage(usageRaw)
-			if err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-
-			vote := &model.Vote{
-				ProposalID:      proposalID,
-				VoterName:       voter,
-				VoterRole:       role,
-				Verdict:         model.Verdict(verdict),
-				Confidence:      confidence,
-				DomainRelevance: domainRelevance,
-				Findings:        findings,
-				FindingsJSON:    findingsJSON,
-				Summary:         summary,
-				Metadata:        metadata,
-				Usage:           usage,
-			}
-
-			// The engine's cast path (engine/vote_cast.go) reads the vote
-			// step's pinned `roster`, `weighting` and `recuse` before the
-			// existing tally runs: a name off a strict roster or the reviewed
-			// step's own executor is refused here as VALIDATION_ERROR with no
-			// vote written, and an equal-weighted step tallies every cast the
-			// same. An ad-hoc proposal enforces nothing and tallies as before.
-			result, err := engine.CastVote(conn, vote)
-			// A result beside the error is a cast that COMMITTED, followed by
-			// a panel-event write that failed (engine.CastVote). The cast
-			// stands and a retry would be refused, so it routes and prints
-			// like any other, and the invocation still fails naming what did
-			// not land — never as the refusal a cast with no result gets.
-			var afterCommit error
-			if err != nil && result != nil {
-				afterCommit, err = err, nil
-			}
-			if err != nil {
-				if _, ok := engine.CodeOf(err); ok {
-					return runErr(err)
-				}
-				if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
-					return e
-				}
-				if errors.Is(err, store.ErrConflict) {
-					return cmdErr(fmt.Errorf("conflict: voter %q has already voted on %s, or proposal is already finalized", voter, model.FormatProposalID(proposalID)), output.ErrConflict)
-				}
-				return cmdErr(fmt.Errorf("casting vote: %w", err), output.ErrGeneral)
-			}
-
-			// The cast that reaches quorum finalizes the proposal
-			// (db.CastVote), and the vote STEP standing behind it — if this
-			// is a run's vote-step ballot and not an ad-hoc one — must then
-			// ROUTE. `next` cannot do it mid-wave (it refuses while a dispatch
-			// is open), so the deciding cast is the
-			// observing invocation (engine/drive.go): downstream staged rows
-			// become claimable the moment this verb returns.
-			if result.QuorumReached {
-				e := engine.NewEngine()
-				if err := e.DriveVoteProposal(conn, proposalID, model.NowMS()); err != nil {
-					if afterCommit != nil {
-						afterCommit = fmt.Errorf("%w; routing the vote step also failed: %v", afterCommit, err)
-					} else {
-						return cmdErr(fmt.Errorf(
-							"the vote recorded and the proposal decided, but "+
-								"routing the vote step failed: %w", err), output.ErrGeneral)
-					}
-				}
+					model.FormatProposalID(res.ProposalID))
 			}
 
 			// Build human-readable message.
-			fmtID := model.FormatProposalID(proposalID)
+			fmtID := model.FormatProposalID(res.ProposalID)
 			msg := fmt.Sprintf("Vote recorded for %s (%d/%d votes cast)", fmtID, result.VotesCast, result.VotesRequired)
 			if result.QuorumReached && result.WeightedScore != nil {
 				status := strings.ToUpper(string(result.ProposalStatus))
@@ -407,10 +312,11 @@ func newVoteCastCmd() *cobra.Command {
 				WeightedScore:  result.WeightedScore,
 			}
 
-			// One report, not a success followed by an error: in JSON mode
-			// that would put two documents on stdout.
-			if afterCommit != nil {
-				w.PartialFailure(data, msg, afterCommit, output.ErrGeneral)
+			// A cast beside an error committed and then failed to record its
+			// panel events. One report, not a success followed by an error:
+			// in JSON mode that would put two documents on stdout.
+			if err != nil {
+				w.PartialFailure(data, msg, err, output.ErrGeneral)
 				return &reportedFailure{Code: output.ErrGeneral}
 			}
 
@@ -470,75 +376,4 @@ func readStdinFlag(flag string) (string, error) {
 		return "", cmdErr(fmt.Errorf("reading %s from stdin: %w", flag, err), output.ErrGeneral)
 	}
 	return strings.TrimRight(string(data), "\n"), nil
-}
-
-// parseVoteMetadata decodes a vote's opaque --metadata bag for THIS FLAG's
-// sake: it turns caller text into a map and refuses the shapes a caster can
-// still fix from the command line. The storage invariant — the size cap — is
-// db.marshalVoteMetadata's, beside the column, so the import path is held to
-// it too; the check here is the early, flag-named copy of that refusal.
-//
-// "Copy" is literal: the cap is applied to the ENCODED bag, the same quantity
-// the column measures, rather than to the caller's raw text. The two differ in
-// both directions — encoding/json escapes `<`, `>` and `&` into six bytes each
-// and drops insignificant whitespace — so a raw-text cap would refuse bags the
-// column accepts and accept bags the column refuses, under one constant that
-// claims to be one limit.
-//
-// The "is this a JSON object" decode is engine.DecodeMetadataBag — the SAME
-// rule `step complete --metadata` enforces — rather than a second copy of it;
-// what stays HERE, thin around that call, is the one thing genuinely specific
-// to this flag: the encoded-size cap against `db.VoteMetadataMaxBytes`, which
-// the step-metadata path has no equivalent of (its own cap is checked on the
-// raw input, before decoding, in engine.validateMetadataSize).
-//
-// KEYS AND VALUES ARE FREE TEXT and stay that way, exactly like --findings:
-// core stores the bag whole and reads no key out of it, so there is no name
-// to constrain and no value to interpret. Anything that renders a bag escapes
-// it at its own boundary, as it already must for findings.
-//
-// An empty flag is the common case (a human `vote cast` asserting nothing
-// about what produced it) and returns nil, nil — the vote's `metadata` column
-// stays NULL, exactly as it did before this flag existed.
-func parseVoteMetadata(raw string) (map[string]any, error) {
-	bag, err := engine.DecodeMetadataBag(raw, "--metadata")
-	if err != nil {
-		return nil, err
-	}
-	if bag == nil {
-		return nil, nil
-	}
-
-	encoded, err := json.Marshal(bag)
-	if err != nil {
-		return nil, fmt.Errorf("--metadata cannot be re-encoded: %w", err)
-	}
-	if len(encoded) > store.VoteMetadataMaxBytes {
-		return nil, fmt.Errorf(
-			"--metadata encodes to %d bytes, over the %d-byte cap; record the detail in --findings instead",
-			len(encoded), store.VoteMetadataMaxBytes)
-	}
-	return bag, nil
-}
-
-// parseVoteUsage decodes a seat's --usage spend report through db.ParseUsage
-// — the SAME rules the step ledger's writer applies, one
-// implementation for both flags — into the map shape model.Vote carries.
-// db.CastVote re-checks the numeric rules beside the insert; this parse
-// exists so a refusal reaches the operator as VALIDATION_ERROR naming the
-// flag, before any transaction opens. Empty means the seat reports nothing,
-// and nothing is written.
-func parseVoteUsage(raw string) (map[string]float64, error) {
-	rows, err := store.ParseUsage(raw)
-	if err != nil {
-		return nil, fmt.Errorf("--usage: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	out := make(map[string]float64, len(rows))
-	for _, r := range rows {
-		out[r.Unit] = r.Quantity
-	}
-	return out, nil
 }

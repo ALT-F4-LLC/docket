@@ -7,27 +7,20 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
-// voteStepKeyPrefix is the head of the engine's vote-step idempotency keys
-// (engine.voteStepScopePrefix). The engine opens a vote step's proposal under
-// such a key and adopts whatever proposal already holds it, so a caller key in
-// this family would let the caller pre-seed the step's ballot.
-const voteStepKeyPrefix = "vote-step:"
-
 var voteCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create a new consensus proposal",
+	Use:         "create",
+	Short:       "Create a new consensus proposal",
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
 		description, _ := cmd.Flags().GetString("description")
 		rationale, _ := cmd.Flags().GetString("rationale")
@@ -40,11 +33,6 @@ var voteCreateCmd = &cobra.Command{
 		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
 		sealed, _ := cmd.Flags().GetBool("sealed")
 		jsonMode, _ := jsonModeOf(cmd)
-
-		// Default created-by to git user.name.
-		if createdBy == "" {
-			createdBy = config.DefaultAuthor()
-		}
 
 		// If JSON mode and no description, return validation error.
 		if jsonMode && description == "" {
@@ -182,69 +170,32 @@ var voteCreateCmd = &cobra.Command{
 			}
 		}
 
-		// Validate voters.
-		if voters < 1 {
-			return cmdErr(fmt.Errorf("--voters must be >= 1"), output.ErrValidation)
-		}
-
-		// Validate threshold.
-		if threshold <= 0.0 || threshold > 1.0 {
-			return cmdErr(fmt.Errorf("--threshold must be in (0.0, 1.0]"), output.ErrValidation)
-		}
-
-		// Validate criticality.
-		if err := model.ValidateCriticality(model.Criticality(criticality)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-
-		var escalationReasonPtr *string
-		if escalationReason != "" {
-			escalationReasonPtr = &escalationReason
-		}
-
-		proposal := model.Proposal{
-			ProjectID:        getProjectID(cmd),
-			Description:      description,
-			Rationale:        rationale,
-			Criticality:      model.Criticality(criticality),
-			Status:           model.ProposalStatusOpen,
-			RequiredVoters:   voters,
-			Threshold:        threshold,
-			CreatedBy:        createdBy,
-			DomainTags:       domainTags,
-			FilesChanged:     filesChanged,
-			EscalationReason: escalationReasonPtr,
-			Sealed:           sealed,
-		}
-
 		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(idempotencyKey, voteStepKeyPrefix) {
-			return cmdErr(
-				fmt.Errorf("--%s must not begin with %q: that key family links workflow vote steps to their proposals",
-					idempotencyKeyFlag, voteStepKeyPrefix),
-				output.ErrValidation,
-			)
-		}
 
-		st := store.StoreOn(conn)
-		id, err := st.CreateProposalIdempotent(&proposal, idempotencyKey)
-		if errors.Is(err, store.ErrConflict) {
-			return cmdErr(err, output.ErrConflict)
-		}
+		env := verbEnv(cmd)
+		res, err := verb.VoteCreate(cmd.Context(), env, verb.VoteCreateInput{
+			Description:      description,
+			Rationale:        rationale,
+			Criticality:      criticality,
+			Voters:           voters,
+			Threshold:        threshold,
+			CreatedBy:        createdBy,
+			DomainTags:       domainTags,
+			FilesChanged:     filesChanged,
+			EscalationReason: escalationReason,
+			Sealed:           sealed,
+			IdempotencyKey:   idempotencyKey,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("creating proposal: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		// Refetch to get full object with timestamps.
-		created, err := st.GetProposal(id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching created proposal: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(created, fmt.Sprintf("Created %s: %s", model.FormatProposalID(id), created.Description))
+		created := res.Proposal
+		w.Success(created, fmt.Sprintf("Created %s: %s", model.FormatProposalID(created.ID), created.Description))
 
 		return nil
 	},

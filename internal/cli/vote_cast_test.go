@@ -21,79 +21,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// TestParseVoteMetadata pins what `vote cast --metadata` accepts and what it
-// refuses, and that every refusal names the flag — the caster reads the
-// message on a command line and needs to know which flag to fix.
-func TestParseVoteMetadata(t *testing.T) {
-	oversized := rawBagOfEncodedSize(t, db.VoteMetadataMaxBytes+1)
-
-	cases := []struct {
-		name string
-		raw  string
-		want map[string]any
-	}{
-		{"an unset flag asserts nothing", "", nil},
-		{"an object decodes whole", `{"a":"b","n":2,"nested":{"k":true}}`, map[string]any{
-			"a":      "b",
-			"n":      float64(2),
-			"nested": map[string]any{"k": true},
-		}},
-		// An explicitly empty object is a caller saying "no keys", and it
-		// stores as NULL like any other empty bag.
-		{"an empty object decodes empty", `{}`, map[string]any{}},
-		// The at-cap accept. Without it nothing tells `>` from `>=`, and a cap
-		// one byte tighter than the constant says would pass every refusal
-		// case below.
-		{"exactly at the cap is accepted", rawBagOfEncodedSize(t, db.VoteMetadataMaxBytes), map[string]any{
-			"blob": strings.Repeat("x", db.VoteMetadataMaxBytes-len(`{"blob":""}`)),
-		}},
-		// The cap measures the ENCODED bag, the quantity the column measures —
-		// not the caller's raw text. Whitespace is insignificant to JSON, so a
-		// padded bag far larger than the cap encodes to nine bytes and is
-		// accepted, exactly as the column would accept it.
-		{"whitespace padding is not part of the size", "{" + strings.Repeat(" ", db.VoteMetadataMaxBytes) + `"a":1}`, map[string]any{
-			"a": float64(1),
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseVoteMetadata(tc.raw)
-			if err != nil {
-				t.Fatalf("parseVoteMetadata(%q) = error %v, want a bag", tc.raw, err)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("parseVoteMetadata(%q) = %#v, want %#v", tc.raw, got, tc.want)
-			}
-		})
-	}
-
-	refusals := []struct {
-		name string
-		raw  string
-	}{
-		{"a JSON array is not a bag", `["a","b"]`},
-		{"a bare scalar is not a bag", `"a"`},
-		{"null is not a bag", `null`},
-		{"malformed JSON", `{"a":`},
-		{"one byte over the cap", oversized},
-		// Escaping grows the encoded bag: encoding/json writes `<` as the six
-		// bytes <, so a bag well under the cap as raw text is over it as
-		// stored. The flag must refuse what the column would refuse.
-		{"escaping pushes an under-cap bag over", `{"a":"` + strings.Repeat("<", db.VoteMetadataMaxBytes/2) + `"}`},
-	}
-	for _, tc := range refusals {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseVoteMetadata(tc.raw)
-			if err == nil {
-				t.Fatalf("parseVoteMetadata accepted %.40q, returning %#v", tc.raw, got)
-			}
-			if !strings.Contains(err.Error(), "--metadata") {
-				t.Errorf("refusal %q does not name the flag", err)
-			}
-		})
-	}
-}
-
 // rawBagOfEncodedSize returns the JSON TEXT of a one-key bag that encodes to
 // exactly n bytes — the quantity both the flag and the column measure. Sizing
 // the filler by hand is how the previous fixture came to be eleven bytes over
@@ -114,7 +41,7 @@ func rawBagOfEncodedSize(t *testing.T, n int) string {
 // TestVoteCastCommandStoresTheMetadataFlag drives the REAL command — cobra
 // parsing, RunE, db.CastVote — and reads the vote back out of the store. It
 // exists because everything either side of the join was already pinned and the
-// join itself was not: parseVoteMetadata is tested as a pure function and
+// join itself was not: the metadata rules are tested at verb.VoteCast and
 // CastVote at the db seam, so a RunE that looked up a flag name nobody
 // registers would silently drop every caster's claim with the whole suite
 // green.
