@@ -28,6 +28,14 @@ func TestGateStatusRefusesAnUnknownStep(t *testing.T) {
 	}
 }
 
+// TestGateStatusResolvesItsOwnProject pins that the root hook leaves project
+// resolution to verb.GateStatus, which reads without registering.
+func TestGateStatusResolvesItsOwnProject(t *testing.T) {
+	if !verbOwnsProject(gateStatusCmd) {
+		t.Error("gate status is not annotated verbOwnsProject, so the root hook would resolve its project too")
+	}
+}
+
 // TestGateStatusEnvelopeStaysUnder1KB is AC2: a 5-seat proposal's envelope
 // fits under 1KB, so a relay agent copies it verbatim without truncating.
 func TestGateStatusEnvelopeStaysUnder1KB(t *testing.T) {

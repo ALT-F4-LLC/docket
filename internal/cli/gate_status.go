@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -86,23 +85,17 @@ gate:tally and gate:outcome probes performed, each a relayed round trip.
 
 STEP-N must be a ` + "`type=\"human\"`" + ` or ` + "`type=\"vote\"`" + ` step; any other kind has no
 decision to report status for and is a VALIDATION_ERROR.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runGateStatus(cmd, args, getWriter(cmd))
 	},
 }
 
 func runGateStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
+	status, err := verb.GateStatus(cmd.Context(), verbEnv(cmd), verb.GateStatusInput{Step: args[0]})
 	if err != nil {
-		return err
-	}
-
-	status, err := engine.GateStatus(conn, id, model.NowMS())
-	if err != nil {
-		return stepErr(err, stepLabel(id))
+		return verbErr(err)
 	}
 
 	result := gateStatusResult{
