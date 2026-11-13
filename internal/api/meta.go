@@ -6,6 +6,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 )
 
 // Handshake reports the build version the Service was built with.
@@ -18,8 +19,8 @@ func decodeHandshake(*docketv1.HandshakeRequest) (struct{}, error) {
 	return struct{}{}, nil
 }
 
-func handshake(_ context.Context, s *Service, _ struct{}) (string, error) {
-	return s.build, nil
+func handshake(_ context.Context, env verb.Env, _ struct{}) (string, error) {
+	return env.Build.Version, nil
 }
 
 func encodeHandshake(build string) *docketv1.HandshakeResponse {
