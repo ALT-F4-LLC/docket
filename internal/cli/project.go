@@ -106,7 +106,7 @@ messages and other projects' run records never go stale.
 		w := getWriter(cmd)
 		env := projectVerbEnv(cmd)
 		result, err := verb.ProjectSetPrefix(cmd.Context(), env, verb.ProjectSetPrefixInput{Prefix: args[0]})
-		recordProjectRegistration(cmd, env, result.Registered)
+		recordRegisteredProject(cmd, env, result.Registered)
 		if err != nil {
 			return verbErr(err)
 		}
@@ -156,7 +156,7 @@ issues with 'docket issue move --project'.`,
 		w := getWriter(cmd)
 		env := projectVerbEnv(cmd)
 		result, err := verb.ProjectDelete(cmd.Context(), env, verb.ProjectDeleteInput{Project: args[0]})
-		recordProjectRegistration(cmd, env, result.Registered)
+		recordRegisteredProject(cmd, env, result.Registered)
 		if err != nil {
 			return verbErr(err)
 		}
@@ -183,11 +183,11 @@ func projectVerbEnv(cmd *cobra.Command) verb.Env {
 	return env
 }
 
-// recordProjectRegistration writes the project-registered event (DKT-61) for
+// recordRegisteredProject writes the project-registered event (DKT-61) for
 // a project a verb registered on first contact, as the root hook does for
 // the commands whose project it resolves. A failure is reported, not
 // returned: the project exists either way.
-func recordProjectRegistration(cmd *cobra.Command, env verb.Env, registered *model.Project) {
+func recordRegisteredProject(cmd *cobra.Command, env verb.Env, registered *model.Project) {
 	if registered == nil {
 		return
 	}
