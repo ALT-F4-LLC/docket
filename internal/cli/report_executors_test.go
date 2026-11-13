@@ -8,51 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
 // `docket report executors` — the cross-run ledger at the CLI boundary
 // (DKT-2453). The grouping itself is the engine's to prove; what these pin is
 // the window flag, the document shape, and the rendered page.
 
-// TestParseLedgerSince pins the two forms --since accepts and the refusal of
-// anything else, each naming the flag.
-func TestParseLedgerSince(t *testing.T) {
-	for _, tc := range []struct {
-		raw       string
-		wantRun   int
-		wantMS    int64
-		wantLabel string
-	}{
-		{"", 0, 0, ""},
-		{"RUN-12", 12, 0, "RUN-12"},
-		{"run-12", 12, 0, "RUN-12"},
-		{"12", 12, 0, "RUN-12"},
-		{"2026-09-01", 0, 1_788_220_800_000, "2026-09-01T00:00:00Z"},
-		{"2026-09-01T10:30:00Z", 0, 1_788_258_600_000, "2026-09-01T10:30:00Z"},
-	} {
-		t.Run(tc.raw, func(t *testing.T) {
-			run, ms, label, err := parseLedgerSince(tc.raw)
-			testsupport.Must(t, err, "parseLedgerSince(%q): %v", tc.raw, err)
-			if run != tc.wantRun || ms != tc.wantMS || label != tc.wantLabel {
-				t.Errorf("parseLedgerSince(%q) = (%d, %d, %q), want (%d, %d, %q)",
-					tc.raw, run, ms, label, tc.wantRun, tc.wantMS, tc.wantLabel)
-			}
-		})
-	}
-	for _, raw := range []string{"yesterday", "RUN-0", "2026-13-01", "-5"} {
-		t.Run(raw, func(t *testing.T) {
-			_, _, _, err := parseLedgerSince(raw)
-			if err == nil {
-				t.Fatalf("parseLedgerSince(%q) accepted", raw)
-			}
-			if !strings.Contains(err.Error(), "--since") {
-				t.Errorf("refusal %q does not name the flag", err)
-			}
-		})
+// The verb resolves the project, so the root hook must not resolve it first.
+func TestReportExecutorsOwnsItsProject(t *testing.T) {
+	if !verbOwnsProject(reportExecutorsCmd) {
+		t.Error("report executors lacks the verbOwnsProject annotation")
 	}
 }
 
@@ -97,6 +68,13 @@ func TestReportExecutorsOnAnEmptyStore(t *testing.T) {
 	}
 }
 
+// unboundIdentity puts an anchored identity no project holds on cmd, so the
+// invocation's project resolves to db.UnregisteredProjectID.
+func unboundIdentity(cmd *cobra.Command) {
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey,
+		&config.Config{Identity: "/src/unbound.git", Anchored: true}))
+}
+
 // TestReportExecutorsFromAnUnboundDirectoryFailsWithoutAllProjects: a cwd
 // whose identity resolves to db.UnregisteredProjectID (no registered docket
 // project) must refuse the project-scoped read rather than answer an empty
@@ -107,7 +85,7 @@ func TestReportExecutorsFromAnUnboundDirectoryFailsWithoutAllProjects(t *testing
 	cmd := cmdWithDB(conn)
 	cmd.Flags().String("since", "", "")
 	cmd.Flags().Bool("all-projects", false, "")
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, db.UnregisteredProjectID))
+	unboundIdentity(cmd)
 	w, buf := bufWriter(true)
 
 	err := runReportExecutors(cmd, w)
@@ -140,7 +118,7 @@ func TestReportExecutorsAllProjectsIgnoresAnUnboundInvokingDirectory(t *testing.
 	cmd.Flags().String("since", "", "")
 	cmd.Flags().Bool("all-projects", false, "")
 	testsupport.Must(t, cmd.Flags().Set("all-projects", "true"), "setting --all-projects: %v", err)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, db.UnregisteredProjectID))
+	unboundIdentity(cmd)
 	w, buf := bufWriter(true)
 
 	err = runReportExecutors(cmd, w)

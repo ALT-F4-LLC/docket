@@ -2,18 +2,15 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -50,7 +47,8 @@ log, so a ruling ` + "`events prune`" + ` removed leaves all three together.
 The window is this project's runs, or the whole store with --all-projects;
 --since RUN-N keeps runs from that id on, --since DATE (2026-09-01, or an
 RFC 3339 timestamp) keeps runs created from that instant on.`,
-	Args: cobra.NoArgs,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runReportExecutors(cmd, getWriter(cmd))
 	},
@@ -68,34 +66,17 @@ type reportExecutorsResult struct {
 }
 
 func runReportExecutors(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	since, _ := cmd.Flags().GetString("since")
+	all, _ := cmd.Flags().GetBool("all-projects")
 
-	sinceRaw, _ := cmd.Flags().GetString("since")
-	sinceRun, sinceMS, sinceLabel, err := parseLedgerSince(sinceRaw)
+	res, err := verb.ReportExecutors(cmd.Context(), verbEnv(cmd), verb.ReportExecutorsInput{
+		Since:       since,
+		AllProjects: all,
+	})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+		return verbErr(err)
 	}
-
-	opts := engine.ExecutorLedgerOptions{SinceRun: sinceRun, SinceMS: sinceMS}
-	scope := "store"
-	if all, _ := cmd.Flags().GetBool("all-projects"); !all {
-		projectID := getProjectID(cmd)
-		if projectID == store.UnregisteredProjectID {
-			cwd, _ := os.Getwd()
-			return cmdErr(fmt.Errorf(
-				"%s has no docket project binding; run `docket report executors "+
-					"--all-projects`, or from inside the repository", cwd),
-				output.ErrValidation)
-		}
-		opts.ProjectID = projectID
-		scope = "project"
-	}
-
-	ledger, err := engine.LoadExecutorLedger(conn, opts)
-	if err != nil {
-		return runErr(err)
-	}
-	result := reportExecutorsResult{ExecutorLedger: ledger, Scope: scope, Since: sinceLabel}
+	result := reportExecutorsResult{ExecutorLedger: res.Ledger, Scope: res.Scope, Since: res.Since}
 
 	var message string
 	if !w.JSONMode {
@@ -103,29 +84,6 @@ func runReportExecutors(cmd *cobra.Command, w *output.Writer) error {
 	}
 	w.Success(result, message)
 	return nil
-}
-
-// parseLedgerSince reads --since as either a run id (`RUN-N`, or a bare N)
-// or an instant (`2026-09-01`, or RFC 3339), and returns the floor in the
-// form the loader takes plus the canonical label the document echoes.
-//
-// A bare number is a run id and never a year: a retro window is "every run
-// since the last retro", which is a run, and a date carries dashes.
-func parseLedgerSince(raw string) (sinceRun int, sinceMS int64, label string, err error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, 0, "", nil
-	}
-	if id, err := model.ParseRunID(raw); err == nil {
-		return id, 0, model.FormatRunID(id), nil
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
-		if at, err := time.Parse(layout, raw); err == nil {
-			return 0, at.UnixMilli(), at.UTC().Format(time.RFC3339), nil
-		}
-	}
-	return 0, 0, "", fmt.Errorf(
-		"--since %q: want a run (RUN-N), a date (2026-09-01), or an RFC 3339 timestamp", raw)
 }
 
 // renderExecutorLedger is the human-mode document. Hints and voter names are
