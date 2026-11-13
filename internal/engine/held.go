@@ -1090,7 +1090,14 @@ func materializedSpec(
 	return workflow.MaterializedHeldStep(def, step.StepName)
 }
 
-// HeldResolutionStaleTargets is DKT-414's resolve-time advisory: the SAME
+// HeldResolutionStaleTargets is HeldResolutionStaleTargetsStore on store.StoreOn(conn).
+func (e *Engine) HeldResolutionStaleTargets(
+	conn store.LegacyDB, heldStepID int, nowMS int64,
+) []StaleTarget {
+	return e.HeldResolutionStaleTargetsStore(store.StoreOn(conn), heldStepID, nowMS)
+}
+
+// HeldResolutionStaleTargetsStore is DKT-414's resolve-time advisory: the SAME
 // recorded-target-vs-shared-HEAD ancestry check `dispatch open` runs (DKT-193),
 // asked at the moment a materialized held step's resolution commits — because
 // that is when the check can still change what happens next.
@@ -1128,9 +1135,13 @@ func materializedSpec(
 // NOT end the hold (sibling clusters still open, `--as retry`) finds the
 // routing step still gated, no downstream step ready, and warns about
 // nothing — the advisory fires when packets actually become consumable.
-func (e *Engine) HeldResolutionStaleTargets(
-	conn store.LegacyDB, heldStepID int, nowMS int64,
+func (e *Engine) HeldResolutionStaleTargetsStore(
+	storage store.Store, heldStepID int, nowMS int64,
 ) []StaleTarget {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		panic(err)
+	}
 	if e == nil || e.HeadFn == nil || e.IsAncestorFn == nil {
 		return nil
 	}

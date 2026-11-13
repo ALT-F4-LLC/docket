@@ -69,7 +69,12 @@ type GateStatusResult struct {
 	Target       *GateTarget
 }
 
-// GateStatus reads STEP-N's decision state: step status, outcome, and — for a
+// GateStatus is GateStatusStore on store.StoreOn(conn).
+func GateStatus(conn store.LegacyDB, stepID int, nowMS int64) (*GateStatusResult, error) {
+	return GateStatusStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// GateStatusStore reads STEP-N's decision state: step status, outcome, and — for a
 // vote step with an open proposal — the tally and every declared seat's cast
 // state, all from ONE StepView plus the two proposal reads a seat roster
 // needs.
@@ -77,7 +82,11 @@ type GateStatusResult struct {
 // stepID must name a `type="human"` or `type="vote"` step — the same
 // restriction `guard gate` applies, because every other step kind has no
 // decision to report status for.
-func GateStatus(conn store.LegacyDB, stepID int, nowMS int64) (*GateStatusResult, error) {
+func GateStatusStore(storage store.Store, stepID int, nowMS int64) (*GateStatusResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	view, err := LoadStepView(conn, stepID, nowMS)
 	if err != nil {
 		return nil, err

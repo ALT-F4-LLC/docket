@@ -169,7 +169,14 @@ func canonicalRowBytes(row model.StepRow) (string, string, error) {
 	return string(raw), workflow.SHA256(raw), nil
 }
 
-// OpenDispatch records a batch manifest for a run.
+// OpenDispatch is OpenDispatchStore on store.StoreOn(conn).
+func (e *Engine) OpenDispatch(
+	conn store.LegacyDB, runID int, limit int, ackSeqs []int64, nowMS int64,
+) (*Manifest, error) {
+	return e.OpenDispatchStore(store.StoreOn(conn), runID, limit, ackSeqs, nowMS)
+}
+
+// OpenDispatchStore records a batch manifest for a run.
 //
 // It computes the ready set EXACTLY AS `next` DOES — the same LoadScheduler,
 // the same predicate, the same SortSteps — by calling the same helper `next`
@@ -185,9 +192,13 @@ func canonicalRowBytes(row model.StepRow) (string, string, error) {
 // relay taking over from a crashed one acknowledges as part of claiming its next
 // batch — and an ack applied after the ready set was computed would produce a
 // manifest that omitted exactly the write-class steps the ack just released.
-func (e *Engine) OpenDispatch(
-	conn store.LegacyDB, runID int, limit int, ackSeqs []int64, nowMS int64,
+func (e *Engine) OpenDispatchStore(
+	storage store.Store, runID int, limit int, ackSeqs []int64, nowMS int64,
 ) (*Manifest, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -424,7 +435,12 @@ type Extension struct {
 	ReapHold string `json:"reap_hold,omitempty"`
 }
 
-// ExtendDispatch appends rows the engine minted or readied since the open to
+// ExtendDispatch is ExtendDispatchStore on store.StoreOn(conn).
+func (e *Engine) ExtendDispatch(conn store.LegacyDB, runID int, nowMS int64) (*Extension, error) {
+	return e.ExtendDispatchStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// ExtendDispatchStore appends rows the engine minted or readied since the open to
 // the run's OPEN manifest (DKT-2071).
 //
 // It exists because the manifest is frozen at open and a fix round is minted at
@@ -451,7 +467,11 @@ type Extension struct {
 // An EXPIRED manifest is refused rather than extended: extending one would push
 // a lapsed manifest's expiry back out and resurrect a batch the TTL had already
 // given up on, which is the wedge `dispatch abandon` exists to avoid.
-func (e *Engine) ExtendDispatch(conn store.LegacyDB, runID int, nowMS int64) (*Extension, error) {
+func (e *Engine) ExtendDispatchStore(storage store.Store, runID int, nowMS int64) (*Extension, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -936,7 +956,14 @@ type RowMismatch struct {
 	Computed string
 }
 
-// VerifyDispatch recomputes the ready set and compares each stored manifest
+// VerifyDispatch is VerifyDispatchStore on store.StoreOn(conn).
+func (e *Engine) VerifyDispatch(
+	conn store.LegacyDB, runID int, nowMS int64,
+) (*VerifyResult, *RowMismatch, error) {
+	return e.VerifyDispatchStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// VerifyDispatchStore recomputes the ready set and compares each stored manifest
 // row against ITS OWN current rendering, BYTE FOR BYTE — with `Stage`
 // excluded from that comparison (DKT-19, below).
 //
@@ -982,9 +1009,13 @@ type RowMismatch struct {
 // for a reason `verify` already accounts for elsewhere in this function, and
 // core makes no claim that `Stage` is enforced or stable (stage.go: "Core
 // enforces nothing … that is the deliberate limit of a scheduling hint").
-func (e *Engine) VerifyDispatch(
-	conn store.LegacyDB, runID int, nowMS int64,
+func (e *Engine) VerifyDispatchStore(
+	storage store.Store, runID int, nowMS int64,
 ) (*VerifyResult, *RowMismatch, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	result, mismatch, candidates, err := e.verifyDispatchTx(conn, runID, nowMS)
 	if err != nil || mismatch != nil {
 		return result, mismatch, err
@@ -2008,7 +2039,14 @@ type IntegrationSkip struct {
 // skipIntegrationVerb names the override in a conductor refusal.
 const skipIntegrationVerb = "dispatch close --skip-integration-check"
 
-// CloseDispatch closes the open manifest of a run.
+// CloseDispatch is CloseDispatchStore on store.StoreOn(conn).
+func (e *Engine) CloseDispatch(
+	conn store.LegacyDB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
+) (*CloseOutcome, error) {
+	return e.CloseDispatchStore(store.StoreOn(conn), runID, acceptMissingUsage, skip, nowMS)
+}
+
+// CloseDispatchStore closes the open manifest of a run.
 //
 // It closes the open manifest ONLY IF no discrepancy exists. With one, it
 // refuses `CONFLICT` enumerating each discrepancy and its resolution — because
@@ -2044,9 +2082,13 @@ const skipIntegrationVerb = "dispatch close --skip-integration-check"
 // DKT-2758: every CONFLICT it returns is recorded as one
 // `dispatch-close-refused` event, in its own transaction that commits although
 // the close did not, naming the dispatch when one was open.
-func (e *Engine) CloseDispatch(
-	conn store.LegacyDB, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
+func (e *Engine) CloseDispatchStore(
+	storage store.Store, runID int, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*CloseOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	openID := 0
 	outcome, err := e.closeDispatch(conn, runID, acceptMissingUsage, skip, nowMS, &openID)
 	if code, ok := CodeOf(err); ok && code == CodeConflict {
@@ -2333,7 +2375,14 @@ func settleAcceptedTx(tx store.LegacyTx, accepted []Discrepancy) ([]string, erro
 	return out, nil
 }
 
-// AbandonDispatchWith closes the open manifest UNCONDITIONALLY.
+// AbandonDispatchWith is AbandonDispatchWithStore on store.StoreOn(conn).
+func (e *Engine) AbandonDispatchWith(
+	conn store.LegacyDB, runID int, opts AbandonDispatchOptions,
+) (*CloseOutcome, error) {
+	return e.AbandonDispatchWithStore(store.StoreOn(conn), runID, opts)
+}
+
+// AbandonDispatchWithStore closes the open manifest UNCONDITIONALLY.
 //
 // NO DISCREPANCY BLOCKS IT, and that is the whole point: the design provides
 // "explicit `dispatch abandon` for a crashed relay", and the relay is gone and
@@ -2345,9 +2394,13 @@ func settleAcceptedTx(tx store.LegacyTx, accepted []Discrepancy) ([]string, erro
 // the conductor's decision, and an executor sharing the checkout must not be
 // able to pull a batch out from under it. The TTL abandon `next` performs
 // stays token-free, because there the engine, not the caller, decides.
-func (e *Engine) AbandonDispatchWith(
-	conn store.LegacyDB, runID int, opts AbandonDispatchOptions,
+func (e *Engine) AbandonDispatchWithStore(
+	storage store.Store, runID int, opts AbandonDispatchOptions,
 ) (*CloseOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	reason, nowMS := opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {

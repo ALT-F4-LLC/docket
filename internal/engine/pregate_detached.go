@@ -379,7 +379,14 @@ func declaresDetachablePreGates(defs map[int]*workflow.Definition) bool {
 	return false
 }
 
-// RunDetachedPreGates is the detached child's whole work: hold the (step,
+// RunDetachedPreGates is RunDetachedPreGatesStore on store.StoreOn(conn).
+func (e *Engine) RunDetachedPreGates(
+	conn store.LegacyDB, stepID int, targetSHA string, nowMS int64,
+) (*DetachedPreGateRun, error) {
+	return e.RunDetachedPreGatesStore(store.StoreOn(conn), stepID, targetSHA, nowMS)
+}
+
+// RunDetachedPreGatesStore is the detached child's whole work: hold the (step,
 // target) lock, confirm the measurement is still wanted, reconstruct the
 // target, run every pre-gate under its entry's own timeout, and record the
 // rows keyed to the target. `step pregate` is its only production caller.
@@ -389,9 +396,13 @@ func declaresDetachablePreGates(defs map[int]*workflow.Definition) bool {
 // step that moved on, a target that moved. Only a target that cannot be
 // reconstructed is an error, because a run that was asked for and could not
 // measure should say so to whoever asked.
-func (e *Engine) RunDetachedPreGates(
-	conn store.LegacyDB, stepID int, targetSHA string, nowMS int64,
+func (e *Engine) RunDetachedPreGatesStore(
+	storage store.Store, stepID int, targetSHA string, nowMS int64,
 ) (*DetachedPreGateRun, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	targetSHA = strings.ToLower(strings.TrimSpace(targetSHA))
 	if !detachedTargetSHA.MatchString(targetSHA) {
 		return nil, validationErr(

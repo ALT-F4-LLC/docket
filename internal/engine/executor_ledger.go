@@ -169,9 +169,18 @@ func (l *ledgerTallies) voter(name string, runID int) *voterTally {
 	return t
 }
 
-// LoadExecutorLedger builds the document over every run the options admit.
-// IT WRITES NOTHING.
+// LoadExecutorLedger is LoadExecutorLedgerStore on store.StoreOn(conn).
 func LoadExecutorLedger(conn store.LegacyDB, opts ExecutorLedgerOptions) (*ExecutorLedger, error) {
+	return LoadExecutorLedgerStore(store.StoreOn(conn), opts)
+}
+
+// LoadExecutorLedgerStore builds the document over every run the options admit.
+// IT WRITES NOTHING.
+func LoadExecutorLedgerStore(storage store.Store, opts ExecutorLedgerOptions) (*ExecutorLedger, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	runs, _, err := store.StoreOn(conn).ListRuns(store.RunListOptions{ProjectID: opts.ProjectID})
 	if err != nil {
 		return nil, err

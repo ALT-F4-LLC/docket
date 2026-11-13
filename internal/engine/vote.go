@@ -353,7 +353,12 @@ func findVoteProposal(conn store.LegacyDB, step *store.Step) (int, error) {
 	return id, nil
 }
 
-// IsVoteStepProposal reports whether a proposal was opened by an engine vote
+// IsVoteStepProposal is IsVoteStepProposalStore on store.StoreOn(conn).
+func IsVoteStepProposal(conn store.LegacyDB, proposalID int) (bool, error) {
+	return IsVoteStepProposalStore(store.StoreOn(conn), proposalID)
+}
+
+// IsVoteStepProposalStore reports whether a proposal was opened by an engine vote
 // step — its create keyed under the vote-step scope prefix.
 //
 // `vote close` (DKT-114) is for CONVERSATIONAL proposals whose decision was
@@ -361,7 +366,11 @@ func findVoteProposal(conn store.LegacyDB, step *store.Step) (int, error) {
 // closing it underneath the step would not route the step, and the run is
 // moved past an uncast vote with `docket step resolve` instead — so the close
 // verb asks this first and refuses with that guidance.
-func IsVoteStepProposal(conn store.LegacyDB, proposalID int) (bool, error) {
+func IsVoteStepProposalStore(storage store.Store, proposalID int) (bool, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return false, err
+	}
 	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return false, err
@@ -369,11 +378,20 @@ func IsVoteStepProposal(conn store.LegacyDB, proposalID int) (bool, error) {
 	return found && strings.HasPrefix(key, voteStepScopePrefix), nil
 }
 
-// VoteProposalRun returns the run whose vote step opened a proposal. The
+// VoteProposalRun is VoteProposalRunStore on store.StoreOn(conn).
+func VoteProposalRun(conn store.LegacyDB, proposalID int) (int, bool, error) {
+	return VoteProposalRunStore(store.StoreOn(conn), proposalID)
+}
+
+// VoteProposalRunStore returns the run whose vote step opened a proposal. The
 // second return is false for a proposal bound to no run: a conversational
 // ballot, or a caller-forged key whose run part does not parse, which
 // DriveVoteProposal likewise routes nowhere.
-func VoteProposalRun(conn store.LegacyDB, proposalID int) (int, bool, error) {
+func VoteProposalRunStore(storage store.Store, proposalID int) (int, bool, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return 0, false, err
+	}
 	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil || !found {
 		return 0, false, err

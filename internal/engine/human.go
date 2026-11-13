@@ -143,7 +143,12 @@ type DecideOptions struct {
 	NowMS int64
 }
 
-// DecideStepWith is `step approve` and `step reject` — the human-gate
+// DecideStepWith is DecideStepWithStore on store.StoreOn(conn).
+func (e *Engine) DecideStepWith(conn store.LegacyDB, stepID int, opts DecideOptions) error {
+	return e.DecideStepWithStore(store.StoreOn(conn), stepID, opts)
+}
+
+// DecideStepWithStore is `step approve` and `step reject` — the human-gate
 // verbs.
 //
 // NO LEASE TOKEN: a human gate is never claimed, so there is no lease to
@@ -153,7 +158,11 @@ type DecideOptions struct {
 // could approve the very gate its own commit is guarded on. The record
 // carries WHO ruled and from where (DKT-2450) — the same two claim-level
 // fields a trust grant carries, on the event.
-func (e *Engine) DecideStepWith(conn store.LegacyDB, stepID int, opts DecideOptions) error {
+func (e *Engine) DecideStepWithStore(storage store.Store, stepID int, opts DecideOptions) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	approve, note, value, nowMS := opts.Approve, opts.Note, opts.Value, opts.NowMS
 	verb := "step approve"
 	if !approve {
@@ -381,7 +390,14 @@ type ResolveOutcome struct {
 	Repin *IssueDiffRepin `json:"issue_diff_repin,omitempty"`
 }
 
-// ResolveStepWith is every `step resolve` shape — the `waiting-human`
+// ResolveStepWith is ResolveStepWithStore on store.StoreOn(conn).
+func (e *Engine) ResolveStepWith(
+	conn store.LegacyDB, stepID int, opts ResolveOptions,
+) (*ResolveOutcome, error) {
+	return e.ResolveStepWithStore(store.StoreOn(conn), stepID, opts)
+}
+
+// ResolveStepWithStore is every `step resolve` shape — the `waiting-human`
 // resolutions, `--batch` (DKT-546), `--drop-interposed` (DKT-861), and
 // `--worktree` (DKT-1034) — and reports the outcome the step row does not
 // carry.
@@ -396,9 +412,13 @@ type ResolveOutcome struct {
 // used to arrive beside a mutation already decided (RUN-61's verify-tribunal,
 // skipped under the operator who had chosen override-pass precisely to reach
 // it).
-func (e *Engine) ResolveStepWith(
-	conn store.LegacyDB, stepID int, opts ResolveOptions,
+func (e *Engine) ResolveStepWithStore(
+	storage store.Store, stepID int, opts ResolveOptions,
 ) (*ResolveOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	out := &ResolveOutcome{}
 	if err := e.resolveStep(conn, stepID, opts, out); err != nil {
 		return nil, err
@@ -1010,7 +1030,12 @@ func (e *Engine) resolveStep(
 	return nil
 }
 
-// OverridePassSkipsInterposedTargets names the interposed step(s) an
+// OverridePassSkipsInterposedTargets is OverridePassSkipsInterposedTargetsStore on store.StoreOn(conn).
+func OverridePassSkipsInterposedTargets(conn store.LegacyDB, stepID int) []string {
+	return OverridePassSkipsInterposedTargetsStore(store.StoreOn(conn), stepID)
+}
+
+// OverridePassSkipsInterposedTargetsStore names the interposed step(s) an
 // `override-pass` on stepID will never route to (DKT-470).
 //
 // ResolveOverridePass always records the GENERIC RoutingPass, whatever the
@@ -1031,7 +1056,11 @@ func (e *Engine) resolveStep(
 // precedes does not change, so it is independent of ResolveStepWith and safe to
 // call and print before that call commits anything — the operator sees the
 // blast radius of what they are about to approve.
-func OverridePassSkipsInterposedTargets(conn store.LegacyDB, stepID int) []string {
+func OverridePassSkipsInterposedTargetsStore(storage store.Store, stepID int) []string {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		panic(err)
+	}
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return nil
@@ -1073,7 +1102,12 @@ func overridePassInterposedWarning(instance string, spec *workflow.Step) string 
 		instance, RoutingPass, strings.Join(targets, ", "))
 }
 
-// FailStep is `step fail` — the explicit-failure counterpart to `complete`.
+// FailStep is FailStepStore on store.StoreOn(conn).
+func (e *Engine) FailStep(conn store.LegacyDB, stepID int, token, note, metadata string, nowMS int64) error {
+	return e.FailStepStore(store.StoreOn(conn), stepID, token, note, metadata, nowMS)
+}
+
+// FailStepStore is `step fail` — the explicit-failure counterpart to `complete`.
 //
 // It consumes an attempt and routes per `on_fail` when attempts are EXHAUSTED,
 // per the status machine ("attempts exhausted ⇒ waiting-human", via the
@@ -1092,7 +1126,11 @@ func overridePassInterposedWarning(instance string, spec *workflow.Step) string 
 //
 // Validated BEFORE the transaction opens, same as stage zero's C5 ordering: a
 // refusal costs the caller nothing and consumes no attempt.
-func (e *Engine) FailStep(conn store.LegacyDB, stepID int, token, note, metadata string, nowMS int64) error {
+func (e *Engine) FailStepStore(storage store.Store, stepID int, token, note, metadata string, nowMS int64) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -1361,11 +1399,22 @@ func commit(tx store.LegacyTx, err error) error {
 	return commitWrite(tx)
 }
 
-// HeartbeatStep extends a live lease held by token. It does not touch
-// `attempt`: a heartbeat is not a new claim.
+// HeartbeatStep is HeartbeatStepStore on store.StoreOn(conn).
 func HeartbeatStep(
 	conn store.LegacyDB, stepID int, token string, nowMS int64,
 ) (*model.Lease, error) {
+	return HeartbeatStepStore(store.StoreOn(conn), stepID, token, nowMS)
+}
+
+// HeartbeatStepStore extends a live lease held by token. It does not touch
+// `attempt`: a heartbeat is not a new claim.
+func HeartbeatStepStore(
+	storage store.Store, stepID int, token string, nowMS int64,
+) (*model.Lease, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))

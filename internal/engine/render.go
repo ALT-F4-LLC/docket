@@ -125,7 +125,14 @@ func RenderStep(
 	return RenderStepAs(conn, stepID, templatePath, "", nowMS)
 }
 
-// RenderStepAs is RenderStep with the `{executor}` substitution resolved to a
+// RenderStepAs is RenderStepAsStore on store.StoreOn(conn).
+func RenderStepAs(
+	conn store.LegacyDB, stepID int, templatePath, executor string, nowMS int64,
+) (*RenderResult, error) {
+	return RenderStepAsStore(store.StoreOn(conn), stepID, templatePath, executor, nowMS)
+}
+
+// RenderStepAsStore is RenderStep with the `{executor}` substitution resolved to a
 // caller-supplied hint (DKT-70).
 //
 // The declared hint is a DECLARATION, and some instances resolve it further
@@ -147,9 +154,13 @@ func RenderStep(
 // An empty executor is the declared behavior, unchanged. The override also
 // lands on the rendered step row's `executor`, so the packet's `target:`
 // line names who the work is actually for.
-func RenderStepAs(
-	conn store.LegacyDB, stepID int, templatePath, executor string, nowMS int64,
+func RenderStepAsStore(
+	storage store.Store, stepID int, templatePath, executor string, nowMS int64,
 ) (*RenderResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	bundle, err := ReadContext(conn, stepID, nowMS)
 	if err != nil {
 		return nil, err

@@ -264,7 +264,12 @@ func NewEngine() *Engine {
 	}
 }
 
-// CompleteStep runs the saga from stage 0, or resumes it from wherever it
+// CompleteStep is CompleteStepStore on store.StoreOn(conn).
+func (e *Engine) CompleteStep(conn store.LegacyDB, stepID int, opts CompleteOptions) error {
+	return e.CompleteStepStore(store.StoreOn(conn), stepID, opts)
+}
+
+// CompleteStepStore runs the saga from stage 0, or resumes it from wherever it
 // stopped.
 //
 // It is safe to call at any time on any step: a step not in the saga starts it
@@ -272,7 +277,11 @@ func NewEngine() *Engine {
 // consulted). That is what makes a crashed worker's saga finish under the next
 // `next`, the next `claim`, or an explicit re-invocation, with no operator
 // action.
-func (e *Engine) CompleteStep(conn store.LegacyDB, stepID int, opts CompleteOptions) error {
+func (e *Engine) CompleteStepStore(storage store.Store, stepID int, opts CompleteOptions) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
@@ -2249,7 +2258,12 @@ type FailedGate struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// FailedGates returns the completion gates that did not pass, sorted by name.
+// FailedGates is FailedGatesStore on store.StoreOn(conn).
+func FailedGates(conn store.LegacyDB, stepID int) ([]FailedGate, error) {
+	return FailedGatesStore(store.StoreOn(conn), stepID)
+}
+
+// FailedGatesStore returns the completion gates that did not pass, sorted by name.
 //
 // It is the READ SIDE of the routing decision (DKT-982): a step whose gate
 // failed parks, and until this existed the verb that parked it could name
@@ -2258,7 +2272,11 @@ type FailedGate struct {
 // print time; it had no accessor to say it with.
 //
 // Empty means every completion gate passed, or none ran.
-func FailedGates(conn store.LegacyDB, stepID int) ([]FailedGate, error) {
+func FailedGatesStore(storage store.Store, stepID int) ([]FailedGate, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := store.StoreOn(conn).GateResultsForStep(stepID)
 	if err != nil {
 		return nil, err

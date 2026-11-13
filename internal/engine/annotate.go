@@ -24,13 +24,22 @@ import (
 // is: the engine stores what it is handed and interprets no
 // key inside it.
 
-// AnnotateStep merges opaque metadata onto a finished step's record.
+// AnnotateStep is AnnotateStepStore on store.StoreOn(conn).
+func AnnotateStep(conn store.LegacyDB, stepID int, metadata string, nowMS int64) (*store.Step, error) {
+	return AnnotateStepStore(store.StoreOn(conn), stepID, metadata, nowMS)
+}
+
+// AnnotateStepStore merges opaque metadata onto a finished step's record.
 //
 // It refuses a step that has not reached a terminal status: a live step's
 // metadata lands with its record (`step complete --metadata`), under its
 // holder's token, and a side channel into an in-flight record would bypass
 // exactly that authorization.
-func AnnotateStep(conn store.LegacyDB, stepID int, metadata string, nowMS int64) (*store.Step, error) {
+func AnnotateStepStore(storage store.Store, stepID int, metadata string, nowMS int64) (*store.Step, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if metadata == "" {
 		return nil, validationErr("--metadata is required; an annotation with no content records nothing")
 	}

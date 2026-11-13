@@ -106,7 +106,15 @@ var refreshBlockingStepStatuses = []string{
 	store.StepClaimed, store.StepRunning, store.StepGated,
 }
 
-// RefreshIssueScopeInRun re-reads `issues.scope_globs` and overwrites the
+// RefreshIssueScopeInRun is RefreshIssueScopeInRunStore on store.StoreOn(conn).
+func RefreshIssueScopeInRun(
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
+) (*RefreshedScope, error) {
+	return RefreshIssueScopeInRunStore(store.StoreOn(conn), runID, issueID, reason, by, token, nowMS)
+}
+
+// RefreshIssueScopeInRunStore re-reads `issues.scope_globs` and overwrites the
 // `scope` key of ONE run-issue's activation snapshot (DKT-869).
 //
 // The unit is (run, issue) rather than a single step because that is where the
@@ -119,10 +127,14 @@ var refreshBlockingStepStatuses = []string{
 // On a bound run it requires the conductor capability (DKT-2465) as `token`:
 // `issue edit --scope` is ungated, so without this check an executor could
 // widen its own issue and then make that widen reach its own packets.
-func RefreshIssueScopeInRun(
-	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+func RefreshIssueScopeInRunStore(
+	storage store.Store, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedScope, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted scope; the event " +

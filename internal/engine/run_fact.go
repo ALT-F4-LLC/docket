@@ -62,8 +62,17 @@ type RunFact struct {
 	Reason   string `json:"reason"`
 }
 
-// RecordRunFact validates and records one conductor-observed fact.
+// RecordRunFact is RecordRunFactStore on store.StoreOn(conn).
 func RecordRunFact(conn store.LegacyDB, opts RunFactOptions) (*RunFact, error) {
+	return RecordRunFactStore(store.StoreOn(conn), opts)
+}
+
+// RecordRunFactStore validates and records one conductor-observed fact.
+func RecordRunFactStore(storage store.Store, opts RunFactOptions) (*RunFact, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	reason := strings.TrimSpace(opts.Reason)
 	if reason == "" {
 		return nil, validationErr("--reason is required: a fact with no reason " +

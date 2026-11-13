@@ -61,14 +61,23 @@ type StepArtifact struct {
 	Payload string `json:"payload,omitempty"`
 }
 
-// ListStepArtifacts reports what one step produced, WITHOUT the bodies.
+// ListStepArtifacts is ListStepArtifactsStore on store.StoreOn(conn).
+func ListStepArtifacts(conn store.LegacyDB, stepID int) ([]StepArtifact, error) {
+	return ListStepArtifactsStore(store.StoreOn(conn), stepID)
+}
+
+// ListStepArtifactsStore reports what one step produced, WITHOUT the bodies.
 //
 // IT WRITES NOTHING, matching every other read verb — no reap, no lease touch.
 //
 // A step that produced nothing is not an error: it returns an empty list. Many
 // steps legitimately produce no artifact, and turning that into a failure
 // would make the verb unusable as the "what is here?" probe it exists to be.
-func ListStepArtifacts(conn store.LegacyDB, stepID int) ([]StepArtifact, error) {
+func ListStepArtifactsStore(storage store.Store, stepID int) ([]StepArtifact, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	// The step must EXIST, even though having no artifacts is fine. Without
 	// this, a typo'd step reference reports "no artifacts" — an answer that
 	// reads as fact and is actually a missing step.
@@ -103,14 +112,23 @@ func ListStepArtifacts(conn store.LegacyDB, stepID int) ([]StepArtifact, error) 
 	return out, nil
 }
 
-// ReadArtifact reads ONE artifact in full, body and payload included.
+// ReadArtifact is ReadArtifactStore on store.StoreOn(conn).
+func ReadArtifact(conn store.LegacyDB, artifactID int) (*StepArtifact, error) {
+	return ReadArtifactStore(store.StoreOn(conn), artifactID)
+}
+
+// ReadArtifactStore reads ONE artifact in full, body and payload included.
 //
 // IT WRITES NOTHING.
 //
 // Reached by numeric id (the N in ARTIFACT-N), which is what the listing above
 // and the run report's index both print — so the reference an operator already
 // has on screen is the one this takes.
-func ReadArtifact(conn store.LegacyDB, artifactID int) (*StepArtifact, error) {
+func ReadArtifactStore(storage store.Store, artifactID int) (*StepArtifact, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	snap, err := store.StoreOn(conn).BeginReadSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("reading artifact ARTIFACT-%d: %w", artifactID, err)

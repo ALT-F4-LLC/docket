@@ -705,7 +705,7 @@ func TestFailMetadataReachesTheReportRollup(t *testing.T) {
 //
 // So this is a SOURCE-POSITION check, the same shape as
 // TestNoPoolReadsInsideTransactions: it parses human.go's AST and asserts
-// that FailStep's calls to validateFailMetadataSize and DecodeMetadataBag
+// that FailStepStore's calls to validateFailMetadataSize and DecodeMetadataBag
 // appear before its call to store.BeginSQLiteTx(). Moving either call after
 // store.BeginSQLiteTx() — even though authorize itself has no side effect today —
 // makes this fail, which is the placement guarantee stageZero makes
@@ -719,7 +719,7 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "FailStep" || fn.Body == nil {
+		if !ok || fn.Name.Name != "FailStepStore" || fn.Body == nil {
 			return true
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -746,13 +746,13 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 	})
 
 	if beginPos == token.NoPos {
-		t.Fatal("FailStep no longer calls store.BeginSQLiteTx() — this test needs updating, not deleting")
+		t.Fatal("FailStepStore no longer calls store.BeginSQLiteTx() — this test needs updating, not deleting")
 	}
 	if sizePos == token.NoPos {
-		t.Fatal("FailStep no longer calls validateFailMetadataSize")
+		t.Fatal("FailStepStore no longer calls validateFailMetadataSize")
 	}
 	if decodePos == token.NoPos {
-		t.Fatal("FailStep no longer calls DecodeMetadataBag")
+		t.Fatal("FailStepStore no longer calls DecodeMetadataBag")
 	}
 	if sizePos > beginPos {
 		t.Error("validateFailMetadataSize runs AFTER store.BeginSQLiteTx() — a refusal " +

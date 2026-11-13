@@ -74,7 +74,12 @@ func (p *runPolicy) load() (*policyDoc, error) {
 	return p.doc, p.err
 }
 
-// ResolveSeats resolves each named seat against the run's pinned policy.toml,
+// ResolveSeats is ResolveSeatsStore on store.StoreOn(conn).
+func ResolveSeats(conn store.LegacyDB, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
+	return ResolveSeatsStore(store.StoreOn(conn), runID, seats, size, labels)
+}
+
+// ResolveSeatsStore resolves each named seat against the run's pinned policy.toml,
 // returning the same {model, effort, variant} a vote step row's
 // voter_assignments carry.
 //
@@ -96,7 +101,11 @@ func (p *runPolicy) load() (*policyDoc, error) {
 // EVERY SEAT RESOLVES OR THE CALL FAILS. A caller building a judge panel needs
 // the whole roster, and returning the seats that happened to resolve would
 // seat a panel nobody chose while hiding which seat the policy has no row for.
-func ResolveSeats(conn store.LegacyDB, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
+func ResolveSeatsStore(storage store.Store, runID int, seats []string, size string, labels []string) ([]model.VoterAssignment, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}

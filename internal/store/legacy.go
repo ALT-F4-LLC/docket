@@ -120,6 +120,44 @@ func SQLTx(tx ReadTx) (*sql.Tx, bool) {
 	return sqlite.tx, true
 }
 
+// SQLDB returns the *sql.DB under a SQLite Store, and an error for any other
+// implementation. It is how an internal/engine Store form reaches the SQLite
+// handle; nothing outside internal/engine and internal/store calls it.
+//
+// For a Store from OpenSQLite it returns the writer pool, db.Open's
+// single-connection pool whose Begin is BEGIN IMMEDIATE; for one from StoreOn
+// it returns the wrapped *sql.DB. Either way the engine body sees the same
+// handle its LegacyDB form passed before.
+//
+// Naming rule: the Store form of an exported engine function or method that
+// takes a store.LegacyDB is its name with the suffix Store, on the same
+// receiver, with store.Store in the LegacyDB parameter's place and every
+// other parameter and result unchanged (CompleteStep and CompleteStepStore).
+// The Store form holds the original body behind one prologue that calls
+// SQLDB; the LegacyDB form keeps its name and signature, and its body is one
+// statement calling the Store form with StoreOn.
+//
+// On a Store that is not SQLite, such as internal/db/pgstore's, a Store form
+// that returns an error returns SQLDB's error before reading or writing
+// anything. Doctor, ScopeEditFrozenForActiveRuns,
+// DescriptionEditFrozenForActiveRuns and OverridePassSkipsInterposedTargets
+// return no error, so their Store forms panic with it instead: an empty
+// result there would read as "nothing frozen" or "nothing skipped", and a
+// freeze guard must fail closed.
+//
+// The retarget in docs/design/sql-handle-migration.md points LegacyDB at
+// Store and removes the LegacyDB forms; SQLDB goes once no engine body passes
+// a *sql.DB to an internal/db helper.
+func SQLDB(s Store) (*sql.DB, error) {
+	switch s := s.(type) {
+	case *sqliteStore:
+		return s.writer, nil
+	case borrowedStore:
+		return s.writer, nil
+	}
+	return nil, fmt.Errorf("store: %T is not a SQLite store, so it has no *sql.DB", s)
+}
+
 // unwrapSQLiteTx is SQLTx for a transaction StoreOn opened, which is always
 // the SQLite one; it rolls tx back and fails rather than leak it otherwise.
 func unwrapSQLiteTx(tx ReadTx) (*sql.Tx, error) {

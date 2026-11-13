@@ -82,7 +82,12 @@ type ReadySteps struct {
 	LimitSources map[string]string
 }
 
-// NextSteps computes a run's ready steps, reaping expired leases on the way.
+// NextSteps is NextStepsStore on store.StoreOn(conn).
+func (e *Engine) NextSteps(conn store.LegacyDB, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+	return e.NextStepsStore(store.StoreOn(conn), runID, limit, nowMS)
+}
+
+// NextStepsStore computes a run's ready steps, reaping expired leases on the way.
 //
 // THIS IS ONE OF THE TWO PLACES A READ-SHAPED VERB MAY WRITE ("lazy lease
 // reaping happens here and at claim, and nowhere else"). Every other read verb —
@@ -92,7 +97,11 @@ type ReadySteps struct {
 // The reap and the readiness computation share ONE transaction, and in that
 // order: a step reaped by this call must be offered by this call, or a
 // dispatcher would have to poll twice to see work that is already available.
-func (e *Engine) NextSteps(conn store.LegacyDB, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+func (e *Engine) NextStepsStore(storage store.Store, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -706,7 +715,12 @@ type StepListEntry struct {
 	ExpectedCost float64         `json:"expected_cost"`
 }
 
-// RunStepList answers `docket step list --run RUN-N`: every step of one run,
+// RunStepList is RunStepListStore on store.StoreOn(conn).
+func RunStepList(conn store.LegacyDB, runID int, nowMS int64) ([]StepListEntry, error) {
+	return RunStepListStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// RunStepListStore answers `docket step list --run RUN-N`: every step of one run,
 // with its EFFECTIVE status and expected cost, in the (issue, id)
 // order ListRunSteps defines.
 //
@@ -718,7 +732,11 @@ type StepListEntry struct {
 // ids, correct exactly as long as the store was quiet. READ-ONLY: the
 // scheduler loads in a transaction that is always rolled back, and no reap
 // runs.
-func RunStepList(conn store.LegacyDB, runID int, nowMS int64) ([]StepListEntry, error) {
+func RunStepListStore(storage store.Store, runID int, nowMS int64) ([]StepListEntry, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -756,7 +774,12 @@ func RunStepList(conn store.LegacyDB, runID int, nowMS int64) ([]StepListEntry, 
 	return out, nil
 }
 
-// IssueStepList answers `docket step list --issue ISSUE-N`: every step recorded
+// IssueStepList is IssueStepListStore on store.StoreOn(conn).
+func IssueStepList(conn store.LegacyDB, issueID int, nowMS int64) ([]StepListEntry, error) {
+	return IssueStepListStore(store.StoreOn(conn), issueID, nowMS)
+}
+
+// IssueStepListStore answers `docket step list --issue ISSUE-N`: every step recorded
 // for one issue, across every run that holds one, with the same effective
 // status RunStepList computes.
 //
@@ -767,7 +790,11 @@ func RunStepList(conn store.LegacyDB, runID int, nowMS int64) ([]StepListEntry, 
 // run is scheduled on its own, because readiness is a question about one run's
 // graph; the rows are then concatenated in run order. READ-ONLY, like
 // RunStepList.
-func IssueStepList(conn store.LegacyDB, issueID int, nowMS int64) ([]StepListEntry, error) {
+func IssueStepListStore(storage store.Store, issueID int, nowMS int64) ([]StepListEntry, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	runIDs, err := store.StoreOn(conn).IssueStepRuns(issueID)
 	if err != nil {
 		return nil, err
@@ -788,7 +815,12 @@ func IssueStepList(conn store.LegacyDB, issueID int, nowMS int64) ([]StepListEnt
 	return out, nil
 }
 
-// EffectiveStatusCounts rolls one run's steps up by EFFECTIVE status,
+// EffectiveStatusCounts is EffectiveStatusCountsStore on store.StoreOn(conn).
+func EffectiveStatusCounts(conn store.LegacyDB, runID int, nowMS int64) ([]model.StatusCount, error) {
+	return EffectiveStatusCountsStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// EffectiveStatusCountsStore rolls one run's steps up by EFFECTIVE status,
 // for `run status` — the same status LoadStepView and RunStepList report, so
 // the rollup can never contradict `step show`/`step list` (DKT-468).
 //
@@ -801,7 +833,11 @@ func IssueStepList(conn store.LegacyDB, issueID int, nowMS int64) ([]StepListEnt
 // exactly the divergence the effective-status discipline exists to prevent.
 // READ-ONLY, like every effective-status computation: the transaction is always rolled
 // back and no reap runs.
-func EffectiveStatusCounts(conn store.LegacyDB, runID int, nowMS int64) ([]model.StatusCount, error) {
+func EffectiveStatusCountsStore(storage store.Store, runID int, nowMS int64) ([]model.StatusCount, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err

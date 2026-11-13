@@ -291,16 +291,27 @@ type RegistryAuditOptions struct {
 	ProjectID int
 }
 
-// AuditRegistries compares every project's registered workflow and schema rows
+// AuditRegistries is AuditRegistriesStore on store.StoreOn(conn).
+func AuditRegistries(
+	conn store.LegacyDB, index *CorpusIndex, opts RegistryAuditOptions,
+) (*RegistryAudit, error) {
+	return AuditRegistriesStore(store.StoreOn(conn), index, opts)
+}
+
+// AuditRegistriesStore compares every project's registered workflow and schema rows
 // against ONE scan of the shared corpus.
 //
 // The index is passed in rather than scanned here so the CALLER owns the two
 // refusals that precede any verdict — no root exists, and a root that would not
 // scan — and can word them for an operator. A report that silently classified
 // against an empty index would name every registration in the store.
-func AuditRegistries(
-	conn store.LegacyDB, index *CorpusIndex, opts RegistryAuditOptions,
+func AuditRegistriesStore(
+	storage store.Store, index *CorpusIndex, opts RegistryAuditOptions,
 ) (*RegistryAudit, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	st := store.StoreOn(conn)
 	projects, err := st.ListProjects()
 	if err != nil {

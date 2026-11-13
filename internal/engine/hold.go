@@ -34,9 +34,18 @@ type HoldOptions struct {
 	NowMS int64
 }
 
-// HoldStep parks one pending step `waiting-human` with park class `held`, and
-// records one `step-held` event carrying the reason and the actor.
+// HoldStep is HoldStepStore on store.StoreOn(conn).
 func HoldStep(conn store.LegacyDB, stepID int, opts HoldOptions) error {
+	return HoldStepStore(store.StoreOn(conn), stepID, opts)
+}
+
+// HoldStepStore parks one pending step `waiting-human` with park class `held`, and
+// records one `step-held` event carrying the reason and the actor.
+func HoldStepStore(storage store.Store, stepID int, opts HoldOptions) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	reason, err := holdReason(opts, "step hold")
 	if err != nil {
 		return err
@@ -80,14 +89,23 @@ func HoldStep(conn store.LegacyDB, stepID int, opts HoldOptions) error {
 	return nil
 }
 
-// HoldIssue parks every pending step of one issue in a run `waiting-human`
+// HoldIssue is HoldIssueStore on store.StoreOn(conn).
+func HoldIssue(conn store.LegacyDB, runID, issueID int, opts HoldOptions) ([]int, error) {
+	return HoldIssueStore(store.StoreOn(conn), runID, issueID, opts)
+}
+
+// HoldIssueStore parks every pending step of one issue in a run `waiting-human`
 // with park class `held` (DKT-4273), ready and staged alike, and records one
 // `step-held` event per step. It refuses, changing nothing, when a step of the
 // issue is in flight (claimed, running, or gated) or when the issue has no
 // pending step to hold, so a hold never reads as covering work it did not
 // stop. The held steps leave the next dispatch's rows and are listed under the
 // manifest's `held`; each releases through `step resolve --as retry`.
-func HoldIssue(conn store.LegacyDB, runID, issueID int, opts HoldOptions) ([]int, error) {
+func HoldIssueStore(storage store.Store, runID, issueID int, opts HoldOptions) ([]int, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	reason, err := holdReason(opts, "run hold-issue")
 	if err != nil {
 		return nil, err

@@ -179,20 +179,38 @@ func ClaimStep(conn store.LegacyDB, stepID int, opts ClaimOptions) (*ClaimResult
 	return claimRecordingRefusals(conn, stepID, opts, nil)
 }
 
-// ClaimStepWithGates is ClaimStep with a gate runner, so pre-gates execute.
+// ClaimStepWithGates is ClaimStepWithGatesStore on store.StoreOn(conn).
+func (e *Engine) ClaimStepWithGates(
+	conn store.LegacyDB, stepID int, opts ClaimOptions,
+) (*ClaimResult, error) {
+	return e.ClaimStepWithGatesStore(store.StoreOn(conn), stepID, opts)
+}
+
+// ClaimStepWithGatesStore is ClaimStep with a gate runner, so pre-gates execute.
 //
 // The runner is a PARAMETER rather than a package-level value because
 // `ClaimStep` is a package-level function with no access to `e.Gates`. The
 // nil-runner form keeps every existing caller and every test written before
 // pre-gates working unchanged: with no runner, a declared pre-gate records
 // `unmatched` rather than executing, which is the fail-closed direction.
-func (e *Engine) ClaimStepWithGates(
-	conn store.LegacyDB, stepID int, opts ClaimOptions,
+func (e *Engine) ClaimStepWithGatesStore(
+	storage store.Store, stepID int, opts ClaimOptions,
 ) (*ClaimResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return claimRecordingRefusals(conn, stepID, opts, e)
 }
 
-// ClaimStepRendered is ClaimStepWithGates for `step claim --render`: the claim
+// ClaimStepRendered is ClaimStepRenderedStore on store.StoreOn(conn).
+func (e *Engine) ClaimStepRendered(
+	conn store.LegacyDB, stepID int, opts ClaimOptions, templatePath, executor string,
+) (*ClaimResult, *RenderResult, error) {
+	return e.ClaimStepRenderedStore(store.StoreOn(conn), stepID, opts, templatePath, executor)
+}
+
+// ClaimStepRenderedStore is ClaimStepWithGates for `step claim --render`: the claim
 // and the packet render as ONE saga (DKT-804).
 //
 // The render used to run strictly AFTER the claim's commit, and a render-time
@@ -223,9 +241,13 @@ func (e *Engine) ClaimStepWithGates(
 // ending the lease costs it one of its own verbs rather than the full TTL or an
 // operator-gated reap. Every deterministic failure still refuses before anything
 // is written.
-func (e *Engine) ClaimStepRendered(
-	conn store.LegacyDB, stepID int, opts ClaimOptions, templatePath, executor string,
+func (e *Engine) ClaimStepRenderedStore(
+	storage store.Store, stepID int, opts ClaimOptions, templatePath, executor string,
 ) (*ClaimResult, *RenderResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	if _, err := RenderStepAs(conn, stepID, templatePath, executor, opts.NowMS); err != nil {
 		return nil, nil, err
 	}
@@ -1127,7 +1149,12 @@ func unclaimableReason(kind string) string {
 		"(or moved past with `docket step resolve`), not by a worker"
 }
 
-// ReadContext re-emits a step's context bundle READ-ONLY, no token required
+// ReadContext is ReadContextStore on store.StoreOn(conn).
+func ReadContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error) {
+	return ReadContextStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// ReadContextStore re-emits a step's context bundle READ-ONLY, no token required
 // It is `step context`'s implementation.
 //
 // IT WRITES NOTHING — not even a reap. Lazy reaping is confined to
@@ -1141,11 +1168,20 @@ func unclaimableReason(kind string) string {
 // since. A step not yet handed out — or back at `pending` for a retry — reads
 // live, as the claim that will hand it out would assemble it (recordedClaim).
 // ReadLiveContext asks the live question of any step.
-func ReadContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error) {
+func ReadContextStore(storage store.Store, stepID int, nowMS int64) (*Context, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return readContext(conn, stepID, nowMS, false)
 }
 
-// ReadLiveContext is ReadContext resolved over the run's artifacts AS THEY
+// ReadLiveContext is ReadLiveContextStore on store.StoreOn(conn).
+func ReadLiveContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error) {
+	return ReadLiveContextStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// ReadLiveContextStore is ReadContext resolved over the run's artifacts AS THEY
 // STAND, whether or not the step has been handed out — `step context --live`.
 //
 // It answers a different question from ReadContext on a claimed step: not
@@ -1153,7 +1189,11 @@ func ReadContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error)
 // preview an operator wants before authorizing a retry, and the one reading
 // every consumer had before DKT-1054, kept reachable by name rather than
 // removed.
-func ReadLiveContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error) {
+func ReadLiveContextStore(storage store.Store, stepID int, nowMS int64) (*Context, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return readContext(conn, stepID, nowMS, true)
 }
 
@@ -1277,9 +1317,18 @@ type StepView struct {
 	TargetWorktree string
 }
 
-// LoadStepView reads one step at its effective status. IT WRITES NOTHING — not
-// even a reap (reaping is confined to next/claim).
+// LoadStepView is LoadStepViewStore on store.StoreOn(conn).
 func LoadStepView(conn store.LegacyDB, stepID int, nowMS int64) (*StepView, error) {
+	return LoadStepViewStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// LoadStepViewStore reads one step at its effective status. IT WRITES NOTHING — not
+// even a reap (reaping is confined to next/claim).
+func LoadStepViewStore(storage store.Store, stepID int, nowMS int64) (*StepView, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	step, err := store.StoreOn(conn).GetStep(stepID)
 	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))

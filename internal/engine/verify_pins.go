@@ -120,7 +120,12 @@ func (r *PinReport) Sound() bool {
 		r.ExecutedCopyChanged == 0
 }
 
-// VerifyPins checks a run's WHOLE pin set against what those refs resolve to
+// VerifyPins is VerifyPinsStore on store.StoreOn(conn).
+func VerifyPins(conn store.LegacyDB, runID int) (*PinReport, error) {
+	return VerifyPinsStore(store.StoreOn(conn), runID)
+}
+
+// VerifyPinsStore checks a run's WHOLE pin set against what those refs resolve to
 // now (DKT-297).
 //
 // It exists because no verb answered "is this run's pin state sound". The verbs
@@ -144,7 +149,11 @@ func (r *PinReport) Sound() bool {
 // The tree is the RUN's: refs resolve against runConfigRoots, so a run whose
 // pins live under its checkout's `.docket/config` verifies the same from any
 // cwd, including one outside every git checkout.
-func VerifyPins(conn store.LegacyDB, runID int) (*PinReport, error) {
+func VerifyPinsStore(storage store.Store, runID int) (*PinReport, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	report, err := verifyPinsClosedIn(conn, runID, runConfigRoots(conn, runID))
 	if err != nil {
 		return nil, err

@@ -756,7 +756,12 @@ type TrustGrant struct {
 	Cwd string
 }
 
-// RecordTrustEvent writes a `trust-added` / `trust-removed` event.
+// RecordTrustEvent is RecordTrustEventStore on store.StoreOn(conn).
+func RecordTrustEvent(conn store.LegacyDB, kind string, grant TrustGrant, atMS int64) error {
+	return RecordTrustEventStore(store.StoreOn(conn), kind, grant, atMS)
+}
+
+// RecordTrustEventStore writes a `trust-added` / `trust-removed` event.
 //
 // It is exported because the trust CLI is where a grant happens, and the CLI is
 // outside this package. It takes the ARGV HASH rather than the argv, and the
@@ -789,7 +794,11 @@ type TrustGrant struct {
 // reaches the table, refuses a grant whose Actor or Cwd is empty, BEFORE
 // anything is written. Guarding here rather than only at the CLI call site is
 // what makes the property hold for a future non-CLI writer too.
-func RecordTrustEvent(conn store.LegacyDB, kind string, grant TrustGrant, atMS int64) error {
+func RecordTrustEventStore(storage store.Store, kind string, grant TrustGrant, atMS int64) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	// THE UNATTRIBUTED-GRANT REFUSAL (DKT-595), ahead of the marshal so a
 	// refused event leaves no differently-shaped payload behind — the write
 	// below still emits every key unconditionally or does not happen at all.
@@ -1040,13 +1049,22 @@ type ProjectRegistration struct {
 	Prefix string
 }
 
-// RecordProjectRegisteredEvent writes a `project-registered` event (DKT-61).
+// RecordProjectRegisteredEvent is RecordProjectRegisteredEventStore on store.StoreOn(conn).
+func RecordProjectRegisteredEvent(conn store.LegacyDB, reg ProjectRegistration, atMS int64) error {
+	return RecordProjectRegisteredEventStore(store.StoreOn(conn), reg, atMS)
+}
+
+// RecordProjectRegisteredEventStore writes a `project-registered` event (DKT-61).
 //
 // Exported for the same reason RecordTrustEvent is: registration happens in the
 // CLI's root hook, outside this package, and the alternative — letting the hook
 // write its own INSERT — would put a kind into the events table without passing
 // the closed-set check that makes the set closed.
-func RecordProjectRegisteredEvent(conn store.LegacyDB, reg ProjectRegistration, atMS int64) error {
+func RecordProjectRegisteredEventStore(storage store.Store, reg ProjectRegistration, atMS int64) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	data, err := json.Marshal(map[string]any{
 		"project_id": reg.ID,
 		"name":       reg.Name,

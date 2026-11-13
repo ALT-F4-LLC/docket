@@ -170,10 +170,21 @@ func RepinRun(conn store.LegacyDB, runID int, reason, token string, nowMS int64)
 	return RepinRunWith(conn, runID, RepinOptions{Reason: reason, Token: token}, nowMS)
 }
 
-// RepinRunWith is RepinRun with the DKT-582 dispositions.
+// RepinRunWith is RepinRunWithStore on store.StoreOn(conn).
 func RepinRunWith(
 	conn store.LegacyDB, runID int, opts RepinOptions, nowMS int64,
 ) (*RepinOutcome, error) {
+	return RepinRunWithStore(store.StoreOn(conn), runID, opts, nowMS)
+}
+
+// RepinRunWithStore is RepinRun with the DKT-582 dispositions.
+func RepinRunWithStore(
+	storage store.Store, runID int, opts RepinOptions, nowMS int64,
+) (*RepinOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return repinRunOptsIn(conn, runID, opts, nowMS, instanceConfigRoots())
 }
 
@@ -703,7 +714,12 @@ func repinQuiescenceGuard(tx store.LegacyTx, run *model.Run, nowMS int64) error 
 	return nil
 }
 
-// PinDrift returns the unsound subset of a run's pin report — the rows a read
+// PinDrift is PinDriftStore on store.StoreOn(conn).
+func PinDrift(conn store.LegacyDB, runID int) ([]PinVerdict, error) {
+	return PinDriftStore(store.StoreOn(conn), runID)
+}
+
+// PinDriftStore returns the unsound subset of a run's pin report — the rows a read
 // surface states when it warns (DKT-408's remedy 2). nil when every pin is
 // sound, so callers can gate rendering on emptiness alone.
 //
@@ -717,7 +733,11 @@ func repinQuiescenceGuard(tx store.LegacyTx, run *model.Run, nowMS int64) error 
 // per-pin verdict to render here — it is the verb's answer, not a drift line —
 // so this advisory keeps to the pins and keeps to a hash-per-pin of work on
 // every `run status`.
-func PinDrift(conn store.LegacyDB, runID int) ([]PinVerdict, error) {
+func PinDriftStore(storage store.Store, runID int) ([]PinVerdict, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	report, err := verifyPinsIn(conn, runID, runConfigRoots(conn, runID))
 	if err != nil {
 		return nil, err

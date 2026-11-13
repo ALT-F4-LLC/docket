@@ -53,7 +53,12 @@ import (
 //
 // ScopeEditFrozenForActiveRuns is what names both at the moment it matters.
 
-// ScopeEditFrozenForActiveRuns names the live runs an `issue edit --scope` on
+// ScopeEditFrozenForActiveRuns is ScopeEditFrozenForActiveRunsStore on store.StoreOn(conn).
+func ScopeEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
+	return ScopeEditFrozenForActiveRunsStore(store.StoreOn(conn), issueID)
+}
+
+// ScopeEditFrozenForActiveRunsStore names the live runs an `issue edit --scope` on
 // issueID did NOT reach, and the abandon + re-plan path that would (DKT-741).
 //
 // It fires only when the widen is actually invisible somewhere: the issue is
@@ -74,7 +79,11 @@ import (
 // Every error is swallowed to nil, matching OverridePassSkipsInterposedTargets:
 // an advisory that cannot be computed must never fail the verb that already
 // succeeded.
-func ScopeEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
+func ScopeEditFrozenForActiveRunsStore(storage store.Store, issueID int) []string {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		panic(err)
+	}
 	st := store.StoreOn(conn)
 	live, err := liveIssueScope(st, issueID)
 	if err != nil {
@@ -122,7 +131,12 @@ func ScopeEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
 	return warnings
 }
 
-// DescriptionEditFrozenForActiveRuns is ScopeEditFrozenForActiveRuns for an
+// DescriptionEditFrozenForActiveRuns is DescriptionEditFrozenForActiveRunsStore on store.StoreOn(conn).
+func DescriptionEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
+	return DescriptionEditFrozenForActiveRunsStore(store.StoreOn(conn), issueID)
+}
+
+// DescriptionEditFrozenForActiveRunsStore is ScopeEditFrozenForActiveRuns for an
 // `issue edit --description`: it names each live run that froze a different
 // description for issueID and still holds a non-terminal step that will render
 // it, and points at `run refresh-body`, the verb that makes the amendment
@@ -132,7 +146,11 @@ func ScopeEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
 // issue.body both render `run_issues.body_snapshot` — so, unlike the scope
 // advisory, there is no half of the edit that already took effect to report.
 // It is advisory-only and swallows every error to nil for the same reasons.
-func DescriptionEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
+func DescriptionEditFrozenForActiveRunsStore(storage store.Store, issueID int) []string {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		panic(err)
+	}
 	st := store.StoreOn(conn)
 	description, _, err := st.IssueDeclaration(issueID)
 	if err != nil {

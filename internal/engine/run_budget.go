@@ -59,13 +59,22 @@ type RunBudget struct {
 	RowVersion  int     `json:"row_version"`
 }
 
-// SetRunBudget writes a run's cap, event-logged, in one transaction.
+// SetRunBudget is SetRunBudgetStore on store.StoreOn(conn).
+func SetRunBudget(conn store.LegacyDB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+	return SetRunBudgetStore(store.StoreOn(conn), runID, budget, reason, ifVersion, nowMS)
+}
+
+// SetRunBudgetStore writes a run's cap, event-logged, in one transaction.
 //
 // `budget` is the new cap; ZERO MEANS UNLIMITED, the meaning the flag has
 // always carried and the one `budgetSnapshot.unlimited()` enforces. Raising
 // and lowering are the same operation — the verb exists to "raise/lower a
 // live cap", and a verb that refused to lower would be a verb that half exists.
-func SetRunBudget(conn store.LegacyDB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+func SetRunBudgetStore(storage store.Store, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if budget < 0 {
 		return nil, validationErr(
 			"--set must be >= 0, got %g (0 means unlimited)", budget)
@@ -204,8 +213,17 @@ func SetRunBudget(conn store.LegacyDB, runID int, budget float64, reason string,
 	return answer, nil
 }
 
-// GetRunBudget is the read form.
+// GetRunBudget is GetRunBudgetStore on store.StoreOn(conn).
 func GetRunBudget(conn store.LegacyDB, runID int) (*RunBudget, error) {
+	return GetRunBudgetStore(store.StoreOn(conn), runID)
+}
+
+// GetRunBudgetStore is the read form.
+func GetRunBudgetStore(storage store.Store, runID int) (*RunBudget, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the budget: %w", err)

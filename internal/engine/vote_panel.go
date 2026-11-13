@@ -25,10 +25,19 @@ import (
 // per run. The cast that reaches quorum records vote-tallied, with the score
 // db.CastVote computed.
 
-// RecordConductorPanelOpened records a step-less panel's vote-opened on every
+// RecordConductorPanelOpened is RecordConductorPanelOpenedStore on store.StoreOn(conn).
+func RecordConductorPanelOpened(conn store.LegacyDB, proposalID int) error {
+	return RecordConductorPanelOpenedStore(store.StoreOn(conn), proposalID)
+}
+
+// RecordConductorPanelOpenedStore records a step-less panel's vote-opened on every
 // run that attributes it and has not recorded it yet. `vote link` calls it
 // once the link exists; a panel no run attributes records nothing.
-func RecordConductorPanelOpened(conn store.LegacyDB, proposalID int) error {
+func RecordConductorPanelOpenedStore(storage store.Store, proposalID int) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	runs, err := conductorPanelRuns(conn, proposalID)
 	if err != nil {
 		return err

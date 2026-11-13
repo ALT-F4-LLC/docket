@@ -95,7 +95,15 @@ type ReconcileOutcome struct {
 	Close    *CloseOutcome    `json:"close,omitempty"`
 }
 
-// ReconcileDispatch performs back-fill, then verify, then close, refusing at
+// ReconcileDispatch is ReconcileDispatchStore on store.StoreOn(conn).
+func (e *Engine) ReconcileDispatch(
+	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
+	onDuplicate string, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
+) (*ReconcileOutcome, error) {
+	return e.ReconcileDispatchStore(store.StoreOn(conn), runID, rows, source, onDuplicate, acceptMissingUsage, skip, nowMS)
+}
+
+// ReconcileDispatchStore performs back-fill, then verify, then close, refusing at
 // whichever stage fails (DKT-580).
 //
 // ON FAILURE IT RETURNS BOTH the partial outcome and a *StageError. The
@@ -113,10 +121,14 @@ type ReconcileOutcome struct {
 // whose usage journal produced no rows is a measurement that went missing, and
 // closing quietly over it is exactly the silent lie this verb exists to make
 // harder.
-func (e *Engine) ReconcileDispatch(
-	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
+func (e *Engine) ReconcileDispatchStore(
+	storage store.Store, runID int, rows []BackfillRow, source string,
 	onDuplicate string, acceptMissingUsage bool, skip IntegrationSkip, nowMS int64,
 ) (*ReconcileOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	out := &ReconcileOutcome{Run: model.FormatRunID(runID)}
 
 	// A refused override must write nothing, and stage 1 commits usage rows

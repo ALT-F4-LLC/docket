@@ -55,7 +55,12 @@ var lifecycleEvents = map[model.RunStatus]string{
 	model.RunAbandoned:    EventRunAbandoned,
 }
 
-// MoveRunWith applies one operator lifecycle transition and records its event
+// MoveRunWith is MoveRunWithStore on store.StoreOn(conn).
+func MoveRunWith(conn store.LegacyDB, opts MoveRunOptions) (*model.Run, []string, error) {
+	return MoveRunWithStore(store.StoreOn(conn), opts)
+}
+
+// MoveRunWithStore applies one operator lifecycle transition and records its event
 // atomically. `Verb` names the CLI verb for the refusal message; `From` is the
 // closed set of statuses the transition may leave.
 //
@@ -83,7 +88,11 @@ var lifecycleEvents = map[model.RunStatus]string{
 // checkout could park or end the run it was working in. The check is inside
 // the transaction, after the run is found and before its status is inspected,
 // so a caller without the capability learns only that the run exists.
-func MoveRunWith(conn store.LegacyDB, opts MoveRunOptions) (*model.Run, []string, error) {
+func MoveRunWithStore(storage store.Store, opts MoveRunOptions) (*model.Run, []string, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	runID, verb, to, from, reason, nowMS :=
 		opts.RunID, opts.Verb, opts.To, opts.From, opts.Reason, opts.NowMS
 	kind, ok := lifecycleEvents[to]
@@ -252,7 +261,12 @@ type AbandonIssueOptions struct {
 	NowMS int64
 }
 
-// AbandonIssueInRunWith is the per-issue disposition (DKT-28): every remaining
+// AbandonIssueInRunWith is AbandonIssueInRunWithStore on store.StoreOn(conn).
+func AbandonIssueInRunWith(conn store.LegacyDB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+	return AbandonIssueInRunWithStore(store.StoreOn(conn), opts)
+}
+
+// AbandonIssueInRunWithStore is the per-issue disposition (DKT-28): every remaining
 // step of ONE issue stops, with a reason, and the run and its other issues
 // continue.
 //
@@ -271,7 +285,11 @@ type AbandonIssueOptions struct {
 // It requires the run's conductor capability exactly as the whole-run abandon
 // does (DKT-2465): the per-issue disposition ends a lane's work the same way,
 // and an executor must not be able to end a sibling's.
-func AbandonIssueInRunWith(conn store.LegacyDB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+func AbandonIssueInRunWithStore(storage store.Store, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	runID, issueID, reason, nowMS := opts.RunID, opts.IssueID, opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {

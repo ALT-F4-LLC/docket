@@ -42,16 +42,28 @@ type RefreshedFiles struct {
 	Steps []string `json:"steps"`
 }
 
-// RefreshIssueFilesInRun re-reads the issue's attached paths and overwrites the
+// RefreshIssueFilesInRun is RefreshIssueFilesInRunStore on store.StoreOn(conn).
+func RefreshIssueFilesInRun(
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
+) (*RefreshedFiles, error) {
+	return RefreshIssueFilesInRunStore(store.StoreOn(conn), runID, issueID, reason, by, token, nowMS)
+}
+
+// RefreshIssueFilesInRunStore re-reads the issue's attached paths and overwrites the
 // `files` key of ONE run-issue's activation snapshot.
 //
 // On a bound run it requires the conductor capability as `token`: `issue file
 // add|remove` is ungated, so without the check an executor could change its own
 // issue's attachments and then make that change reach its own packets.
-func RefreshIssueFilesInRun(
-	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+func RefreshIssueFilesInRunStore(
+	storage store.Store, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedFiles, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted attachment list; " +

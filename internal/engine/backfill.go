@@ -40,7 +40,14 @@ type VoteBackfillRow struct {
 	Quantity float64
 }
 
-// BackfillVoteUsage records panel spend a relay measured but the seats could
+// BackfillVoteUsage is BackfillVoteUsageStore on store.StoreOn(conn).
+func (e *Engine) BackfillVoteUsage(
+	conn store.LegacyDB, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
+) error {
+	return e.BackfillVoteUsageStore(store.StoreOn(conn), proposalID, rows, source, nowMS)
+}
+
+// BackfillVoteUsageStore records panel spend a relay measured but the seats could
 // not report at cast time (DKT-115).
 //
 // The step back-fill above cannot receive it: tribunal seats carry a proposal
@@ -57,9 +64,13 @@ type VoteBackfillRow struct {
 // ONE TRANSACTION for the whole batch, for the same reason the step back-fill
 // is: a half-applied batch would strand its remainder behind the ledger's
 // unique key on a re-run.
-func (e *Engine) BackfillVoteUsage(
-	conn store.LegacyDB, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
+func (e *Engine) BackfillVoteUsageStore(
+	storage store.Store, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
 ) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	if len(rows) == 0 {
 		return validationErr("no usage rows to back-fill; pass at least one " +
 			"--voter with its --unit and --quantity")
@@ -224,7 +235,15 @@ type BackfillOutcome struct {
 	MetadataDropped []DroppedMetadataTarget `json:"metadata_dropped,omitempty"`
 }
 
-// BackfillUsage records usage for steps whose claimant could not report it.
+// BackfillUsage is BackfillUsageStore on store.StoreOn(conn).
+func (e *Engine) BackfillUsage(
+	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
+	onDuplicate string, nowMS int64,
+) (*BackfillOutcome, error) {
+	return e.BackfillUsageStore(store.StoreOn(conn), runID, rows, source, onDuplicate, nowMS)
+}
+
+// BackfillUsageStore records usage for steps whose claimant could not report it.
 //
 // ONE TRANSACTION for the whole batch. A back-fill that half-applied would
 // leave a dispatch that is neither closable nor honestly re-runnable, and an
@@ -288,10 +307,14 @@ type BackfillOutcome struct {
 // is named on the outcome. A bag that is not a JSON object still refuses the
 // batch whatever the step's status, because the shape is a property of the
 // input and not of the step.
-func (e *Engine) BackfillUsage(
-	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
+func (e *Engine) BackfillUsageStore(
+	storage store.Store, runID int, rows []BackfillRow, source string,
 	onDuplicate string, nowMS int64,
 ) (*BackfillOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if len(rows) == 0 {
 		return nil, validationErr("no usage rows to back-fill; pass at least one " +
 			"--step with its --unit and --quantity")

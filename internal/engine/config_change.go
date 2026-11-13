@@ -25,7 +25,12 @@ import (
 // criticality, sealed, hold_on_dissent — still shapes how a tally decides, and
 // that is what this records.
 
-// SetConfig is the engine's config write: the store's SetConfigTx plus, for a vote-rule
+// SetConfig is SetConfigStore on store.StoreOn(conn).
+func SetConfig(conn store.LegacyDB, projectID int, key, value, changedBy string) error {
+	return SetConfigStore(store.StoreOn(conn), projectID, key, value, changedBy)
+}
+
+// SetConfigStore is the engine's config write: the store's SetConfigTx plus, for a vote-rule
 // key, the `config-changed` event, committed together or not at all.
 //
 // `changedBy` is the identity the activity log attributes issue edits to
@@ -34,7 +39,11 @@ import (
 // not a proof. A write to a key outside the vote-rule family records nothing,
 // and a refused write (unknown key, invalid value) records nothing because it
 // wrote nothing.
-func SetConfig(conn store.LegacyDB, projectID int, key, value, changedBy string) error {
+func SetConfigStore(storage store.Store, projectID int, key, value, changedBy string) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("storing config %s: %w", key, err)

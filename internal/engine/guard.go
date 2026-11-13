@@ -34,7 +34,12 @@ type GuardVerdict struct {
 	Reason string
 }
 
-// GuardStop answers `docket guard stop`: is the machine done working?
+// GuardStop is GuardStopStore on store.StoreOn(conn).
+func GuardStop(conn store.LegacyDB, projectID int, nowMS int64) (*GuardVerdict, error) {
+	return GuardStopStore(store.StoreOn(conn), projectID, nowMS)
+}
+
+// GuardStopStore answers `docket guard stop`: is the machine done working?
 //
 // The base rule: a step in `claimed`/`running`/`gated`/`pending` for
 // an active AND DISPATCHED run blocks a stop. Four refinements narrow it to
@@ -81,7 +86,11 @@ type GuardVerdict struct {
 // (observed 2026-08-11, RUN-2). A stop only interferes with the invoking
 // project's runs, so that is the default question; --all-projects asks the old
 // one.
-func GuardStop(conn store.LegacyDB, projectID int, nowMS int64) (*GuardVerdict, error) {
+func GuardStopStore(storage store.Store, projectID int, nowMS int64) (*GuardVerdict, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	// A NEVER-DISPATCHED RUN IS NOT WORK IN FLIGHT (DKT-71).
 	//
 	// This guard's own header states the predicate is "is the MACHINE done
@@ -266,7 +275,12 @@ func suspendedOnOpenPanel(sched *Scheduler, step *store.Step, openVotes map[int]
 	return false
 }
 
-// GuardGate answers `docket guard gate --step NAME [--run RUN-N]`: does a
+// GuardGate is GuardGateStore on store.StoreOn(conn).
+func GuardGate(conn store.LegacyDB, stepName string, runID, projectID int) (*GuardVerdict, error) {
+	return GuardGateStore(store.StoreOn(conn), stepName, runID, projectID)
+}
+
+// GuardGateStore answers `docket guard gate --step NAME [--run RUN-N]`: does a
 // PASSED gate step of that name exist?
 //
 // "Passed" is `done` with a `pass` routing — the state `step approve` produces
@@ -309,7 +323,11 @@ func suspendedOnOpenPanel(sched *Scheduler, step *store.Step, openVotes map[int]
 // projectID scopes the unscoped search to one project's runs; 0 answers over
 // every project (see GuardStop). An approval is a decision about ONE project's
 // gate, so a same-named gate in another project must not answer for it.
-func GuardGate(conn store.LegacyDB, stepName string, runID, projectID int) (*GuardVerdict, error) {
+func GuardGateStore(storage store.Store, stepName string, runID, projectID int) (*GuardVerdict, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if stepName == "" {
 		return nil, validationErr("--step is required: name the gate to check")
 	}

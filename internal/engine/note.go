@@ -53,7 +53,12 @@ type RunNote struct {
 	RecordedAtMS int64 `json:"recorded_at_ms"`
 }
 
-// AddRunNote records one note against a run, event-logged, in one
+// AddRunNote is AddRunNoteStore on store.StoreOn(conn).
+func AddRunNote(conn store.LegacyDB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+	return AddRunNoteStore(store.StoreOn(conn), runID, token, by, under, text, nowMS)
+}
+
+// AddRunNoteStore records one note against a run, event-logged, in one
 // transaction.
 //
 // It refuses an empty note (a note with no content steers nothing), one over
@@ -81,7 +86,11 @@ type RunNote struct {
 // `by` says who wrote the note and from where, and the event records it as
 // `actor` and `cwd`, as every ruling does. A note with either field empty is
 // refused as a validation error before anything is written.
-func AddRunNote(conn store.LegacyDB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+func AddRunNoteStore(storage store.Store, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+	conn, connErr := store.SQLDB(storage)
+	if connErr != nil {
+		return nil, connErr
+	}
 	under, err := ParseRunNoteAuthority(under.Kind)
 	if err != nil {
 		return nil, err
@@ -187,8 +196,17 @@ func ParseRunNoteAuthority(kind string) (Authority, error) {
 	}
 }
 
-// ListRunNotes returns a run's notes in the order they render.
+// ListRunNotes is ListRunNotesStore on store.StoreOn(conn).
 func ListRunNotes(conn store.LegacyDB, runID int) ([]RunNote, error) {
+	return ListRunNotesStore(store.StoreOn(conn), runID)
+}
+
+// ListRunNotesStore returns a run's notes in the order they render.
+func ListRunNotesStore(storage store.Store, runID int) ([]RunNote, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	st := store.StoreOn(conn)
 	if _, err := st.GetRun(runID); err != nil {
 		if errors.Is(err, store.ErrRunNotFound) {

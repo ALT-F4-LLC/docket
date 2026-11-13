@@ -108,7 +108,14 @@ const MetadataKeyIntegratedSHA = "integrated_sha"
 // rode a `step resolve`.
 const ResolutionIntegratedSHA = "integrated-sha"
 
-// AnnotateIntegration records a verified integration for a finished write-class
+// AnnotateIntegration is AnnotateIntegrationStore on store.StoreOn(conn).
+func (e *Engine) AnnotateIntegration(
+	conn store.LegacyDB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
+) (*IntegrationAnnotation, error) {
+	return e.AnnotateIntegrationStore(store.StoreOn(conn), stepID, sha, metadata, by, token, nowMS)
+}
+
+// AnnotateIntegrationStore records a verified integration for a finished write-class
 // step: the sha's ancestry against the shared checkout's HEAD is established
 // first, then the step's `issue.diff` is re-recorded over the integrated range
 // and `integrated_sha` (plus any further metadata) is merged onto the step's
@@ -121,9 +128,13 @@ const ResolutionIntegratedSHA = "integrated-sha"
 // it); a step whose record names no commit (there is no divergence to
 // resolve); an engine with no ancestry seam wired; an unanswerable ancestry
 // question; and a sha that is not an ancestor of the shared checkout's HEAD.
-func (e *Engine) AnnotateIntegration(
-	conn store.LegacyDB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
+func (e *Engine) AnnotateIntegrationStore(
+	storage store.Store, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
 ) (*IntegrationAnnotation, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if !fullCommitSHA.MatchString(sha) {
 		return nil, validationErr(

@@ -610,8 +610,17 @@ type ClusterSourceAttribution struct {
 	Clusters int `json:"clusters"`
 }
 
-// LoadRunReport builds the document. IT WRITES NOTHING.
+// LoadRunReport is LoadRunReportStore on store.StoreOn(conn).
 func LoadRunReport(conn store.LegacyDB, runID int, nowMS int64) (*RunReport, error) {
+	return LoadRunReportStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// LoadRunReportStore builds the document. IT WRITES NOTHING.
+func LoadRunReportStore(storage store.Store, runID int, nowMS int64) (*RunReport, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	run, err := store.StoreOn(conn).GetRun(runID)
 	if err != nil {
 		return nil, err
@@ -1035,7 +1044,12 @@ func abandonRulingOf(e store.IssueEvent) abandonRuling {
 	return r
 }
 
-// LatestIssueDisposition reads the LAST terminal ruling any run recorded about
+// LatestIssueDisposition is LatestIssueDispositionStore on store.StoreOn(conn).
+func LatestIssueDisposition(conn store.LegacyDB, issueID int) (*model.IssueRunDisposition, error) {
+	return LatestIssueDispositionStore(store.StoreOn(conn), issueID)
+}
+
+// LatestIssueDispositionStore reads the LAST terminal ruling any run recorded about
 // its work on one issue (DKT-404), or nil when no run ever abandoned it.
 //
 // KEYED BY ISSUE, DELIBERATELY UNBOUNDED BY RUN. The run report answers "what
@@ -1049,7 +1063,11 @@ func abandonRulingOf(e store.IssueEvent) abandonRuling {
 // and abandoned again, and what a reader must not misread is the CURRENT state.
 // The earlier rulings stay in the event log, which is the right place for a
 // history.
-func LatestIssueDisposition(conn store.LegacyDB, issueID int) (*model.IssueRunDisposition, error) {
+func LatestIssueDispositionStore(storage store.Store, issueID int) (*model.IssueRunDisposition, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	e, found, err := store.StoreOn(conn).LatestIssueEvent(issueID, EventIssueAbandoned)
 	if err != nil {
 		return nil, fmt.Errorf("reading issue dispositions: %w", err)

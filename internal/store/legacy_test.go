@@ -264,3 +264,33 @@ func TestSQLTxRejectsATxThatIsNotSQLite(t *testing.T) {
 		t.Fatalf("SQLTx(non-SQLite Tx) = (%v, %t), want (nil, false)", sqlTx, ok)
 	}
 }
+
+func TestSQLDBReachesTheHandleUnderEitherSQLiteStore(t *testing.T) {
+	const key = db.KeyVoteHoldVoters
+	conn := openMigratedDB(t)
+	got, err := SQLDB(StoreOn(conn))
+	testsupport.Must(t, err, "SQLDB(StoreOn): %v", err)
+	if got != conn {
+		t.Fatal("SQLDB(StoreOn(conn)) is not conn")
+	}
+
+	path := filepath.Join(t.TempDir(), "opened.db")
+	st, err := OpenSQLite(path)
+	testsupport.Must(t, err, "OpenSQLite: %v", err)
+	t.Cleanup(func() { st.Close() })
+	handle, err := SQLDB(st)
+	testsupport.Must(t, err, "SQLDB(OpenSQLite): %v", err)
+	testsupport.Must(t, db.Initialize(handle), "Initialize through SQLDB")
+	testsupport.Must(t, db.Migrate(handle), "Migrate through SQLDB")
+	testsupport.Must(t, db.SetConfig(handle, 0, key, "bob"), "writing through SQLDB")
+	entry, err := st.GetConfig(0, key)
+	testsupport.Must(t, err, "reading through the store: %v", err)
+	if entry.Value != "bob" {
+		t.Fatalf("store read %s = %q, want %q written through SQLDB's handle", key, entry.Value, "bob")
+	}
+
+	type otherStore struct{ Store }
+	if handle, err := SQLDB(otherStore{}); err == nil || handle != nil {
+		t.Fatalf("SQLDB(non-SQLite Store) = (%v, %v), want (nil, an error)", handle, err)
+	}
+}

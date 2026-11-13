@@ -70,10 +70,19 @@ func (r *runReads) directionalRelations() ([]model.Relation, error) {
 	return r.relations, nil
 }
 
-// RunAdvisories is `run status`'s pair of advisory lists, the unexpanded
+// RunAdvisories is RunAdvisoriesStore on store.StoreOn(conn).
+func RunAdvisories(conn store.LegacyDB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+	return RunAdvisoriesStore(store.StoreOn(conn), runID)
+}
+
+// RunAdvisoriesStore is `run status`'s pair of advisory lists, the unexpanded
 // issues and the retry-eligible parks, read over one step list and one
 // relations scan.
-func RunAdvisories(conn store.LegacyDB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+func RunAdvisoriesStore(storage store.Store, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	reads := &runReads{conn: conn, runID: runID}
 	unexpanded, err := reads.unexpandedIssues()
 	if err != nil {

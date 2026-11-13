@@ -67,12 +67,23 @@ type integratePlan struct {
 	chain    []string
 }
 
-// IntegrateSteps cherry-picks each named step's recorded writer chain onto the
-// shared checkout and annotates the step with the resulting HEAD. It returns
-// the steps it completed, also on a failure part way through.
+// IntegrateSteps is IntegrateStepsStore on store.StoreOn(conn).
 func (e *Engine) IntegrateSteps(
 	conn store.LegacyDB, stepIDs []int, by Attribution, token string, nowMS int64,
 ) ([]StepIntegration, error) {
+	return e.IntegrateStepsStore(store.StoreOn(conn), stepIDs, by, token, nowMS)
+}
+
+// IntegrateStepsStore cherry-picks each named step's recorded writer chain onto the
+// shared checkout and annotates the step with the resulting HEAD. It returns
+// the steps it completed, also on a failure part way through.
+func (e *Engine) IntegrateStepsStore(
+	storage store.Store, stepIDs []int, by Attribution, token string, nowMS int64,
+) ([]StepIntegration, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if len(stepIDs) == 0 {
 		return nil, validationErr("name at least one step to integrate")
 	}

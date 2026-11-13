@@ -68,10 +68,19 @@ func sagaHeldElsewhere(stepID int) bool {
 	return path != "" && detachedPreGateHeld(path)
 }
 
-// RunDetachedSaga is the detached child's whole work: hold the step's saga
+// RunDetachedSaga is RunDetachedSagaStore on store.StoreOn(conn).
+func (e *Engine) RunDetachedSaga(conn store.LegacyDB, stepID int, nowMS int64) (DetachedSagaRun, error) {
+	return e.RunDetachedSagaStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// RunDetachedSagaStore is the detached child's whole work: hold the step's saga
 // lock, resume the saga, then drive the run's engine-side lifecycles. A child
 // finding the lock held exits without running.
-func (e *Engine) RunDetachedSaga(conn store.LegacyDB, stepID int, nowMS int64) (DetachedSagaRun, error) {
+func (e *Engine) RunDetachedSagaStore(storage store.Store, stepID int, nowMS int64) (DetachedSagaRun, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return DetachedSagaRun{}, err
+	}
 	run := DetachedSagaRun{Step: model.FormatStepID(stepID)}
 
 	lockPath := detachedSagaLockPath(stepID)

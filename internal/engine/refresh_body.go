@@ -69,7 +69,15 @@ type RefreshedBody struct {
 	Steps []string `json:"steps"`
 }
 
-// RefreshIssueBodyInRun re-reads `issues.description` and overwrites ONE
+// RefreshIssueBodyInRun is RefreshIssueBodyInRunStore on store.StoreOn(conn).
+func RefreshIssueBodyInRun(
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
+) (*RefreshedBody, error) {
+	return RefreshIssueBodyInRunStore(store.StoreOn(conn), runID, issueID, reason, by, token, nowMS)
+}
+
+// RefreshIssueBodyInRunStore re-reads `issues.description` and overwrites ONE
 // run-issue's `body_snapshot` and `body_sha256` (DKT-2291).
 //
 // The unit is (run, issue) for the reason it is there: that is where the
@@ -81,10 +89,14 @@ type RefreshedBody struct {
 // scope refresh does: `issue edit --description` is ungated, so without this
 // check an executor could amend its own issue and then make that amendment
 // reach its own packets.
-func RefreshIssueBodyInRun(
-	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+func RefreshIssueBodyInRunStore(
+	storage store.Store, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedBody, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted body; the event " +

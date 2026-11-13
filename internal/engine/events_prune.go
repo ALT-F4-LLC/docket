@@ -74,14 +74,23 @@ type PruneResult struct {
 	LiveRuns []string `json:"-"`
 }
 
-// PruneEvents is the whole verb: validate, refuse, delete, log — in ONE
+// PruneEvents is PruneEventsStore on store.StoreOn(conn).
+func PruneEvents(conn store.LegacyDB, q PruneQuery) (*PruneResult, error) {
+	return PruneEventsStore(store.StoreOn(conn), q)
+}
+
+// PruneEventsStore is the whole verb: validate, refuse, delete, log — in ONE
 // transaction.
 //
 // THE REFUSAL PREDICATES ARE EVALUATED INSIDE THE DELETE'S TRANSACTION, so
 // the set refused and the set deleted are computed over one snapshot. A run that
 // reaches `done` between a check and a delete does not widen what was deleted:
 // it prunes on the next call, having been a live run for the whole of this one.
-func PruneEvents(conn store.LegacyDB, q PruneQuery) (*PruneResult, error) {
+func PruneEventsStore(storage store.Store, q PruneQuery) (*PruneResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if err := validatePruneTarget(q); err != nil {
 		return nil, err
 	}

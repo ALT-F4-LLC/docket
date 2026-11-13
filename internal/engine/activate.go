@@ -338,7 +338,12 @@ type BlockingIssue struct {
 	Status  string `json:"status"`
 }
 
-// Activate is the fat transaction.
+// Activate is ActivateStore on store.StoreOn(conn).
+func Activate(conn store.LegacyDB, runID int, opts ActivateOptions) (*ActivateResult, error) {
+	return ActivateStore(store.StoreOn(conn), runID, opts)
+}
+
+// ActivateStore is the fat transaction.
 //
 // ONE transaction, seven stages in order, each failing the whole activation:
 //
@@ -358,7 +363,11 @@ type BlockingIssue struct {
 // path that does not exist aborts everything, leaving no run rows, no steps,
 // and no pins. Pinning is never partial, because a partially-pinned run is a
 // run that cannot reproduce itself and cannot say so.
-func Activate(conn store.LegacyDB, runID int, opts ActivateOptions) (*ActivateResult, error) {
+func ActivateStore(storage store.Store, runID int, opts ActivateOptions) (*ActivateResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	// AUTO-REGISTRATION'S SCAN. It reads and hashes files, so it happens
 	// out here, before the transaction opens: holding a write lock across
 	// arbitrary filesystem latency buys nothing, and a malformed file is a

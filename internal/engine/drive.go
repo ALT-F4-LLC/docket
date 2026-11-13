@@ -24,7 +24,12 @@ import (
 // it before computing their rows. No daemon watches; the lifecycle still
 // advances only when somebody talks to the engine.
 
-// DriveRunLifecycles advances every engine-run lifecycle a run has ready — the
+// DriveRunLifecycles is DriveRunLifecyclesStore on store.StoreOn(conn).
+func (e *Engine) DriveRunLifecycles(conn store.LegacyDB, runID int, nowMS int64) error {
+	return e.DriveRunLifecyclesStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// DriveRunLifecyclesStore advances every engine-run lifecycle a run has ready — the
 // vote phases (open, read, route) and the action steps — to quiescence.
 //
 // A LOOP, because routing cascades: an action's routing un-defers a step
@@ -39,7 +44,11 @@ import (
 // Errors are engine faults, exactly as next.go classifies them: next already
 // routes a step that cannot run per its `on_fail`, so anything failing here is
 // a database the next verb would hit too, and reporting beats proceeding.
-func (e *Engine) DriveRunLifecycles(conn store.LegacyDB, runID int, nowMS int64) error {
+func (e *Engine) DriveRunLifecyclesStore(storage store.Store, runID int, nowMS int64) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return err
@@ -75,7 +84,12 @@ func (e *Engine) DriveRunLifecycles(conn store.LegacyDB, runID int, nowMS int64)
 	return nil
 }
 
-// DriveVoteProposal is DriveRunLifecycles addressed by PROPOSAL: the hook the
+// DriveVoteProposal is DriveVoteProposalStore on store.StoreOn(conn).
+func (e *Engine) DriveVoteProposal(conn store.LegacyDB, proposalID int, nowMS int64) error {
+	return e.DriveVoteProposalStore(store.StoreOn(conn), proposalID, nowMS)
+}
+
+// DriveVoteProposalStore is DriveRunLifecycles addressed by PROPOSAL: the hook the
 // `vote cast` verb calls when its cast reached quorum, which knows the ballot
 // it filled but not the run it belongs to.
 //
@@ -86,7 +100,11 @@ func (e *Engine) DriveRunLifecycles(conn store.LegacyDB, runID int, nowMS int64)
 // and a second copy could disagree with it. A proposal with no such key is an
 // ad-hoc, operator-created ballot bound to no step; there is nothing to
 // route, and the call is a no-op rather than an error.
-func (e *Engine) DriveVoteProposal(conn store.LegacyDB, proposalID int, nowMS int64) error {
+func (e *Engine) DriveVoteProposalStore(storage store.Store, proposalID int, nowMS int64) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return err

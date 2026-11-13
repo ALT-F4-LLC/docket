@@ -127,7 +127,12 @@ type EventQuery struct {
 	ProjectID int
 }
 
-// ListEvents serves `events list --since`.
+// ListEvents is ListEventsStore on store.StoreOn(conn).
+func ListEvents(conn store.LegacyDB, q EventQuery) (*EventPage, error) {
+	return ListEventsStore(store.StoreOn(conn), q)
+}
+
+// ListEventsStore serves `events list --since`.
 //
 // THE CURSOR RACE is closed structurally rather than by a lock: the read
 // is ONE `SELECT ... WHERE seq > ?` in ONE transaction, and `seq` is
@@ -139,7 +144,11 @@ type EventQuery struct {
 //
 // The ordering is `seq ASC`, ALWAYS. There is no reverse mode: a cursor
 // feed that could run backwards is a cursor feed that skips.
-func ListEvents(conn store.LegacyDB, q EventQuery) (*EventPage, error) {
+func ListEventsStore(storage store.Store, q EventQuery) (*EventPage, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
@@ -558,13 +567,22 @@ func actorReportTx(tx store.LegacyReadTx, runID int) ([]ActorCount, error) {
 	return out, nil
 }
 
-// ResolveRunFilter maps `--run RUN-N` onto a run id, refusing a run that does
+// ResolveRunFilter is ResolveRunFilterStore on store.StoreOn(conn).
+func ResolveRunFilter(conn store.LegacyDB, ref string) (int, error) {
+	return ResolveRunFilterStore(store.StoreOn(conn), ref)
+}
+
+// ResolveRunFilterStore maps `--run RUN-N` onto a run id, refusing a run that does
 // not exist.
 //
 // The refusal matters for a CURSOR feed specifically: `events list --run RUN-99`
 // over a missing run would otherwise return an empty page, and a consumer
 // polling it would wait forever on a run that was never there.
-func ResolveRunFilter(conn store.LegacyDB, ref string) (int, error) {
+func ResolveRunFilterStore(storage store.Store, ref string) (int, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return 0, err
+	}
 	if ref == "" {
 		return 0, nil
 	}
@@ -578,12 +596,21 @@ func ResolveRunFilter(conn store.LegacyDB, ref string) (int, error) {
 	return runID, nil
 }
 
-// ResolveStepFilter maps `--step STEP-N` onto a step id, refusing a step that
+// ResolveStepFilter is ResolveStepFilterStore on store.StoreOn(conn).
+func ResolveStepFilter(conn store.LegacyDB, ref string) (int, error) {
+	return ResolveStepFilterStore(store.StoreOn(conn), ref)
+}
+
+// ResolveStepFilterStore maps `--step STEP-N` onto a step id, refusing a step that
 // does not exist, for the same reason ResolveRunFilter refuses a missing run:
 // a filter over nothing would answer with a successful empty page. Only the
 // joinable id is accepted, never a `name@k#i` instance label, which collides
 // across issues in one run.
-func ResolveStepFilter(conn store.LegacyDB, ref string) (int, error) {
+func ResolveStepFilterStore(storage store.Store, ref string) (int, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return 0, err
+	}
 	if ref == "" {
 		return 0, nil
 	}
@@ -623,13 +650,22 @@ type ActivationHead struct {
 	Commit string `json:"commit"`
 }
 
-// LatestActivationHead reads ActivationHead for `run status` (DKT-3310). It
+// LatestActivationHead is LatestActivationHeadStore on store.StoreOn(conn).
+func LatestActivationHead(conn store.LegacyDB, runID int) (*ActivationHead, error) {
+	return LatestActivationHeadStore(store.StoreOn(conn), runID)
+}
+
+// LatestActivationHeadStore reads ActivationHead for `run status` (DKT-3310). It
 // returns nil when the latest run-activated event carries no commit.
 //
 // It reads the row directly rather than through ListEvents: that is a cursor
 // feed whose GONE probe refuses a zero cursor once anything was pruned, and
 // a status read must not fail because old events were retired.
-func LatestActivationHead(conn store.LegacyDB, runID int) (*ActivationHead, error) {
+func LatestActivationHeadStore(storage store.Store, runID int) (*ActivationHead, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the activation head: %w", err)

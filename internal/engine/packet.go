@@ -409,7 +409,12 @@ func checkPacketRef(ref, entry string) error {
 	return nil
 }
 
-// PinContent is the bytes a run pinned at one config-relative path (DKT-2026).
+// PinContent is PinContentStore on store.StoreOn(conn).
+func PinContent(conn store.LegacyDB, runID int, ref string) (string, error) {
+	return PinContentStore(store.StoreOn(conn), runID, ref)
+}
+
+// PinContentStore is the bytes a run pinned at one config-relative path (DKT-2026).
 //
 // A rendered packet names its pinned files by ref and sha256, so a contract
 // telling a worker to test something against `policy.toml` named a document the
@@ -431,7 +436,11 @@ func checkPacketRef(ref, entry string) error {
 // NOT_FOUND, as `run verify-pins` answers; an unactivated one has no pin set.
 //
 // It writes nothing: no lease, no lock, no event.
-func PinContent(conn store.LegacyDB, runID int, ref string) (string, error) {
+func PinContentStore(storage store.Store, runID int, ref string) (string, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return "", err
+	}
 	runRef := model.FormatRunID(runID)
 	st := store.StoreOn(conn)
 	run, err := st.GetRun(runID)

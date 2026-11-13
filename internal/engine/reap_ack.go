@@ -191,7 +191,12 @@ type ForceReapOptions struct {
 	NowMS int64
 }
 
-// ForceReapStepWith is `docket step reap` (DKT-83): an operator or relay that
+// ForceReapStepWith is ForceReapStepWithStore on store.StoreOn(conn).
+func ForceReapStepWith(conn store.LegacyDB, stepID int, opts ForceReapOptions) error {
+	return ForceReapStepWithStore(store.StoreOn(conn), stepID, opts)
+}
+
+// ForceReapStepWithStore is `docket step reap` (DKT-83): an operator or relay that
 // has ESTABLISHED an executor is dead clears its claim now, instead of waiting
 // out the full lease TTL.
 //
@@ -221,7 +226,11 @@ type ForceReapOptions struct {
 // an executor could fail — see the exemption below, and
 // db.ExemptStepAttemptFromBudgetTx for why it is a +1 nudge of the base and
 // never a touch of `attempt` itself.
-func ForceReapStepWith(conn store.LegacyDB, stepID int, opts ForceReapOptions) error {
+func ForceReapStepWithStore(storage store.Store, stepID int, opts ForceReapOptions) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	reason, nowMS := opts.Reason, opts.NowMS
 	if reason == "" {
 		return validationErr(

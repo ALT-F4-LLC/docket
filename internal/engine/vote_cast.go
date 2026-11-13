@@ -30,7 +30,12 @@ import (
 // tally's own input names. Nothing here computes a score either — the tally
 // is still db.CastVote's, reached through CastVoteWeighted with one flag.
 
-// CastVote is the engine half of `docket vote cast`: authorize the cast
+// CastVote is CastVoteStore on store.StoreOn(conn).
+func CastVote(conn store.LegacyDB, vote *model.Vote) (*store.CastVoteResult, error) {
+	return CastVoteStore(store.StoreOn(conn), vote)
+}
+
+// CastVoteStore is the engine half of `docket vote cast`: authorize the cast
 // against the vote step's pinned switches, then record it through the existing
 // tally. An ad-hoc proposal (no vote step behind it) and a materialized held
 // step (whose minted name the pinned definition never declares) enforce
@@ -41,7 +46,11 @@ import (
 // A refusal is a VALIDATION_ERROR, raised BEFORE the transaction opens, so a
 // refused cast writes no vote row. The db sentinels (ErrNotFound, ErrConflict)
 // come back unwrapped from the tally, as they always did.
-func CastVote(conn store.LegacyDB, vote *model.Vote) (*store.CastVoteResult, error) {
+func CastVoteStore(storage store.Store, vote *model.Vote) (*store.CastVoteResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	// DKT-3290: a verdict that carries concerns carries its rationale. A seat
 	// whose summary file write was refused passed `--summary ""`, and the gate
 	// recorded an approve-with-concerns with nothing saying what concerned it.

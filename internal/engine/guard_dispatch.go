@@ -27,7 +27,12 @@ import (
 // behavior, which is the property that lets an operator wire one without
 // thinking about it.
 
-// GuardRecord answers `docket guard record`: is there no unreconciled dispatch?
+// GuardRecord is GuardRecordStore on store.StoreOn(conn).
+func GuardRecord(conn store.LegacyDB, runID, projectID int, nowMS int64) (*GuardVerdict, error) {
+	return GuardRecordStore(store.StoreOn(conn), runID, projectID, nowMS)
+}
+
+// GuardRecordStore answers `docket guard record`: is there no unreconciled dispatch?
 //
 // "Unreconciled" is an open dispatch OR any discrepancy — THE SAME TWO PROBES
 // `next` USES, COMPUTED BY THE SAME FUNCTION. That identity
@@ -48,7 +53,11 @@ import (
 // every project (see GuardStop). An EXPLICIT `--run` is exempt from scoping:
 // naming a run is naming intent, and refusing a cross-project reference a hook
 // spelled out would trade one surprise for another.
-func GuardRecord(conn store.LegacyDB, runID, projectID int, nowMS int64) (*GuardVerdict, error) {
+func GuardRecordStore(storage store.Store, runID, projectID int, nowMS int64) (*GuardVerdict, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	runIDs, err := guardRunScope(conn, runID, projectID)
 	if err != nil {
 		return nil, err
@@ -170,7 +179,14 @@ type SpawnOptions struct {
 	NowMS     int64
 }
 
-// GuardSpawn answers `docket guard spawn`: may the relay start this batch?
+// GuardSpawn is GuardSpawnStore on store.StoreOn(conn).
+func (e *Engine) GuardSpawn(
+	conn store.LegacyDB, runID int, opts SpawnOptions,
+) (*GuardVerdict, error) {
+	return e.GuardSpawnStore(store.StoreOn(conn), runID, opts)
+}
+
+// GuardSpawnStore answers `docket guard spawn`: may the relay start this batch?
 //
 // It allows iff BOTH:
 //
@@ -193,9 +209,13 @@ type SpawnOptions struct {
 // NOT A LOCK, and the real enforcement remains where it has always been —
 // `step claim`'s CAS. This is the same honest bound `guard gate` carries, and
 // it is recorded rather than papered over.
-func (e *Engine) GuardSpawn(
-	conn store.LegacyDB, runID int, opts SpawnOptions,
+func (e *Engine) GuardSpawnStore(
+	storage store.Store, runID int, opts SpawnOptions,
 ) (*GuardVerdict, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if runID == 0 {
 		return nil, validationErr(
 			"--run is required: name the run whose batch is being spawned")
@@ -544,7 +564,14 @@ func usageJoinVerdict(hold string) *GuardVerdict {
 	}
 }
 
-// GuardSpawnActive answers `docket guard spawn --active`: may every active run
+// GuardSpawnActive is GuardSpawnActiveStore on store.StoreOn(conn).
+func GuardSpawnActive(
+	conn store.LegacyDB, projectID, decidingVote int, usageJoin bool, nowMS int64,
+) (*GuardVerdict, error) {
+	return GuardSpawnActiveStore(store.StoreOn(conn), projectID, decidingVote, usageJoin, nowMS)
+}
+
+// GuardSpawnActiveStore answers `docket guard spawn --active`: may every active run
 // in the project accept a spawn right now?
 //
 // DKT-1287: docket-spawn-guard-hook.sh resolved the `run status` list and
@@ -573,9 +600,13 @@ func usageJoinVerdict(hold string) *GuardVerdict {
 //
 // `--usage-join` (DKT-3289) admits the hold of every run: the launch claims
 // no step on any of them, so no run's headroom is at stake.
-func GuardSpawnActive(
-	conn store.LegacyDB, projectID, decidingVote int, usageJoin bool, nowMS int64,
+func GuardSpawnActiveStore(
+	storage store.Store, projectID, decidingVote int, usageJoin bool, nowMS int64,
 ) (*GuardVerdict, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if usageJoin && decidingVote > 0 {
 		return nil, validationErr(usageJoinWithDecidingVote)
 	}

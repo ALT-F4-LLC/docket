@@ -71,9 +71,18 @@ func authorizeConductor(conn store.LegacyDB, runID int, token, verb string) erro
 	return checkConductor(hash, token, runID, verb)
 }
 
-// AuthorizeConductor is authorizeConductor for a CLI verb whose write lives
-// outside the engine (`vote commit`): the verb runs it before writing.
+// AuthorizeConductor is AuthorizeConductorStore on store.StoreOn(conn).
 func AuthorizeConductor(conn store.LegacyDB, runID int, token, verb string) error {
+	return AuthorizeConductorStore(store.StoreOn(conn), runID, token, verb)
+}
+
+// AuthorizeConductorStore is authorizeConductor for a CLI verb whose write lives
+// outside the engine (`vote commit`): the verb runs it before writing.
+func AuthorizeConductorStore(storage store.Store, runID int, token, verb string) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	return authorizeConductor(conn, runID, token, verb)
 }
 
@@ -152,14 +161,23 @@ type ConductResult struct {
 	Rotated bool
 }
 
-// ConductRun takes (or re-takes) a run's conductor seat: it mints the run's
+// ConductRun is ConductRunStore on store.StoreOn(conn).
+func ConductRun(conn store.LegacyDB, runID int, opts ConductOptions) (*ConductResult, error) {
+	return ConductRunStore(store.StoreOn(conn), runID, opts)
+}
+
+// ConductRunStore takes (or re-takes) a run's conductor seat: it mints the run's
 // capability, retiring any standing one, and records who did it.
 //
 // It refuses a TERMINAL run: there is nothing left to conduct, and a token
 // minted on a done run would be a capability for verbs that all refuse it
 // anyway. A planning run is conductable — `run abandon` applies to one — and
 // its first activation then keeps the capability rather than minting a second.
-func ConductRun(conn store.LegacyDB, runID int, opts ConductOptions) (*ConductResult, error) {
+func ConductRunStore(storage store.Store, runID int, opts ConductOptions) (*ConductResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if err := opts.By.require("run conduct"); err != nil {
 		return nil, err
 	}

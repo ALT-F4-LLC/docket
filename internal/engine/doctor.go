@@ -87,10 +87,19 @@ type DoctorOptions struct {
 	NowMS      int64
 }
 
-// Doctor runs all seven checks and reports one row each, without
+// Doctor is DoctorStore on store.StoreOn(conn).
+func Doctor(conn store.LegacyDB, opts DoctorOptions) *DoctorReport {
+	return DoctorStore(store.StoreOn(conn), opts)
+}
+
+// DoctorStore runs all seven checks and reports one row each, without
 // short-circuiting on an early failure (AC1): a conductor deciding whether to
 // attach needs every answer in one call, not the first one that went wrong.
-func Doctor(conn store.LegacyDB, opts DoctorOptions) *DoctorReport {
+func DoctorStore(storage store.Store, opts DoctorOptions) *DoctorReport {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		panic(err)
+	}
 	checks := []DoctorCheck{
 		checkDoctorSeat(opts.Cwd),
 		checkDoctorStore(opts.DBPath),
