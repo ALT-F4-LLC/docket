@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,7 +20,6 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"github.com/ALT-F4-LLC/docket/internal/api"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -261,12 +261,23 @@ func setClientBuild(t *testing.T, client string) {
 	t.Cleanup(func() { version = previous })
 }
 
-// runLocalDaemonCommand serves the real daemon service, reporting daemonBuild,
-// as the local daemon, runs a command that connects to it, and returns the
-// command's stderr and error.
+// handshakeDaemon answers Handshake with its build, as the daemon does, and
+// leaves every other procedure unimplemented.
+type handshakeDaemon struct {
+	docketv1connect.UnimplementedDocketServiceHandler
+	build string
+}
+
+func (d handshakeDaemon) Handshake(context.Context, *connect.Request[docketv1.HandshakeRequest]) (*connect.Response[docketv1.HandshakeResponse], error) {
+	return connect.NewResponse(&docketv1.HandshakeResponse{DaemonVersion: d.build}), nil
+}
+
+// runLocalDaemonCommand serves a daemon reporting daemonBuild as the local
+// daemon, runs a command that connects to it, and returns the command's
+// stderr and error.
 func runLocalDaemonCommand(t *testing.T, daemonBuild string) (string, error) {
 	t.Helper()
-	path, handler := api.NewHandler(api.NewService(nil, daemonBuild), discardLogger)
+	path, handler := docketv1connect.NewDocketServiceHandler(handshakeDaemon{build: daemonBuild})
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
 	daemon := httptest.NewServer(mux)
@@ -434,5 +445,37 @@ func TestRootSkipsProjectResolutionForVerbOwnedProject(t *testing.T) {
 	}
 	if hasProject {
 		t.Error("annotated probe carries an eagerly resolved project")
+	}
+}
+
+// TestGetProjectIDPanicsForVerbOwnedProject: a command annotated
+// verbOwnsProject has no eagerly resolved project, so reaching getProjectID
+// from one panics with a typed error instead of falling back to the default
+// project. An unannotated command still reads the project the root hook
+// resolved.
+func TestGetProjectIDPanicsForVerbOwnedProject(t *testing.T) {
+	const configured = 7
+	plain := &cobra.Command{Use: "plain-probe"}
+	plain.SetContext(context.WithValue(context.Background(), projectKey, configured))
+	if got := getProjectID(plain); got != configured {
+		t.Errorf("getProjectID(unannotated) = %d, want the configured project %d", got, configured)
+	}
+
+	annotated := &cobra.Command{
+		Use:         "verb-owned-probe",
+		Annotations: map[string]string{"verbOwnsProject": ""},
+	}
+	annotated.SetContext(context.Background())
+	got, recovered := func() (id int, recovered any) {
+		defer func() { recovered = recover() }()
+		return getProjectID(annotated), nil
+	}()
+	err, _ := recovered.(error)
+	var typed *verbOwnedProjectError
+	if !errors.As(err, &typed) {
+		t.Fatalf("getProjectID(annotated) = %d, panic %v; want a panic with *verbOwnedProjectError", got, recovered)
+	}
+	if !strings.Contains(typed.Error(), "verb-owned-probe") {
+		t.Errorf("panic error %q does not name the command", typed)
 	}
 }

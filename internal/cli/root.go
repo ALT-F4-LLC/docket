@@ -14,7 +14,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/ALT-F4-LLC/docket/internal/api"
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -284,8 +284,7 @@ var rootCmd = &cobra.Command{
 		// A command annotated verbOwnsProject resolves its own project through
 		// internal/verb, so it gets neither a project nor its display prefix
 		// from here.
-		_, verbOwnsProject := cmd.Annotations["verbOwnsProject"]
-		if !verbOwnsProject {
+		if !verbOwnsProject(cmd) {
 			projectID, err := resolveInvocationProject(cmd, conn, cfg)
 			if err != nil {
 				return err
@@ -569,7 +568,7 @@ func newDaemonClient(ctx context.Context, daemonURL string, resolver daemonHostR
 			return nil
 		},
 	}
-	return api.NewClient(httpClient, daemonURL, logger), nil
+	return client.NewClient(httpClient, daemonURL, logger), nil
 }
 
 // connectLocalDaemon connects to the local daemon at baseURL through
@@ -577,7 +576,7 @@ func newDaemonClient(ctx context.Context, daemonURL string, resolver daemonHostR
 // daemon on another build gets one stderr warning naming both, and the command
 // goes on.
 func connectLocalDaemon(cmd *cobra.Command, httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) (docketv1connect.DocketServiceClient, error) {
-	client, meta, err := api.Connect(cmd.Context(), httpClient, baseURL, logger)
+	daemon, meta, err := client.Connect(cmd.Context(), httpClient, baseURL, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +585,7 @@ func connectLocalDaemon(cmd *cobra.Command, httpClient connect.HTTPClient, baseU
 			"warning: docket client build %s differs from the local daemon build %s\n",
 			version, daemonBuild)
 	}
-	return client, nil
+	return daemon, nil
 }
 
 func getCfg(cmd *cobra.Command) *config.Config {
@@ -602,10 +601,33 @@ func getDB(cmd *cobra.Command) store.LegacyDB {
 	return conn
 }
 
+// verbOwnedProjectError is getProjectID's panic value when it is reached from
+// a command annotated verbOwnsProject.
+type verbOwnedProjectError struct{ command string }
+
+func (e *verbOwnedProjectError) Error() string {
+	return fmt.Sprintf(
+		"bug: getProjectID called from %q, which is annotated verbOwnsProject and must resolve its project through verb.ResolveProject",
+		e.command)
+}
+
+// verbOwnsProject reports whether cmd resolves its own project through
+// internal/verb rather than taking the one the root hook resolves.
+func verbOwnsProject(cmd *cobra.Command) bool {
+	_, ok := cmd.Annotations["verbOwnsProject"]
+	return ok
+}
+
 // getProjectID returns the invocation's resolved project (v12). Commands built
 // outside the root hook — tests wiring a bare command — fall back to the
-// default project, which is the pre-v12 single-tenant behavior exactly.
+// default project, which is the pre-v12 single-tenant behavior exactly. A
+// command annotated verbOwnsProject has no resolved project, and the fallback
+// would silently anchor it to the default one, so reaching here from it panics
+// with *verbOwnedProjectError.
 func getProjectID(cmd *cobra.Command) int {
+	if verbOwnsProject(cmd) {
+		panic(&verbOwnedProjectError{command: cmd.CommandPath()})
+	}
 	if id, ok := cmd.Context().Value(projectKey).(int); ok && id != 0 {
 		return id
 	}
