@@ -3,11 +3,14 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -57,14 +60,13 @@ without it, only versions still in service — the ones a workflow's payload may
 newly reference — are shown. A retired version is never deleted: it stays
 readable by explicit @version and keeps serving the runs that pinned it. See
 ` + "`docket schema deprecate --help`" + `.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaList(cmd, args, getWriter(cmd))
 	},
 }
 
 func runSchemaList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
 	name, _ := cmd.Flags().GetString("name")
 	limit, _ := cmd.Flags().GetInt("limit")
 	deprecated, _ := cmd.Flags().GetBool("deprecated")
@@ -72,24 +74,36 @@ func runSchemaList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 
-	schemas, total, err := st.ListSchemas(store.SchemaListOptions{
-		ProjectID:         getProjectID(cmd),
+	listed, err := verb.SchemaList(cmd.Context(), schemaVerbEnv(cmd), verb.SchemaListInput{
 		Name:              name,
 		Limit:             limit,
-		ExcludeDeprecated: !deprecated,
+		IncludeDeprecated: deprecated,
 	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing schemas: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
 
-	result := schemaListResult{Schemas: schemas, Total: total, limit: limit}
+	result := schemaListResult{Schemas: listed.Schemas, Total: listed.Total, limit: limit}
 
 	var message string
 	if !w.JSONMode {
-		message = renderSchemaList(schemas)
+		message = renderSchemaList(listed.Schemas)
 	}
 	w.Success(result, message)
 	return nil
+}
+
+// schemaVerbEnv is the Env the schema verbs run under: the invocation's store
+// and its configured project identity, which the verb resolves itself.
+// Commands wired outside the root hook carry no config and so resolve to the
+// default project.
+func schemaVerbEnv(cmd *cobra.Command) verb.Env {
+	env := verb.Env{Store: store.StoreOn(getDB(cmd)), Author: config.DefaultAuthor()}
+	env.Cwd, _ = os.Getwd()
+	if cfg := getCfg(cmd); cfg != nil {
+		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}
+	}
+	return env
 }
 
 func renderSchemaList(schemas []*model.Schema) string {
