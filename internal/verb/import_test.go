@@ -3,6 +3,7 @@ package verb_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -38,32 +39,77 @@ func projectIssueTitles(t *testing.T, st store.Store, projectID int) []string {
 	return issueTitles(issues)
 }
 
-func TestImportRefusesAnInvalidRequestBeforeTheStore(t *testing.T) {
+// text is an ImportInput.Document that yields s.
+func text(s string) func() ([]byte, error) {
+	return func() ([]byte, error) { return []byte(s), nil }
+}
+
+// requireRegisteredBy fails unless identity is registered and res reports
+// that registration, attributed to import, for the caller's event.
+func requireRegisteredBy(t *testing.T, st store.Store, identity string, res verb.ImportResult) {
+	t.Helper()
+	projectID, found, err := st.LookupProject(identity)
+	if err != nil || !found {
+		t.Fatalf("LookupProject(%q): found=%v err=%v, want the registered row", identity, found, err)
+	}
+	if reg := res.Registered; reg == nil || reg.ID != projectID || reg.Verb != "import" {
+		t.Errorf("Registered = %+v, want project %d registered by import", reg, projectID)
+	}
+}
+
+// A refused request writes nothing into the project. The project is resolved
+// before the request is checked, so an anchored caller's project is registered
+// anyway, and the registration is reported for its event.
+func TestImportRefusesAnInvalidRequestWithoutWriting(t *testing.T) {
 	document := exportDocument(t, "imported")
 	cases := []struct {
 		name       string
 		in         verb.ImportInput
 		wantPrefix string
 	}{
-		{"merge with replace", verb.ImportInput{Document: document, Merge: true, Replace: true},
+		{"merge with replace", verb.ImportInput{Document: text(document), Merge: true, Replace: true},
 			"--merge and --replace are mutually exclusive"},
-		{"malformed JSON", verb.ImportInput{Document: "{"}, "parsing JSON"},
-		{"unsupported version", verb.ImportInput{Document: `{"version": 2}`},
+		{"malformed JSON", verb.ImportInput{Document: text("{")}, "parsing JSON"},
+		{"unsupported version", verb.ImportInput{Document: text(`{"version": 2}`)},
 			"validation failed with 1 error(s):\n  - unsupported version 2: expected 1"},
-		{"replace without yes", verb.ImportInput{Document: document, Replace: true}, "--replace deletes"},
+		{"replace without yes", verb.ImportInput{Document: text(document), Replace: true}, "--replace deletes"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			st := openStore(t)
 			createExportIssue(t, st, store.DefaultProjectID, "must survive", model.StatusTodo, "")
 
-			_, err := verb.Import(context.Background(), projectEnv(st, "/repos/fresh", true), c.in)
+			res, err := verb.Import(context.Background(), projectEnv(st, "/repos/fresh", true), c.in)
 			requireVerbError(t, err, output.ErrValidation, c.wantPrefix)
-			requireUnregistered(t, st, "/repos/fresh")
+			requireRegisteredBy(t, st, "/repos/fresh", res)
 			if got := projectIssueTitles(t, st, store.DefaultProjectID); !reflect.DeepEqual(got, []string{"must survive"}) {
 				t.Errorf("issues = %v, want the refused import to leave [must survive]", got)
 			}
 		})
+	}
+}
+
+// The exclusive flags are refused before the document is read, and a
+// document that cannot be read fails with the reader's own error.
+func TestImportReadsTheDocumentOnlyForAValidFlagSet(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+
+	_, err := verb.Import(context.Background(), env, verb.ImportInput{
+		Document: func() ([]byte, error) {
+			t.Error("Import read the document despite the exclusive flags")
+			return nil, nil
+		},
+		Merge: true, Replace: true,
+	})
+	requireVerbError(t, err, output.ErrValidation, "--merge and --replace are mutually exclusive")
+
+	unreadable := errors.New("reading file: no such file")
+	_, err = verb.Import(context.Background(), env, verb.ImportInput{
+		Document: func() ([]byte, error) { return nil, unreadable },
+	})
+	if err != unreadable {
+		t.Errorf("error = %v, want the reader's error returned unchanged", err)
 	}
 }
 
@@ -73,10 +119,10 @@ func TestImportIntoANonEmptyProjectNeedsMergeOrReplace(t *testing.T) {
 	env := projectEnv(st, "", false)
 	document := exportDocument(t, "imported")
 
-	_, err := verb.Import(context.Background(), env, verb.ImportInput{Document: document})
+	_, err := verb.Import(context.Background(), env, verb.ImportInput{Document: text(document)})
 	requireVerbError(t, err, output.ErrConflict, "database is not empty")
 
-	res, err := verb.Import(context.Background(), env, verb.ImportInput{Document: document, Replace: true, Yes: true})
+	res, err := verb.Import(context.Background(), env, verb.ImportInput{Document: text(document), Replace: true, Yes: true})
 	if err != nil {
 		t.Fatalf("Import --replace --yes: %v", err)
 	}
@@ -96,7 +142,7 @@ func TestImportMergeIntoANonEmptyProjectKeepsItsOwnRows(t *testing.T) {
 	env := projectEnv(st, "", false)
 
 	res, err := verb.Import(context.Background(), env,
-		verb.ImportInput{Document: exportDocument(t, "imported"), Merge: true})
+		verb.ImportInput{Document: text(exportDocument(t, "imported")), Merge: true})
 	if err != nil {
 		t.Fatalf("Import --merge: %v", err)
 	}
@@ -125,7 +171,7 @@ func TestImportReportsTheRegistrationWhenTheRestoreFails(t *testing.T) {
 
 	st := openStore(t)
 	res, err := verb.Import(context.Background(), projectEnv(st, "/repos/fresh", true),
-		verb.ImportInput{Document: string(document), Replace: true, Yes: true})
+		verb.ImportInput{Document: text(string(document)), Replace: true, Yes: true})
 	requireVerbError(t, err, output.ErrGeneral, "importing data")
 
 	projectID, found, lookupErr := st.LookupProject("/repos/fresh")
@@ -145,7 +191,7 @@ func TestImportRegistersTheCallersProject(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	res, err := verb.Import(context.Background(), projectEnv(st, "/repos/fresh", true),
-		verb.ImportInput{Document: exportDocument(t, "imported")})
+		verb.ImportInput{Document: text(exportDocument(t, "imported"))})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -162,12 +208,32 @@ func TestImportRegistersTheCallersProject(t *testing.T) {
 	}
 }
 
+// The unanchored-write refusal comes before every check on the request, as it
+// did when the CLI's root hook resolved the project ahead of the command, so
+// a caller with no project learns that first whatever else is wrong.
 func TestImportFromAnUnanchoredIdentityIsRefused(t *testing.T) {
-	st := openStore(t)
-	_, err := verb.Import(context.Background(), projectEnv(st, "/tmp/scratch", false),
-		verb.ImportInput{Document: exportDocument(t, "imported")})
-	requireVerbError(t, err, output.ErrValidation, "cannot tell which project")
-	requireUnregistered(t, st, "/tmp/scratch")
+	document := exportDocument(t, "imported")
+	cases := []struct {
+		name string
+		in   verb.ImportInput
+	}{
+		{"valid request", verb.ImportInput{Document: text(document)}},
+		{"merge with replace", verb.ImportInput{Document: text(document), Merge: true, Replace: true}},
+		{"unreadable document", verb.ImportInput{Document: func() ([]byte, error) {
+			return nil, errors.New("reading file: no such file")
+		}}},
+		{"malformed JSON", verb.ImportInput{Document: text("{")}},
+		{"unsupported version", verb.ImportInput{Document: text(`{"version": 2}`)}},
+		{"replace without yes", verb.ImportInput{Document: text(document), Replace: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := openStore(t)
+			_, err := verb.Import(context.Background(), projectEnv(st, "/tmp/scratch", false), c.in)
+			requireVerbError(t, err, output.ErrValidation, "cannot tell which project")
+			requireUnregistered(t, st, "/tmp/scratch")
+		})
+	}
 }
 
 // A source id another project already holds is reassigned rather than
@@ -187,7 +253,7 @@ func TestImportRemapsIDsAnotherProjectHolds(t *testing.T) {
 	}
 
 	res, err := verb.Import(context.Background(), projectEnv(st, "/repos/second", true),
-		verb.ImportInput{Document: document})
+		verb.ImportInput{Document: text(document)})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}

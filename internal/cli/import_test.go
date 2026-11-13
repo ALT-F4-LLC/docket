@@ -745,6 +745,20 @@ func TestImportRefusesMergeWithReplaceBeforeReadingTheFile(t *testing.T) {
 	}
 }
 
+// A caller with no project is refused before the file is read, as when the
+// root hook resolved the project ahead of the command, so the refusal names
+// the missing project even when the path is also wrong.
+func TestImportFromAnUnanchoredCheckoutIsRefusedBeforeReadingTheFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	cfg := &config.Config{Identity: "/tmp/scratch", Anchored: false}
+	err := runImportCmdArgs(t, newTestDB(t), cfg, missing)
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation ||
+		!strings.HasPrefix(cmdErr.Error(), "cannot tell which project") {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR refusing the unanchored checkout", err)
+	}
+}
+
 func TestImportMergeFlagImportsIntoANonEmptyProject(t *testing.T) {
 	filePath := seedAndWriteExportFile(t, newTestDB(t))
 	dst := newTestDB(t)
@@ -769,6 +783,24 @@ func TestImportCommandRecordsTheProjectItRegisters(t *testing.T) {
 	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
 	if err := runImportCmdArgs(t, dst, cfg, filePath); err != nil {
 		t.Fatalf("import from a new anchored identity: %v", err)
+	}
+	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
+		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)
+	}
+}
+
+// A refused import still registers the caller's anchored project, since the
+// project is resolved first, so the command records that registration too.
+func TestImportCommandRecordsTheProjectARefusedImportRegisters(t *testing.T) {
+	badFile := filepath.Join(t.TempDir(), "bad.json")
+	err := os.WriteFile(badFile, []byte("not json"), 0o600)
+	testsupport.Must(t, err, "WriteFile: %v", err)
+	dst := newTestDB(t)
+
+	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
+	var cmdErr *CmdError
+	if err = runImportCmdArgs(t, dst, cfg, badFile); !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR for the malformed file", err)
 	}
 	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
 		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)

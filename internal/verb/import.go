@@ -13,10 +13,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
-// ImportInput is an import request. Document is the export file's content:
-// the transport reads the file, and the verb never opens a path.
+// ImportInput is an import request.
 type ImportInput struct {
-	Document string
+	// Document returns the export document's content. Import calls it once,
+	// after it has resolved the project and checked the flags, so a
+	// transport that reads a file reports an unreadable one only where it
+	// always did. Its error is returned unchanged, for the transport to word
+	// and code; the verb never opens a path.
+	Document func() ([]byte, error)
 	// Merge imports into a non-empty project; Replace clears the project's
 	// own data first, and only when Yes confirms it.
 	Merge   bool
@@ -39,19 +43,31 @@ type ImportResult struct {
 }
 
 // Import writes an export document into the caller's project. It writes there,
-// so it may register the project.
+// so it may register the project. The project is resolved before any check on
+// the request, so a caller with no project is refused first, and an anchored
+// one is registered even when the request is then refused.
 func Import(ctx context.Context, env Env, in ImportInput) (ImportResult, error) {
+	projectID, registered, err := resolveRegisteringProject(env, "import")
+	res := ImportResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
 	if in.Merge && in.Replace {
-		return ImportResult{}, newError(
+		return res, newError(
 			errors.New("--merge and --replace are mutually exclusive"), output.ErrValidation)
 	}
 
+	document, err := in.Document()
+	if err != nil {
+		return res, err
+	}
 	var data model.ExportData
-	if err := json.Unmarshal([]byte(in.Document), &data); err != nil {
-		return ImportResult{}, newError(fmt.Errorf("parsing JSON: %w", err), output.ErrValidation)
+	if err := json.Unmarshal(document, &data); err != nil {
+		return res, newError(fmt.Errorf("parsing JSON: %w", err), output.ErrValidation)
 	}
 	if errs := validateExportData(&data); len(errs) > 0 {
-		return ImportResult{}, newError(fmt.Errorf("validation failed with %d error(s):\n  - %s",
+		return res, newError(fmt.Errorf("validation failed with %d error(s):\n  - %s",
 			len(errs), strings.Join(errs, "\n  - ")), output.ErrValidation)
 	}
 
@@ -59,15 +75,9 @@ func Import(ctx context.Context, env Env, in ImportInput) (ImportResult, error) 
 	// unconditionally: an output format, or whether a terminal is attached,
 	// must never double as consent.
 	if in.Replace && !in.Yes {
-		return ImportResult{}, newError(
+		return res, newError(
 			errors.New("--replace deletes THIS PROJECT's existing data; pass --yes to confirm"),
 			output.ErrValidation)
-	}
-
-	projectID, registered, err := resolveRegisteringProject(env, "import")
-	res := ImportResult{Registered: registered}
-	if err != nil {
-		return res, err
 	}
 
 	if !in.Merge && !in.Replace {
