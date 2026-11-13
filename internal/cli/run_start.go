@@ -1,16 +1,13 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -33,26 +30,28 @@ The cap is read from the run row for the life of the run: a ` + "`budget.default
 set after ` + "`run start`" + ` does not re-cap a run already started. ` + "`docket run report`" + `
 prints the effective cap AND where it came from, so the question that follows
 from that ("why didn't it stop?") is answered by a read verb.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunStart(cmd, getWriter(cmd))
 	},
 }
 
 func runRunStart(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-	st := store.StoreOn(conn)
-
 	requestFile, _ := cmd.Flags().GetString("request-file")
-	budget, _ := cmd.Flags().GetFloat64("budget")
 	issueRefs, _ := cmd.Flags().GetStringSlice("issue")
+	in := verb.RunStartInput{Issues: issueRefs}
 
-	if budget < 0 {
-		return cmdErr(
-			fmt.Errorf("--budget must be >= 0, got %g (0 means unlimited)", budget),
-			output.ErrValidation)
+	// OMITTED is `Changed`, not zero (DKT-1539): an explicit `--budget 0` is
+	// unlimited, and only an omitted flag inherits the configured default.
+	if cmd.Flags().Changed("budget") {
+		budget, _ := cmd.Flags().GetFloat64("budget")
+		in.Budget = &budget
+	}
+	if cmd.Flags().Changed("usage-budget") {
+		usageBudget, _ := cmd.Flags().GetFloat64("usage-budget")
+		in.UsageBudget = &usageBudget
 	}
 
-	var request string
 	if requestFile != "" {
 		content, err := os.ReadFile(requestFile)
 		if err != nil {
@@ -63,130 +62,36 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 			return cmdErr(
 				fmt.Errorf("reading request file %s: %w", requestFile, err), output.ErrNotFound)
 		}
-		request = strings.TrimRight(string(content), "\n")
-	}
-
-	// Issues are resolved BEFORE the run is created, so a typo'd id refuses
-	// without leaving an empty run behind for someone to wonder about.
-	//
-	// Homing is checked beside existence (DKT-21): the run will be created in
-	// the INVOKING project, and a run's issues live in the run's own project —
-	// activation binds them against that project's workflow registry and books
-	// their snapshots, steps, and gaps there. Ids are store-wide, so without
-	// this check any project's issue would attach from any cwd.
-	runProject := getProjectID(cmd)
-	issueIDs := make([]int, 0, len(issueRefs))
-	for _, ref := range issueRefs {
-		id, err := model.ParseID(ref)
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID %q: %w", ref, err), output.ErrValidation)
-		}
-		issueProject, err := st.IssueProjectID(id)
-		if errors.Is(err, store.ErrNotFound) {
-			return cmdErr(
-				fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
-		}
-		if err != nil {
-			return cmdErr(fmt.Errorf("checking issue %s: %w", ref, err), output.ErrGeneral)
-		}
-		if issueProject != runProject {
-			return cmdErr(fmt.Errorf(
-				"issue %s belongs to %s, but this run would start in %s — a run's "+
-					"issues live in the run's own project; migrate the issue first "+
-					"with `docket issue move %s --project <target>`, or start the "+
-					"run from the issue's own repository",
-				model.FormatID(id), projectLabel(conn, issueProject),
-				projectLabel(conn, runProject), model.FormatID(id)),
-				output.ErrValidation)
-		}
-		issueIDs = append(issueIDs, id)
-	}
-
-	// The default branch, resolved HERE rather than at every claim: an omitted
-	// `--budget` takes `docket config budget.default`, and the resolved number is
-	// what the row stores. That is what makes this hold: the cap a claim enforces
-	// is read from the run row and from nowhere else, so a config change after
-	// `run start` cannot silently re-cap a live run.
-	//
-	// OMITTED is `Changed`, not zero (DKT-1539). `--budget 0` is documented as
-	// unlimited, and reading the default whenever the number is 0 made that
-	// impossible to say on a project with a non-zero default: the explicit
-	// unlimited silently became the default's cap.
-	if !cmd.Flags().Changed("budget") {
-		entry, err := st.GetConfig(getProjectID(cmd), store.KeyBudgetDefault)
-		if err != nil {
-			return cmdErr(fmt.Errorf("reading %s: %w", store.KeyBudgetDefault, err),
-				output.ErrGeneral)
-		}
-		fallback, err := strconv.ParseFloat(entry.Value, 64)
-		if err != nil {
-			return cmdErr(
-				fmt.Errorf("%s is %q, which is not a number", store.KeyBudgetDefault, entry.Value),
-				output.ErrValidation)
-		}
-		budget = fallback
-	}
-
-	// The MEASURED cap resolves the same way — on flag PRESENCE, so an
-	// explicit `--usage-budget 0` is unlimited and only an omitted flag reads
-	// `budget.usage.default` — and is pinned the same way (DKT-238). Two flags
-	// because the two caps count different things: one bounds how much work a
-	// run schedules, the other bounds what that work actually consumed, and a
-	// run reasonably wants both.
-	usageBudget, _ := cmd.Flags().GetFloat64("usage-budget")
-	if usageBudget < 0 {
-		return cmdErr(
-			fmt.Errorf("--usage-budget must be >= 0, got %g (0 means unlimited)",
-				usageBudget),
-			output.ErrValidation)
-	}
-	if !cmd.Flags().Changed("usage-budget") {
-		entry, err := st.GetConfig(getProjectID(cmd), store.KeyUsageBudgetDefault)
-		if err != nil {
-			return cmdErr(fmt.Errorf("reading %s: %w", store.KeyUsageBudgetDefault, err),
-				output.ErrGeneral)
-		}
-		fallback, err := strconv.ParseFloat(entry.Value, 64)
-		if err != nil {
-			return cmdErr(
-				fmt.Errorf("%s is %q, which is not a number",
-					store.KeyUsageBudgetDefault, entry.Value),
-				output.ErrValidation)
-		}
-		usageBudget = fallback
+		in.Request = strings.TrimRight(string(content), "\n")
 	}
 
 	// The run records where and on what it started: the invoking
 	// checkout's root, its branch and commit, and the machine. Best-effort —
 	// outside a checkout the fields record empty rather than invented.
-	runCtx := store.RunContext{UsageBudget: usageBudget}
 	if cfg := getCfg(cmd); cfg != nil {
-		runCtx.ExecRoot = cfg.ExecRoot
-		runCtx.Branch, runCtx.CommitSHA = config.GitHead(cfg.ExecRoot)
+		in.ExecRoot = cfg.ExecRoot
+		in.Branch, in.CommitSHA = config.GitHead(cfg.ExecRoot)
 	}
 	if host, err := os.Hostname(); err == nil {
-		runCtx.Hostname = host
+		in.Hostname = host
 	}
 
 	idempotencyKey, err := idempotencyKeyOf(cmd)
 	if err != nil {
 		return err
 	}
+	in.IdempotencyKey = idempotencyKey
 
-	// The roster commits in the insert's own transaction. A replayed key
-	// returns the original run unchanged; a key reused with a different
-	// request, budget, context or --issue list is a conflict.
-	run, inserted, err := st.InsertRunWithContextIdempotent(getProjectID(cmd), request, budget, model.NowMS(), runCtx, idempotencyKey, issueIDs...)
-	if errors.Is(err, store.ErrConflict) {
-		return cmdErr(err, output.ErrConflict)
-	}
+	res, err := verb.RunStart(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
+	run := res.Run
 	message := fmt.Sprintf("Started %s in %s", run.Ref(), run.Status)
-	if inserted && len(issueIDs) > 0 {
-		message = fmt.Sprintf("%s with %d issue(s)", message, len(issueIDs))
+	if res.Inserted && len(issueRefs) > 0 {
+		message = fmt.Sprintf("%s with %d issue(s)", message, len(issueRefs))
 	}
 	w.Success(withRunVersion(run), message)
 	return nil

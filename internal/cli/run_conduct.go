@@ -3,9 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -38,7 +37,8 @@ verb, and the engine keeps them off the verbs that require the capability.
 A run activated before the capability existed asks for no token until it is
 conducted; conducting it binds it. A terminal run is refused: there is
 nothing left to conduct.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunConduct(cmd, args, getWriter(cmd))
 	},
@@ -53,23 +53,19 @@ type conductResponse struct {
 }
 
 func runRunConduct(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
 	by, err := rulingBy()
 	if err != nil {
 		return err
 	}
+	env := verbEnv(cmd)
+	env.Author, env.Cwd = by.Actor, by.Cwd
 
-	result, err := engine.ConductRun(conn, runID, engine.ConductOptions{
-		By: by, NowMS: model.NowMS(),
-	})
+	res, err := verb.RunConduct(cmd.Context(), env, verb.RunConductInput{Run: args[0]})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	result := res.Conduct
 
 	message := fmt.Sprintf("Took the conductor seat on %s", result.Run.Ref())
 	if result.Rotated {

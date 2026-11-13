@@ -9,6 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -102,7 +103,8 @@ the newly-expanded phase's cost alone on a re-activation. A skipped step
 still counts toward both sums. The human summary line prints the added
 figure before the total, for the same reason: reading the total as the
 increment is how a budget cap once got raised against the wrong number.`,
-		Args: cobra.ExactArgs(1),
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{"verbOwnsProject": ""},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRunActivate(cmd, args, getWriter(cmd))
 		},
@@ -264,33 +266,23 @@ func warnScopeWarnings(w *output.Writer, warnings []engine.ScopeWarning) {
 }
 
 func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
 	pins, _ := cmd.Flags().GetStringSlice("pin")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	reason, _ := cmd.Flags().GetString("reason")
 
-	opts := engine.ActivateOptions{
-		FilePins: pins,
-		NowMS:    model.NowMS(),
-		DryRun:   dryRun,
-		Reason:   reason,
-	}
+	in := verb.RunActivateInput{Run: args[0], Pins: pins, DryRun: dryRun, Reason: reason}
 	// The activating checkout's head rides on the run-activated event
 	// (DKT-3263), read the same best-effort way `run start` records its
 	// execution context.
 	if cfg := getCfg(cmd); cfg != nil && cfg.ExecRoot != "" {
-		opts.HeadBranch, opts.HeadCommit = config.GitHead(cfg.ExecRoot)
+		in.HeadBranch, in.HeadCommit = config.GitHead(cfg.ExecRoot)
 	}
-	result, err := engine.Activate(conn, runID, opts)
+	res, err := verb.RunActivate(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	result := res.Activation
 
 	// The WARN cap reports and proceeds; only the ERROR cap refuses. Warn
 	// writes to stderr in human mode and is a no-op in JSON mode, where the
