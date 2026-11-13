@@ -45,6 +45,12 @@ type planJSON struct {
 	} `json:"data"`
 }
 
+func TestPlanOwnsItsProject(t *testing.T) {
+	if _, ok := planCmd.Annotations["verbOwnsProject"]; !ok {
+		t.Error("plan lacks the verbOwnsProject annotation")
+	}
+}
+
 func runPlanJSON(t *testing.T, conn *sql.DB) planJSON {
 	t.Helper()
 	cmd := planCmdWithDB(conn)

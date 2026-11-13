@@ -2,9 +2,7 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -132,16 +130,15 @@ type planResult struct {
 }
 
 var planCmd = &cobra.Command{
-	Use:   "plan",
-	Short: "Show execution plan with phased grouping",
+	Use:         "plan",
+	Short:       "Show execution plan with phased grouping",
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runPlan)
 	},
 }
 
 func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
@@ -151,79 +148,19 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 	rootFlag, _ := cmd.Flags().GetString("root")
 	withBody, _ := cmd.Flags().GetBool("with-body")
 
-	// Validate status filter values.
-	for _, s := range statuses {
-		if err := model.ValidateStatus(model.Status(s)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, p := range priorities {
-		if err := model.ValidatePriority(model.Priority(p)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, sz := range sizes {
-		if err := model.ValidateSize(model.Size(sz)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, t := range types {
-		if err := model.ValidateIssueKind(model.IssueKind(t)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-
-	// Fetch all non-done issues.
-	issues, _, err := st.ListIssues(store.ListOptions{
-		ProjectID:   getProjectID(cmd),
-		IncludeDone: false,
-		Limit:       0,
-	})
-	if err != nil {
-		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
-	}
-
-	if err := st.HydrateDocs(issues); err != nil {
-		return cmdErr(fmt.Errorf("hydrating docs: %w", err), output.ErrGeneral)
-	}
-
-	// Fetch all directional relations.
-	relations, err := st.GetAllDirectionalRelations()
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-	}
-
-	// Build the DAG.
-	dag := planner.BuildDAG(issues, relations)
-
-	// Build plan filters.
-	filters := planner.PlanFilters{
+	planned, err := verb.Plan(cmd.Context(), verbEnv(cmd), verb.PlanInput{
 		Statuses:   statuses,
 		Labels:     labels,
 		Priorities: priorities,
 		Sizes:      sizes,
 		Types:      types,
 		Assignee:   assignee,
-	}
-
-	// Parse --root flag.
-	if rootFlag != "" {
-		rootID, err := model.ParseID(rootFlag)
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid root ID: %w", err), output.ErrValidation)
-		}
-		filters.RootID = &rootID
-	}
-
-	// Generate the plan (includes cycle detection via TopoSort).
-	plan, err := planner.GeneratePlan(dag, filters)
+		Root:       rootFlag,
+	})
 	if err != nil {
-		var cycleErr *planner.CycleError
-		if errors.As(err, &cycleErr) {
-			return cmdErr(err, output.ErrConflict)
-		}
-		return cmdErr(fmt.Errorf("generating plan: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
+	plan, blockedBy := planned.Plan, planned.BlockedBy
 
 	// Build JSON result.
 	phases := make([]planPhaseJSON, len(plan.Phases))
@@ -232,7 +169,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 		for j, issue := range phase.Issues {
 			planIssues[j] = planIssue{
 				Issue:     issue,
-				BlockedBy: collectDeps(issue.ID, dag),
+				BlockedBy: blockedBy[issue.ID],
 				withBody:  withBody,
 			}
 		}
@@ -253,7 +190,7 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	var message string
 	if !w.JSONMode {
-		message = renderPlanHuman(plan, dag)
+		message = renderPlanHuman(plan, blockedBy)
 	}
 	w.Success(result, message)
 
@@ -261,13 +198,14 @@ func runPlan(cmd *cobra.Command, args []string, w *output.Writer) error {
 }
 
 // renderPlanHuman renders the execution plan as human-readable text.
-func renderPlanHuman(plan *planner.Plan, dag *planner.DAG) string {
+// blockedBy maps an issue's id to the formatted ids of its blockers.
+func renderPlanHuman(plan *planner.Plan, blockedBy map[int][]string) string {
 	if plan.TotalIssues == 0 {
 		return render.EmptyState("No issues to plan.", "Create issues first with: docket issue create", false)
 	}
 
 	if !render.ColorsEnabled() {
-		return renderPlanPlain(plan, dag)
+		return renderPlanPlain(plan, blockedBy)
 	}
 
 	var b strings.Builder
@@ -304,7 +242,7 @@ func renderPlanHuman(plan *planner.Plan, dag *planner.DAG) string {
 			statusIcon := lipgloss.NewStyle().Foreground(render.ColorFromName(issue.Status.Color())).Render(issue.Status.Icon())
 			kindIcon := lipgloss.NewStyle().Foreground(render.ColorFromName(issue.Kind.Color())).Render(issue.Kind.Icon())
 
-			deps := collectDeps(issue.ID, dag)
+			deps := blockedBy[issue.ID]
 			if len(deps) > 0 {
 				fmt.Fprintf(&b, "  %s %s %s %s %s  %s\n",
 					statusIcon,
@@ -337,7 +275,7 @@ func renderPlanHuman(plan *planner.Plan, dag *planner.DAG) string {
 }
 
 // renderPlanPlain renders the execution plan without colors.
-func renderPlanPlain(plan *planner.Plan, dag *planner.DAG) string {
+func renderPlanPlain(plan *planner.Plan, blockedBy map[int][]string) string {
 	var b strings.Builder
 
 	b.WriteString("Execution Plan:\n")
@@ -354,7 +292,7 @@ func renderPlanPlain(plan *planner.Plan, dag *planner.DAG) string {
 		}
 
 		for _, issue := range phase.Issues {
-			deps := collectDeps(issue.ID, dag)
+			deps := blockedBy[issue.ID]
 			if len(deps) > 0 {
 				fmt.Fprintf(&b, "  %-6s [%-8s] %s  (depends on %s)\n",
 					model.FormatID(issue.ID),
@@ -376,36 +314,6 @@ func renderPlanPlain(plan *planner.Plan, dag *planner.DAG) string {
 		plan.TotalIssues, plan.TotalPhases, plan.MaxParallelism)
 
 	return b.String()
-}
-
-// collectDeps returns formatted IDs of issues that block the given issue.
-func collectDeps(issueID int, dag *planner.DAG) []string {
-	node, ok := dag.Nodes[issueID]
-	if !ok {
-		return nil
-	}
-	if len(node.Reverse) == 0 {
-		return nil
-	}
-	deps := make([]string, 0, len(node.Reverse))
-	for blockerID := range node.Reverse {
-		deps = append(deps, model.FormatID(blockerID))
-	}
-	// Sort for deterministic output.
-	sortDeps(deps)
-	return deps
-}
-
-// sortDeps sorts formatted IDs (e.g. "DKT-7", "DKT-12") by their numeric value.
-func sortDeps(deps []string) {
-	sort.Slice(deps, func(i, j int) bool {
-		a, errA := model.ParseID(deps[i])
-		b, errB := model.ParseID(deps[j])
-		if errA != nil || errB != nil {
-			return deps[i] < deps[j]
-		}
-		return a < b
-	})
 }
 
 func init() {
