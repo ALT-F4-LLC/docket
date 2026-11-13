@@ -18,7 +18,7 @@ import (
 
 // createIssue writes one issue into projectID with the fields an export
 // renders filled in.
-func createIssue(t *testing.T, st store.Store, projectID int, title string, status model.Status, assignee string) int {
+func createExportIssue(t *testing.T, st store.Store, projectID int, title string, status model.Status, assignee string) int {
 	t.Helper()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	id, _, err := st.CreateIssueIdempotent(&model.Issue{
@@ -111,8 +111,8 @@ func TestExportReadsOnlyTheCallersProject(t *testing.T) {
 		return id
 	}
 	// The first identity registered claims the default project's row.
-	createIssue(t, st, register("/repo/beta"), "in beta", model.StatusTodo, "")
-	createIssue(t, st, register("/repo/alpha"), "in alpha", model.StatusTodo, "")
+	createExportIssue(t, st, register("/repo/beta"), "in beta", model.StatusTodo, "")
+	createExportIssue(t, st, register("/repo/alpha"), "in alpha", model.StatusTodo, "")
 
 	data := exportJSON(t, projectEnv(st, "/repo/alpha", true), verb.ExportInput{})
 	if got := issueTitles(data.Issues); !reflect.DeepEqual(got, []string{"in alpha"}) {
@@ -124,7 +124,7 @@ func TestExportReadsOnlyTheCallersProject(t *testing.T) {
 // registered, even when it is anchored.
 func TestExportOfAnUnregisteredProjectIsEmptyAndRegistersNothing(t *testing.T) {
 	st := openStore(t)
-	createIssue(t, st, store.DefaultProjectID, "in the default project", model.StatusTodo, "")
+	createExportIssue(t, st, store.DefaultProjectID, "in the default project", model.StatusTodo, "")
 
 	data := exportJSON(t, projectEnv(st, "/repo/unknown", true), verb.ExportInput{})
 	if len(data.Issues) != 0 {
@@ -135,8 +135,8 @@ func TestExportOfAnUnregisteredProjectIsEmptyAndRegistersNothing(t *testing.T) {
 
 func TestExportFiltersByStatus(t *testing.T) {
 	st := openStore(t)
-	createIssue(t, st, store.DefaultProjectID, "open work", model.StatusTodo, "")
-	createIssue(t, st, store.DefaultProjectID, "finished work", model.StatusDone, "")
+	createExportIssue(t, st, store.DefaultProjectID, "open work", model.StatusTodo, "")
+	createExportIssue(t, st, store.DefaultProjectID, "finished work", model.StatusDone, "")
 
 	data := exportJSON(t, projectEnv(st, "", false), verb.ExportInput{Statuses: []string{"done"}})
 	if got := issueTitles(data.Issues); !reflect.DeepEqual(got, []string{"finished work"}) {
@@ -165,10 +165,10 @@ func TestExportCSVNeutralizesFormulaInjection(t *testing.T) {
 	st := openStore(t)
 	wantByID := make(map[string]string, len(cases))
 	for _, tc := range cases {
-		id := createIssue(t, st, store.DefaultProjectID, tc.title, model.StatusTodo, "")
+		id := createExportIssue(t, st, store.DefaultProjectID, tc.title, model.StatusTodo, "")
 		wantByID[model.FormatID(id)] = tc.want
 	}
-	assigned := createIssue(t, st, store.DefaultProjectID, "assigned", model.StatusTodo, "@alice")
+	assigned := createExportIssue(t, st, store.DefaultProjectID, "assigned", model.StatusTodo, "@alice")
 
 	result, err := verb.Export(context.Background(), projectEnv(st, "", false),
 		verb.ExportInput{Format: "csv"})
