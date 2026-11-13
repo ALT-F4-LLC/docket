@@ -3,13 +3,10 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -60,39 +57,30 @@ omitted does the same to the install-drift check alone.
 The stragglers (7) and postgres (8) checks never move ` + "`clean`" + ` — they are
 reports, not verdicts; reclaiming a straggler worktree is ` + "`git worktree prune`" + `'s job, not
 this verb's.`,
-	Args: cobra.NoArgs,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDoctor(cmd, getWriter(cmd))
 	},
 }
 
 func runDoctor(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-	cfg := getCfg(cmd)
-
-	runID, err := optionalRunFlag(cmd)
-	if err != nil {
-		return err
-	}
+	run, _ := cmd.Flags().GetString("run")
 	source, _ := cmd.Flags().GetString("source")
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		return cmdErr(fmt.Errorf("resolving the working directory: %w", err), output.ErrGeneral)
 	}
-	// Canonicalize before it reaches the seat check: git reports resolved
-	// paths (macOS: /var vs /private/var) and Getwd does not.
-	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
-		cwd = resolved
-	}
+	env := verbEnv(cmd)
+	env.Cwd = cwd
 
-	// The project is whatever the root hook resolved: doctor is a read-only
-	// leaf verb, so an identity with no row arrives here as the unregistered
-	// sentinel and is reported as such, never registered.
-	report := engine.Doctor(conn, engine.DoctorOptions{
-		Cwd: cwd, DBPath: cfg.DBPath, ProjectID: getProjectID(cmd), Identity: cfg.Identity,
-		RunID: runID, SourceRoot: source, NowMS: model.NowMS(),
+	report, err := verb.Doctor(cmd.Context(), env, verb.DoctorInput{
+		Run: run, Source: source, DBPath: getCfg(cmd).DBPath,
 	})
+	if err != nil {
+		return verbErr(err)
+	}
 
 	result := doctorResultJSON{Clean: report.Clean, Skipped: report.Skipped}
 	for _, c := range report.Checks {
@@ -100,7 +88,6 @@ func runDoctor(cmd *cobra.Command, w *output.Writer) error {
 			Check: c.Check, Verdict: string(c.Verdict), Detail: c.Detail,
 		})
 	}
-	result.Checks = append(result.Checks, postgresCheck(config.PostgresFromEnv().DSN))
 
 	var message string
 	if !w.JSONMode {
@@ -108,17 +95,6 @@ func runDoctor(cmd *cobra.Command, w *output.Writer) error {
 	}
 	w.Success(result, message)
 	return nil
-}
-
-// postgresCheck reports whether a PostgreSQL DSN is configured. Its detail is
-// one of two constants and never derives from the DSN: even the redacted form
-// carries the username, and the DSN may embed a password by misconfiguration.
-func postgresCheck(dsn config.PostgresDSN) doctorCheckJSON {
-	detail := "not configured"
-	if dsn.IsSet() {
-		detail = "configured; DSN withheld"
-	}
-	return doctorCheckJSON{Check: "postgres", Verdict: string(engine.DoctorOK), Detail: detail}
 }
 
 func renderDoctor(r doctorResultJSON) string {

@@ -181,13 +181,20 @@ func TestDoctorReportsAnUnsetPostgresDSN(t *testing.T) {
 	}
 }
 
+// TestDoctorOwnsItsProject pins the annotation that makes the root hook leave
+// project resolution to verb.Doctor.
+func TestDoctorOwnsItsProject(t *testing.T) {
+	if !verbOwnsProject(doctorCmd) {
+		t.Error("doctor lacks the verbOwnsProject annotation")
+	}
+}
+
 // TestDoctorReportsAnUnboundCwdWithoutRegistering is the measured defect: from
 // a git worktree whose identity has no project row, `docket doctor` once
 // claimed the store's default row for that identity and logged a
-// project-registered event with verb doctor. It resolves the project the way
-// the root hook does for the real `doctor` command, then runs doctor, and
-// asserts the report says unbound while the projects table, the default row,
-// and the event log are untouched.
+// project-registered event with verb doctor. It runs doctor with that
+// identity in config, and asserts the report says unbound while the projects
+// table, the default row, and the event log are untouched.
 func TestDoctorReportsAnUnboundCwdWithoutRegistering(t *testing.T) {
 	conn := newTestDB(t)
 	cfg := &config.Config{
@@ -200,17 +207,8 @@ func TestDoctorReportsAnUnboundCwdWithoutRegistering(t *testing.T) {
 	eventsBefore := eventRowCount(t, conn)
 	defaultBefore := defaultProjectIdentity(t, conn)
 
-	id, err := resolveInvocationProject(commandAt(t, "doctor"), conn, cfg)
-	testsupport.Must(t, err, "resolving doctor's project: %v", err)
-	if id != db.UnregisteredProjectID {
-		t.Fatalf("doctor resolved project %d, want the unregistered sentinel %d",
-			id, db.UnregisteredProjectID)
-	}
-
-	cmd := doctorCmdWithDB(conn, cfg)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, id))
 	w, buf := bufWriter(true)
-	testsupport.Must(t, runDoctor(cmd, w), "doctor: %v", nil)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), w), "doctor: %v", nil)
 
 	var envelope doctorEnvelope
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
