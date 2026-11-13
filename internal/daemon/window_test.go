@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/ALT-F4-LLC/docket/internal/api"
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -26,7 +27,7 @@ func serveHosted(t *testing.T, cfg config.DaemonConfig) docketv1connect.DocketSe
 	mux.Handle(path, handler)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	return api.NewClient(server.Client(), server.URL, logger)
+	return client.NewClient(server.Client(), server.URL, logger)
 }
 
 // handshakeAs calls Handshake as a client speaking API major major and

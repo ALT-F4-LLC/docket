@@ -9,7 +9,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/codec"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 )
@@ -34,9 +33,4 @@ func handlerOptions(logger *slog.Logger) connect.HandlerOption {
 		connect.WithReadMaxBytes(requestMaxBytes),
 		connect.WithInterceptors(codec.StrictValidation(logger)),
 	)
-}
-
-// NewClient forwards to client.NewClient while callers move to that package.
-func NewClient(httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) docketv1connect.DocketServiceClient {
-	return client.NewClient(httpClient, baseURL, logger)
 }

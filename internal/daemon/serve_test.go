@@ -11,7 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/ALT-F4-LLC/docket/internal/api"
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 )
@@ -64,16 +64,16 @@ func TestHostedEntrypointAnswersHandshake(t *testing.T) {
 	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
 	t.Cleanup(transport.CloseIdleConnections)
 	httpClient := &http.Client{Timeout: 5 * time.Second, Transport: bearerTransport{secret: secret, next: transport}}
-	client := api.NewClient(httpClient, "https://127.0.0.1:"+port, logger)
+	daemonClient := client.NewClient(httpClient, "https://127.0.0.1:"+port, logger)
 
-	res, err := client.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{ApiMajor: 1}))
+	res, err := daemonClient.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{ApiMajor: 1}))
 	if err != nil {
 		t.Fatalf("Handshake inside the window: %v", err)
 	}
 	if got := res.Msg.GetDaemonVersion(); got != build {
 		t.Errorf("daemon version = %q, want the build passed to ListenHosted %q", got, build)
 	}
-	if got := handshakeAs(t, client, 2); got != output.ErrIncompatible {
+	if got := handshakeAs(t, daemonClient, 2); got != output.ErrIncompatible {
 		t.Errorf("Handshake outside the window [1, 1]: code = %q, want %q", got, output.ErrIncompatible)
 	}
 
@@ -88,7 +88,7 @@ func TestHostedEntrypointAnswersHandshake(t *testing.T) {
 	}
 
 	transport.CloseIdleConnections()
-	if _, err := client.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{ApiMajor: 1})); err == nil {
+	if _, err := daemonClient.Handshake(context.Background(), connect.NewRequest(&docketv1.HandshakeRequest{ApiMajor: 1})); err == nil {
 		t.Fatal("Handshake succeeded after the daemon shut down")
 	}
 }
@@ -128,7 +128,7 @@ func TestHostedEntrypointClientWindow(t *testing.T) {
 	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
 	t.Cleanup(transport.CloseIdleConnections)
 	httpClient := &http.Client{Timeout: 5 * time.Second, Transport: bearerTransport{secret: secret, next: transport}}
-	client := api.NewClient(httpClient, "https://127.0.0.1:"+port, logger)
+	daemonClient := client.NewClient(httpClient, "https://127.0.0.1:"+port, logger)
 
 	cases := []struct {
 		name  string
@@ -141,7 +141,7 @@ func TestHostedEntrypointClientWindow(t *testing.T) {
 		{"above max", 5, output.ErrIncompatible},
 	}
 	for _, tc := range cases {
-		if got := handshakeAs(t, client, tc.major); got != tc.want {
+		if got := handshakeAs(t, daemonClient, tc.major); got != tc.want {
 			t.Errorf("%s: client API major %d against window [2, 4]: code = %q, want %q", tc.name, tc.major, got, tc.want)
 		}
 	}
