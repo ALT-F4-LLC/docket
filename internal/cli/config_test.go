@@ -151,31 +151,37 @@ func TestConfigSetDeliversTheLeaseClassWarning(t *testing.T) {
 }
 
 // TestConfigSetDefaultProfileNeedsNoProject: default_profile lives in the
-// per-user client config, so an unanchored caller with no project may set it,
-// and doing so registers no project.
+// per-user client config, so a caller with no project may set it, and doing
+// so registers no project. The unanchored caller pins that nothing refuses
+// it; the anchored one, which project resolution would register, pins that
+// nothing registers it.
 func TestConfigSetDefaultProfileNeedsNoProject(t *testing.T) {
-	path := clientConfigSandbox(t)
-	testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o700), "mkdir client config dir")
-	client := "version = 1\n\n[profile.prod]\nurl = \"https://docket.example.test\"\n"
-	testsupport.Must(t, os.WriteFile(path, []byte(client), 0o600), "writing client.toml")
-	conn := newTestDB(t)
-	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
-	testsupport.Must(t, err, "claiming the default project: %v", err)
+	for _, anchored := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unanchored", true: "anchored"}[anchored], func(t *testing.T) {
+			path := clientConfigSandbox(t)
+			testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o700), "mkdir client config dir")
+			client := "version = 1\n\n[profile.prod]\nurl = \"https://docket.example.test\"\n"
+			testsupport.Must(t, os.WriteFile(path, []byte(client), 0o600), "writing client.toml")
+			conn := newTestDB(t)
+			_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+			testsupport.Must(t, err, "claiming the default project: %v", err)
 
-	_, err = runLeaseCommandOutput(t, conn, &config.Config{Identity: "/scratch/unseen", Anchored: false},
-		configSetCmd, clientDefaultProfileKey, "prod")
-	testsupport.Must(t, err, "config set default_profile prod: %v", err)
+			_, err = runLeaseCommandOutput(t, conn, &config.Config{Identity: "/scratch/unseen", Anchored: anchored},
+				configSetCmd, clientDefaultProfileKey, "prod")
+			testsupport.Must(t, err, "config set default_profile prod: %v", err)
 
-	if doc := readClientConfigDoc(t, path); doc.DefaultProfile != "prod" {
-		t.Errorf("default_profile = %q in %s, want prod", doc.DefaultProfile, path)
-	}
-	_, found, err := db.LookupProject(conn, "/scratch/unseen")
-	testsupport.Must(t, err, "LookupProject: %v", err)
-	if found {
-		t.Error("config set default_profile registered /scratch/unseen")
-	}
-	if got := registrationEvents(t, conn); len(got) != 0 {
-		t.Errorf("registration events = %v, want none", got)
+			if doc := readClientConfigDoc(t, path); doc.DefaultProfile != "prod" {
+				t.Errorf("default_profile = %q in %s, want prod", doc.DefaultProfile, path)
+			}
+			_, found, err := db.LookupProject(conn, "/scratch/unseen")
+			testsupport.Must(t, err, "LookupProject: %v", err)
+			if found {
+				t.Error("config set default_profile registered /scratch/unseen")
+			}
+			if got := registrationEvents(t, conn); len(got) != 0 {
+				t.Errorf("registration events = %v, want none", got)
+			}
+		})
 	}
 }
 
