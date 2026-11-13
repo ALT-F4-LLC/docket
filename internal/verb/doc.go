@@ -322,6 +322,151 @@ func DocDelete(ctx context.Context, env Env, in DocDeleteInput) (DocDeleteResult
 	return result, nil
 }
 
+// DocCommentAddInput is the comment to add to Doc. A replayed IdempotencyKey
+// returns the comment it first created.
+type DocCommentAddInput struct {
+	Doc            string
+	Body           string
+	IdempotencyKey string
+}
+
+// DocCommentAddResult is the commented doc and the stored comment.
+// Registered is as in DocCreateResult.
+type DocCommentAddResult struct {
+	Doc        *model.Doc
+	Comment    *model.DocComment
+	Registered *model.Project
+}
+
+// DocCommentAdd adds a comment authored by env.Author to a doc. It is a write,
+// so it may register the caller's anchored project.
+func DocCommentAdd(ctx context.Context, env Env, in DocCommentAddInput) (DocCommentAddResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocCommentAddResult{}, err
+	}
+	var result DocCommentAddResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	id, err := parseDocRef(in.Doc)
+	if err != nil {
+		return result, err
+	}
+	label := "doc " + in.Doc
+
+	if result.Doc, err = env.Store.GetDoc(id); err != nil {
+		return result, docError(err, label, "fetching doc")
+	}
+
+	commentID, err := env.Store.CreateDocCommentIdempotent(&model.DocComment{
+		DocID:  id,
+		Body:   in.Body,
+		Author: env.Author,
+	}, in.IdempotencyKey)
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return result, newError(err, output.ErrConflict)
+		}
+		return result, docError(err, label, "creating comment")
+	}
+
+	if result.Comment, err = env.Store.GetDocComment(commentID); err != nil {
+		return result, newError(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
+	}
+	return result, nil
+}
+
+// DocLinkAddInput names the doc and the issue to link it to.
+type DocLinkAddInput struct {
+	Doc   string
+	Issue string
+}
+
+// DocLinkAddResult is the linked pair. Registered is as in DocCreateResult.
+type DocLinkAddResult struct {
+	DocID      int
+	IssueID    int
+	Registered *model.Project
+}
+
+// DocLinkAdd links a doc to an issue; an existing link is a CONFLICT. It is a
+// write, so it may register the caller's anchored project.
+func DocLinkAdd(ctx context.Context, env Env, in DocLinkAddInput) (DocLinkAddResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocLinkAddResult{}, err
+	}
+	var result DocLinkAddResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	if result.DocID, result.IssueID, err = parseDocIssuePair(in.Doc, in.Issue); err != nil {
+		return result, err
+	}
+
+	if err := env.Store.LinkDocIssue(result.DocID, result.IssueID); err != nil {
+		if e := notFound(err, "doc or issue"); e != nil {
+			return result, e
+		}
+		if errors.Is(err, store.ErrConflict) {
+			return result, newError(fmt.Errorf("link already exists"), output.ErrConflict)
+		}
+		return result, newError(fmt.Errorf("linking doc to issue: %w", err), output.ErrGeneral)
+	}
+	return result, nil
+}
+
+// DocLinkRemoveInput names the doc and the issue to unlink.
+type DocLinkRemoveInput struct {
+	Doc   string
+	Issue string
+}
+
+// DocLinkRemoveResult is the unlinked pair. Registered is as in
+// DocCreateResult.
+type DocLinkRemoveResult struct {
+	DocID      int
+	IssueID    int
+	Registered *model.Project
+}
+
+// DocLinkRemove removes the link between a doc and an issue; a missing link is
+// NOT_FOUND. It is a write, so it may register the caller's anchored project.
+func DocLinkRemove(ctx context.Context, env Env, in DocLinkRemoveInput) (DocLinkRemoveResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocLinkRemoveResult{}, err
+	}
+	var result DocLinkRemoveResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	if result.DocID, result.IssueID, err = parseDocIssuePair(in.Doc, in.Issue); err != nil {
+		return result, err
+	}
+
+	if err := env.Store.UnlinkDocIssue(result.DocID, result.IssueID); err != nil {
+		if e := notFound(err, "link"); e != nil {
+			return result, e
+		}
+		return result, newError(fmt.Errorf("unlinking doc from issue: %w", err), output.ErrGeneral)
+	}
+	return result, nil
+}
+
+// parseDocIssuePair parses the doc and issue references of a link, the doc
+// first.
+func parseDocIssuePair(docRef, issueRef string) (docID, issueID int, err error) {
+	if docID, err = parseDocRef(docRef); err != nil {
+		return 0, 0, err
+	}
+	if issueID, err = ParseIssueRef(issueRef); err != nil {
+		return 0, 0, err
+	}
+	return docID, issueID, nil
+}
+
 func parseDocRef(ref string) (int, error) {
 	id, err := model.ParseDocID(ref)
 	if err != nil {

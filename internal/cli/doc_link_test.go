@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -45,5 +46,45 @@ func TestDocLinkAddThenRemove(t *testing.T) {
 	run(docLinkRemoveCmd)
 	if ids := docLinkedIssueIDs(t, st, docID); slices.Contains(ids, issueID) {
 		t.Fatalf("after doc link remove, linked issues = %v, want %d excluded", ids, issueID)
+	}
+}
+
+// TestDocLinkAddEmitsTheLinkedPair: in JSON mode, doc link add emits the doc
+// and issue ids it linked.
+func TestDocLinkAddEmitsTheLinkedPair(t *testing.T) {
+	conn := newTestDB(t)
+	docID := createDoc(t, conn, "linked doc", "spec", "draft")
+	issueID := createIssue(t, conn, "linked issue", model.StatusBacklog, model.PriorityMedium)
+
+	cmd := cmdWithDB(conn)
+	cmd.Flags().String("issue", "", "")
+	testsupport.Must(t, cmd.Flags().Set("json", "true"), "set json")
+	testsupport.Must(t, cmd.Flags().Set("issue", model.FormatID(issueID)), "set issue")
+
+	stdout := captureStdout(t)
+	err := docLinkAddCmd.RunE(cmd, []string{model.FormatDocID(docID)})
+	out := stdout()
+	testsupport.Must(t, err, "doc link add: %v", err)
+
+	var env struct {
+		Data docLinkResult `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	want := docLinkResult{DocID: model.FormatDocID(docID), IssueID: model.FormatID(issueID)}
+	if env.Data != want {
+		t.Errorf("doc link add emitted %+v, want %+v", env.Data, want)
+	}
+}
+
+// TestDocLinkCommandsOwnTheirProject: doc link add and remove resolve their
+// project through internal/verb, so the root hook must skip its eager
+// resolution for them.
+func TestDocLinkCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{docLinkAddCmd, docLinkRemoveCmd} {
+		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
+			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
+		}
 	}
 }

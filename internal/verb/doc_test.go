@@ -404,3 +404,203 @@ func TestDocDeleteErrorCodes(t *testing.T) {
 	_, err = verb.DocDelete(context.Background(), env, verb.DocDeleteInput{Doc: "999"})
 	requireVerbError(t, err, output.ErrNotFound, "doc DOC-999 not found")
 }
+
+func TestDocCommentAddStoresTheCommentAsTheEnvAuthor(t *testing.T) {
+	st := openStore(t)
+	id := createDoc(t, st, store.DefaultProjectID, "commented")
+	env := projectEnv(st, "", false)
+	env.Author = "carol"
+
+	res, err := verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{
+		Doc: model.FormatDocID(id), Body: "looks good",
+	})
+	if err != nil {
+		t.Fatalf("DocCommentAdd: %v", err)
+	}
+	if res.Doc == nil || res.Doc.ID != id || res.Doc.Title != "commented" {
+		t.Errorf("DocCommentAdd doc = %#v, want doc %d titled commented", res.Doc, id)
+	}
+	stored, err := st.ListDocComments(id)
+	if err != nil {
+		t.Fatalf("ListDocComments: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Body != "looks good" || stored[0].Author != "carol" {
+		t.Fatalf("stored comments = %#v, want one by carol saying looks good", stored)
+	}
+	if c := res.Comment; c == nil || c.ID != stored[0].ID || c.Body != "looks good" || c.Author != "carol" {
+		t.Errorf("DocCommentAdd comment = %#v, want the stored comment %d", c, stored[0].ID)
+	}
+}
+
+func TestDocCommentAddReplaysAnIdempotencyKeyAndRefusesItsReuse(t *testing.T) {
+	st := openStore(t)
+	id := createDoc(t, st, store.DefaultProjectID, "doc")
+	ref := model.FormatDocID(id)
+	env := projectEnv(st, "", false)
+
+	first, err := verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: ref, Body: "once", IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatalf("DocCommentAdd: %v", err)
+	}
+	again, err := verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: ref, Body: "once", IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatalf("DocCommentAdd replay: %v", err)
+	}
+	if again.Comment.ID != first.Comment.ID {
+		t.Errorf("replayed DocCommentAdd = comment %d, want the original comment %d", again.Comment.ID, first.Comment.ID)
+	}
+
+	_, err = verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: ref, Body: "different", IdempotencyKey: "k1"})
+	requireVerbError(t, err, output.ErrConflict, "")
+	if stored, err := st.ListDocComments(id); err != nil || len(stored) != 1 {
+		t.Errorf("comments after the refused reuse = (%d, %v), want 1", len(stored), err)
+	}
+}
+
+func TestDocCommentAddErrorCodes(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+
+	_, err := verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: "not-a-doc", Body: "b"})
+	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
+
+	_, err = verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: "DOC-999", Body: "b"})
+	requireVerbError(t, err, output.ErrNotFound, "doc DOC-999 not found")
+}
+
+func TestDocLinkAddThenRemove(t *testing.T) {
+	st := openStore(t)
+	docID := createDoc(t, st, store.DefaultProjectID, "linked")
+	issueID := createIssue(t, st)
+	env := projectEnv(st, "", false)
+	docRef, issueRef := model.FormatDocID(docID), model.FormatID(issueID)
+
+	added, err := verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: issueRef})
+	if err != nil {
+		t.Fatalf("DocLinkAdd: %v", err)
+	}
+	if added.DocID != docID || added.IssueID != issueID {
+		t.Errorf("DocLinkAdd = doc %d issue %d, want doc %d issue %d", added.DocID, added.IssueID, docID, issueID)
+	}
+	if linked := docLinkedIssues(t, st, docID); len(linked) != 1 || linked[0] != issueID {
+		t.Fatalf("linked issues after add = %v, want [%d]", linked, issueID)
+	}
+
+	_, err = verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: issueRef})
+	requireVerbError(t, err, output.ErrConflict, "link already exists")
+
+	removed, err := verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: docRef, Issue: issueRef})
+	if err != nil {
+		t.Fatalf("DocLinkRemove: %v", err)
+	}
+	if removed.DocID != docID || removed.IssueID != issueID {
+		t.Errorf("DocLinkRemove = doc %d issue %d, want doc %d issue %d", removed.DocID, removed.IssueID, docID, issueID)
+	}
+	if linked := docLinkedIssues(t, st, docID); len(linked) != 0 {
+		t.Fatalf("linked issues after remove = %v, want none", linked)
+	}
+
+	_, err = verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: docRef, Issue: issueRef})
+	requireVerbError(t, err, output.ErrNotFound, "link not found")
+}
+
+func docLinkedIssues(t *testing.T, st store.Store, docID int) []int {
+	t.Helper()
+	linked, err := st.HydrateLinkedIssues([]int{docID})
+	if err != nil {
+		t.Fatalf("HydrateLinkedIssues: %v", err)
+	}
+	var ids []int
+	for _, ref := range linked[docID] {
+		ids = append(ids, ref.ID)
+	}
+	return ids
+}
+
+func TestDocLinkErrorCodes(t *testing.T) {
+	st := openStore(t)
+	docRef := model.FormatDocID(createDoc(t, st, store.DefaultProjectID, "doc"))
+	env := projectEnv(st, "", false)
+
+	_, err := verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: "not-a-doc", Issue: "DKT-1"})
+	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
+	_, err = verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: "not-an-issue"})
+	requireVerbError(t, err, output.ErrValidation, "invalid issue ID: ")
+	_, err = verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: "DKT-999"})
+	requireVerbError(t, err, output.ErrNotFound, "doc or issue not found")
+
+	_, err = verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: "not-a-doc", Issue: "DKT-1"})
+	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
+	_, err = verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: docRef, Issue: "not-an-issue"})
+	requireVerbError(t, err, output.ErrValidation, "invalid issue ID: ")
+}
+
+// TestDocCommentAndLinkWritesRefuseAnUnanchoredIdentity: comment add, link add
+// and link remove write, so an unanchored identity with no project row is
+// refused before any change and registers nothing.
+func TestDocCommentAndLinkWritesRefuseAnUnanchoredIdentity(t *testing.T) {
+	st := openStore(t)
+	ensureProject(t, st, "/repos/first", "first")
+	docID := createDoc(t, st, store.DefaultProjectID, "kept")
+	issueID := createIssue(t, st)
+	docRef, issueRef := model.FormatDocID(docID), model.FormatID(issueID)
+	env := projectEnv(st, "/work/scratch", false)
+
+	_, err := verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: docRef, Body: "b"})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+	_, err = verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: issueRef})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+	_, err = verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: docRef, Issue: issueRef})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+
+	requireUnregistered(t, st, "/work/scratch")
+	if stored, err := st.ListDocComments(docID); err != nil || len(stored) != 0 {
+		t.Errorf("comments = (%d, %v), want none", len(stored), err)
+	}
+	if linked := docLinkedIssues(t, st, docID); len(linked) != 0 {
+		t.Errorf("linked issues = %v, want none", linked)
+	}
+}
+
+// TestDocCommentAndLinkWritesRegisterAnAnchoredProject: each write registers
+// the caller's anchored identity on first contact and reports the new row.
+func TestDocCommentAndLinkWritesRegisterAnAnchoredProject(t *testing.T) {
+	ctx := context.Background()
+	for name, write := range map[string]func(env verb.Env, docRef, issueRef string) (*model.Project, error){
+		"comment add": func(env verb.Env, docRef, _ string) (*model.Project, error) {
+			res, err := verb.DocCommentAdd(ctx, env, verb.DocCommentAddInput{Doc: docRef, Body: "b"})
+			return res.Registered, err
+		},
+		"link add": func(env verb.Env, docRef, issueRef string) (*model.Project, error) {
+			res, err := verb.DocLinkAdd(ctx, env, verb.DocLinkAddInput{Doc: docRef, Issue: issueRef})
+			return res.Registered, err
+		},
+		"link remove": func(env verb.Env, docRef, issueRef string) (*model.Project, error) {
+			if _, err := verb.DocLinkAdd(ctx, projectEnv(env.Store, "", false),
+				verb.DocLinkAddInput{Doc: docRef, Issue: issueRef}); err != nil {
+				return nil, err
+			}
+			res, err := verb.DocLinkRemove(ctx, env, verb.DocLinkRemoveInput{Doc: docRef, Issue: issueRef})
+			return res.Registered, err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			ensureProject(t, st, "/repos/first", "first")
+			docRef := model.FormatDocID(createDoc(t, st, store.DefaultProjectID, "doc"))
+			issueRef := model.FormatID(createIssue(t, st))
+
+			reg, err := write(projectEnv(st, "/repos/fresh", true), docRef, issueRef)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			id, found, err := st.LookupProject("/repos/fresh")
+			if err != nil || !found {
+				t.Fatalf("LookupProject = (%d, %v, %v), want a registered row", id, found, err)
+			}
+			if reg == nil || reg.ID != id || reg.Identity != "/repos/fresh" {
+				t.Errorf("Registered = %+v, want the new row %d", reg, id)
+			}
+		})
+	}
+}

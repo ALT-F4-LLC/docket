@@ -79,6 +79,28 @@ func TestDocCommentAddReturnsTheStoredComment(t *testing.T) {
 	}
 }
 
+// TestDocCommentAddOwnsItsProject: doc comment add resolves its project
+// through internal/verb, so the root hook must skip its eager resolution.
+func TestDocCommentAddOwnsItsProject(t *testing.T) {
+	if _, ok := docCommentAddCmd.Annotations["verbOwnsProject"]; !ok {
+		t.Errorf("%s has no verbOwnsProject annotation", docCommentAddCmd.CommandPath())
+	}
+}
+
+// TestDocCommentAddUnknownDocIsNotFound: adding a comment to a doc that does
+// not exist is NOT_FOUND naming the doc, and stores nothing.
+func TestDocCommentAddUnknownDocIsNotFound(t *testing.T) {
+	newVoteCreateStore(t)
+	err := runDocCommentAdd(t, "DOC-999", "-m", "hello")
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrNotFound {
+		t.Fatalf("doc comment add DOC-999 returned %v, want NOT_FOUND", err)
+	}
+	if !strings.Contains(err.Error(), "doc DOC-999 not found") {
+		t.Errorf("error %q does not name the missing doc", err)
+	}
+}
+
 // TestDocCommentListReturnsTheDocsComments: `doc comment list` emits every
 // comment on the doc and none from another doc.
 func TestDocCommentListReturnsTheDocsComments(t *testing.T) {

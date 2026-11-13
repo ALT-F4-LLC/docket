@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -21,78 +19,59 @@ var docLinkCmd = &cobra.Command{
 }
 
 var docLinkAddCmd = &cobra.Command{
-	Use:   "add <id> --issue <issue_id>",
-	Short: "Link a document to an issue",
-	Args:  cobra.ExactArgs(1),
+	Use:         "add <id> --issue <issue_id>",
+	Short:       "Link a document to an issue",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		st := store.StoreOn(getDB(cmd))
-
-		docID, err := model.ParseDocID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
-		}
-
 		issueFlag, _ := cmd.Flags().GetString("issue")
-		issueID, err := issueArg(issueFlag)
-		if err != nil {
-			return err
-		}
 
-		if err := st.LinkDocIssue(docID, issueID); err != nil {
-			if e := notFound(err, "doc or issue"); e != nil {
-				return e
-			}
-			if errors.Is(err, store.ErrConflict) {
-				return cmdErr(fmt.Errorf("link already exists"), output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("linking doc to issue: %w", err), output.ErrGeneral)
+		env := verbEnv(cmd)
+		res, err := verb.DocLinkAdd(cmd.Context(), env, verb.DocLinkAddInput{
+			Doc:   args[0],
+			Issue: issueFlag,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
+		if err != nil {
+			return verbErr(err)
 		}
 
 		result := docLinkResult{
-			DocID:   model.FormatDocID(docID),
-			IssueID: model.FormatID(issueID),
+			DocID:   model.FormatDocID(res.DocID),
+			IssueID: model.FormatID(res.IssueID),
 		}
 
-		w.Success(result, fmt.Sprintf("Linked %s to %s",
-			model.FormatDocID(docID), model.FormatID(issueID)))
+		w.Success(result, fmt.Sprintf("Linked %s to %s", result.DocID, result.IssueID))
 		return nil
 	},
 }
 
 var docLinkRemoveCmd = &cobra.Command{
-	Use:   "remove <id> --issue <issue_id>",
-	Short: "Remove a link between a document and an issue",
-	Args:  cobra.ExactArgs(1),
+	Use:         "remove <id> --issue <issue_id>",
+	Short:       "Remove a link between a document and an issue",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		st := store.StoreOn(getDB(cmd))
-
-		docID, err := model.ParseDocID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
-		}
-
 		issueFlag, _ := cmd.Flags().GetString("issue")
-		issueID, err := issueArg(issueFlag)
-		if err != nil {
-			return err
-		}
 
-		if err := st.UnlinkDocIssue(docID, issueID); err != nil {
-			if e := notFound(err, "link"); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("unlinking doc from issue: %w", err), output.ErrGeneral)
+		env := verbEnv(cmd)
+		res, err := verb.DocLinkRemove(cmd.Context(), env, verb.DocLinkRemoveInput{
+			Doc:   args[0],
+			Issue: issueFlag,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
+		if err != nil {
+			return verbErr(err)
 		}
 
 		result := docLinkResult{
-			DocID:   model.FormatDocID(docID),
-			IssueID: model.FormatID(issueID),
+			DocID:   model.FormatDocID(res.DocID),
+			IssueID: model.FormatID(res.IssueID),
 		}
 
-		w.Success(result, fmt.Sprintf("Unlinked %s from %s",
-			model.FormatDocID(docID), model.FormatID(issueID)))
+		w.Success(result, fmt.Sprintf("Unlinked %s from %s", result.DocID, result.IssueID))
 		return nil
 	},
 }

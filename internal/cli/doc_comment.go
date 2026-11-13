@@ -1,16 +1,14 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -20,25 +18,12 @@ var docCommentCmd = &cobra.Command{
 }
 
 var docCommentAddCmd = &cobra.Command{
-	Use:   "add [id]",
-	Short: "Add a comment to a document",
-	Args:  cobra.ExactArgs(1),
+	Use:         "add [id]",
+	Short:       "Add a comment to a document",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		st := store.StoreOn(getDB(cmd))
-
-		id, err := model.ParseDocID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
-		}
-
-		doc, err := st.GetDoc(id)
-		if err != nil {
-			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
-		}
 
 		jsonMode, _ := jsonModeOf(cmd)
 		body, _ := cmd.Flags().GetString("message")
@@ -59,7 +44,7 @@ var docCommentAddCmd = &cobra.Command{
 			}
 		}
 
-		body, err = commentBodyOrEditor(body, cmd.Flags().Changed("message"), jsonMode)
+		body, err := commentBodyOrEditor(body, cmd.Flags().Changed("message"), jsonMode)
 		if err != nil {
 			return err
 		}
@@ -69,36 +54,23 @@ var docCommentAddCmd = &cobra.Command{
 			return nil
 		}
 
-		author := config.DefaultAuthor()
-
-		comment := model.DocComment{
-			DocID:  id,
-			Body:   body,
-			Author: author,
-		}
-
 		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
 			return err
 		}
 
-		commentID, err := st.CreateDocCommentIdempotent(&comment, idempotencyKey)
+		env := verbEnv(cmd)
+		res, err := verb.DocCommentAdd(cmd.Context(), env, verb.DocCommentAddInput{
+			Doc:            args[0],
+			Body:           body,
+			IdempotencyKey: idempotencyKey,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
-				return e
-			}
-			if errors.Is(err, store.ErrConflict) {
-				return cmdErr(err, output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		created, err := st.GetDocComment(commentID)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(created, fmt.Sprintf("Comment added to %s: %s", model.FormatDocID(id), doc.Title))
+		w.Success(res.Comment, fmt.Sprintf("Comment added to %s: %s", model.FormatDocID(res.Doc.ID), res.Doc.Title))
 
 		return nil
 	},
