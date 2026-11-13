@@ -24,10 +24,82 @@ type NextInput struct {
 	Sizes      []string
 	Labels     []string
 	Types      []string
-	// Run switches to step mode. Statuses, Priorities, Labels and Types are
-	// refused alongside it; Sizes is ignored.
+	// Run switches to step mode, where every issue filter is refused. A
+	// filter counts as set when it is non-nil, so an empty but non-nil one is
+	// refused too.
 	Run   string
 	Limit int
+}
+
+// Validate checks in without reading the store: the filter values in issue
+// mode; in run mode the run reference, then the refused filters. Next runs it
+// itself. A caller with checks of its own that must report after these runs
+// it first.
+func (in NextInput) Validate() error {
+	if in.Run != "" {
+		if _, err := ParseRunRef(in.Run); err != nil {
+			return err
+		}
+		return refuseIssueFilters(in)
+	}
+	for _, s := range in.Statuses {
+		if err := model.ValidateStatus(model.Status(s)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	for _, p := range in.Priorities {
+		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	for _, sz := range in.Sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	for _, t := range in.Types {
+		if err := model.ValidateIssueKind(model.IssueKind(t)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	return nil
+}
+
+// refuseIssueFilters refuses the issue filters in step mode rather than
+// ignoring them: a dispatcher asking for `--priority critical` steps that got
+// every step would dispatch work it meant to defer. Each is named by the CLI
+// flag that sets it.
+func refuseIssueFilters(in NextInput) error {
+	var conflicting []string
+	for _, f := range []struct {
+		flag   string
+		values []string
+	}{
+		{"--status", in.Statuses},
+		{"--priority", in.Priorities},
+		{"--size", in.Sizes},
+		{"--label", in.Labels},
+		{"--type", in.Types},
+	} {
+		if f.values != nil {
+			conflicting = append(conflicting, f.flag)
+		}
+	}
+	if len(conflicting) == 0 {
+		return nil
+	}
+	subject := "is an issue filter"
+	if len(conflicting) > 1 {
+		subject = "are issue filters"
+	}
+	return newError(
+		fmt.Errorf(
+			"%s %s and cannot be combined with --run, which lists a run's "+
+				"ready STEPS; inspect the run with `docket run status` instead",
+			strings.Join(conflicting, ", "), subject,
+		),
+		output.ErrValidation,
+	)
 }
 
 // NextResult is the ready set: Issues in issue mode, Steps in run mode, the
@@ -46,6 +118,9 @@ func Next(ctx context.Context, env Env, in NextInput) (NextResult, error) {
 	if err != nil {
 		return NextResult{}, err
 	}
+	if err := in.Validate(); err != nil {
+		return NextResult{}, err
+	}
 	if in.Run != "" {
 		return nextSteps(env, in)
 	}
@@ -53,44 +128,10 @@ func Next(ctx context.Context, env Env, in NextInput) (NextResult, error) {
 }
 
 func nextSteps(env Env, in NextInput) (NextResult, error) {
-	runID, err := model.ParseRunID(in.Run)
+	runID, err := ParseRunRef(in.Run)
 	if err != nil {
-		return NextResult{}, newError(fmt.Errorf("invalid run ID: %w", err), output.ErrValidation)
+		return NextResult{}, err
 	}
-
-	// The issue filters mean nothing in step mode, and are refused rather than
-	// ignored: a dispatcher asking for `--priority critical` steps that got
-	// every step would dispatch work it meant to defer. Each is named by the
-	// CLI flag that sets it.
-	var conflicting []string
-	for _, f := range []struct {
-		flag   string
-		values []string
-	}{
-		{"--status", in.Statuses},
-		{"--priority", in.Priorities},
-		{"--label", in.Labels},
-		{"--type", in.Types},
-	} {
-		if len(f.values) > 0 {
-			conflicting = append(conflicting, f.flag)
-		}
-	}
-	if len(conflicting) > 0 {
-		subject := "is an issue filter"
-		if len(conflicting) > 1 {
-			subject = "are issue filters"
-		}
-		return NextResult{}, newError(
-			fmt.Errorf(
-				"%s %s and cannot be combined with --run, which lists a run's "+
-					"ready STEPS; inspect the run with `docket run status` instead",
-				strings.Join(conflicting, ", "), subject,
-			),
-			output.ErrValidation,
-		)
-	}
-
 	ready, err := engine.NewEngine().NextStepsStore(env.Store, runID, in.Limit, model.NowMS())
 	if err != nil {
 		return NextResult{}, engineError(err)
@@ -99,27 +140,6 @@ func nextSteps(env Env, in NextInput) (NextResult, error) {
 }
 
 func nextIssues(env Env, in NextInput, projectID int) (NextResult, error) {
-	for _, s := range in.Statuses {
-		if err := model.ValidateStatus(model.Status(s)); err != nil {
-			return NextResult{}, newError(err, output.ErrValidation)
-		}
-	}
-	for _, p := range in.Priorities {
-		if err := model.ValidatePriority(model.Priority(p)); err != nil {
-			return NextResult{}, newError(err, output.ErrValidation)
-		}
-	}
-	for _, sz := range in.Sizes {
-		if err := model.ValidateSize(model.Size(sz)); err != nil {
-			return NextResult{}, newError(err, output.ErrValidation)
-		}
-	}
-	for _, t := range in.Types {
-		if err := model.ValidateIssueKind(model.IssueKind(t)); err != nil {
-			return NextResult{}, newError(err, output.ErrValidation)
-		}
-	}
-
 	// Every open issue, unlimited: the DAG needs all of them.
 	allIssues, _, err := env.Store.ListIssues(store.ListOptions{
 		ProjectID:   projectID,

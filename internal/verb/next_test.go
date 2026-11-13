@@ -3,6 +3,7 @@ package verb_test
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -98,11 +99,90 @@ func TestNextRefusesInvalidInput(t *testing.T) {
 		"label with run":       {Run: "RUN-1", Labels: []string{"x"}},
 		"type with run":        {Run: "RUN-1", Types: []string{"task"}},
 		"two filters with run": {Run: "RUN-1", Statuses: []string{"todo"}, Labels: []string{"x"}},
+		"size with run":        {Run: "RUN-1", Sizes: []string{"small"}},
+		// A filter set to nothing was still set: run mode refuses it as the
+		// CLI always has for `--status ""`.
+		"empty status with run": {Run: "RUN-1", Statuses: []string{}},
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			_, err := verb.Next(context.Background(), verb.Env{Store: openStore(t)}, in)
 			requireCode(t, err, output.ErrValidation)
+			requireCode(t, in.Validate(), output.ErrValidation)
+		})
+	}
+}
+
+// TestNextValidateReportsTheRunBeforeTheFilters pins the order run mode
+// reports two faults in: the run reference first.
+func TestNextValidateReportsTheRunBeforeTheFilters(t *testing.T) {
+	err := verb.NextInput{Run: "not-a-run", Statuses: []string{"todo"}}.Validate()
+	requireCode(t, err, output.ErrValidation)
+	if !strings.Contains(err.Error(), "invalid run ID") {
+		t.Errorf("Validate = %q, want the invalid run reported first", err)
+	}
+}
+
+// createNextIssue files issue in the default project with labels.
+func createNextIssue(t *testing.T, st store.Store, issue model.Issue, labels ...string) int {
+	t.Helper()
+	issue.ProjectID = store.DefaultProjectID
+	if issue.Status == "" {
+		issue.Status = model.StatusTodo
+	}
+	if issue.Priority == "" {
+		issue.Priority = model.PriorityMedium
+	}
+	if issue.Kind == "" {
+		issue.Kind = model.IssueKindTask
+	}
+	id, _, err := st.CreateIssueIdempotent(&issue, labels, nil, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent(%q): %v", issue.Title, err)
+	}
+	return id
+}
+
+// TestNextIssueModeSelectsByReadinessAndEachFilter seeds one issue per
+// property a filter selects on, plus a busy and a blocked one, and checks
+// each NextInput field narrows the ready set to its match.
+func TestNextIssueModeSelectsByReadinessAndEachFilter(t *testing.T) {
+	st := openStore(t)
+	createNextIssue(t, st, model.Issue{Title: "plain"})
+	createNextIssue(t, st, model.Issue{Title: "urgent", Priority: model.PriorityHigh})
+	createNextIssue(t, st, model.Issue{Title: "small", Size: model.SizeSmall})
+	createNextIssue(t, st, model.Issue{Title: "labelled"}, "infra")
+	createNextIssue(t, st, model.Issue{Title: "bug", Kind: model.IssueKindBug})
+	createNextIssue(t, st, model.Issue{Title: "busy", Status: model.StatusInProgress})
+	blocker := createNextIssue(t, st, model.Issue{Title: "blocker", Status: model.StatusInProgress})
+	blocked := createNextIssue(t, st, model.Issue{Title: "blocked"})
+	if _, err := st.CreateRelation(&model.Relation{
+		SourceIssueID: blocker, TargetIssueID: blocked, RelationType: model.RelationBlocks,
+	}); err != nil {
+		t.Fatalf("CreateRelation: %v", err)
+	}
+
+	cases := map[string]struct {
+		in   verb.NextInput
+		want []string
+	}{
+		"no filter":  {verb.NextInput{}, []string{"bug", "labelled", "plain", "small", "urgent"}},
+		"status":     {verb.NextInput{Statuses: []string{"in-progress"}}, []string{"blocker", "busy"}},
+		"priority":   {verb.NextInput{Priorities: []string{"high"}}, []string{"urgent"}},
+		"size":       {verb.NextInput{Sizes: []string{"small"}}, []string{"small"}},
+		"label":      {verb.NextInput{Labels: []string{"infra"}}, []string{"labelled"}},
+		"type":       {verb.NextInput{Types: []string{"bug"}}, []string{"bug"}},
+		"two fields": {verb.NextInput{Priorities: []string{"high"}, Types: []string{"bug"}}, []string{}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			res, err := verb.Next(context.Background(), verb.Env{Store: st}, tc.in)
+			if err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			if got := nextTitles(res); !slices.Equal(got, tc.want) {
+				t.Errorf("Next(%+v) = %v, want %v", tc.in, got, tc.want)
+			}
 		})
 	}
 }

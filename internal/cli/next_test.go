@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ func nextCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().StringSlice("status", nil, "")
 	cmd.Flags().StringSlice("priority", nil, "")
+	cmd.Flags().StringSlice("size", nil, "")
 	cmd.Flags().StringSlice("label", nil, "")
 	cmd.Flags().StringSlice("type", nil, "")
 	cmd.Flags().Int("limit", limit, "")
@@ -79,6 +81,87 @@ func createIssueWithFile(t *testing.T, conn *sql.DB, title, file string) int {
 func TestNextCmdVerbOwnsProject(t *testing.T) {
 	if !verbOwnsProject(nextCmd) {
 		t.Error("next lacks the verbOwnsProject annotation")
+	}
+}
+
+// nextIDs runs cmd in issue mode under v2 and returns the listed ids, sorted.
+func nextIDs(t *testing.T, cmd *cobra.Command) []string {
+	t.Helper()
+	w, buf := bufWriter(true)
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
+	var nj nextJSON
+	if err := json.Unmarshal(buf.Bytes(), &nj); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	ids := make([]string, 0, len(nj.Data.Items))
+	for _, item := range nj.Data.Items {
+		ids = append(ids, item.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestNextForwardsEachIssueFilter pins that each issue-mode filter flag
+// reaches the ready-set query: one seeded issue matches each flag's value,
+// and the flag alone lists exactly that issue.
+func TestNextForwardsEachIssueFilter(t *testing.T) {
+	conn := newTestDB(t)
+	create := func(issue model.Issue, labels ...string) string {
+		t.Helper()
+		if issue.Status == "" {
+			issue.Status = model.StatusTodo
+		}
+		if issue.Priority == "" {
+			issue.Priority = model.PriorityMedium
+		}
+		if issue.Kind == "" {
+			issue.Kind = model.IssueKindTask
+		}
+		id, err := db.CreateIssue(conn, &issue, labels, nil)
+		testsupport.Must(t, err, "CreateIssue(%q): %v", issue.Title, err)
+		return model.FormatID(id)
+	}
+	create(model.Issue{Title: "plain"})
+	busy := create(model.Issue{Title: "busy", Status: model.StatusInProgress})
+	urgent := create(model.Issue{Title: "urgent", Priority: model.PriorityCritical})
+	small := create(model.Issue{Title: "small", Size: model.SizeSmall})
+	labelled := create(model.Issue{Title: "labelled"}, "infra")
+	bug := create(model.Issue{Title: "bug", Kind: model.IssueKindBug})
+
+	for _, tc := range []struct{ flag, value, want string }{
+		{"status", "in-progress", busy},
+		{"priority", "critical", urgent},
+		{"size", "small", small},
+		{"label", "infra", labelled},
+		{"type", "bug", bug},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			cmd := nextCmdWithDB(conn, 10)
+			err := cmd.Flags().Set(tc.flag, tc.value)
+			testsupport.Must(t, err, "setting --%s: %v", tc.flag, err)
+			if got := nextIDs(t, cmd); !slices.Equal(got, []string{tc.want}) {
+				t.Errorf("next --%s %s = %v, want [%s]", tc.flag, tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNextListsTheInvocationsProject pins that `next`, which resolves its own
+// project, lists the project its checkout names rather than the default one.
+func TestNextListsTheInvocationsProject(t *testing.T) {
+	conn := newTestDB(t)
+	createIssue(t, conn, "default project", model.StatusTodo, model.PriorityHigh)
+	_, two, _ := threeProjects(t, conn)
+	theirs, err := db.CreateIssue(conn, &model.Issue{
+		ProjectID: two, Title: "two's issue",
+		Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue in two.git: %v", err)
+
+	got := nextIDs(t, inCheckoutOf(t, nextCmdWithDB(conn, 10), two))
+	if want := []string{model.FormatID(theirs)}; !slices.Equal(got, want) {
+		t.Errorf("next from two.git's checkout = %v, want %v", got, want)
 	}
 }
 

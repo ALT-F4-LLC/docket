@@ -165,6 +165,63 @@ func TestNextStepModeAllFiltersNamedAtOnce(t *testing.T) {
 	}
 }
 
+// TestNextStepModeRefusesAnEmptyIssueFilter: a filter flag given an empty
+// value was still given, and step mode refuses it like any other.
+func TestNextStepModeRefusesAnEmptyIssueFilter(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedRunForNext(t, conn)
+
+	cmd := nextCmdWithDB(conn, 10)
+	err := cmd.Flags().Set("run", model.FormatRunID(runID))
+	testsupport.Must(t, err, "setting --run: %v", err)
+	err = cmd.Flags().Set("status", "")
+	testsupport.Must(t, err, "setting --status: %v", err)
+
+	w, _ := bufWriter(true)
+	err = runNext(cmd, nil, w)
+	var cmdError *CmdError
+	if !asCmdError(err, &cmdError) || cmdError.Code != output.ErrValidation {
+		t.Fatalf("next --run --status \"\" = %v, want a VALIDATION_ERROR", err)
+	}
+	if !strings.Contains(err.Error(), "--status") {
+		t.Errorf("message does not name --status: %s", err)
+	}
+}
+
+// TestNextStepModeReportsRunFaultsBeforeTheLimit pins which fault step mode
+// reports when the call has two: a bad run reference or a refused filter
+// comes before a negative --limit under v2.
+func TestNextStepModeReportsRunFaultsBeforeTheLimit(t *testing.T) {
+	conn := newTestDB(t)
+	run := model.FormatRunID(activatedRunForNext(t, conn))
+
+	for _, tc := range []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"limit alone", map[string]string{"run": run}, "--limit must be >= 0"},
+		{"bad run", map[string]string{"run": "not-a-run"}, "invalid run ID"},
+		{"refused filter", map[string]string{"run": run, "status": "todo"}, "--status is an issue filter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := nextCmdWithDB(conn, 10)
+			tc.flags["json"] = "true"
+			tc.flags["limit"] = "-1"
+			for name, value := range tc.flags {
+				err := cmd.Flags().Set(name, value)
+				testsupport.Must(t, err, "setting --%s: %v", name, err)
+			}
+
+			w, _ := bufWriter(true)
+			err := runNext(cmd, nil, w)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("runNext = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestNextStepModeWireShape pins the `next row` wire shape, field for field,
 // plus the two recorded additions: `instance` and `kind`.
 func TestNextStepModeWireShape(t *testing.T) {
