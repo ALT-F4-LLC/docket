@@ -2,6 +2,7 @@ package verb_test
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -84,6 +85,55 @@ func TestImportIntoANonEmptyProjectNeedsMergeOrReplace(t *testing.T) {
 	}
 	if got := projectIssueTitles(t, st, store.DefaultProjectID); !reflect.DeepEqual(got, []string{"imported"}) {
 		t.Errorf("issues = %v, want [imported] after the replace", got)
+	}
+}
+
+// Merge imports into a non-empty project and skips the rows the project
+// already holds under the same ids, rather than refusing or overwriting them.
+func TestImportMergeIntoANonEmptyProjectKeepsItsOwnRows(t *testing.T) {
+	st := openStore(t)
+	createExportIssue(t, st, store.DefaultProjectID, "existing", model.StatusTodo, "")
+	env := projectEnv(st, "", false)
+
+	res, err := verb.Import(context.Background(), env,
+		verb.ImportInput{Document: exportDocument(t, "imported"), Merge: true})
+	if err != nil {
+		t.Fatalf("Import --merge: %v", err)
+	}
+	if res.Skipped == 0 {
+		t.Errorf("Skipped = 0, want the issue the project already holds skipped")
+	}
+	if got := projectIssueTitles(t, st, store.DefaultProjectID); !reflect.DeepEqual(got, []string{"existing"}) {
+		t.Errorf("issues = %v, want the merge to keep [existing]", got)
+	}
+}
+
+// A project Import registers stays registered when the restore then fails, so
+// the caller still learns of it and records its event.
+func TestImportReportsTheRegistrationWhenTheRestoreFails(t *testing.T) {
+	var data model.ExportData
+	if err := json.Unmarshal([]byte(exportDocument(t, "imported")), &data); err != nil {
+		t.Fatalf("decoding the export: %v", err)
+	}
+	data.DocIssueLinks = append(data.DocIssueLinks, model.DocIssueLink{
+		DocID: 999998, IssueID: 999999, CreatedAt: "2026-01-01T00:00:00Z",
+	})
+	document, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("encoding the export: %v", err)
+	}
+
+	st := openStore(t)
+	res, err := verb.Import(context.Background(), projectEnv(st, "/repos/fresh", true),
+		verb.ImportInput{Document: string(document), Replace: true, Yes: true})
+	requireVerbError(t, err, output.ErrGeneral, "importing data")
+
+	projectID, found, lookupErr := st.LookupProject("/repos/fresh")
+	if lookupErr != nil || !found {
+		t.Fatalf("LookupProject: found=%v err=%v, want the registered row", found, lookupErr)
+	}
+	if reg := res.Registered; reg == nil || reg.ID != projectID || reg.Verb != "import" {
+		t.Errorf("Registered = %+v, want project %d registered by import alongside the error", reg, projectID)
 	}
 }
 

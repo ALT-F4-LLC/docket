@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -48,6 +49,12 @@ func runImport(cmd *cobra.Command, args []string) error {
 	merge, _ := cmd.Flags().GetBool("merge")
 	replace, _ := cmd.Flags().GetBool("replace")
 	yes, _ := cmd.Flags().GetBool("yes")
+
+	// The verb refuses this pair too; checking it here first keeps a bad flag
+	// pair reported as such when the file is also unreadable.
+	if merge && replace {
+		return cmdErr(errors.New("--merge and --replace are mutually exclusive"), output.ErrValidation)
+	}
 
 	data, err := os.ReadFile(args[0])
 	if err != nil {

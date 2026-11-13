@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -690,18 +691,6 @@ func TestRoundTripPreservesEveryCollection(t *testing.T) {
 func runImportCmd(t *testing.T, conn store.LegacyDB, filePath string, jsonMode bool, replace, yes bool) error {
 	t.Helper()
 
-	cmd := newImportCmd()
-	cmd.SilenceUsage = true
-	cmd.SilenceErrors = true
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-
-	// --json and --quiet are persistent flags rootCmd normally supplies;
-	// newImportCmd has no parent in this test, so register the ones RunE
-	// reads directly on the fresh command.
-	cmd.Flags().String("json", "", "")
-	cmd.Flags().Bool("quiet", false, "")
-
 	args := []string{filePath}
 	if jsonMode {
 		// The real --json is a string flag with NoOptDefVal "v1" (root.go),
@@ -716,10 +705,74 @@ func runImportCmd(t *testing.T, conn store.LegacyDB, filePath string, jsonMode b
 	if yes {
 		args = append(args, "--yes")
 	}
+	return runImportCmdArgs(t, conn, nil, args...)
+}
+
+// runImportCmdArgs is runImportCmd with the argv spelled out and, when cfg is
+// non-nil, the project identity the root hook would otherwise load.
+func runImportCmdArgs(t *testing.T, conn store.LegacyDB, cfg *config.Config, args ...string) error {
+	t.Helper()
+
+	cmd := newImportCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	// --json and --quiet are persistent flags rootCmd normally supplies;
+	// newImportCmd has no parent in this test, so register the ones RunE
+	// reads directly on the fresh command.
+	cmd.Flags().String("json", "", "")
+	cmd.Flags().Bool("quiet", false, "")
 	cmd.SetArgs(args)
 
 	ctx := context.WithValue(context.Background(), dbKey, conn)
+	if cfg != nil {
+		ctx = context.WithValue(ctx, cfgKey, cfg)
+	}
 	return cmd.ExecuteContext(ctx)
+}
+
+// The mutual-exclusion refusal comes before the file is read, so a bad flag
+// pair is reported as such even when the path is also wrong.
+func TestImportRefusesMergeWithReplaceBeforeReadingTheFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	err := runImportCmdArgs(t, newTestDB(t), nil, missing, "--merge", "--replace")
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation ||
+		cmdErr.Error() != "--merge and --replace are mutually exclusive" {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR naming the exclusive flags", err)
+	}
+}
+
+func TestImportMergeFlagImportsIntoANonEmptyProject(t *testing.T) {
+	filePath := seedAndWriteExportFile(t, newTestDB(t))
+	dst := newTestDB(t)
+	createIssue(t, dst, "existing", model.StatusTodo, model.PriorityHigh)
+
+	if err := runImportCmdArgs(t, dst, nil, filePath, "--merge"); err != nil {
+		t.Fatalf("import --merge into a non-empty project: %v", err)
+	}
+	gotIssues, err := db.ListAllIssues(dst, 0)
+	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
+	if len(gotIssues) != 1 || gotIssues[0].Title != "existing" {
+		t.Fatalf("expected the merge to keep the project's own issue, got %+v", gotIssues)
+	}
+}
+
+// The import command records the project-registered event for a project the
+// import registered, as the root hook did before the verb resolved it.
+func TestImportCommandRecordsTheProjectItRegisters(t *testing.T) {
+	filePath := seedAndWriteExportFile(t, newTestDB(t))
+	dst := newTestDB(t)
+
+	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
+	if err := runImportCmdArgs(t, dst, cfg, filePath); err != nil {
+		t.Fatalf("import from a new anchored identity: %v", err)
+	}
+	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
+		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)
+	}
 }
 
 // seedAndWriteExportFile creates one issue ("seed issue") in conn and writes

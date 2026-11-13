@@ -92,6 +92,48 @@ func Import(ctx context.Context, env Env, in ImportInput) (ImportResult, error) 
 	return written, nil
 }
 
+// RestoreExport writes an export document into projectID in one transaction,
+// clearing the project's own data first when replace is set. Source ids
+// another project already holds are reassigned first, rewriting data in
+// place. It is Import's write half: Import decides the project and refuses an
+// unconfirmed or conflicting import before calling it.
+func RestoreExport(st store.Store, data *model.ExportData, replace bool, projectID int) (ImportResult, error) {
+	tx, err := st.Begin()
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if replace {
+		// Replace clears THIS PROJECT's data, never the store's: under the
+		// shared store, "replace everything" scoped any wider would destroy
+		// projects the operator was not looking at.
+		if err := tx.ClearProjectDataTx(projectID); err != nil {
+			return ImportResult{}, fmt.Errorf("clearing project data: %w", err)
+		}
+	}
+
+	remapped, err := remapExportForImport(tx, data, projectID)
+	if err != nil {
+		return ImportResult{}, err
+	}
+
+	res := ImportResult{Remapped: remapped}
+	for _, c := range exportCollections {
+		imported, skipped, err := c.restore(tx, data)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		res.Imported += imported
+		res.Skipped += skipped
+	}
+
+	if err := tx.Commit(); err != nil {
+		return ImportResult{}, fmt.Errorf("committing transaction: %w", err)
+	}
+	return res, nil
+}
+
 // validateExportData collects every structural error in the document rather
 // than failing on the first.
 func validateExportData(export *model.ExportData) []string {
