@@ -6,6 +6,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -78,52 +79,20 @@ from.
 
 It REPAIRS NOTHING. Adopting a bumped definition is what activation does,
 inside a transaction, with the validation and collision rules that go with it.`,
-	Args: cobra.NoArgs,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRegistryAudit(cmd, args, getWriter(cmd))
 	},
 }
 
 func runRegistryAudit(cmd *cobra.Command, _ []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	var opts engine.RegistryAuditOptions
-	if ref, _ := cmd.Flags().GetString("project"); strings.TrimSpace(ref) != "" {
-		target, err := resolveProjectRef(conn, ref)
-		if err != nil {
-			return err
-		}
-		opts.ProjectID = target.ID
-	}
-
-	// THE TWO REFUSALS COME FIRST, and they are separate messages because they
-	// send an operator to different places. With nothing scanned, EVERY
-	// registered name in the store trivially has no file declaring it and every
-	// version trivially has no current version to be behind — so the report
-	// would be invented out of having looked nowhere, which is the one output
-	// this verb must never produce. `workflow list --orphans` refuses on the
-	// same two conditions, with the same codes.
-	index, err := engine.ScanCorpus()
+	ref, _ := cmd.Flags().GetString("project")
+	result, err := verb.RegistryAudit(cmd.Context(), verbEnv(cmd), verb.RegistryAuditInput{Project: ref})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+		return verbErr(err)
 	}
-	if !index.Scanned() {
-		return cmdErr(fmt.Errorf(
-			"the shared store root has no config directory, and the audit never "+
-				"reads a repository's .docket/config, so no registry can be "+
-				"compared against anything: with nothing to scan, every "+
-				"registered name would look orphaned"), output.ErrValidation)
-	}
-	if err := index.Err(); err != nil {
-		return cmdErr(fmt.Errorf(
-			"scanning the instance config for current definitions: %w", err),
-			output.ErrGeneral)
-	}
-
-	audit, err := engine.AuditRegistries(conn, index, opts)
-	if err != nil {
-		return cmdErr(err, output.ErrGeneral)
-	}
+	audit := result.Audit
 
 	// NOT a Collection. The v2 collection envelope replaces `data` with
 	// {items, total, truncated}, which would drop `roots` and the store-wide
