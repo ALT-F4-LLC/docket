@@ -29,7 +29,9 @@ type IssueClaimResult struct {
 	Lease   model.Lease
 	Version int
 	// Registered is the project this call registered, if it registered one,
-	// for the caller to record its project-registered event.
+	// for the caller to record its project-registered event. It is set even
+	// when IssueClaim also returns an error, because the project stays
+	// registered: read it before checking the error.
 	Registered *engine.ProjectRegistration
 }
 
@@ -49,7 +51,7 @@ func IssueClaim(ctx context.Context, env Env, in IssueClaimInput) (IssueClaimRes
 		return IssueClaimResult{}, err
 	}
 
-	projectID, registered, err := resolveLeaseProject(env, "issue claim")
+	projectID, registered, err := resolveRegisteringProject(env, "issue claim")
 	res := IssueClaimResult{Issue: id, Registered: registered}
 	if err != nil {
 		return res, err
@@ -82,8 +84,10 @@ type IssueReleaseInput struct {
 
 // IssueReleaseResult is the ended lease. Attempt survives the release.
 type IssueReleaseResult struct {
-	Issue      int
-	Lease      model.Lease
+	Issue int
+	Lease model.Lease
+	// Registered is as on IssueClaimResult: set even when IssueRelease also
+	// returns an error, so read it before checking the error.
 	Registered *engine.ProjectRegistration
 }
 
@@ -97,7 +101,7 @@ func IssueRelease(ctx context.Context, env Env, in IssueReleaseInput) (IssueRele
 		return IssueReleaseResult{}, err
 	}
 
-	projectID, registered, err := resolveLeaseProject(env, "issue release")
+	projectID, registered, err := resolveRegisteringProject(env, "issue release")
 	res := IssueReleaseResult{Issue: id, Registered: registered}
 	if err != nil {
 		return res, err
@@ -123,8 +127,10 @@ type IssueHeartbeatInput struct {
 
 // IssueHeartbeatResult is the extended lease.
 type IssueHeartbeatResult struct {
-	Issue      int
-	Lease      model.Lease
+	Issue int
+	Lease model.Lease
+	// Registered is as on IssueClaimResult: set even when IssueHeartbeat also
+	// returns an error, so read it before checking the error.
 	Registered *engine.ProjectRegistration
 }
 
@@ -142,7 +148,7 @@ func IssueHeartbeat(ctx context.Context, env Env, in IssueHeartbeatInput) (Issue
 		return IssueHeartbeatResult{}, err
 	}
 
-	projectID, registered, err := resolveLeaseProject(env, "issue heartbeat")
+	projectID, registered, err := resolveRegisteringProject(env, "issue heartbeat")
 	res := IssueHeartbeatResult{Issue: id, Registered: registered}
 	if err != nil {
 		return res, err
@@ -178,10 +184,10 @@ func checkTTL(ttl *time.Duration) error {
 	return nil
 }
 
-// resolveLeaseProject resolves the caller's project for an issue lease verb,
-// which writes there and so may register it. When it registers one, it
-// returns the registration for the caller to record as an event.
-func resolveLeaseProject(env Env, verbPath string) (int, *engine.ProjectRegistration, error) {
+// resolveRegisteringProject resolves the caller's project for a verb that
+// writes there and so may register it. When it registers one, it returns the
+// registration, attributed to verbPath, for the caller to record as an event.
+func resolveRegisteringProject(env Env, verbPath string) (int, *engine.ProjectRegistration, error) {
 	projectID, created, err := env.ResolveProject(ProjectMayRegister)
 	if err != nil || !created {
 		return projectID, nil, err

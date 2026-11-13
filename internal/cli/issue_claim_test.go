@@ -27,6 +27,20 @@ func TestIssueLeaseCommandsOwnTheirProject(t *testing.T) {
 // with --json=v2 and returns its decoded data payload.
 func runLeaseCommand(t *testing.T, conn *sql.DB, cfg *config.Config, cmd *cobra.Command, args ...string) map[string]any {
 	t.Helper()
+	out, runErr := runLeaseCommandOutput(t, conn, cfg, cmd, args...)
+	testsupport.Must(t, runErr, "issue %s %v: %v", cmd.Name(), args, runErr)
+
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(out), &envelope), "payload is not JSON: %q", out)
+	return envelope.Data
+}
+
+// runLeaseCommandOutput is runLeaseCommand for a run that may fail: it
+// returns the raw stdout and RunE's error.
+func runLeaseCommandOutput(t *testing.T, conn *sql.DB, cfg *config.Config, cmd *cobra.Command, args ...string) (string, error) {
+	t.Helper()
 	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 	t.Cleanup(func() { _ = rootCmd.PersistentFlags().Set("json", "") })
 	t.Cleanup(func() {
@@ -43,14 +57,7 @@ func runLeaseCommand(t *testing.T, conn *sql.DB, cfg *config.Config, cmd *cobra.
 	cmd.SetContext(ctx)
 	stdout := captureStdout(t)
 	runErr := cmd.RunE(cmd, args)
-	out := stdout()
-	testsupport.Must(t, runErr, "issue %s %v: %v", cmd.Name(), args, runErr)
-
-	var envelope struct {
-		Data map[string]any `json:"data"`
-	}
-	testsupport.Must(t, json.Unmarshal([]byte(out), &envelope), "payload is not JSON: %q", out)
-	return envelope.Data
+	return stdout(), runErr
 }
 
 func TestIssueLeaseCommandsRenderTheLease(t *testing.T) {
@@ -79,25 +86,65 @@ func TestIssueLeaseCommandsRenderTheLease(t *testing.T) {
 	}
 }
 
-// TestIssueClaimRecordsTheProjectItRegisters keeps the project-registered
-// event the root hook wrote before the claim resolved its own project.
-func TestIssueClaimRecordsTheProjectItRegisters(t *testing.T) {
+// registrationEvents maps each project-registered event's identity to the
+// verb that registered it, failing on a second event for one identity.
+func registrationEvents(t *testing.T, conn *sql.DB) map[string]string {
+	t.Helper()
+	rows, err := conn.Query(`SELECT data FROM events WHERE kind = 'project-registered'`)
+	testsupport.Must(t, err, "reading the project-registered events: %v", err)
+	defer rows.Close()
+	verbs := map[string]string{}
+	for rows.Next() {
+		var data string
+		testsupport.Must(t, rows.Scan(&data), "scanning an event")
+		var event struct {
+			Identity string `json:"identity"`
+			Verb     string `json:"verb"`
+		}
+		testsupport.Must(t, json.Unmarshal([]byte(data), &event), "event data is not JSON: %q", data)
+		if prior, dup := verbs[event.Identity]; dup {
+			t.Errorf("%s registered twice, by %s and %s", event.Identity, prior, event.Verb)
+		}
+		verbs[event.Identity] = event.Verb
+	}
+	testsupport.Must(t, rows.Err(), "iterating the events")
+	return verbs
+}
+
+// TestIssueLeaseCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each lease command
+// resolved its own project, including for a command refused after it
+// registered the project.
+func TestIssueLeaseCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 	conn := newTestDB(t)
-	id := createIssue(t, conn, "lease subject", model.StatusTodo, model.PriorityNone)
-	cfg := &config.Config{Identity: "/repos/fresh", Anchored: true}
+	ref := model.FormatID(createIssue(t, conn, "lease subject", model.StatusTodo, model.PriorityNone))
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
 
 	testsupport.Must(t, claimCmd.Flags().Set("owner", "worker-1"), "set --owner")
-	runLeaseCommand(t, conn, cfg, claimCmd, model.FormatID(id))
-
-	var data string
-	err := conn.QueryRow(`SELECT data FROM events WHERE kind = 'project-registered'`).Scan(&data)
-	testsupport.Must(t, err, "reading the project-registered event: %v", err)
-	var event struct {
-		Identity string `json:"identity"`
-		Verb     string `json:"verb"`
+	claimed := runLeaseCommand(t, conn, anchored("/repos/claim"), claimCmd, ref)
+	token, _ := claimed["token"].(string)
+	t.Setenv(TokenEnvVar, token)
+	runLeaseCommand(t, conn, anchored("/repos/heartbeat"), heartbeatCmd, ref)
+	runLeaseCommand(t, conn, anchored("/repos/release"), releaseCmd, ref)
+	if _, err := runLeaseCommandOutput(t, conn, anchored("/repos/refused"), claimCmd, "DKT-999"); err == nil {
+		t.Fatal("claim of a missing issue succeeded, want NOT_FOUND")
 	}
-	testsupport.Must(t, json.Unmarshal([]byte(data), &event), "event data is not JSON: %q", data)
-	if event.Identity != "/repos/fresh" || event.Verb != "issue claim" {
-		t.Errorf("event = %+v, want /repos/fresh registered by issue claim", event)
+
+	want := map[string]string{
+		"/repos/claim":     "issue claim",
+		"/repos/heartbeat": "issue heartbeat",
+		"/repos/release":   "issue release",
+		"/repos/refused":   "issue claim",
+	}
+	got := registrationEvents(t, conn)
+	if len(got) != len(want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+	for identity, verb := range want {
+		if got[identity] != verb {
+			t.Errorf("%s registered by %q, want %q", identity, got[identity], verb)
+		}
 	}
 }

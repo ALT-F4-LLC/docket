@@ -3,6 +3,7 @@ package verb_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -201,5 +202,149 @@ func TestIssueClaimMayRegisterTheCallersProject(t *testing.T) {
 		if lease.Owner != "" {
 			t.Errorf("owner = %q, want the refused claim to take no lease", lease.Owner)
 		}
+	})
+}
+
+func TestIssueClaimReportsTheRegistrationWhenItFailsAfterRegistering(t *testing.T) {
+	st := openStore(t)
+	res, err := verb.IssueClaim(context.Background(), projectEnv(st, "/repos/fresh", true),
+		verb.IssueClaimInput{Issue: "999", Owner: "worker-1"})
+	requireCode(t, err, output.ErrNotFound)
+	if res.Registered == nil || res.Registered.Identity != "/repos/fresh" {
+		t.Errorf("Registered = %+v, want /repos/fresh: the project stays registered after the refusal", res.Registered)
+	}
+}
+
+func setConfig(t *testing.T, st store.Store, projectID int, key, value string) {
+	t.Helper()
+	if err := st.SetConfig(projectID, key, value); err != nil {
+		t.Fatalf("SetConfig(%d, %s): %v", projectID, key, err)
+	}
+}
+
+// requireExpiresAfter asserts lease expires ttl after a moment within
+// [beforeMS, afterMS], the window around the call that set it.
+func requireExpiresAfter(t *testing.T, lease model.Lease, ttl time.Duration, beforeMS, afterMS int64) {
+	t.Helper()
+	lo, hi := beforeMS+ttl.Milliseconds(), afterMS+ttl.Milliseconds()
+	if lease.ExpiresMS < lo || lease.ExpiresMS > hi {
+		t.Errorf("lease expires at %d, want %s after the call (%d..%d)", lease.ExpiresMS, ttl, lo, hi)
+	}
+}
+
+func TestIssueLeaseVerbsTakeTheConfiguredTTLOfTheCallersProject(t *testing.T) {
+	st := openStore(t)
+	// The first registration takes over the default project's row; the
+	// caller's project must be another one for its config to be told apart.
+	ensureProject(t, st, "/repos/first", "first")
+	own := ensureProject(t, st, "/repos/ttl", "ttl")
+	if own == store.DefaultProjectID {
+		t.Fatalf("caller project = %d, want one other than the default", own)
+	}
+	setConfig(t, st, store.DefaultProjectID, "lease.ttl.default", "1m")
+	setConfig(t, st, store.DefaultProjectID, "lease.ttl.slow", "2m")
+	setConfig(t, st, own, "lease.ttl.default", "3h")
+	setConfig(t, st, own, "lease.ttl.slow", "5h")
+
+	env := projectEnv(st, "/repos/ttl", true)
+	ctx := context.Background()
+	ref := model.FormatID(createIssue(t, st))
+
+	before := model.NowMS()
+	claimed, err := verb.IssueClaim(ctx, env, verb.IssueClaimInput{Issue: ref, Owner: "worker-1"})
+	if err != nil {
+		t.Fatalf("IssueClaim: %v", err)
+	}
+	requireExpiresAfter(t, claimed.Lease, 3*time.Hour, before, model.NowMS())
+
+	before = model.NowMS()
+	beat, err := verb.IssueHeartbeat(ctx, env, verb.IssueHeartbeatInput{
+		Issue: ref, Token: claimed.Token, Class: "slow",
+	})
+	if err != nil {
+		t.Fatalf("IssueHeartbeat: %v", err)
+	}
+	requireExpiresAfter(t, beat.Lease, 5*time.Hour, before, model.NowMS())
+}
+
+func TestIssueReleaseAndHeartbeatRefuseAnUnanchoredCaller(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	claimed := claim(t, projectEnv(st, "", false), id)
+	before, err := st.GetIssueLease(id)
+	if err != nil {
+		t.Fatalf("GetIssueLease: %v", err)
+	}
+
+	ctx := context.Background()
+	env := projectEnv(st, "/tmp/scratch", false)
+	ref := model.FormatID(id)
+	_, releaseErr := verb.IssueRelease(ctx, env, verb.IssueReleaseInput{Issue: ref, Token: claimed.Token})
+	_, heartbeatErr := verb.IssueHeartbeat(ctx, env, verb.IssueHeartbeatInput{Issue: ref, Token: claimed.Token})
+
+	for name, err := range map[string]error{"release": releaseErr, "heartbeat": heartbeatErr} {
+		t.Run(name, func(t *testing.T) {
+			requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+		})
+	}
+	requireUnregistered(t, st, "/tmp/scratch")
+	after, err := st.GetIssueLease(id)
+	if err != nil {
+		t.Fatalf("GetIssueLease: %v", err)
+	}
+	if *after != *before {
+		t.Errorf("lease = %+v after refused calls, want unchanged %+v", *after, *before)
+	}
+}
+
+func TestIssueHeartbeatOnAnExpiredLeaseIsStale(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	// A 1ms lease taken at the epoch is long expired, with no sleep.
+	token, _, err := st.ClaimIssue(id, "worker-1", 1, 1)
+	if err != nil {
+		t.Fatalf("ClaimIssue: %v", err)
+	}
+
+	_, err = verb.IssueHeartbeat(context.Background(), projectEnv(st, "", false),
+		verb.IssueHeartbeatInput{Issue: model.FormatID(id), Token: token})
+	requireCode(t, err, output.ErrStaleLease)
+}
+
+func TestIssueLeaseRefusalsNameTheIssueByItsOwningProject(t *testing.T) {
+	st := openStore(t)
+	prefixes := map[string]string{"/repos/owner": "OWN", "/repos/caller": "CALL"}
+	projects := map[string]int{}
+	for identity, prefix := range prefixes {
+		projects[identity] = ensureProject(t, st, identity, prefix)
+		if err := st.SetProjectPrefix(projects[identity], prefix); err != nil {
+			t.Fatalf("SetProjectPrefix(%s): %v", identity, err)
+		}
+	}
+	id, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: projects["/repos/owner"],
+		Title:     "lease subject",
+		Status:    model.StatusTodo,
+		Priority:  model.PriorityMedium,
+		Kind:      model.IssueKindTask,
+	}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent: %v", err)
+	}
+	claim(t, projectEnv(st, "/repos/owner", true), id)
+
+	ctx := context.Background()
+	env := projectEnv(st, "/repos/caller", true)
+
+	t.Run("an owned issue takes its owner's prefix", func(t *testing.T) {
+		_, err := verb.IssueHeartbeat(ctx, env, verb.IssueHeartbeatInput{
+			Issue: model.FormatID(id), Token: "deadbeef",
+		})
+		requireVerbError(t, err, output.ErrAuth, fmt.Sprintf("issue OWN-%d:", id))
+	})
+
+	t.Run("an unowned id takes the caller's prefix", func(t *testing.T) {
+		_, err := verb.IssueClaim(ctx, env, verb.IssueClaimInput{Issue: "999", Owner: "worker-1"})
+		requireVerbError(t, err, output.ErrNotFound, "issue CALL-999 not found")
 	})
 }
