@@ -8,7 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -27,53 +27,31 @@ type statsResult struct {
 }
 
 var statsCmd = &cobra.Command{
-	Use:   "stats",
-	Short: "Show summary statistics for the issue database",
+	Use:         "stats",
+	Short:       "Show summary statistics for the issue database",
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runStats)
 	},
 }
 
 func runStats(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
-	projectID := getProjectID(cmd)
-	total, err := st.CountIssues(projectID)
+	stats, err := verb.Stats(cmd.Context(), verbEnv(cmd), verb.StatsInput{})
 	if err != nil {
-		return cmdErr(fmt.Errorf("counting issues: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
 
-	rootCount, err := st.CountRootIssues(projectID)
-	if err != nil {
-		return cmdErr(fmt.Errorf("counting root issues: %w", err), output.ErrGeneral)
-	}
-
-	byStatus, err := st.CountByStatus(projectID)
-	if err != nil {
-		return cmdErr(fmt.Errorf("counting by status: %w", err), output.ErrGeneral)
-	}
-
-	byPriority, err := st.CountByPriority(projectID)
-	if err != nil {
-		return cmdErr(fmt.Errorf("counting by priority: %w", err), output.ErrGeneral)
-	}
-
-	labels, err := st.ListAllLabels(projectID)
-	if err != nil {
-		return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
-	}
-
-	labelStats := make([]labelStat, len(labels))
-	for i, l := range labels {
+	labelStats := make([]labelStat, len(stats.Labels))
+	for i, l := range stats.Labels {
 		labelStats[i] = labelStat{Name: l.Name, Count: l.IssueCount}
 	}
 
 	result := statsResult{
-		Total:      total,
-		RootIssues: rootCount,
-		SubIssues:  total - rootCount,
-		ByStatus:   byStatus,
-		ByPriority: byPriority,
+		Total:      stats.Total,
+		RootIssues: stats.RootIssues,
+		SubIssues:  stats.SubIssues,
+		ByStatus:   stats.ByStatus,
+		ByPriority: stats.ByPriority,
 		Labels:     labelStats,
 	}
 
