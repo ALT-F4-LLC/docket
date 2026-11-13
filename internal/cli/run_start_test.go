@@ -154,6 +154,21 @@ func TestRunStartReportsANegativeBudgetBeforeAMissingRequestFile(t *testing.T) {
 	}
 }
 
+// A malformed run id is reported ahead of an unreadable working directory.
+func TestRunConductReportsAMalformedRunBeforeAnUnreadableCwd(t *testing.T) {
+	conn := newTestDB(t)
+	stubGetwdFailure(t)
+	w, _ := bufWriter(true)
+
+	err := runRunConduct(cmdWithDB(conn), []string{"RUN-x"}, w)
+	if err == nil {
+		t.Fatal("run conduct succeeded on a malformed run id")
+	}
+	if got := codeOf(t, err); got != output.ErrValidation {
+		t.Errorf("code = %q, want %q (%v)", got, output.ErrValidation, err)
+	}
+}
+
 // The run records the head of the checkout it was started from.
 func TestRunStartRecordsTheCheckoutHead(t *testing.T) {
 	conn := newTestDB(t)

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
@@ -55,6 +56,11 @@ type conductResponse struct {
 func runRunConduct(cmd *cobra.Command, args []string, w *output.Writer) error {
 	by, err := rulingBy()
 	if err != nil {
+		// A malformed run id outranks the working-directory error. The verb
+		// refuses it too, but only once the caller is attributed.
+		if _, parseErr := model.ParseRunID(args[0]); parseErr != nil {
+			return cmdErr(parseErr, output.ErrValidation)
+		}
 		return err
 	}
 	env := verbEnv(cmd)
