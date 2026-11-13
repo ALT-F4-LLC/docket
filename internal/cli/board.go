@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -27,16 +25,15 @@ type boardResult struct {
 }
 
 var boardCmd = &cobra.Command{
-	Use:   "board",
-	Short: "Show Kanban board",
+	Use:         "board",
+	Short:       "Show Kanban board",
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runBoard)
 	},
 }
 
 func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
 	sizes, _ := cmd.Flags().GetStringSlice("size")
@@ -44,43 +41,18 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 	expand, _ := cmd.Flags().GetBool("expand")
 	withBody, _ := cmd.Flags().GetBool("with-body")
 
-	// Validate filter enum values.
-	for _, p := range priorities {
-		if err := model.ValidatePriority(model.Priority(p)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, sz := range sizes {
-		if err := model.ValidateSize(model.Size(sz)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-
-	opts := store.ListOptions{
-		ProjectID:   getProjectID(cmd),
-		Priorities:  priorities,
-		Sizes:       sizes,
-		Labels:      labels,
-		Assignee:    assignee,
-		IncludeDone: true,
-	}
-
-	issues, _, err := st.ListIssues(opts)
+	board, err := verb.Board(cmd.Context(), verbEnv(cmd), verb.BoardInput{
+		Labels:           labels,
+		Priorities:       priorities,
+		Sizes:            sizes,
+		Assignee:         assignee,
+		Expand:           expand,
+		SubIssueProgress: !w.JSONMode,
+	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
-
-	// By default, roll up sub-issues into their parent (exclude issues that
-	// have a parent). When --expand is set, show all issues individually.
-	if !expand {
-		var roots []*model.Issue
-		for _, issue := range issues {
-			if issue.ParentID == nil {
-				roots = append(roots, issue)
-			}
-		}
-		issues = roots
-	}
+	issues := board.Issues
 
 	if w.JSONMode {
 		// Group issues by status for structured output.
@@ -106,17 +78,8 @@ func runBoard(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return nil
 	}
 
-	// Build sub-issue progress map for parent issues in a single query.
-	parentIDs := make([]int, len(issues))
-	for i, issue := range issues {
-		parentIDs[i] = issue.ID
-	}
-	batchProgress, err := st.GetBatchSubIssueProgress(parentIDs)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
-	}
-	progress := make(map[int]render.SubIssueProgress, len(batchProgress))
-	for id, counts := range batchProgress {
+	progress := make(map[int]render.SubIssueProgress, len(board.Progress))
+	for id, counts := range board.Progress {
 		if counts[1] > 0 {
 			progress[id] = render.SubIssueProgress{Done: counts[0], Total: counts[1]}
 		}
