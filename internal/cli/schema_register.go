@@ -1,15 +1,11 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/schema"
-	"github.com/ALT-F4-LLC/docket/internal/store"
-	"github.com/ALT-F4-LLC/docket/internal/workflow"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -39,138 +35,84 @@ a conflict in one project neither cancels nor hides another project's
 registration. Registering schemas store-wide is the step that comes BEFORE
 sweeping a workflow corpus, since a workflow's 'payload' references resolve
 against the registry of the project it is being registered into.`,
-	Args: cobra.ExactArgs(2),
+	Args:        cobra.ExactArgs(2),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaRegister(cmd, args, getWriter(cmd))
 	},
 }
 
 func runSchemaRegister(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
 	ref, path := args[0], args[1]
+	project, _ := cmd.Flags().GetString("project")
+	all, _ := cmd.Flags().GetBool("all-projects")
 
-	// `name@version` is an ARGUMENT, not two flags — the surface line is
-	// `docket schema register name@v schema.json`. The grammar is
-	// internal/workflow's own PayloadShape, shared rather than restated, so what
-	// a workflow may REFERENCE and what the registry ACCEPTS cannot drift.
-	name, version, err := workflow.ParsePayloadRef(ref)
+	res, err := verb.SchemaRegister(cmd.Context(), schemaVerbEnv(cmd), verb.SchemaRegisterInput{
+		Ref:         ref,
+		Document:    func() ([]byte, error) { return readSchemaFile(path) },
+		SourcePath:  path,
+		Project:     project,
+		AllProjects: all,
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+		return verbErr(err)
 	}
 
-	src, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cmdErr(fmt.Errorf("schema file %s not found", path), output.ErrNotFound)
-		}
-		return cmdErr(
-			fmt.Errorf("reading schema file %s: %w", path, err), output.ErrNotFound)
+	if res.Projects != nil {
+		return renderSchemaRegisterAcrossProjects(cmd, w, res)
 	}
 
-	// Compile checks the ordered_enum annotation rules and then compiles the
-	// document as ordinary JSON Schema. Both refusals name the property path.
-	registered, err := schema.Compile(name, version, src)
-	if err != nil {
-		return schemaErr(fmt.Errorf("%s: %w", path, err))
-	}
-
-	// The derived index is stored NEXT TO the bytes it came from, so nothing
-	// re-walks a schema document during evaluation. It is a cache of a pure
-	// function of those bytes, never a second source of truth.
-	ordered, err := json.Marshal(registered.Ordered)
-	if err != nil {
-		return cmdErr(fmt.Errorf("encoding the ordered index: %w", err), output.ErrGeneral)
-	}
-
-	// The DOCUMENT is judged before the targets are: bytes that do not compile
-	// are wrong in every project, and naming a project in that refusal would
-	// suggest the document might have been right somewhere else.
-	targets, fannedOut, err := resolveRegistryTargets(cmd, conn)
-	if err != nil {
-		return err
-	}
-	if fannedOut {
-		return registerSchemaAcrossProjects(
-			cmd, w, conn, name, version, path, src, string(ordered), targets)
-	}
-
-	stored, created, err := store.StoreOn(conn).InsertSchema(
-		schemaRow(name, version, path, src, string(ordered), getProjectID(cmd)),
-		model.NowMS())
-	if err != nil {
-		return schemaErr(err)
-	}
-
+	stored := res.Schema
 	message := fmt.Sprintf("Registered %s", stored.Ref())
 	if fields := stored.OrderedFields(); len(fields) > 0 {
 		message += fmt.Sprintf(" (ordered: %s)", joinFields(fields))
 	}
-	if !created {
+	if !res.Created {
 		message = fmt.Sprintf("%s is already registered with these bytes", stored.Ref())
 	}
 	w.Success(stored, message)
 	return nil
 }
 
-// schemaRow builds the row to insert. Shared by the single-project path and the
-// fan-out so the two can never store different columns for the same bytes.
-func schemaRow(
-	name string, version int, path string, src []byte, ordered string, projectID int,
-) *model.Schema {
-	return &model.Schema{
-		// The registration lands in a NAMED project's registry (DKT-20):
-		// without this the insert falls through to the column's DEFAULT 1, so
-		// every project's registrations pile up under whichever repo holds the
-		// default row — invisible to the very project that registered them.
-		ProjectID: projectID,
-		Name:      name,
-		Version:   version,
-		// source_path is provenance only — it records where the bytes came from
-		// and is never re-read.
-		SourcePath:   path,
-		SourceSHA256: workflow.SHA256(src),
-		Body:         string(src),
-		Ordered:      ordered,
+// readSchemaFile reads the schema document at path, refusing a missing or
+// unreadable file as NOT_FOUND.
+func readSchemaFile(path string) ([]byte, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, cmdErr(fmt.Errorf("schema file %s not found", path), output.ErrNotFound)
+		}
+		return nil, cmdErr(
+			fmt.Errorf("reading schema file %s: %w", path, err), output.ErrNotFound)
 	}
+	return src, nil
 }
 
-// registerSchemaAcrossProjects is the --project / --all-projects path.
-//
-// A schema has no environment to validate against — the document compiled
-// once, above, and compiling is a pure function of the bytes — so the loop is
-// insert-only. A conflicting project is recorded and the sweep continues, for
-// the reason the flag exists: one command is supposed to cover the store, and
-// stopping at the first conflict would leave the operator to work out by hand
-// which projects it had reached.
-func registerSchemaAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
-	name string, version int, path string, src []byte, ordered string,
-	targets []*model.Project,
+// renderSchemaRegisterAcrossProjects writes the --project / --all-projects
+// report: each project's own outcome, a conflict in one never hiding
+// another's registration.
+func renderSchemaRegisterAcrossProjects(
+	cmd *cobra.Command, w *output.Writer, res verb.SchemaRegisterResult,
 ) error {
 	report := &registryFanoutReport{
 		Operation: "schema register",
-		Subject:   fmt.Sprintf("%s@%d", name, version),
+		Subject:   fmt.Sprintf("%s@%d", res.Name, res.Version),
 		Scope:     fanoutScope(cmd),
 	}
-
-	st := store.StoreOn(conn)
-
-	for _, target := range targets {
-		stored, created, err := st.InsertSchema(
-			schemaRow(name, version, path, src, ordered, target.ID), model.NowMS())
-		if err != nil {
+	for _, r := range res.Projects {
+		if r.Err != nil {
 			report.Results = append(report.Results,
-				registryFailureResult(target, err, schemaErr))
+				registryFailureResult(r.Project, r.Err, verbErr))
 			continue
 		}
 		outcome := outcomeUnchanged
-		if created {
+		if r.Changed {
 			outcome = outcomeRegistered
 		}
 		report.Results = append(report.Results,
-			registrySuccessResult(target, outcome, stored.Ref()))
+			registrySuccessResult(r.Project, outcome, r.Schema.Ref()))
 	}
-
 	return finishRegistryFanout(w, report)
 }
 

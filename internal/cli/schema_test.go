@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -71,6 +70,21 @@ func registerSchema(t *testing.T, conn *sql.DB, ref, body string) error {
 
 func schemaCmdWithDB(conn *sql.DB) *cobra.Command { return cmdWithDB(conn) }
 
+// schemaRow builds a schema row in projectID for a test to insert directly.
+func schemaRow(
+	name string, version int, path string, src []byte, ordered string, projectID int,
+) *model.Schema {
+	return &model.Schema{
+		ProjectID:    projectID,
+		Name:         name,
+		Version:      version,
+		SourcePath:   path,
+		SourceSHA256: workflow.SHA256(src),
+		Body:         string(src),
+		Ordered:      ordered,
+	}
+}
+
 func TestSchemaRegisterSucceeds(t *testing.T) {
 	conn := newTestDB(t)
 	err := registerSchema(t, conn, "findings@1", findingsSchema)
@@ -101,6 +115,14 @@ func TestSchemaRegisterSucceeds(t *testing.T) {
 	}
 }
 
+func TestSchemaWritesOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{schemaRegisterCmd, schemaDeprecateCmd} {
+		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
+			t.Errorf("schema %s lacks the verbOwnsProject annotation", cmd.Name())
+		}
+	}
+}
+
 // TestSchemaRegisterLandsInTheCallersProject pins DKT-20: the register verb
 // resolves the INVOKING project the same way the read verbs do, rather than
 // letting the insert fall through to the schemas column's DEFAULT 1. Before
@@ -108,22 +130,11 @@ func TestSchemaRegisterSucceeds(t *testing.T) {
 // success and then read back NOT_FOUND from the very cwd that registered it.
 func TestSchemaRegisterLandsInTheCallersProject(t *testing.T) {
 	conn := newTestDB(t)
-
-	// EnsureProject claims the unclaimed default row in place before it
-	// inserts, so two calls are what it takes to get a caller that is NOT the
-	// default project.
-	_, err := db.EnsureProject(conn, "/repo/default", "default", model.NowMS())
-	testsupport.Must(t, err, "claiming the default project: %v", err)
-	caller, err := db.EnsureProject(conn, "/repo/caller", "caller", model.NowMS())
-	testsupport.Must(t, err, "creating the caller's project: %v", err)
-	if caller == db.DefaultProjectID {
-		t.Fatalf("caller project = %d, want a non-default id", caller)
-	}
-
 	cmd := schemaCmdWithDB(conn)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, caller))
+	caller := inCallerProject(t, conn, cmd, "/repo/caller")
+
 	w, _ := bufWriter(true)
-	err = runSchemaRegister(cmd, []string{"findings@1", writeSchema(t, findingsSchema)}, w)
+	err := runSchemaRegister(cmd, []string{"findings@1", writeSchema(t, findingsSchema)}, w)
 	testsupport.Must(t, err, "register: %v", err)
 
 	if _, err := db.GetSchema(conn, caller, "findings", 1); err != nil {

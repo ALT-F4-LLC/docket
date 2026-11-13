@@ -1,15 +1,10 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
-	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
-	"github.com/ALT-F4-LLC/docket/internal/workflow"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -65,52 +60,42 @@ store. Both report each project's own outcome: a project where the version was
 never registered is reported as not-registered, one where it was already
 retired as already-deprecated, and one where a live workflow still references
 it as in-use, while every project that did retire it still did.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaDeprecate(cmd, args, getWriter(cmd))
 	},
 }
 
-// errSchemaInUse wraps the in-use refusal so the fan-out can classify it by
-// sentinel, the way it classifies already-deprecated.
-var errSchemaInUse = errors.New("schema is referenced by a workflow still in service")
+// errSchemaInUse forwards to verb.ErrSchemaInUse, which the fan-out
+// classifies by sentinel the way it classifies already-deprecated.
+var errSchemaInUse = verb.ErrSchemaInUse
 
 func runSchemaDeprecate(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	// The reference grammar is the registry's own PayloadShape, so an explicit
-	// version is REQUIRED by construction: a `payload` declaration names an
-	// exact version, and retirement applies to exactly one.
-	name, version, err := workflow.ParsePayloadRef(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
 	restore, _ := cmd.Flags().GetBool("restore")
+	project, _ := cmd.Flags().GetString("project")
+	all, _ := cmd.Flags().GetBool("all-projects")
 
-	targets, fannedOut, err := resolveRegistryTargets(cmd, conn)
+	res, err := verb.SchemaDeprecate(cmd.Context(), schemaVerbEnv(cmd), verb.SchemaDeprecateInput{
+		Ref:         args[0],
+		Restore:     restore,
+		Project:     project,
+		AllProjects: all,
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
-	}
-	if fannedOut {
-		return deprecateSchemaAcrossProjects(
-			cmd, w, conn, args[0], name, version, restore, targets)
+		return verbErr(err)
 	}
 
+	if res.Projects != nil {
+		return renderSchemaDeprecateAcrossProjects(cmd, w, args[0], restore, res.Projects)
+	}
+
+	s := res.Schema
 	if restore {
-		s, err := store.StoreOn(conn).RestoreSchema(getProjectID(cmd), name, version)
-		if err != nil {
-			return schemaErr(describeSchemaDeprecateFailure(err, args[0]))
-		}
 		w.Success(s, fmt.Sprintf("%s restored to service.", s.Ref()))
 		return nil
 	}
-
-	s, err := deprecateSchemaIn(conn, getProjectID(cmd), name, version)
-	if err != nil {
-		return schemaErr(describeSchemaDeprecateFailure(err, args[0]))
-	}
-
 	w.Success(s, fmt.Sprintf(
 		"%s retired from service. It stays registered and readable, runs that "+
 			"pinned it still validate against it, and new payload references "+
@@ -118,48 +103,14 @@ func runSchemaDeprecate(cmd *cobra.Command, args []string, w *output.Writer) err
 	return nil
 }
 
-// deprecateSchemaIn is the single-project retirement: the reference check,
-// then the write. The check runs OUTSIDE the write's transaction, which is
-// acceptable here because a workflow registered between the two is refused by
-// its own V25a check the moment the retirement lands — the race resolves to the
-// same refusal either way, only attributed to the other command.
-func deprecateSchemaIn(conn store.LegacyDB, projectID int, name string, version int) (*model.Schema, error) {
-	referencing, err := engine.WorkflowsReferencingSchema(conn, projectID, name, version)
-	if err != nil {
-		return nil, err
-	}
-	if len(referencing) > 0 {
-		return nil, fmt.Errorf(
-			"%w: %s@%d is named as `payload` by %s. Retire or re-version those "+
-				"workflows first; their next registration or activation would "+
-				"otherwise be refused",
-			errSchemaInUse, name, version, strings.Join(referencing, ", "))
-	}
-	return store.StoreOn(conn).DeprecateSchema(projectID, name, version, model.NowMS())
-}
-
-// describeSchemaDeprecateFailure gives a fanned-out refusal the SAME sentence
-// its single-project counterpart writes. The sentinels stay wrapped, since the
-// classifier and the report both match on them.
-func describeSchemaDeprecateFailure(err error, ref string) error {
-	switch {
-	case errors.Is(err, store.ErrSchemaAlreadyDeprecated):
-		return fmt.Errorf("%s is already deprecated: %w", ref, err)
-	case errors.Is(err, store.ErrSchemaBuiltin):
-		return fmt.Errorf("%s ships with docket and is visible to every project; "+
-			"it cannot be retired: %w", ref, err)
-	}
-	return describeMissingSchema(err, ref)
-}
-
-// deprecateSchemaAcrossProjects is the --project / --all-projects path for
-// both directions of the verb, deprecateWorkflowAcrossProjects's shape: restore
-// is idempotent (already-in-service is a success), deprecate is not
-// (already-deprecated is a CONFLICT), and in-use is a per-project refusal that
-// never cancels a neighbor's retirement.
-func deprecateSchemaAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
-	ref, name string, version int, restore bool, targets []*model.Project,
+// renderSchemaDeprecateAcrossProjects writes the --project / --all-projects
+// report for both directions of the verb, deprecateWorkflowAcrossProjects's
+// shape: restore is idempotent (already-in-service is a success), deprecate is
+// not (already-deprecated is a CONFLICT), and in-use is a per-project refusal
+// that never cancels a neighbor's retirement.
+func renderSchemaDeprecateAcrossProjects(
+	cmd *cobra.Command, w *output.Writer, ref string, restore bool,
+	results []verb.SchemaProjectResult,
 ) error {
 	operation := "schema deprecate"
 	if restore {
@@ -168,39 +119,22 @@ func deprecateSchemaAcrossProjects(
 	report := &registryFanoutReport{
 		Operation: operation, Subject: ref, Scope: fanoutScope(cmd),
 	}
-	st := store.StoreOn(conn)
-
-	for _, target := range targets {
-		var (
-			s       *model.Schema
-			err     error
-			outcome string
-		)
-		if restore {
-			before, lookupErr := st.GetSchema(target.ID, name, version)
-			if lookupErr != nil {
-				report.Results = append(report.Results, registryFailureResult(
-					target, describeSchemaDeprecateFailure(lookupErr, ref), schemaErr))
-				continue
-			}
-			outcome = outcomeAlreadyBinding
-			if before.Deprecated() {
-				outcome = outcomeRestored
-			}
-			s, err = st.RestoreSchema(target.ID, name, version)
-		} else {
-			outcome = outcomeDeprecated
-			s, err = deprecateSchemaIn(conn, target.ID, name, version)
-		}
-		if err != nil {
-			report.Results = append(report.Results, registryFailureResult(
-				target, describeSchemaDeprecateFailure(err, ref), schemaErr))
+	for _, r := range results {
+		if r.Err != nil {
+			report.Results = append(report.Results,
+				registryFailureResult(r.Project, r.Err, verbErr))
 			continue
 		}
+		outcome := outcomeDeprecated
+		if restore {
+			outcome = outcomeAlreadyBinding
+			if r.Changed {
+				outcome = outcomeRestored
+			}
+		}
 		report.Results = append(report.Results,
-			registrySuccessResult(target, outcome, s.Ref()))
+			registrySuccessResult(r.Project, outcome, r.Schema.Ref()))
 	}
-
 	return finishRegistryFanout(w, report)
 }
 
