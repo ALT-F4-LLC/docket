@@ -25,6 +25,13 @@ var docCommentAddCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
+		env := verbEnv(cmd)
+		target, err := verb.DocCommentTarget(cmd.Context(), env, verb.DocCommentTargetInput{Doc: args[0]})
+		recordRegisteredProject(cmd, env, target.Registered)
+		if err != nil {
+			return verbErr(err)
+		}
+
 		jsonMode, _ := jsonModeOf(cmd)
 		body, _ := cmd.Flags().GetString("message")
 
@@ -44,7 +51,7 @@ var docCommentAddCmd = &cobra.Command{
 			}
 		}
 
-		body, err := commentBodyOrEditor(body, cmd.Flags().Changed("message"), jsonMode)
+		body, err = commentBodyOrEditor(body, cmd.Flags().Changed("message"), jsonMode)
 		if err != nil {
 			return err
 		}
@@ -59,7 +66,6 @@ var docCommentAddCmd = &cobra.Command{
 			return err
 		}
 
-		env := verbEnv(cmd)
 		res, err := verb.DocCommentAdd(cmd.Context(), env, verb.DocCommentAddInput{
 			Doc:            args[0],
 			Body:           body,

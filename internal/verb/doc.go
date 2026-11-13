@@ -322,6 +322,49 @@ func DocDelete(ctx context.Context, env Env, in DocDeleteInput) (DocDeleteResult
 	return result, nil
 }
 
+// DocCommentTargetInput names the doc a comment is about to be added to.
+type DocCommentTargetInput struct {
+	Doc string
+}
+
+// DocCommentTargetResult is the doc a comment would be added to. Registered
+// is as in DocCreateResult.
+type DocCommentTargetResult struct {
+	Doc        *model.Doc
+	Registered *model.Project
+}
+
+// DocCommentTarget runs every check DocCommentAdd makes before it writes:
+// the project, the doc reference and the doc's existence. A caller that has
+// to ask a person for the comment body calls it first, so a comment that
+// would be refused is refused before anyone types it. It resolves the project
+// as DocCommentAdd does, so it may register the caller's anchored project.
+func DocCommentTarget(ctx context.Context, env Env, in DocCommentTargetInput) (DocCommentTargetResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocCommentTargetResult{}, err
+	}
+	var result DocCommentTargetResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	_, result.Doc, err = commentedDoc(env, in.Doc)
+	return result, err
+}
+
+// commentedDoc parses ref and fetches the doc it names.
+func commentedDoc(env Env, ref string) (int, *model.Doc, error) {
+	id, err := parseDocRef(ref)
+	if err != nil {
+		return 0, nil, err
+	}
+	doc, err := env.Store.GetDoc(id)
+	if err != nil {
+		return 0, nil, docError(err, "doc "+ref, "fetching doc")
+	}
+	return id, doc, nil
+}
+
 // DocCommentAddInput is the comment to add to Doc. A replayed IdempotencyKey
 // returns the comment it first created.
 type DocCommentAddInput struct {
@@ -349,15 +392,12 @@ func DocCommentAdd(ctx context.Context, env Env, in DocCommentAddInput) (DocComm
 	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
 		return result, err
 	}
-	id, err := parseDocRef(in.Doc)
+	id, doc, err := commentedDoc(env, in.Doc)
 	if err != nil {
 		return result, err
 	}
+	result.Doc = doc
 	label := "doc " + in.Doc
-
-	if result.Doc, err = env.Store.GetDoc(id); err != nil {
-		return result, docError(err, label, "fetching doc")
-	}
 
 	commentID, err := env.Store.CreateDocCommentIdempotent(&model.DocComment{
 		DocID:  id,

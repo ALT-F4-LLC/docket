@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -77,6 +78,10 @@ func TestDocCommentAddReturnsTheStoredComment(t *testing.T) {
 	if env.Data.DocID != ref {
 		t.Errorf("add returned doc_id %q, want %q", env.Data.DocID, ref)
 	}
+	if author := config.DefaultAuthor(); env.Data.Author != author || stored[0].Author != author {
+		t.Errorf("add returned author %q, stored %q; want the default author %q",
+			env.Data.Author, stored[0].Author, author)
+	}
 }
 
 // TestDocCommentAddOwnsItsProject: doc comment add resolves its project
@@ -98,6 +103,82 @@ func TestDocCommentAddUnknownDocIsNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "doc DOC-999 not found") {
 		t.Errorf("error %q does not name the missing doc", err)
+	}
+}
+
+// TestDocCommentAddRefusesBeforeAskingForTheBody: a comment that cannot be
+// added is refused before the body is read, so nobody types a comment that is
+// then thrown away. A JSON-mode run with no message shows the order: each
+// refusal is reported, never the missing message.
+func TestDocCommentAddRefusesBeforeAskingForTheBody(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	docID := createDoc(t, conn, "subject", "note", "draft")
+	ref := model.FormatDocID(docID)
+
+	for _, tc := range []struct {
+		name   string
+		cfg    *config.Config
+		doc    string
+		code   output.ErrorCode
+		prefix string
+	}{
+		{"unanchored caller", &config.Config{Identity: "/work/scratch"}, ref,
+			output.ErrValidation, "cannot tell which project this belongs to"},
+		{"malformed doc ID", nil, "not-a-doc", output.ErrValidation, "invalid doc ID: "},
+		{"missing doc", nil, "DOC-999", output.ErrNotFound, "doc DOC-999 not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStdin(t, "")
+			_, err := runLeaseCommandOutput(t, conn, tc.cfg, docCommentAddCmd, tc.doc)
+			var cmdError *CmdError
+			if !errors.As(err, &cmdError) || cmdError.Code != tc.code ||
+				!strings.HasPrefix(cmdError.Error(), tc.prefix) {
+				t.Errorf("doc comment add %s with no message returned %v, want %s %q",
+					tc.doc, err, tc.code, tc.prefix)
+			}
+		})
+	}
+	if comments, err := db.ListDocComments(conn, docID); err != nil || len(comments) != 0 {
+		t.Errorf("comments = (%d, %v), want none", len(comments), err)
+	}
+}
+
+// TestDocCommentAddRecordsTheProjectItRegisters keeps the project-registered
+// event the root hook wrote before doc comment add resolved its own project,
+// including when the comment is refused after the project is registered.
+func TestDocCommentAddRecordsTheProjectItRegisters(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	ref := model.FormatDocID(createDoc(t, conn, "subject", "note", "draft"))
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+
+	testsupport.Must(t, docCommentAddCmd.Flags().Set("message", "hello"), "set --message")
+	_, err = runLeaseCommandOutput(t, conn, anchored("/repos/comment"), docCommentAddCmd, ref)
+	testsupport.Must(t, err, "doc comment add: %v", err)
+	testsupport.Must(t, docCommentAddCmd.Flags().Set("message", "hello"), "set --message")
+	_, err = runLeaseCommandOutput(t, conn, anchored("/repos/missing"), docCommentAddCmd, "DOC-999")
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrNotFound {
+		t.Fatalf("doc comment add DOC-999 returned %v, want NOT_FOUND", err)
+	}
+
+	want := map[string]string{
+		"/repos/comment": "doc comment add",
+		"/repos/missing": "doc comment add",
+	}
+	got := registrationEvents(t, conn)
+	if len(got) != len(want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+	for identity, verb := range want {
+		if got[identity] != verb {
+			t.Errorf("registration of %s attributed to %q, want %q", identity, got[identity], verb)
+		}
 	}
 }
 

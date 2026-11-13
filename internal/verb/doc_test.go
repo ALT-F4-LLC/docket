@@ -604,3 +604,117 @@ func TestDocCommentAndLinkWritesRegisterAnAnchoredProject(t *testing.T) {
 		})
 	}
 }
+
+// TestDocCommentAndLinkWritesReportTheProjectTheyRegisteredBeforeFailing:
+// a write that registers the caller's anchored identity and then fails still
+// reports the new row beside its error, so the caller can record the
+// project-registered event for a project that exists either way.
+func TestDocCommentAndLinkWritesReportTheProjectTheyRegisteredBeforeFailing(t *testing.T) {
+	ctx := context.Background()
+	type fixture struct{ docRef, issueRef string }
+	for _, tc := range []struct {
+		name   string
+		code   output.ErrorCode
+		prefix string
+		write  func(env verb.Env, f fixture) (*model.Project, error)
+	}{
+		{"comment target, missing doc", output.ErrNotFound, "doc DOC-999 not found",
+			func(env verb.Env, _ fixture) (*model.Project, error) {
+				res, err := verb.DocCommentTarget(ctx, env, verb.DocCommentTargetInput{Doc: "DOC-999"})
+				return res.Registered, err
+			}},
+		{"comment add, malformed doc ID", output.ErrValidation, "invalid doc ID: ",
+			func(env verb.Env, _ fixture) (*model.Project, error) {
+				res, err := verb.DocCommentAdd(ctx, env, verb.DocCommentAddInput{Doc: "not-a-doc", Body: "b"})
+				return res.Registered, err
+			}},
+		{"comment add, missing doc", output.ErrNotFound, "doc DOC-999 not found",
+			func(env verb.Env, _ fixture) (*model.Project, error) {
+				res, err := verb.DocCommentAdd(ctx, env, verb.DocCommentAddInput{Doc: "DOC-999", Body: "b"})
+				return res.Registered, err
+			}},
+		{"comment add, reused key", output.ErrConflict, "",
+			func(env verb.Env, f fixture) (*model.Project, error) {
+				if _, err := verb.DocCommentAdd(ctx, projectEnv(env.Store, "", false),
+					verb.DocCommentAddInput{Doc: f.docRef, Body: "first", IdempotencyKey: "k"}); err != nil {
+					return nil, err
+				}
+				res, err := verb.DocCommentAdd(ctx, env,
+					verb.DocCommentAddInput{Doc: f.docRef, Body: "second", IdempotencyKey: "k"})
+				return res.Registered, err
+			}},
+		{"link add, malformed doc ID", output.ErrValidation, "invalid doc ID: ",
+			func(env verb.Env, f fixture) (*model.Project, error) {
+				res, err := verb.DocLinkAdd(ctx, env, verb.DocLinkAddInput{Doc: "not-a-doc", Issue: f.issueRef})
+				return res.Registered, err
+			}},
+		{"link add, missing issue", output.ErrNotFound, "doc or issue not found",
+			func(env verb.Env, f fixture) (*model.Project, error) {
+				res, err := verb.DocLinkAdd(ctx, env, verb.DocLinkAddInput{Doc: f.docRef, Issue: "DKT-999"})
+				return res.Registered, err
+			}},
+		{"link add, existing link", output.ErrConflict, "link already exists",
+			func(env verb.Env, f fixture) (*model.Project, error) {
+				if _, err := verb.DocLinkAdd(ctx, projectEnv(env.Store, "", false),
+					verb.DocLinkAddInput{Doc: f.docRef, Issue: f.issueRef}); err != nil {
+					return nil, err
+				}
+				res, err := verb.DocLinkAdd(ctx, env, verb.DocLinkAddInput{Doc: f.docRef, Issue: f.issueRef})
+				return res.Registered, err
+			}},
+		{"link remove, malformed issue ID", output.ErrValidation, "invalid issue ID: ",
+			func(env verb.Env, f fixture) (*model.Project, error) {
+				res, err := verb.DocLinkRemove(ctx, env, verb.DocLinkRemoveInput{Doc: f.docRef, Issue: "not-an-issue"})
+				return res.Registered, err
+			}},
+		{"link remove, missing link", output.ErrNotFound, "link not found",
+			func(env verb.Env, f fixture) (*model.Project, error) {
+				res, err := verb.DocLinkRemove(ctx, env, verb.DocLinkRemoveInput{Doc: f.docRef, Issue: f.issueRef})
+				return res.Registered, err
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			ensureProject(t, st, "/repos/first", "first")
+			f := fixture{
+				docRef:   model.FormatDocID(createDoc(t, st, store.DefaultProjectID, "doc")),
+				issueRef: model.FormatID(createIssue(t, st)),
+			}
+
+			reg, err := tc.write(projectEnv(st, "/repos/fresh", true), f)
+			requireVerbError(t, err, tc.code, tc.prefix)
+			id, found, lookupErr := st.LookupProject("/repos/fresh")
+			if lookupErr != nil || !found {
+				t.Fatalf("LookupProject = (%d, %v, %v), want a registered row", id, found, lookupErr)
+			}
+			if reg == nil || reg.ID != id || reg.Identity != "/repos/fresh" {
+				t.Errorf("Registered = %+v beside %v, want the new row %d", reg, err, id)
+			}
+		})
+	}
+}
+
+// TestDocCommentTargetNamesTheDocToComment: the target of a comment is the doc
+// the reference names, and an unanchored caller is refused before any lookup.
+func TestDocCommentTargetNamesTheDocToComment(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	ensureProject(t, st, "/repos/first", "first")
+	docID := createDoc(t, st, store.DefaultProjectID, "subject")
+	ref := model.FormatDocID(docID)
+
+	target, err := verb.DocCommentTarget(ctx, projectEnv(st, "", false), verb.DocCommentTargetInput{Doc: ref})
+	if err != nil {
+		t.Fatalf("DocCommentTarget: %v", err)
+	}
+	if target.Doc == nil || target.Doc.ID != docID || target.Doc.Title != "subject" {
+		t.Errorf("DocCommentTarget = %+v, want doc %d titled %q", target.Doc, docID, "subject")
+	}
+
+	_, err = verb.DocCommentTarget(ctx, projectEnv(st, "", false), verb.DocCommentTargetInput{Doc: "not-a-doc"})
+	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
+
+	_, err = verb.DocCommentTarget(ctx, projectEnv(st, "/work/scratch", false), verb.DocCommentTargetInput{Doc: "DOC-999"})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+	requireUnregistered(t, st, "/work/scratch")
+}
