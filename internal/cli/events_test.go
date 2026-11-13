@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -134,7 +133,7 @@ func eventsFor(
 			t.Fatalf("setting --all-projects: %v", err)
 		}
 	}
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, invoking))
+	inCheckoutOf(t, cmd, invoking)
 
 	w, buf := bufWriter(true)
 	w.JSONVersion = output.JSONV2
@@ -250,7 +249,7 @@ func TestEventsListAllProjectsWithRunStillAnswers(t *testing.T) {
 // predicate under --run must not drop it everywhere.
 func TestEventsListWithoutRunStaysScopedToTheInvokingProject(t *testing.T) {
 	conn := newTestDB(t)
-	here, _, hereRun, _ := twoProjectRuns(t, conn)
+	here, there, hereRun, thereRun := twoProjectRuns(t, conn)
 
 	out := eventsFor(t, conn, here, "", false)
 
@@ -261,6 +260,19 @@ func TestEventsListWithoutRunStaysScopedToTheInvokingProject(t *testing.T) {
 	if out.Data.Items[0].Run != hereRun {
 		t.Errorf("the scoped feed carries %q, want this project's %q",
 			out.Data.Items[0].Run, hereRun)
+	}
+
+	// From the other checkout the scope follows the checkout, not the store's
+	// default project.
+	out = eventsFor(t, conn, there, "", false)
+	if len(out.Data.Items) != 2 {
+		t.Fatalf("the other checkout's feed answered %d events, want its 2: %+v",
+			len(out.Data.Items), out.Data.Items)
+	}
+	for _, e := range out.Data.Items {
+		if e.Run != thereRun {
+			t.Errorf("the other checkout's feed carries %q, want only %q", e.Run, thereRun)
+		}
 	}
 }
 

@@ -3,9 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -50,7 +49,8 @@ would read as having caught up. Pruning a step's claim event also makes
 ` + "`docket step context`" + ` and ` + "`docket step render`" + ` for that step return ` + "`GONE`" + `
 (exit 9): the recorded issue body and scope are read back from that event, so
 there is no seq to resume from.`,
-	Args: cobra.NoArgs,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runEventsPrune(cmd, getWriter(cmd))
 	},
@@ -71,63 +71,26 @@ type eventsPruneResult struct {
 }
 
 func runEventsPrune(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	var in verb.EventsPruneInput
+	in.Before, _ = cmd.Flags().GetInt64("before")
+	in.BeforeRun, _ = cmd.Flags().GetString("before-run")
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.DryRun, _ = cmd.Flags().GetBool("dry-run")
+	in.Yes, _ = cmd.Flags().GetBool("yes")
 
-	before, _ := cmd.Flags().GetInt64("before")
-	beforeRunRef, _ := cmd.Flags().GetString("before-run")
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	yes, _ := cmd.Flags().GetBool("yes")
-
-	var beforeRun int
-	if beforeRunRef != "" {
-		id, err := model.ParseRunID(beforeRunRef)
-		if err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-		beforeRun = id
-	}
-
-	runRef, _ := cmd.Flags().GetString("run")
-	runID, err := engine.ResolveRunFilter(conn, runRef)
+	res, err := verb.EventsPrune(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
-	}
-
-	// A DELETION REQUIRES `--yes`.
-	//
-	// It is required in BOTH modes rather than only under `--json`. The
-	// alternative — prompting a human and requiring the flag only from a script
-	// — would make the verb's behavior depend on whether a terminal happened to
-	// be attached, which is the property that turns "I piped it to less" into a
-	// deleted log. `--dry-run` needs no confirmation, because it deletes
-	// nothing.
-	if !dryRun && !yes {
-		return cmdErr(
-			fmt.Errorf("events prune deletes events permanently; pass --yes to "+
-				"confirm, or --dry-run to see what it would delete"),
-			output.ErrValidation)
-	}
-
-	result, err := engine.PruneEvents(conn, engine.PruneQuery{
-		Before:    before,
-		BeforeRun: beforeRun,
-		RunID:     runID,
-		DryRun:    dryRun,
-		NowMS:     model.NowMS(),
-	})
-	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	payload := eventsPruneResult{
-		Pruned:          result.Pruned,
-		RetainedMinimum: result.RetainedMinimum,
-		HeldByRetention: result.HeldByRetention,
-		DryRun:          result.DryRun,
-		Before:          before,
-	}
-	if beforeRun != 0 {
-		payload.BeforeRun = model.FormatRunID(beforeRun)
+		Pruned:          res.Prune.Pruned,
+		RetainedMinimum: res.Prune.RetainedMinimum,
+		HeldByRetention: res.Prune.HeldByRetention,
+		DryRun:          res.Prune.DryRun,
+		Before:          in.Before,
+		BeforeRun:       res.BeforeRun,
 	}
 
 	var message string

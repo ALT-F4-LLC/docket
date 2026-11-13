@@ -15,6 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -103,39 +104,19 @@ func newestEventSeq(conn store.LegacyDB) (int64, error) {
 func runEventsFollow(cmd *cobra.Command) error {
 	conn := getDB(cmd)
 
-	since, _ := cmd.Flags().GetInt64("since")
-	if since < 0 {
-		return cmdErr(
-			fmt.Errorf("--since must not be negative: %d", since), output.ErrValidation)
-	}
-	limit, _ := cmd.Flags().GetInt("limit")
-	if err := validateLimit(cmd, limit); err != nil {
-		return err
-	}
-	if limit == 0 {
-		limit = eventsDefaultLimit
-	}
-
-	tail, err := eventsTailFlag(cmd)
+	in, err := eventsListInput(cmd)
 	if err != nil {
 		return err
 	}
-	kind, stepID, err := eventsPredicateFlags(cmd)
-	if err != nil {
-		return err
-	}
-
 	interval, _ := cmd.Flags().GetDuration("interval")
 	if interval <= 0 {
 		return cmdErr(
 			fmt.Errorf("--interval must be a positive duration, got %s", interval),
 			output.ErrValidation)
 	}
-
-	runRef, _ := cmd.Flags().GetString("run")
-	runID, err := engine.ResolveRunFilter(conn, runRef)
+	query, err := verb.EventsQuery(verbEnv(cmd), in)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	jsonMode, jsonVersion := jsonModeOf(cmd)
@@ -147,14 +128,10 @@ func runEventsFollow(cmd *cobra.Command) error {
 	defer stop()
 
 	if err := followEvents(ctx, followOptions{
-		conn:       conn,
-		stream:     openEventStream(conn, eventHeadWake{conn: conn, every: interval}),
-		retryEvery: interval,
-		query: engine.EventQuery{
-			Since: since, RunID: runID, Limit: limit, Tail: tail,
-			Kind: kind, StepID: stepID,
-			ProjectID: eventsProjectScope(cmd),
-		},
+		conn:        conn,
+		stream:      openEventStream(conn, eventHeadWake{conn: conn, every: interval}),
+		retryEvery:  interval,
+		query:       query,
 		jsonMode:    jsonMode,
 		jsonVersion: jsonVersion,
 		quietMode:   quietMode,

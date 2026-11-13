@@ -9,6 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -27,13 +28,8 @@ import (
 // note, and resolved the same way: the shape is satisfied, the spelling is
 // recorded.
 
-// eventsDefaultLimit is the default page size.
-//
-// A default exists at all because this is a CURSOR feed: a consumer polling it
-// wants a bounded page and a `total` telling it whether to poll again
-// immediately. An unbounded default would hand a first-time caller the whole
-// repo history.
-const eventsDefaultLimit = 100
+// eventsDefaultLimit is the default page size, which the verb owns.
+const eventsDefaultLimit = verb.EventsDefaultLimit
 
 var eventsCmd = &cobra.Command{
 	Use:   "events",
@@ -83,7 +79,8 @@ store, not the output.
 
 Human mode escapes stored strings on their way to the terminal; --json carries
 the raw bytes, because the consumer there is a program.`,
-	Args: cobra.NoArgs,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if follow, _ := cmd.Flags().GetBool("follow"); follow {
 			return runEventsFollow(cmd)
@@ -113,23 +110,6 @@ var _ output.Collection = eventsListResult{}
 
 // eventsListPayload emits the v1 array shape, the same wrapper every other list
 // verb uses so a bare slice does not render v1 items inside a v2 envelope.
-// eventsProjectScope resolves the feed's project scope (v12): the invoking
-// project by default, the whole store under --all-projects. Store-level
-// events — trust changes — appear either way; see EventQuery.ProjectID.
-//
-// IT IS NOT THE WHOLE STORY UNDER `--run` (DKT-583). ListEvents IGNORES this
-// scope when the query names a run, because a run belongs to one project and
-// the run filter is therefore already the narrower scope — scoping again could
-// only answer a neighbour's run with a successful EMPTY feed. The decision
-// lives in the engine so `--follow`, which shares this helper, cannot drift
-// away from `list`.
-func eventsProjectScope(cmd *cobra.Command) int {
-	if all, _ := cmd.Flags().GetBool("all-projects"); all {
-		return 0
-	}
-	return getProjectID(cmd)
-}
-
 type eventsListPayload struct{ events []engine.Event }
 
 func (p eventsListPayload) MarshalJSON() ([]byte, error) {
@@ -139,103 +119,52 @@ func (p eventsListPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(p.events)
 }
 
-// eventsTailFlag reads and validates `--tail` for BOTH entry points.
-//
-// It is shared rather than duplicated because `--follow` starts its stream at
-// the tail (DKT-752): if the two paths validated the flag separately, one of
-// them would eventually accept a combination the other refuses, and the pair
-// that matters most — `--tail` with `--since` — is precisely the one whose
-// meaning is undefined.
-func eventsTailFlag(cmd *cobra.Command) (int, error) {
-	tail, _ := cmd.Flags().GetInt("tail")
-	if tail < 0 {
-		return 0, cmdErr(
-			fmt.Errorf("--tail must not be negative: %d", tail), output.ErrValidation)
+// eventsListInput reads `events list`'s flags into the verb's input for BOTH
+// entry points, so `--follow` cannot accept a flag combination `list`
+// refuses; verb.EventsQuery then validates the values for both.
+func eventsListInput(cmd *cobra.Command) (verb.EventsListInput, error) {
+	var in verb.EventsListInput
+	in.Since, _ = cmd.Flags().GetInt64("since")
+	in.Limit, _ = cmd.Flags().GetInt("limit")
+	if err := validateLimit(cmd, in.Limit); err != nil {
+		return in, err
 	}
+	in.Tail, _ = cmd.Flags().GetInt("tail")
 	// `--tail` answers "what just happened" and `--since` answers "what have I
 	// not seen". Combining them reads as a cursor but silently skips whatever
 	// falls between the cursor and the tail window, so it is refused rather
-	// than served with a plausible-looking short page.
-	if tail > 0 && cmd.Flags().Changed("since") {
-		return 0, cmdErr(
+	// than served with a plausible-looking short page. It is checked here
+	// because `--since 0` counts: the verb sees only the value.
+	if in.Tail > 0 && cmd.Flags().Changed("since") {
+		return in, cmdErr(
 			fmt.Errorf("--tail and --since are mutually exclusive: "+
 				"--since walks the feed forward, --tail jumps to its end"),
 			output.ErrValidation)
 	}
-	return tail, nil
-}
-
-// eventsPredicateFlags reads `--kind` and `--step` for BOTH entry points, for
-// the reason eventsTailFlag is shared: a filter one path validated and the
-// other did not would let `--follow` answer a lookup `list` refuses.
-func eventsPredicateFlags(cmd *cobra.Command) (kind string, stepID int, err error) {
-	kind, _ = cmd.Flags().GetString("kind")
-	if err := engine.ValidateEventKind(kind); err != nil {
-		return "", 0, runErr(err)
-	}
-	stepRef, _ := cmd.Flags().GetString("step")
-	stepID, err = engine.ResolveStepFilter(getDB(cmd), stepRef)
-	if err != nil {
-		return "", 0, runErr(err)
-	}
-	return kind, stepID, nil
+	in.Kind, _ = cmd.Flags().GetString("kind")
+	in.Step, _ = cmd.Flags().GetString("step")
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.AllProjects, _ = cmd.Flags().GetBool("all-projects")
+	return in, nil
 }
 
 func runEventsList(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	since, _ := cmd.Flags().GetInt64("since")
-	if since < 0 {
-		return cmdErr(
-			fmt.Errorf("--since must not be negative: %d", since), output.ErrValidation)
-	}
-	limit, _ := cmd.Flags().GetInt("limit")
-	if err := validateLimit(cmd, limit); err != nil {
-		return err
-	}
-	if limit == 0 {
-		limit = eventsDefaultLimit
-	}
-
-	tail, err := eventsTailFlag(cmd)
+	in, err := eventsListInput(cmd)
 	if err != nil {
 		return err
 	}
-	kind, stepID, err := eventsPredicateFlags(cmd)
+	res, err := verb.EventsList(cmd.Context(), verbEnv(cmd), in)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	runRef, _ := cmd.Flags().GetString("run")
-	runID, err := engine.ResolveRunFilter(conn, runRef)
-	if err != nil {
-		return runErr(err)
-	}
-
-	page, err := engine.ListEvents(conn, engine.EventQuery{
-		Since: since, RunID: runID, Limit: limit, Tail: tail,
-		Kind: kind, StepID: stepID,
-		ProjectID: eventsProjectScope(cmd),
-	})
-	if err != nil {
-		return runErr(err)
-	}
-
-	// Under `--tail` the effective window is N, not `--limit`, so the
-	// truncation flag is computed against the bound that actually applied.
-	effectiveLimit := limit
-	if tail > 0 {
-		effectiveLimit = tail
-	}
-	result := eventsListResult{Events: page.Events, Total: page.Total, limit: effectiveLimit}
+	result := eventsListResult{Events: res.Events, Total: res.Total, limit: res.Limit}
 
 	var message string
 	if !w.JSONMode {
 		// The project column appears only in the cross-project view: in a
 		// scoped feed every row has the same project, and a column that repeats
 		// one value down the page costs width without saying anything.
-		allProjects, _ := cmd.Flags().GetBool("all-projects")
-		message = renderEventList(page.Events, allProjects)
+		message = renderEventList(res.Events, in.AllProjects)
 	}
 	w.Success(result, message)
 	return nil
