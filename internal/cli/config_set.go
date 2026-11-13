@@ -1,15 +1,14 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -70,55 +69,35 @@ naming the classes that ARE declared. It is a warning and not a refusal — a
 workflow registered after its config is an ordinary order of operations — but
 a TTL that binds nothing is otherwise discovered when a healthy step is reaped
 mid-run.`,
-	Args: cobra.ExactArgs(2),
+	Args:        cobra.ExactArgs(2),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		key, value := args[0], args[1]
-
-		if key == clientDefaultProfileKey {
-			return setClientDefaultProfile(cmd, value)
+		if args[0] == clientDefaultProfileKey {
+			return setClientDefaultProfile(cmd, args[1])
 		}
 
 		// Project-scoped by default (v12): the value applies to this project
 		// and no other. --global writes the store-wide default every project
 		// without its own override falls back to — which is also what every
 		// pre-v12 value already is.
-		projectID := getProjectID(cmd)
-		if global, _ := cmd.Flags().GetBool("global"); global {
-			projectID = 0
+		in := verb.ConfigSetInput{Key: args[0], Value: args[1]}
+		in.Global, _ = cmd.Flags().GetBool("global")
+
+		env := projectVerbEnv(cmd)
+		result, err := verb.ConfigSet(cmd.Context(), env, in)
+		recordRegisteredProject(cmd, env, result.Registered)
+		if err != nil {
+			return verbErr(err)
 		}
 
-		// Through the engine rather than db.SetConfig directly (DKT-2767): a
-		// write to a vote-rule key records a `config-changed` event in the
-		// write's own transaction, attributed to the same identity the
-		// activity log uses, so a rewrite of a security-load-bearing key is
-		// detectable even though nothing yet prevents it.
-		if err := engine.SetConfig(conn, projectID, key, value, config.DefaultAuthor()); err != nil {
-			if errors.Is(err, store.ErrUnknownConfigKey) {
-				return cmdErr(err, output.ErrValidation)
-			}
-			// A validation failure on the value is the other expected case;
-			// anything else is a storage failure.
-			if strings.Contains(err.Error(), "storing config") {
-				return cmdErr(err, output.ErrGeneral)
-			}
-			return cmdErr(err, output.ErrValidation)
+		message := fmt.Sprintf("Set %s = %s", in.Key, in.Value)
+		if result.Warning != "" {
+			fmt.Fprintln(os.Stderr, result.Warning)
+			message += "\n" + result.Warning
 		}
-
-		// AFTER the write, not before (DKT-260). The value is valid and was
-		// stored; this is a disclosure about what it will bind to, and
-		// withholding the write over it would refuse a configuration the
-		// operator may be setting ahead of the workflow that uses it.
-		message := fmt.Sprintf("Set %s = %s", key, value)
-		if warning := leaseTTLClassWarning(conn, projectID, key); warning != "" {
-			fmt.Fprintln(os.Stderr, warning)
-			message += "\n" + warning
-		}
-
-		entry := store.ConfigEntry{Key: key, Value: value, Source: "set"}
-		w.Success(entry, message)
+		w.Success(result.Entry, message)
 		return nil
 	},
 }
@@ -135,7 +114,8 @@ distinguishable from "somebody configured this to the same value".
 
 An unset lease.ttl.<class> falls back to lease.ttl.default rather than to
 nothing.`,
-	Args: cobra.MaximumNArgs(1),
+	Args:        cobra.MaximumNArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -143,34 +123,25 @@ nothing.`,
 			return getClientDefaultProfile(cmd)
 		}
 
-		st := store.StoreOn(getDB(cmd))
-
-		projectID := getProjectID(cmd)
-		if global, _ := cmd.Flags().GetBool("global"); global {
-			projectID = 0
+		in := verb.ConfigGetInput{}
+		in.Global, _ = cmd.Flags().GetBool("global")
+		if len(args) == 1 {
+			in.Key = args[0]
 		}
 
-		if len(args) == 0 {
-			entries, err := st.ListConfig(projectID)
-			if err != nil {
-				return cmdErr(fmt.Errorf("listing config: %w", err), output.ErrGeneral)
-			}
+		result, err := verb.ConfigGet(cmd.Context(), projectVerbEnv(cmd), in)
+		if err != nil {
+			return verbErr(err)
+		}
+
+		if in.Key == "" {
 			w.Success(
-				configEntryList{Entries: entries, Total: len(entries)},
-				formatConfigEntries(entries),
+				configEntryList{Entries: result.Entries, Total: len(result.Entries)},
+				formatConfigEntries(result.Entries),
 			)
 			return nil
 		}
-
-		entry, err := st.GetConfig(projectID, args[0])
-		if err != nil {
-			if errors.Is(err, store.ErrUnknownConfigKey) {
-				return cmdErr(err, output.ErrValidation)
-			}
-			return cmdErr(fmt.Errorf("reading config: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(entry, configValueForHuman(entry))
+		w.Success(result.Entry, configValueForHuman(result.Entry))
 		return nil
 	},
 }

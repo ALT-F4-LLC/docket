@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +80,60 @@ func TestConfigRedactsPostgresDSNAndNeverReadsPasswordFile(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestConfigSetRecordsTheProjectItRegisters keeps the project-registered event
+// the root hook wrote before `config set` resolved its own project.
+func TestConfigSetRecordsTheProjectItRegisters(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+
+	_, err = runLeaseCommandOutput(t, conn, &config.Config{Identity: "/repos/configured", Anchored: true},
+		configSetCmd, "attempt.max", "5")
+	testsupport.Must(t, err, "config set: %v", err)
+
+	got := registrationEvents(t, conn)
+	if len(got) != 1 || got["/repos/configured"] != "config set" {
+		t.Errorf("registration events = %v, want /repos/configured attributed to \"config set\"", got)
+	}
+}
+
+// TestConfigGetAndSetOwnTheirProject pins `config get` and `config set` to the
+// verb layer: the root hook leaves project resolution to verb.ConfigGet and
+// verb.ConfigSet, and get must still read the override set wrote for the
+// same project.
+func TestConfigGetAndSetOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{configGetCmd, configSetCmd} {
+		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
+			t.Fatalf("config %s lacks the verbOwnsProject annotation", cmd.Name())
+		}
+	}
+
+	clientConfigSandbox(t)
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	_, err = runRootVerb(t, configSetCmd, "config", "set", "attempt.max", "5")
+	testsupport.Must(t, err, "docket config set attempt.max 5: %v", err)
+
+	read := func(args ...string) db.ConfigEntry {
+		t.Helper()
+		out, err := runRootVerb(t, configGetCmd, append([]string{"config", "get"}, args...)...)
+		testsupport.Must(t, err, "docket config get %v: %v", args, err)
+		var env struct {
+			Data db.ConfigEntry `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &env); err != nil {
+			t.Fatalf("unmarshal envelope: %v\n%s", err, out)
+		}
+		return env.Data
+	}
+
+	if got := read("attempt.max", "--json"); got != (db.ConfigEntry{Key: "attempt.max", Value: "5", Source: "set"}) {
+		t.Errorf("config get attempt.max = %+v, want the project's 5 (set)", got)
+	}
+	if got := read("attempt.max", "--global", "--json"); got.Source != "default" {
+		t.Errorf("config get attempt.max --global = %+v, want the store-wide default", got)
 	}
 }
