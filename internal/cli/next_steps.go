@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"fmt"
-	"strings"
-
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -48,44 +45,12 @@ var (
 	_ output.CollectionSiblings = nextStepsResult{}
 )
 
-// issueModeFlags are the filters that mean something in ISSUE mode and nothing
-// in step mode.
-//
-// They are REFUSED rather than silently ignored. An issue-mode filter
-// that quietly does nothing in step mode is a filter a dispatcher will trust
-// and be wrong about — it would ask for `--priority critical` steps, get every
-// step, and dispatch work it meant to defer.
-var issueModeFlags = []string{"status", "priority", "label", "type"}
-
 func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(runRef)
-	if err != nil {
-		return cmdErr(fmt.Errorf("invalid run ID: %w", err), output.ErrValidation)
-	}
-
-	var conflicting []string
-	for _, name := range issueModeFlags {
-		if cmd.Flags().Changed(name) {
-			conflicting = append(conflicting, "--"+name)
-		}
-	}
-	if len(conflicting) > 0 {
-		subject := "is an issue filter"
-		if len(conflicting) > 1 {
-			subject = "are issue filters"
-		}
-		return cmdErr(
-			fmt.Errorf(
-				"%s %s and cannot be combined with --run, which lists a run's "+
-					"ready STEPS; inspect the run with `docket run status` instead",
-				strings.Join(conflicting, ", "), subject,
-			),
-			output.ErrValidation,
-		)
-	}
-
+	// The issue filters are passed through so verb.Next can refuse them.
+	statuses, _ := cmd.Flags().GetStringSlice("status")
+	priorities, _ := cmd.Flags().GetStringSlice("priority")
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	types, _ := cmd.Flags().GetStringSlice("type")
 	limit, _ := cmd.Flags().GetInt("limit")
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
@@ -102,10 +67,18 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 		limit = 0 // 0 means no limit (readyRows)
 	}
 
-	ready, err := engine.NewEngine().NextSteps(conn, runID, limit, model.NowMS())
+	next, err := verb.Next(cmd.Context(), verbEnv(cmd), verb.NextInput{
+		Statuses:   statuses,
+		Priorities: priorities,
+		Labels:     labels,
+		Types:      types,
+		Run:        runRef,
+		Limit:      limit,
+	})
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	ready := next.Steps
 
 	// Reaping is the one write this read-shaped verb performs. Saying so
 	// on stderr keeps it auditable without touching the payload — a JSON

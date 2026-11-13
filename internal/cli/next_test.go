@@ -74,6 +74,14 @@ func createIssueWithFile(t *testing.T, conn *sql.DB, title, file string) int {
 	return id
 }
 
+// TestNextCmdVerbOwnsProject pins that `next` resolves its project through
+// verb.Next rather than the root hook, in both modes.
+func TestNextCmdVerbOwnsProject(t *testing.T) {
+	if !verbOwnsProject(nextCmd) {
+		t.Error("next lacks the verbOwnsProject annotation")
+	}
+}
+
 func TestNextJSON_HydratesFilesAndDocs(t *testing.T) {
 	conn := newTestDB(t)
 	issueID := createIssueWithFile(t, conn, "ready", "internal/db/doc_links.go")

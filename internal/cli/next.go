@@ -1,14 +1,9 @@
 package cli
 
 import (
-	"fmt"
-
-	"github.com/ALT-F4-LLC/docket/internal/filter"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -40,8 +35,9 @@ func (r nextResult) CollectionTruncated() bool {
 }
 
 var nextCmd = &cobra.Command{
-	Use:   "next",
-	Short: "Show work-ready issues",
+	Use:         "next",
+	Short:       "Show work-ready issues",
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runNext)
 	},
@@ -49,12 +45,8 @@ var nextCmd = &cobra.Command{
 
 // runNext dispatches between the two modes of `next`.
 //
-// `docket next` WITHOUT --run is the existing issue-mode verb, BYTE-IDENTICAL:
-// runNextIssues below is the pre-phase-3 body, MOVED and not edited, so the
-// diff on that code is a pure relocation a reviewer can verify at a glance.
-// That is a code-structure requirement rather than an intention — it is what
-// makes QA section X (test_x_next.sh) pass untouched, which is the strongest
-// available evidence that behavior did not move.
+// `docket next` WITHOUT --run is the issue-mode verb, and its output is
+// frozen: QA section X (test_x_next.sh) pins it byte for byte.
 func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 	if runRef, _ := cmd.Flags().GetString("run"); runRef != "" {
 		return runNextSteps(cmd, runRef, w)
@@ -63,8 +55,6 @@ func runNext(cmd *cobra.Command, args []string, w *output.Writer) error {
 }
 
 func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	priorities, _ := cmd.Flags().GetStringSlice("priority")
 	sizes, _ := cmd.Flags().GetStringSlice("size")
@@ -77,83 +67,25 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 
-	// Validate filter enum values.
-	for _, s := range statuses {
-		if err := model.ValidateStatus(model.Status(s)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, p := range priorities {
-		if err := model.ValidatePriority(model.Priority(p)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, sz := range sizes {
-		if err := model.ValidateSize(model.Size(sz)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	for _, t := range types {
-		if err := model.ValidateIssueKind(model.IssueKind(t)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-
-	// Fetch all non-done issues for DAG construction.
-	allIssues, _, err := st.ListIssues(store.ListOptions{
-		ProjectID:   getProjectID(cmd),
-		IncludeDone: false,
-		Limit:       0, // no limit — need all for DAG
+	next, err := verb.Next(cmd.Context(), verbEnv(cmd), verb.NextInput{
+		Statuses:   statuses,
+		Priorities: priorities,
+		Sizes:      sizes,
+		Labels:     labels,
+		Types:      types,
+		Limit:      limit,
 	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
-
-	// Fetch all directional relations (blocks / depends_on).
-	relations, err := st.GetAllDirectionalRelations()
-	if err != nil {
-		return cmdErr(fmt.Errorf("loading relations: %w", err), output.ErrGeneral)
-	}
-
-	// Build DAG and find work-ready issues.
-	dag := planner.BuildDAG(allIssues, relations)
-
-	// Default statuses for FindReady: backlog, todo.
-	readyStatuses := statuses
-	if len(readyStatuses) == 0 {
-		readyStatuses = []string{string(model.StatusBacklog), string(model.StatusTodo)}
-	}
-	ready := planner.FindReady(dag, readyStatuses)
-
-	// Apply additional filters (priority, size, label, type) on the ready set.
-	ready = filterReady(ready, priorities, sizes, labels, types)
-
-	// Capture the true size of the ready set before truncating, so the v2
-	// envelope can report it and flag the drop.
-	readyTotal := len(ready)
-
-	// Apply limit.
-	if limit > 0 && len(ready) > limit {
-		ready = ready[:limit]
-	}
-
-	if err := st.HydrateDocs(ready); err != nil {
-		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
-	}
-
-	// FindReady/filterReady return a nil slice when nothing is ready. Both row
-	// payloads marshal a nil slice as `[]`, but the human table is handed
-	// `ready` directly, so it is normalized here once for every consumer.
-	if ready == nil {
-		ready = []*model.Issue{}
-	}
+	ready := next.Issues
 
 	// Total stays len(ready) — the v1 field is frozen. The honest pre-limit
 	// count rides in readyTotal and surfaces only under --json=v2.
 	result := nextResult{
 		Issues:     issuesPayload(ready, withBody),
 		Total:      len(ready),
-		readyTotal: readyTotal,
+		readyTotal: next.Total,
 		limit:      limit,
 		count:      len(ready),
 	}
@@ -179,43 +111,6 @@ func runNextIssues(cmd *cobra.Command, args []string, w *output.Writer) error {
 // nextModeHint disambiguates the two modes of `next` for a human reader.
 const nextModeHint = "\nShowing work-ready ISSUES. " +
 	"For a run's ready steps, use `docket next --run RUN-N`.\n"
-
-// filterReady applies priority, size, label, and type filters to a slice of
-// ready issues.
-func filterReady(issues []*model.Issue, priorities, sizes, labels, types []string) []*model.Issue {
-	if len(priorities) == 0 && len(sizes) == 0 && len(labels) == 0 && len(types) == 0 {
-		return issues
-	}
-
-	prioritySet := filter.ToStringSet(priorities)
-	sizeSet := filter.ToStringSet(sizes)
-	labelSet := filter.ToStringSet(labels)
-	typeSet := filter.ToStringSet(types)
-
-	var filtered []*model.Issue
-	for _, issue := range issues {
-		if len(prioritySet) > 0 {
-			if _, ok := prioritySet[string(issue.Priority)]; !ok {
-				continue
-			}
-		}
-		if len(sizeSet) > 0 {
-			if _, ok := sizeSet[string(issue.Size)]; !ok {
-				continue
-			}
-		}
-		if len(typeSet) > 0 {
-			if _, ok := typeSet[string(issue.Kind)]; !ok {
-				continue
-			}
-		}
-		if len(labelSet) > 0 && !filter.HasAllLabels(issue, labelSet) {
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	return filtered
-}
 
 func init() {
 	nextCmd.Flags().StringSliceP("status", "s", nil, "Filter by status (default: backlog,todo)")
