@@ -308,6 +308,10 @@ func TestPinShowWritesNothing(t *testing.T) {
 		t.Errorf("run row = %+v, want it unchanged at %+v", *runAfter, *runBefore)
 	}
 
+	if _, ok := pinShowCmd.Annotations["verbOwnsProject"]; !ok {
+		t.Error("pin show lacks the verbOwnsProject annotation")
+	}
+
 	var found bool
 	for _, child := range rootCmd.Commands() {
 		if child.Name() == "pin" {
