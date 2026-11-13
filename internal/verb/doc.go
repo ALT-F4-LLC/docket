@@ -151,6 +151,177 @@ func DocCommentList(ctx context.Context, env Env, in DocCommentListInput) (DocCo
 	return DocCommentListResult{DocID: id, Comments: comments}, nil
 }
 
+// DocCreateInput is the doc to create. Body is the content itself, never a
+// path. A replayed IdempotencyKey returns the doc it first created.
+type DocCreateInput struct {
+	Title          string
+	Body           string
+	Type           string
+	Status         string
+	IdempotencyKey string
+}
+
+// DocCreateResult is the created doc. Registered is the caller's project as
+// this call registered it, nil when it already existed; the caller records
+// the project-registered event for it, since that write is outside
+// store.Store.
+type DocCreateResult struct {
+	Doc        *model.Doc
+	Registered *model.Project
+}
+
+// DocCreate creates a doc in the caller's project, authored by env.Author. It
+// writes into that project, so it may register an anchored one.
+func DocCreate(ctx context.Context, env Env, in DocCreateInput) (DocCreateResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocCreateResult{}, err
+	}
+	var result DocCreateResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+
+	id, err := env.Store.CreateDocIdempotent(&model.Doc{
+		ProjectID: projectID,
+		Type:      in.Type,
+		Status:    in.Status,
+		Title:     in.Title,
+		Body:      in.Body,
+		Author:    env.Author,
+	}, in.IdempotencyKey)
+	if errors.Is(err, store.ErrConflict) {
+		return result, newError(err, output.ErrConflict)
+	}
+	if err != nil {
+		return result, newError(fmt.Errorf("creating doc: %w", err), output.ErrGeneral)
+	}
+
+	if result.Doc, err = env.Store.GetDoc(id); err != nil {
+		return result, newError(fmt.Errorf("fetching created doc: %w", err), output.ErrGeneral)
+	}
+	return result, nil
+}
+
+// DocEditInput names a doc and the fields to change; a nil field is left as
+// it is. Body is the content itself, never a path.
+type DocEditInput struct {
+	Doc    string
+	Title  *string
+	Body   *string
+	Type   *string
+	Status *string
+}
+
+// DocEditResult is the doc after the edit. Changed is false when the input
+// changed nothing, either because it set no field or because every field it
+// set already held that value. Registered is as in DocCreateResult.
+type DocEditResult struct {
+	Doc        *model.Doc
+	Changed    bool
+	Registered *model.Project
+}
+
+// DocEdit changes a doc's fields, recording a revision authored by
+// env.Author. It is a write, so it may register the caller's anchored project.
+func DocEdit(ctx context.Context, env Env, in DocEditInput) (DocEditResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocEditResult{}, err
+	}
+	var result DocEditResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	id, err := parseDocRef(in.Doc)
+	if err != nil {
+		return result, err
+	}
+	label := "doc " + model.FormatDocID(id)
+
+	doc, err := env.Store.GetDoc(id)
+	if err != nil {
+		return result, docError(err, label, "fetching doc")
+	}
+	if in.Title == nil && in.Body == nil && in.Type == nil && in.Status == nil {
+		result.Doc = doc
+		return result, nil
+	}
+
+	rev, err := env.Store.UpdateDoc(id, store.DocUpdate{
+		Title:  in.Title,
+		Body:   in.Body,
+		Status: in.Status,
+		Type:   in.Type,
+		Author: env.Author,
+	})
+	if err != nil {
+		return result, docError(err, label, "updating doc")
+	}
+	if result.Doc, err = env.Store.GetDoc(id); err != nil {
+		return result, newError(fmt.Errorf("fetching updated doc: %w", err), output.ErrGeneral)
+	}
+	result.Changed = rev != 0
+	return result, nil
+}
+
+// DocDeleteInput names the doc to delete. Cascade also removes its issue and
+// proposal links, which otherwise refuse the delete. Force is the caller's
+// consent to the deletion.
+type DocDeleteInput struct {
+	Doc     string
+	Cascade bool
+	Force   bool
+}
+
+// DocDeleteResult is the doc as it stood before the delete. Registered is as
+// in DocCreateResult.
+type DocDeleteResult struct {
+	Doc        *model.Doc
+	Registered *model.Project
+}
+
+// DocDelete deletes a doc. Without Force it deletes nothing and returns the
+// doc it would delete together with a VALIDATION_ERROR refusal, so a caller
+// that can ask for consent has what to ask about. It is a write, so it may
+// register the caller's anchored project.
+func DocDelete(ctx context.Context, env Env, in DocDeleteInput) (DocDeleteResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return DocDeleteResult{}, err
+	}
+	var result DocDeleteResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	id, err := parseDocRef(in.Doc)
+	if err != nil {
+		return result, err
+	}
+	ref := model.FormatDocID(id)
+
+	doc, err := env.Store.GetDoc(id)
+	if err != nil {
+		return result, docError(err, "doc "+ref, "fetching doc")
+	}
+	result.Doc = doc
+	if !in.Force {
+		return result, newError(fmt.Errorf(
+			"deleting %s is destructive; pass --force to confirm", ref), output.ErrValidation)
+	}
+
+	if err := env.Store.DeleteDoc(id, in.Cascade); err != nil {
+		if e := notFound(err, "doc "+ref); e != nil {
+			return result, e
+		}
+		if errors.Is(err, store.ErrConflict) {
+			return result, newError(err, output.ErrConflict)
+		}
+		return result, newError(fmt.Errorf("deleting doc: %w", err), output.ErrGeneral)
+	}
+	return result, nil
+}
+
 func parseDocRef(ref string) (int, error) {
 	id, err := model.ParseDocID(ref)
 	if err != nil {

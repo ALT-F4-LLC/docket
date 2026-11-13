@@ -194,3 +194,213 @@ func TestDocReadsRegisterNoProject(t *testing.T) {
 	}
 	requireUnregistered(t, st, "/repos/new")
 }
+
+func TestDocCreateWritesIntoTheResolvedProjectAsTheEnvAuthor(t *testing.T) {
+	st := openStore(t)
+	ensureProject(t, st, "/repos/first", "first")
+	other := ensureProject(t, st, "/repos/other", "other")
+	env := projectEnv(st, "/repos/other", true)
+	env.Author = "alice"
+
+	res, err := verb.DocCreate(context.Background(), env, verb.DocCreateInput{
+		Title: "plan", Body: "the body", Type: "spec", Status: "draft",
+	})
+	if err != nil {
+		t.Fatalf("DocCreate: %v", err)
+	}
+	doc := res.Doc
+	if doc == nil || doc.Title != "plan" || doc.Body != "the body" || doc.Type != "spec" || doc.Status != "draft" {
+		t.Fatalf("DocCreate doc = %#v, want the doc as given", doc)
+	}
+	if doc.Author != "alice" {
+		t.Errorf("DocCreate doc author %q, want alice", doc.Author)
+	}
+	requireProjectDocs(t, st, other, doc.ID)
+	if res.Registered != nil {
+		t.Errorf("Registered = %+v, want nil for an already registered project", res.Registered)
+	}
+}
+
+func TestDocCreateRegistersAnAnchoredProject(t *testing.T) {
+	st := openStore(t)
+	ensureProject(t, st, "/repos/first", "first")
+
+	res, err := verb.DocCreate(context.Background(), projectEnv(st, "/repos/fresh", true),
+		verb.DocCreateInput{Title: "first doc"})
+	if err != nil {
+		t.Fatalf("DocCreate: %v", err)
+	}
+	id, found, err := st.LookupProject("/repos/fresh")
+	if err != nil || !found {
+		t.Fatalf("LookupProject = (%d, %v, %v), want a registered row", id, found, err)
+	}
+	if reg := res.Registered; reg == nil || reg.ID != id || reg.Identity != "/repos/fresh" {
+		t.Errorf("Registered = %+v, want the new row %d", reg, id)
+	}
+	requireProjectDocs(t, st, id, res.Doc.ID)
+}
+
+// requireProjectDocs asserts project holds exactly the doc docID.
+func requireProjectDocs(t *testing.T, st store.Store, project, docID int) {
+	t.Helper()
+	docs, total, err := st.ListDocsWithCounts(store.DocListOptions{ProjectID: project})
+	if err != nil {
+		t.Fatalf("ListDocsWithCounts: %v", err)
+	}
+	if total != 1 || len(docs) != 1 || docs[0].Doc.ID != docID {
+		t.Errorf("project %d holds %d docs, want only doc %d", project, total, docID)
+	}
+}
+
+func TestDocCreateReplaysAnIdempotencyKeyAndRefusesItsReuse(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+
+	first, err := verb.DocCreate(context.Background(), env, verb.DocCreateInput{Title: "once", IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatalf("DocCreate: %v", err)
+	}
+	again, err := verb.DocCreate(context.Background(), env, verb.DocCreateInput{Title: "once", IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatalf("DocCreate replay: %v", err)
+	}
+	if again.Doc.ID != first.Doc.ID {
+		t.Errorf("replayed DocCreate = doc %d, want the original doc %d", again.Doc.ID, first.Doc.ID)
+	}
+
+	_, err = verb.DocCreate(context.Background(), env, verb.DocCreateInput{Title: "different", IdempotencyKey: "k1"})
+	requireVerbError(t, err, output.ErrConflict, "")
+}
+
+// TestDocWritesRefuseAnUnanchoredIdentity: create, edit and delete write, so
+// an unanchored identity with no project row is refused before any change and
+// registers nothing.
+func TestDocWritesRefuseAnUnanchoredIdentity(t *testing.T) {
+	st := openStore(t)
+	ensureProject(t, st, "/repos/first", "first")
+	id := createDoc(t, st, store.DefaultProjectID, "kept")
+	ref := model.FormatDocID(id)
+	env := projectEnv(st, "/work/scratch", false)
+	title := "changed"
+
+	_, err := verb.DocCreate(context.Background(), env, verb.DocCreateInput{Title: "new"})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+	_, err = verb.DocEdit(context.Background(), env, verb.DocEditInput{Doc: ref, Title: &title})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+	_, err = verb.DocDelete(context.Background(), env, verb.DocDeleteInput{Doc: ref, Force: true})
+	requireVerbError(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+
+	requireUnregistered(t, st, "/work/scratch")
+	doc, err := st.GetDoc(id)
+	if err != nil || doc.Title != "kept" {
+		t.Errorf("GetDoc = (%#v, %v), want the doc untouched", doc, err)
+	}
+	if _, total, err := st.ListDocsWithCounts(store.DocListOptions{ProjectID: store.DefaultProjectID}); err != nil || total != 1 {
+		t.Errorf("docs in the default project = (%d, %v), want only the kept doc", total, err)
+	}
+}
+
+func TestDocEditAppliesTheGivenFieldsAsTheEnvAuthor(t *testing.T) {
+	st := openStore(t)
+	id := createDoc(t, st, store.DefaultProjectID, "old title")
+	env := projectEnv(st, "", false)
+	env.Author = "bob"
+	title, body := "new title", "new body"
+
+	res, err := verb.DocEdit(context.Background(), env, verb.DocEditInput{
+		Doc: model.FormatDocID(id), Title: &title, Body: &body,
+	})
+	if err != nil {
+		t.Fatalf("DocEdit: %v", err)
+	}
+	if !res.Changed || res.Doc == nil || res.Doc.Title != "new title" || res.Doc.Body != "new body" {
+		t.Fatalf("DocEdit = changed %v doc %#v, want the changed doc", res.Changed, res.Doc)
+	}
+	if res.Doc.Type != "note" || res.Doc.Status != "draft" {
+		t.Errorf("DocEdit doc type %q status %q, want the untouched note/draft", res.Doc.Type, res.Doc.Status)
+	}
+	revs, err := st.ListDocRevisions(id)
+	if err != nil {
+		t.Fatalf("ListDocRevisions: %v", err)
+	}
+	if latest := revs[len(revs)-1]; latest.Author != "bob" {
+		t.Errorf("latest revision author = %q, want bob", latest.Author)
+	}
+}
+
+func TestDocEditWithoutAChangeReportsUnchanged(t *testing.T) {
+	st := openStore(t)
+	id := createDoc(t, st, store.DefaultProjectID, "same")
+	ref := model.FormatDocID(id)
+	env := projectEnv(st, "", false)
+	same := "same"
+
+	for name, in := range map[string]verb.DocEditInput{
+		"no fields":       {Doc: ref},
+		"identical title": {Doc: ref, Title: &same},
+	} {
+		res, err := verb.DocEdit(context.Background(), env, in)
+		if err != nil {
+			t.Fatalf("DocEdit %s: %v", name, err)
+		}
+		if res.Changed || res.Doc == nil || res.Doc.ID != id {
+			t.Errorf("DocEdit %s = changed %v doc %#v, want the unchanged doc %d", name, res.Changed, res.Doc, id)
+		}
+	}
+}
+
+func TestDocEditErrorCodes(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	title := "t"
+
+	_, err := verb.DocEdit(context.Background(), env, verb.DocEditInput{Doc: "not-a-doc", Title: &title})
+	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
+
+	_, err = verb.DocEdit(context.Background(), env, verb.DocEditInput{Doc: "999", Title: &title})
+	requireVerbError(t, err, output.ErrNotFound, "doc DOC-999 not found")
+}
+
+func TestDocDeleteWithoutForceDeletesNothingAndReturnsTheDoc(t *testing.T) {
+	st := openStore(t)
+	id := createDoc(t, st, store.DefaultProjectID, "keep me")
+	ref := model.FormatDocID(id)
+
+	res, err := verb.DocDelete(context.Background(), projectEnv(st, "", false), verb.DocDeleteInput{Doc: ref})
+	requireVerbError(t, err, output.ErrValidation, "deleting "+ref+" is destructive; pass --force to confirm")
+	if res.Doc == nil || res.Doc.ID != id || res.Doc.Title != "keep me" {
+		t.Errorf("unconfirmed DocDelete doc = %#v, want the doc it would delete", res.Doc)
+	}
+	if _, err := st.GetDoc(id); err != nil {
+		t.Errorf("the unconfirmed delete removed %s: %v", ref, err)
+	}
+}
+
+func TestDocDeleteWithForceDeletesTheDoc(t *testing.T) {
+	st := openStore(t)
+	id := createDoc(t, st, store.DefaultProjectID, "gone")
+
+	res, err := verb.DocDelete(context.Background(), projectEnv(st, "", false),
+		verb.DocDeleteInput{Doc: model.FormatDocID(id), Force: true})
+	if err != nil {
+		t.Fatalf("DocDelete: %v", err)
+	}
+	if res.Doc == nil || res.Doc.ID != id || res.Doc.Title != "gone" {
+		t.Errorf("DocDelete doc = %#v, want the deleted doc", res.Doc)
+	}
+	if _, err := st.GetDoc(id); err == nil {
+		t.Errorf("DocDelete --force left %s in place", model.FormatDocID(id))
+	}
+}
+
+func TestDocDeleteErrorCodes(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+
+	_, err := verb.DocDelete(context.Background(), env, verb.DocDeleteInput{Doc: "not-a-doc", Force: true})
+	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
+
+	// A missing doc is reported before the consent check.
+	_, err = verb.DocDelete(context.Background(), env, verb.DocDeleteInput{Doc: "999"})
+	requireVerbError(t, err, output.ErrNotFound, "doc DOC-999 not found")
+}
