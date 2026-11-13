@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -12,6 +15,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 )
 
@@ -81,5 +85,92 @@ func TestConnectCallsHandshakeOnce(t *testing.T) {
 	}
 	if got := meta.GetDaemonVersion(); got != "counted" {
 		t.Errorf("daemon_version = %q, want the daemon's %q", got, "counted")
+	}
+}
+
+// attributedDaemon answers Handshake and RunStatus so one server can take both
+// the Connect handshake and an ordinary RPC.
+type attributedDaemon struct {
+	runStatusStub
+}
+
+func (attributedDaemon) Handshake(context.Context, *connect.Request[docketv1.HandshakeRequest]) (*connect.Response[docketv1.HandshakeResponse], error) {
+	return connect.NewResponse(&docketv1.HandshakeResponse{}), nil
+}
+
+// headerRecorder serves the daemon and keeps every request's headers.
+type headerRecorder struct {
+	mu      sync.Mutex
+	headers []http.Header
+}
+
+func (r *headerRecorder) serve(t *testing.T) *httptest.Server {
+	t.Helper()
+	path, handler := docketv1connect.NewDocketServiceHandler(attributedDaemon{runStatusStub{status: "active"}})
+	mux := http.NewServeMux()
+	mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		r.headers = append(r.headers, req.Header.Clone())
+		r.mu.Unlock()
+		handler.ServeHTTP(w, req)
+	}))
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func (r *headerRecorder) recorded() []http.Header {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.headers
+}
+
+func TestClientSendsAuthorAndCwdHeaders(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	var recorder headerRecorder
+	server := recorder.serve(t)
+
+	c, _, err := Connect(context.Background(), server.Client(), server.URL, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := c.RunStatus(context.Background(), connect.NewRequest(&docketv1.RunStatusRequest{})); err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+
+	got := recorder.recorded()
+	if len(got) != 2 {
+		t.Fatalf("recorded %d requests, want the handshake and RunStatus", len(got))
+	}
+	want := map[string]string{"Docket-Author": config.DefaultAuthor(), "Docket-Cwd": dir}
+	for i, header := range got {
+		for name, value := range want {
+			if values := header.Values(name); len(values) != 1 || values[0] != value {
+				t.Errorf("request %d: %s = %q, want exactly [%q]", i, name, values, value)
+			}
+		}
+	}
+}
+
+func TestClientRefusesToSendWithoutWorkingDirectory(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	var recorder headerRecorder
+	server := recorder.serve(t)
+
+	_, _, err := Connect(context.Background(), server.Client(), server.URL, slog.New(slog.DiscardHandler))
+
+	if err == nil {
+		t.Fatal("Connect succeeded from an unreadable working directory, want an error")
+	}
+	if n := len(recorder.recorded()); n != 0 {
+		t.Errorf("daemon received %d requests, want none sent without a Docket-Cwd", n)
 	}
 }

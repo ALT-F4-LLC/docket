@@ -14,11 +14,13 @@ import (
 
 // NewClient returns a client for the daemon at baseURL that speaks the strict
 // protojson codec: a response carrying a state-machine value this client does
-// not know fails with the INCOMPATIBLE docket code.
+// not know fails with the INCOMPATIBLE docket code. Every request carries the
+// caller's author and working directory in the Docket-Author and Docket-Cwd
+// headers.
 func NewClient(httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) docketv1connect.DocketServiceClient {
 	return docketv1connect.NewDocketServiceClient(httpClient, baseURL,
 		connect.WithProtoJSON(),
-		connect.WithInterceptors(codec.StrictValidation(logger)),
+		connect.WithInterceptors(codec.StrictValidation(logger), attribution()),
 	)
 }
 
