@@ -79,7 +79,9 @@ type ConfigSetResult struct {
 // ConfigSet stores one engine config value for the caller's project, or the
 // store-wide default under Global. It is a write, so it may register an
 // anchored project; Registered is set even when the write is refused,
-// because the registration has already happened.
+// because the registration has already happened. The one exception is a
+// failure to read the registered row back: that storage error is returned
+// with Registered nil and nothing written.
 func ConfigSet(ctx context.Context, env Env, in ConfigSetInput) (ConfigSetResult, error) {
 	projectID, created, err := env.ResolveProject(ProjectMayRegister)
 	if err != nil {

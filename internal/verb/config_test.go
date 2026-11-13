@@ -2,10 +2,12 @@ package verb_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -183,6 +185,8 @@ func TestConfigSetRegistersAnAnchoredProject(t *testing.T) {
 	}
 }
 
+// --global does not lift the refusal: the caller's project is resolved before
+// the write is redirected to the store-wide default.
 func TestConfigSetRefusesAnUnanchoredCallerWithNoProject(t *testing.T) {
 	st := openStore(t)
 	if _, err := st.EnsureProject("/repos/first", "first", 1); err != nil {
@@ -190,9 +194,97 @@ func TestConfigSetRefusesAnUnanchoredCallerWithNoProject(t *testing.T) {
 	}
 	env := projectEnv(st, "/scratch/unseen", false)
 
-	_, err := verb.ConfigSet(context.Background(), env, verb.ConfigSetInput{Key: attemptMax, Value: "3"})
-	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project this belongs to")
-	requireUnregistered(t, st, "/scratch/unseen")
+	for _, global := range []bool{false, true} {
+		_, err := verb.ConfigSet(context.Background(), env,
+			verb.ConfigSetInput{Key: attemptMax, Value: "3", Global: global})
+		requireVerbCode(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+		requireUnregistered(t, st, "/scratch/unseen")
+	}
+	stored, err := st.GetConfig(0, attemptMax)
+	if err != nil {
+		t.Fatalf("GetConfig(0): %v", err)
+	}
+	if stored.Source != "default" {
+		t.Errorf("store-wide %s = %+v after refused writes, want it untouched", attemptMax, stored)
+	}
+}
+
+// The registration happens before the write is validated, so a refused write
+// still reports the row it registered for the caller to record.
+func TestConfigSetReportsTheProjectItRegisteredWhenTheWriteIsRefused(t *testing.T) {
+	for _, in := range []verb.ConfigSetInput{
+		{Key: "no.such.key", Value: "1"},
+		{Key: attemptMax, Value: "lots"},
+	} {
+		t.Run(in.Key, func(t *testing.T) {
+			st := openStore(t)
+			if _, err := st.EnsureProject("/repos/first", "first", 1); err != nil {
+				t.Fatalf("claiming the default project: %v", err)
+			}
+
+			got, err := verb.ConfigSet(context.Background(), projectEnv(st, "/repos/new", true), in)
+			requireVerbCode(t, err, output.ErrValidation, in.Key)
+			id, found, lerr := st.LookupProject("/repos/new")
+			if lerr != nil || !found {
+				t.Fatalf("LookupProject(/repos/new) = (%d, %v, %v), want the registered row", id, found, lerr)
+			}
+			if got.Registered == nil || got.Registered.ID != id || got.Registered.Identity != "/repos/new" {
+				t.Errorf("Registered = %+v, want the new row %d for /repos/new", got.Registered, id)
+			}
+		})
+	}
+}
+
+// A vote-rule write records a config-changed event naming env.Author as the
+// writer; a write outside that family records none.
+func TestConfigSetAttributesAVoteRuleChangeToTheAuthor(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	env.Author = "operator-a"
+	key := store.VoteRuleThresholdKey("x")
+
+	if _, err := verb.ConfigSet(context.Background(), env, verb.ConfigSetInput{Key: key, Value: "0.6"}); err != nil {
+		t.Fatalf("ConfigSet(%s): %v", key, err)
+	}
+	if _, err := verb.ConfigSet(context.Background(), env, verb.ConfigSetInput{Key: attemptMax, Value: "4"}); err != nil {
+		t.Fatalf("ConfigSet(%s): %v", attemptMax, err)
+	}
+
+	events := configChangedEvents(t, st)
+	if len(events) != 1 {
+		t.Fatalf("%d config-changed events, want 1 for the vote-rule write only: %+v", len(events), events)
+	}
+	if events[0].Key != key || events[0].Value != "0.6" || events[0].ChangedBy != "operator-a" {
+		t.Errorf("event = %+v, want %s=0.6 changed by operator-a", events[0], key)
+	}
+}
+
+type configChangedEvent struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	ChangedBy string `json:"changed_by"`
+}
+
+func configChangedEvents(t *testing.T, st store.Store) []configChangedEvent {
+	t.Helper()
+	tx, err := st.BeginReadSnapshot()
+	if err != nil {
+		t.Fatalf("BeginReadSnapshot: %v", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.ListEventsTx(store.EventFilter{Kind: engine.EventConfigChanged}, 0, 0)
+	if err != nil {
+		t.Fatalf("ListEventsTx: %v", err)
+	}
+	out := make([]configChangedEvent, 0, len(rows))
+	for _, row := range rows {
+		var e configChangedEvent
+		if err := json.Unmarshal([]byte(row.Data), &e); err != nil {
+			t.Fatalf("decoding event data %q: %v", row.Data, err)
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func TestConfigSetRefusesAnUnknownKeyOrInvalidValueAsValidation(t *testing.T) {
@@ -270,6 +362,48 @@ func TestConfigSetIsSilentWithNoWorkflows(t *testing.T) {
 	}
 	if got.Warning != "" {
 		t.Errorf("warned on a project with no registered workflows:\n%s", got.Warning)
+	}
+}
+
+// A --global lease TTL is the default every project falls back to, so its
+// class is judged against every project's workflows, not the caller's.
+func TestConfigSetGlobalJudgesALeaseClassAgainstEveryProject(t *testing.T) {
+	st := openStore(t)
+	if _, err := st.EnsureProject("/repos/first", "first", 1); err != nil {
+		t.Fatalf("claiming the default project: %v", err)
+	}
+	insertClassFixture(t, st)
+	if _, err := st.EnsureProject("/repos/other", "other", 1); err != nil {
+		t.Fatalf("EnsureProject(/repos/other): %v", err)
+	}
+	env := projectEnv(st, "/repos/other", true)
+	read := store.KeyLeaseTTLPrefix + "read"
+
+	local, err := verb.ConfigSet(context.Background(), env, verb.ConfigSetInput{Key: read, Value: "30m"})
+	if err != nil {
+		t.Fatalf("ConfigSet(%s): %v", read, err)
+	}
+	if local.Warning != "" {
+		t.Errorf("project-scoped %s warned for a project with no workflows:\n%s", read, local.Warning)
+	}
+
+	global, err := verb.ConfigSet(context.Background(), env, verb.ConfigSetInput{Key: read, Value: "30m", Global: true})
+	if err != nil {
+		t.Fatalf("ConfigSet(%s, global): %v", read, err)
+	}
+	for _, needle := range []string{"read", "impl", "serialize"} {
+		if !strings.Contains(global.Warning, needle) {
+			t.Errorf("global %s warning does not mention %q:\n%s", read, needle, global.Warning)
+		}
+	}
+
+	binds, err := verb.ConfigSet(context.Background(), env,
+		verb.ConfigSetInput{Key: store.KeyLeaseTTLPrefix + "impl", Value: "30m", Global: true})
+	if err != nil {
+		t.Fatalf("ConfigSet(lease.ttl.impl, global): %v", err)
+	}
+	if binds.Warning != "" {
+		t.Errorf("global lease.ttl.impl warned though another project declares impl:\n%s", binds.Warning)
 	}
 }
 

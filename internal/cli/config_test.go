@@ -100,6 +100,85 @@ func TestConfigSetRecordsTheProjectItRegisters(t *testing.T) {
 	}
 }
 
+// TestConfigSetRecordsTheProjectItRegisteredWhenTheWriteIsRefused: the
+// registration precedes the key and value checks, so a refused write from a
+// new anchored checkout still records the project-registered event.
+func TestConfigSetRecordsTheProjectItRegisteredWhenTheWriteIsRefused(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+
+	_, err = runLeaseCommandOutput(t, conn, &config.Config{Identity: "/repos/configured", Anchored: true},
+		configSetCmd, "no.such.key", "5")
+	if err == nil || !strings.Contains(err.Error(), "no.such.key") {
+		t.Fatalf("config set no.such.key = %v, want a refusal naming the key", err)
+	}
+
+	got := registrationEvents(t, conn)
+	if len(got) != 1 || got["/repos/configured"] != "config set" {
+		t.Errorf("registration events = %v, want /repos/configured attributed to \"config set\"", got)
+	}
+}
+
+// TestConfigSetDeliversTheLeaseClassWarning: a lease.ttl.<class> no
+// registered workflow declares is stored, and the warning reaches the user on
+// stderr and in the success message.
+func TestConfigSetDeliversTheLeaseClassWarning(t *testing.T) {
+	conn := newTestDB(t)
+	registerForRun(t, conn, runWorkflow)
+
+	stderr := captureStderr(t)
+	out, err := runLeaseCommandOutput(t, conn, nil, configSetCmd, "lease.ttl.read", "30m")
+	printed := stderr()
+	testsupport.Must(t, err, "config set lease.ttl.read: %v", err)
+
+	var env struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\n%s", err, out)
+	}
+	for name, text := range map[string]string{"stderr": printed, "message": env.Message} {
+		for _, needle := range []string{"warning:", `"read"`, "someone"} {
+			if !strings.Contains(text, needle) {
+				t.Errorf("%s lacks %q:\n%s", name, needle, text)
+			}
+		}
+	}
+	if !strings.HasPrefix(env.Message, "Set lease.ttl.read = 30m\n") {
+		t.Errorf("message = %q, want the set line before the warning", env.Message)
+	}
+}
+
+// TestConfigSetDefaultProfileNeedsNoProject: default_profile lives in the
+// per-user client config, so an unanchored caller with no project may set it,
+// and doing so registers no project.
+func TestConfigSetDefaultProfileNeedsNoProject(t *testing.T) {
+	path := clientConfigSandbox(t)
+	testsupport.Must(t, os.MkdirAll(filepath.Dir(path), 0o700), "mkdir client config dir")
+	client := "version = 1\n\n[profile.prod]\nurl = \"https://docket.example.test\"\n"
+	testsupport.Must(t, os.WriteFile(path, []byte(client), 0o600), "writing client.toml")
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+
+	_, err = runLeaseCommandOutput(t, conn, &config.Config{Identity: "/scratch/unseen", Anchored: false},
+		configSetCmd, clientDefaultProfileKey, "prod")
+	testsupport.Must(t, err, "config set default_profile prod: %v", err)
+
+	if doc := readClientConfigDoc(t, path); doc.DefaultProfile != "prod" {
+		t.Errorf("default_profile = %q in %s, want prod", doc.DefaultProfile, path)
+	}
+	_, found, err := db.LookupProject(conn, "/scratch/unseen")
+	testsupport.Must(t, err, "LookupProject: %v", err)
+	if found {
+		t.Error("config set default_profile registered /scratch/unseen")
+	}
+	if got := registrationEvents(t, conn); len(got) != 0 {
+		t.Errorf("registration events = %v, want none", got)
+	}
+}
+
 // TestConfigGetAndSetOwnTheirProject pins `config get` and `config set` to the
 // verb layer: the root hook leaves project resolution to verb.ConfigGet and
 // verb.ConfigSet, and get must still read the override set wrote for the
