@@ -18,6 +18,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -73,28 +74,18 @@ func stepArg(arg string) (int, error) {
 }
 
 // tokenedStep is the shared prologue of `step heartbeat`, `step complete`, and
-// `step fail`: parse the STEP-N argument and read the capability token off
-// stdin/env. Callers needing an error label for stepErr pass id, which
-// stepErr formats itself.
-//
-// It returns the writer and connection too, since every caller's next line is
-// one or the other of those anyway — leaving three separate `getWriter` /
-// `getDB` calls at each site would be its own small duplication.
-func tokenedStep(cmd *cobra.Command, args []string) (
-	w *output.Writer, conn store.LegacyDB, id int, token string, err error,
-) {
-	w = getWriter(cmd)
-	conn = getDB(cmd)
-
-	id, err = stepArg(args[0])
-	if err != nil {
-		return nil, nil, 0, "", err
+// `step fail`: read the capability token off stdin/env. A malformed STEP-N
+// argument is reported first, so it is not masked by a missing token and
+// leaves stdin undrained.
+func tokenedStep(cmd *cobra.Command, args []string) (w *output.Writer, token string, err error) {
+	if _, err := stepArg(args[0]); err != nil {
+		return nil, "", err
 	}
 	token, err = readToken(os.Stdin)
 	if err != nil {
-		return nil, nil, 0, "", err
+		return nil, "", err
 	}
-	return w, conn, id, token, nil
+	return getWriter(cmd), token, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -147,47 +138,32 @@ scaled cost before the claim commits. It is the dispatcher's declaration that
 it resolved the step to a variant priced differently from what the definition
 guessed — an escalated retry costs what it costs, at the cap, the moment it is
 claimed.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
+		// A malformed ref is reported before the recovery secret is read.
 		id, err := stepArg(args[0])
 		if err != nil {
 			return err
 		}
 
 		owner, _ := cmd.Flags().GetString("owner")
-		if owner == "" {
-			return cmdErr(
-				fmt.Errorf("--owner is required: it identifies the lease holder"),
-				output.ErrValidation)
-		}
-
-		var ttlMS int64
-		if cmd.Flags().Changed("ttl") {
-			ttl, _ := cmd.Flags().GetDuration("ttl")
-			if ttl <= 0 {
-				return cmdErr(fmt.Errorf("--ttl must be positive, got %s", ttl),
-					output.ErrValidation)
-			}
-			ttlMS = ttl.Milliseconds()
-		}
-
 		metadata, _ := cmd.Flags().GetString("metadata")
+		ttl, err := ttlFlag(cmd)
+		if err != nil {
+			return err
+		}
 
 		// DKT-867: the dispatcher's variant scaling. `Changed` distinguishes an
 		// explicit value from the unset default, so an explicit 0 — a free
 		// claim, which would erase an accrual the workflow author declared —
 		// is refusable rather than indistinguishable from "not passed".
-		var costMultiplier float64
+		var costMultiplier *float64
 		if cmd.Flags().Changed("cost-multiplier") {
-			costMultiplier, _ = cmd.Flags().GetFloat64("cost-multiplier")
-			if costMultiplier <= 0 {
-				return cmdErr(fmt.Errorf(
-					"--cost-multiplier must be positive, got %g", costMultiplier),
-					output.ErrValidation)
-			}
+			m, _ := cmd.Flags().GetFloat64("cost-multiplier")
+			costMultiplier = &m
 		}
 
 		recoverySecret, err := readRecoverySecret(cmd.InOrStdin())
@@ -195,38 +171,28 @@ claimed.`,
 			return err
 		}
 
-		label := stepLabel(id)
-		claimOpts := engine.ClaimOptions{
-			Owner: owner, TTLOverride: ttlMS, Metadata: metadata,
-			CostMultiplier: costMultiplier, RecoverySecret: recoverySecret,
-			NowMS: model.NowMS(),
-		}
-
+		// `claim --render` returns the packet instead of the bundle, in the
+		// same call — and the render is part of the claim SAGA (DKT-804): a
+		// packet that cannot render refuses BEFORE the lease is taken, so a
+		// validation failure leaves the step claimable rather than stranding
+		// it claimed with no token issued.
 		render, _ := cmd.Flags().GetBool("render")
-		if render {
-			// `claim --render` returns the packet instead of the bundle, in the
-			// same call — and the render is part of the claim SAGA
-			// (DKT-804): a packet that cannot render refuses BEFORE the lease
-			// is taken, so a validation failure leaves the step claimable
-			// rather than stranding it claimed with no token issued.
-			templatePath, _ := cmd.Flags().GetString("template")
-			executor, _ := cmd.Flags().GetString("executor")
-			result, packet, err := engine.NewEngine().ClaimStepRendered(
-				conn, id, claimOpts, templatePath, executor)
-			if err != nil {
-				return emitIncompleteClaim(w, err, label)
-			}
-			return emitClaim(w, result, packet)
-		}
+		templatePath, _ := cmd.Flags().GetString("template")
+		executor, _ := cmd.Flags().GetString("executor")
 
-		// The gate-bearing claim: a step's `pre = true` gates run HERE, at
-		// claim, with their results in the returned bundle. A step with no
-		// pre-gates takes the identical single-transaction path.
-		result, err := engine.NewEngine().ClaimStepWithGates(conn, id, claimOpts)
+		res, err := verb.StepClaim(cmd.Context(), verbEnv(cmd), verb.StepClaimInput{
+			Step: args[0], Owner: owner, TTL: ttl, Metadata: metadata,
+			CostMultiplier: costMultiplier, RecoverySecret: recoverySecret,
+			Render: render, Template: templatePath, Executor: executor,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return emitIncompleteClaim(w, err, label)
+			if res.Claim != nil {
+				return emitIncompleteClaim(w, err, stepLabel(id))
+			}
+			return verbErr(err)
 		}
-		return emitClaim(w, result, nil)
+		return emitClaim(w, res.Claim, res.Packet)
 	},
 }
 
@@ -600,18 +566,23 @@ DOCKET_TOKEN or on stdin. Tokens are never accepted in argv.
 The attempt counter is untouched — a heartbeat is not a new claim. Note that
 heartbeating does NOT extend a step past its class's max_step_duration, which
 is measured from the claim: a runaway holder cannot renew forever.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w, conn, id, token, err := tokenedStep(cmd, args)
+		w, token, err := tokenedStep(cmd, args)
 		if err != nil {
 			return err
 		}
 
-		lease, err := engine.HeartbeatStep(conn, id, token, model.NowMS())
+		res, err := verb.StepHeartbeat(cmd.Context(), verbEnv(cmd), verb.StepHeartbeatInput{
+			Step: args[0], Token: token,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return stepErr(err, stepLabel(id))
+			return verbErr(err)
 		}
 
+		id, lease := res.Step, res.Lease
 		w.Success(
 			heartbeatResponse{
 				Issue:          model.FormatStepID(id),
@@ -702,9 +673,10 @@ like ` + "`Home: THIS repository`" + ` on line two composes with a ` + "`Severit
 on line three. An unrecognized value for a recognized key is ignored rather
 than refused. A gap file with no header block files exactly what it always
 did: priority none, kind task, no labels.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w, conn, id, token, err := tokenedStep(cmd, args)
+		w, token, err := tokenedStep(cmd, args)
 		if err != nil {
 			return err
 		}
@@ -764,42 +736,33 @@ did: priority none, kind task, no labels.`,
 			}
 		}
 
-		var gapIssues []string
-		var pending bool
-		e := engine.NewEngine()
-		err = e.CompleteStep(conn, id, engine.CompleteOptions{
-			Token: token, WorkDir: workDir, Artifact: artifact, Payload: payload,
-			Usage: usage, Metadata: metadata,
-			Gaps: gaps, GapIssues: &gapIssues, Comments: comments, Pending: &pending,
-			NowMS: model.NowMS(),
-		})
-		if err != nil {
-			return stepErr(err, stepLabel(id))
-		}
-
 		// The recording may have READIED engine-run steps — a vote step whose
 		// last dependency this was (its proposal opens now, mid-wave), or an
 		// action step (it runs now). `next` cannot drive them while the
 		// dispatch is open, so the recording verb is the observing invocation
 		// (engine/drive.go) — this is what lets one wave carry a staged
 		// `judges -> gate -> reconcile -> report` chain end to end.
-		if step, readErr := store.StoreOn(conn).GetStep(id); readErr == nil {
-			if err := e.DriveRunLifecycles(conn, step.RunID, model.NowMS()); err != nil {
-				return cmdErr(fmt.Errorf(
-					"the step recorded, but driving the run's engine-side "+
-						"lifecycles failed: %w", err), output.ErrGeneral)
-			}
+		res, err := verb.StepComplete(cmd.Context(), verbEnv(cmd), verb.StepCompleteInput{
+			Step: args[0], Token: token, WorkDir: workDir,
+			Artifact: artifact, Payload: payload, Usage: usage, Metadata: metadata,
+			Gaps: gaps, Comments: comments,
+		})
+		recordProjectRegistration(cmd, res.Registered)
+		if err != nil {
+			return verbErr(err)
 		}
 
-		if pending {
-			verb := "Recorded, gates and routing running detached:"
-			if len(gapIssues) > 0 {
-				verb = fmt.Sprintf("Recorded, gaps filed as %s; gates and routing running detached:",
-					strings.Join(gapIssues, ", "))
+		if res.Detached {
+			recorded := "Recorded, gates and routing running detached:"
+			if len(res.GapIssues) > 0 {
+				recorded = fmt.Sprintf("Recorded, gaps filed as %s; gates and routing running detached:",
+					strings.Join(res.GapIssues, ", "))
 			}
-			return emitStepState(w, conn, id, verb)
+			renderStepState(w, res.Step, recorded, nil, nil)
+			return nil
 		}
-		return emitRecordState(w, conn, id, gapIssues)
+		emitRecordState(w, res.Step, res.FailedGates, res.GapIssues)
+		return nil
 	},
 }
 
@@ -815,22 +778,19 @@ did: priority none, kind task, no labels.`,
 //
 // A record whose gates all passed prints exactly the line it always has.
 func emitRecordState(
-	w *output.Writer, conn store.LegacyDB, id int, gapIssues []string,
-) error {
-	failed, err := engine.FailedGates(conn, id)
-	if err != nil {
-		return stepErr(err, stepLabel(id))
-	}
+	w *output.Writer, row model.StepRow, failed []engine.FailedGate, gapIssues []string,
+) {
 	if len(failed) > 0 {
-		return emitRecordGateFailure(w, conn, id, failed, gapIssues)
+		emitRecordGateFailure(w, row, failed, gapIssues)
+		return
 	}
 
-	verb := "Completed"
+	completed := "Completed"
 	if len(gapIssues) > 0 {
-		verb = fmt.Sprintf("Completed, gaps filed as %s:",
+		completed = fmt.Sprintf("Completed, gaps filed as %s:",
 			strings.Join(gapIssues, ", "))
 	}
-	return emitStepState(w, conn, id, verb)
+	renderStepState(w, row, completed, nil, nil)
 }
 
 // emitRecordGateFailure prints a completion whose gates did not all pass.
@@ -843,15 +803,10 @@ func emitRecordState(
 // advisory rides beside it: a machine consumer gets the same fact as the human
 // one instead of having to run `step gates` to learn it.
 func emitRecordGateFailure(
-	w *output.Writer, conn store.LegacyDB, id int,
+	w *output.Writer, row model.StepRow,
 	failed []engine.FailedGate, gapIssues []string,
-) error {
-	view, err := engine.LoadStepView(conn, id, model.NowMS())
-	if err != nil {
-		return stepErr(err, stepLabel(id))
-	}
-
-	step := view.Row.Step
+) {
+	step := row.Step
 	noun := "gate"
 	if len(failed) > 1 {
 		noun = "gates"
@@ -862,14 +817,13 @@ func emitRecordGateFailure(
 	}
 
 	message := fmt.Sprintf("%s %s; %s", noun, strings.Join(clauses, ", "),
-		recordedStepClause(step, view.Row.Status))
+		recordedStepClause(step, row.Status))
 	if len(gapIssues) > 0 {
 		message += fmt.Sprintf("; gaps filed as %s", strings.Join(gapIssues, ", "))
 	}
 	message += fmt.Sprintf(" — `docket step gates %s` has the captured output", step)
 
-	w.Outcome(recordedStepPayload{StepRow: view.Row, FailedGates: failed}, message)
-	return nil
+	w.Outcome(recordedStepPayload{StepRow: row, FailedGates: failed}, message)
 }
 
 // recordedStepPayload is `step record`'s JSON shape when a gate did not pass:
@@ -926,32 +880,28 @@ row like any other, so the next attempt's completion or failure overlays on
 top of it.
 
 Requires the capability token.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		w, conn, id, token, err := tokenedStep(cmd, args)
+		w, token, err := tokenedStep(cmd, args)
 		if err != nil {
 			return err
 		}
 		note, _ := cmd.Flags().GetString("note")
 		metadata, _ := cmd.Flags().GetString("metadata")
 
-		e := engine.NewEngine()
-		if err := e.FailStep(conn, id, token, note, metadata, model.NowMS()); err != nil {
-			return stepErr(err, stepLabel(id))
-		}
-
 		// A failure that exhausted attempts ROUTES, and routing can ready
-		// engine-run steps mid-wave exactly as a completion can — same hook,
-		// same reasoning as `step record`'s (engine/drive.go).
-		if step, readErr := store.StoreOn(conn).GetStep(id); readErr == nil {
-			if err := e.DriveRunLifecycles(conn, step.RunID, model.NowMS()); err != nil {
-				return cmdErr(fmt.Errorf(
-					"the failure recorded, but driving the run's engine-side "+
-						"lifecycles failed: %w", err), output.ErrGeneral)
-			}
+		// engine-run steps mid-wave exactly as a completion can, so the verb
+		// drives them as `step record`'s does (engine/drive.go).
+		res, err := verb.StepFail(cmd.Context(), verbEnv(cmd), verb.StepFailInput{
+			Step: args[0], Token: token, Note: note, Metadata: metadata,
+		})
+		recordProjectRegistration(cmd, res.Registered)
+		if err != nil {
+			return verbErr(err)
 		}
-
-		return emitStepState(w, conn, id, "Failed")
+		renderStepState(w, res.Step, "Failed", nil, nil)
+		return nil
 	},
 }
 
@@ -2006,17 +1956,25 @@ func emitResolvedState(
 	if err != nil {
 		return stepErr(err, stepLabel(id))
 	}
-	message := fmt.Sprintf("%s %s (%s)", verb, view.Row.Step, view.Row.Status)
+	renderStepState(w, view.Row, verb, stale, repin)
+	return nil
+}
+
+// renderStepState is emitResolvedState over a row already read.
+func renderStepState(
+	w *output.Writer, row model.StepRow, verb string,
+	stale []engine.StaleTarget, repin *engine.IssueDiffRepin,
+) {
+	message := fmt.Sprintf("%s %s (%s)", verb, row.Step, row.Status)
 	if repin != nil {
 		message += "; " + repinClause(repin)
 	}
 	if len(stale) == 0 && repin == nil {
-		w.Success(view.Row, message)
-		return nil
+		w.Success(row, message)
+		return
 	}
 	warnStaleTargets(w, stale)
-	w.Success(resolvedStepPayload{StepRow: view.Row, StaleTargets: stale, Repin: repin}, message)
-	return nil
+	w.Success(resolvedStepPayload{StepRow: row, StaleTargets: stale, Repin: repin}, message)
 }
 
 // repinClause renders what a re-pin did, for the success line: the two shas

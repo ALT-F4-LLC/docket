@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
 // The step refusal matrix AT THE CLI BOUNDARY.
@@ -304,7 +305,18 @@ func TestStepRecordIsCompleteAlias(t *testing.T) {
 // (waiting-human)`: no gate, no verdict, a success glyph on a park. RUN-63's
 // executor read that line, answered "Record succeeded", and reported the wave
 // green over a real cargo-fmt failure. These drive emitRecordState — the whole
-// of what the RunE does after the saga returns — over recorded gate rows.
+// of what the RunE does after the verb returns — over recorded gate rows.
+
+// emitRecorded reads the step's row and failed gates as verb.StepComplete
+// returns them after an inline saga, and prints them with emitRecordState.
+func emitRecorded(t *testing.T, w *output.Writer, conn *sql.DB, stepID int) {
+	t.Helper()
+	failed, err := engine.FailedGates(conn, stepID)
+	testsupport.Must(t, err, "FailedGates: %v", err)
+	view, err := engine.LoadStepView(conn, stepID, model.NowMS())
+	testsupport.Must(t, err, "LoadStepView: %v", err)
+	emitRecordState(w, view.Row, failed, nil)
+}
 
 // recordFixture activates a run and returns the connection and the executor
 // step every case here records against.
@@ -370,7 +382,7 @@ func TestStepRecordNamesTheFailedGateAndItsExit(t *testing.T) {
 		db.GateResultRow{Gate: "self-hygiene", Verdict: db.GateVerdictFail, Exit: &exit})
 
 	w, buf := bufWriter(false)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	out := buf.String()
 	for _, want := range []string{
@@ -409,7 +421,7 @@ func TestStepRecordNamesEveryFailedGate(t *testing.T) {
 		db.GateResultRow{Gate: "build", Verdict: db.GateVerdictFail, Exit: &exit})
 
 	w, buf := bufWriter(false)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	out := buf.String()
 	want := "gates build failed (exit 1), secret-scan unmatched (no exit); " +
@@ -432,7 +444,7 @@ func TestStepRecordJSONCarriesTheFailedGates(t *testing.T) {
 		db.GateResultRow{Gate: "self-hygiene", Verdict: db.GateVerdictFail, Exit: &exit})
 
 	w, buf := bufWriter(true)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	var envelope struct {
 		OK   bool `json:"ok"`
@@ -486,7 +498,7 @@ func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
 			Exit: intPtr(3), Pre: true})
 
 	w, buf := bufWriter(false)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	want := "✔ Completed " + model.FormatStepID(stepID) + " (done)\n"
 	if buf.String() != want {
@@ -495,6 +507,18 @@ func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+// The step lease commands resolve their project through internal/verb, so the
+// root hook must skip its own resolution for them.
+func TestStepLeaseCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{
+		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
+	} {
+		if !verbOwnsProject(cmd) {
+			t.Errorf("step %s lacks the verbOwnsProject annotation", cmd.Name())
+		}
+	}
+}
 
 // TestStepClaimCommandWritesTheMetadataFlag drives the REAL `step claim` RunE
 // over its REAL flag set and reads the step back out of the store (DKT-592).
