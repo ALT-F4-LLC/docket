@@ -14,6 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -67,31 +68,28 @@ event. It is the entry point a NEW relay uses when taking over from a crashed
 one: core knows the database lease lapsed but cannot check a process it did not
 start, so it holds the class's headroom until somebody confirms the writer is
 gone.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchOpen(cmd, getWriter(cmd))
 	},
 }
 
 func runDispatchOpen(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := dispatchRunID(cmd)
-	if err != nil {
-		return err
-	}
+	run, _ := cmd.Flags().GetString("run")
 	limit, _ := cmd.Flags().GetInt("limit")
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
-	acks, err := ackSeqs(cmd)
-	if err != nil {
-		return err
-	}
+	acks, _ := cmd.Flags().GetInt64Slice("ack-reap")
 
-	manifest, err := engine.NewEngine().OpenDispatch(conn, runID, limit, acks, model.NowMS())
+	res, err := verb.DispatchOpen(cmd.Context(), verbEnv(cmd), verb.DispatchOpenInput{
+		Run: run, Limit: limit, AckReap: acks,
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	manifest := res.Manifest
 
 	// DKT-193: stale targets warn on stderr for a human AND ride the JSON
 	// envelope (`stale_targets`), the two channels every advisory here uses —
@@ -257,23 +255,21 @@ exactly ONE open manifest and ` + "`next --run`" + ` still refuses while it is o
 Rows already on the manifest are dropped, so extending twice with nothing new
 appends nothing and succeeds. An appended row nobody launches stays pending and
 is not a discrepancy at close.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchExtend(cmd, getWriter(cmd))
 	},
 }
 
 func runDispatchExtend(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	run, _ := cmd.Flags().GetString("run")
 
-	runID, err := dispatchRunID(cmd)
+	res, err := verb.DispatchExtend(cmd.Context(), verbEnv(cmd), verb.DispatchExtendInput{Run: run})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	extension, err := engine.NewEngine().ExtendDispatch(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
+	extension := res.Extension
 
 	// The extend's own reaps and the hold they leave, on the two channels
 	// `dispatch open` uses and for the same reader: the relay about to spawn
@@ -329,25 +325,22 @@ THIS VERB WRITES NOTHING, including no lease reap. It is the one
 scheduling-shaped verb that must not reap: reaping would change the very ready
 set it was asked to compare against, and a verify that mutated its own subject
 could never fail.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchVerify(cmd, getWriter(cmd))
 	},
 }
 
 func runDispatchVerify(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	run, _ := cmd.Flags().GetString("run")
 
-	runID, err := dispatchRunID(cmd)
+	res, err := verb.DispatchVerify(cmd.Context(), verbEnv(cmd), verb.DispatchVerifyInput{Run: run})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	result, mismatch, err := engine.NewEngine().VerifyDispatch(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
-	if mismatch != nil {
-		return mismatchConflict("", result, mismatch)
+	result := res.Verify
+	if res.Mismatch != nil {
+		return mismatchConflict("", result, res.Mismatch)
 	}
 
 	warnStaleTargets(w, result.StaleTargets)
@@ -549,56 +542,43 @@ a linked issue labelled tribunal (file the condition with
 refuses CONFLICT naming each vote and its seats. --no-conditions REASON waives
 the check: the votes and REASON ride on the close event and REASON is recorded
 as a run note. It takes the same conductor token as --skip-integration-check.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchClose(cmd, getWriter(cmd))
 	},
 }
 
 func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := dispatchRunID(cmd)
-	if err != nil {
-		return err
-	}
-	accept, _ := cmd.Flags().GetBool("accept-missing-usage")
+	var in verb.DispatchCloseInput
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.AcceptMissingUsage, _ = cmd.Flags().GetBool("accept-missing-usage")
+	in.SkipIntegrationCheck, _ = cmd.Flags().GetString("skip-integration-check")
+	in.NoConditions, _ = cmd.Flags().GetString("no-conditions")
 	from, _ := cmd.Flags().GetString("backfill-from")
-	skip := engine.IntegrationSkip{}
-	skip.Reason, _ = cmd.Flags().GetString("skip-integration-check")
 
-	skip.Conditions.Reason, _ = cmd.Flags().GetString("no-conditions")
-	if skip.Conditions.Reason != "" {
-		by, err := rulingBy()
-		if err != nil {
-			return err
-		}
-		skip.Conditions.By = by
+	// The verb reads the token only for an override on a bound run, so a
+	// plain close never touches stdin. `--backfill-from -` carries the usage
+	// rows on stdin, so there the token comes from DOCKET_TOKEN alone.
+	stdin := cmd.InOrStdin()
+	if from == "-" {
+		stdin = strings.NewReader("")
 	}
-
-	// Only an override reads the conductor token, so a plain close never
-	// touches stdin. `--backfill-from -` carries the usage rows on stdin, so
-	// there the token comes from DOCKET_TOKEN alone.
-	if skip.Reason != "" || skip.Conditions.Reason != "" {
-		stdin := cmd.InOrStdin()
-		if from == "-" {
-			stdin = strings.NewReader("")
-		}
-		skip.Token = conductorToken(conn, runID, stdin)
-		skip.Conditions.Token = skip.Token
-	}
+	in.ConductorToken = func() string { return optionalToken(stdin) }
 
 	// DKT-580: with `--backfill-from` this verb is the whole wave-close
 	// pipeline. Without it, every line below is what it has always been —
 	// criterion 2 is that the plain close did not change, so the reconcile is a
 	// branch taken on the flag rather than a rewrite of the default path.
 	if from != "" {
-		return runDispatchReconcile(cmd, w, runID, from, accept, skip)
+		return runDispatchReconcile(cmd, w, from, in)
 	}
 
-	outcome, err := engine.NewEngine().CloseDispatch(conn, runID, accept, skip, model.NowMS())
+	res, err := verb.DispatchClose(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	outcome := res.Close
 
 	var message string
 	if !w.JSONMode {
@@ -617,20 +597,22 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 // to point at the wrong journal or skip the verify, and a skipped verify is how
 // a manifest closes over a ready set that moved underneath it.
 func runDispatchReconcile(
-	cmd *cobra.Command, w *output.Writer, runID int, from string, accept bool, skip engine.IntegrationSkip,
+	cmd *cobra.Command, w *output.Writer, from string, in verb.DispatchCloseInput,
 ) error {
 	rows, err := reconcileRows(cmd, from)
 	if err != nil {
 		return err
 	}
-	source, _ := cmd.Flags().GetString("source")
-	onDuplicate, _ := cmd.Flags().GetString("on-duplicate")
+	in.BackfillRows = rows
+	in.Source, _ = cmd.Flags().GetString("source")
+	in.OnDuplicate, _ = cmd.Flags().GetString("on-duplicate")
 
-	outcome, err := engine.NewEngine().ReconcileDispatch(
-		getDB(cmd), runID, rows, source, onDuplicate, accept, skip, model.NowMS())
+	res, err := verb.DispatchClose(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
 		return reconcileErr(err)
 	}
+	outcome := res.Reconcile
 
 	// The same advisories the standalone verbs emit, from the same stages: a
 	// conductor that switched to one invocation must not lose a warning it
@@ -658,15 +640,15 @@ func runDispatchReconcile(
 // DKT-243's verdict block, both carried on the result — so it is rendered
 // through the same function `dispatch verify` renders it with, with the stage
 // named in front. Every other stage failure keeps its own message and its own
-// exit code: StageError unwraps to the stage's error, so runErr's lookup finds
-// the code the standalone verb would have exited with.
+// exit code: StageError unwraps to the stage's error, so the verb's lookup
+// finds the code the standalone verb would have exited with.
 func reconcileErr(err error) error {
 	var stage *engine.StageError
 	if errors.As(err, &stage) && stage.Mismatch != nil {
 		return mismatchConflict(
 			stage.Stage+" stage: ", stage.Verify, stage.Mismatch)
 	}
-	return runErr(err)
+	return verbErr(err)
 }
 
 // reconcileRows reads `--backfill-from`.

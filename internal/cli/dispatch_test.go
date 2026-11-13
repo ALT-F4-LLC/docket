@@ -583,3 +583,29 @@ func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
 		}
 	}
 }
+
+// The verb-backed dispatch commands resolve their project through
+// internal/verb, so the root hook must not resolve one for them.
+func TestDispatchVerbCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{
+		dispatchOpenCmd, dispatchExtendCmd, dispatchVerifyCmd, dispatchCloseCmd,
+	} {
+		if !verbOwnsProject(cmd) {
+			t.Errorf("dispatch %s lacks the verbOwnsProject annotation", cmd.Name())
+		}
+	}
+}
+
+func TestDispatchOpenRefusesANonPositiveAckSeq(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedDispatchRunForCLI(t, conn)
+	cmd := dispatchCmdWithDB(conn, model.FormatRunID(runID))
+	testsupport.Must(t, cmd.Flags().Set("ack-reap", "0"), "set --ack-reap: %v", nil)
+
+	w, _ := bufWriter(true)
+	err := runDispatchOpen(cmd, w)
+	assertCmdCode(t, err, output.ErrValidation, "dispatch open --ack-reap 0")
+	if !strings.Contains(err.Error(), "--ack-reap 0 is not an event seq") {
+		t.Errorf("error = %v, want it to name the flag", err)
+	}
+}
