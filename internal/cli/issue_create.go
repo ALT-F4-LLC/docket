@@ -9,18 +9,18 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
 var createCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create a new issue",
+	Use:         "create",
+	Short:       "Create a new issue",
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
 		title, _ := cmd.Flags().GetString("title")
 		description, _ := cmd.Flags().GetString("description")
@@ -153,90 +153,32 @@ var createCmd = &cobra.Command{
 			description = strings.TrimRight(string(data), "\n")
 		}
 
-		// Validate enum values.
-		if err := model.ValidateStatus(model.Status(status)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-		if err := model.ValidatePriority(model.Priority(priority)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-		// Size is validated only when given: unlike Priority, whose "none" is
-		// itself a valid value, an unset --size leaves the flag default ""
-		// (SizeNone), which ValidateSize refuses — the default must NOT be
-		// validated, or `issue create` with no --size at all would fail.
-		if size != "" {
-			if err := model.ValidateSize(model.Size(size)); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-		}
-		if err := model.ValidateIssueKind(model.IssueKind(kind)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-
-		// Handle parent ID. The parent must exist AND live in the project this
-		// issue is being created in (DKT-22) — resolveParentIssue enforces both.
-		var parentID *int
-		if parent != "" {
-			parentIssue, err := resolveParentIssue(conn, parent, getProjectID(cmd))
-			if err != nil {
-				return err
-			}
-			parentID = &parentIssue.ID
-		}
-
-		issue := model.Issue{
-			ProjectID:   getProjectID(cmd),
-			ParentID:    parentID,
-			Title:       title,
-			Description: description,
-			Status:      model.Status(status),
-			Priority:    model.Priority(priority),
-			Size:        model.Size(size),
-			Kind:        model.IssueKind(kind),
-			Assignee:    assignee,
-		}
-
 		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
 			return err
 		}
 
-		st := store.StoreOn(conn)
-		id, inserted, err := st.CreateIssueIdempotent(&issue, labelFlag, fileFlag, idempotencyKey)
-		if errors.Is(err, store.ErrConflict) {
-			return cmdErr(err, output.ErrConflict)
-		}
+		res, err := verb.IssueCreate(cmd.Context(), verbEnv(cmd), verb.IssueCreateInput{
+			Title:          title,
+			Description:    description,
+			Status:         status,
+			Priority:       priority,
+			Size:           size,
+			Kind:           kind,
+			Assignee:       assignee,
+			Parent:         parent,
+			Labels:         labelFlag,
+			Files:          fileFlag,
+			Scope:          scopeOf(cmd),
+			IdempotencyKey: idempotencyKey,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("creating issue: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		// A replayed key returns the earlier issue and writes nothing to it:
-		// this call's flags describe a create that is not happening. Only the
-		// create's own answer can say so; a lookup made before it can be raced
-		// by another process committing the same key.
-		//
-		// Scope is written after the insert rather than through CreateIssue,
-		// so the create path an unmodified `issue create` takes is unchanged:
-		// a repo that never declares a scope executes exactly the v6 code and
-		// leaves scope_globs NULL.
-		if inserted {
-			if err := applyScope(cmd, conn, id); err != nil {
-				return err
-			}
-		}
-
-		// Refetch to get full object with timestamps.
-		created, err := st.GetIssue(id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching created issue: %w", err), output.ErrGeneral)
-		}
-
-		// Echo back what was actually linked, not a bare issues row (DKT-240).
-		if err := hydrateIssueAssociations(conn, created); err != nil {
-			return err
-		}
-
-		w.Success(withIssueVersion(created), fmt.Sprintf("Created %s: %s", model.FormatID(id), created.Title))
+		created := res.Issue
+		w.Success(withIssueVersion(created), fmt.Sprintf("Created %s: %s", model.FormatID(created.ID), created.Title))
 
 		return nil
 	},

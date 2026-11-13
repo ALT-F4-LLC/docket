@@ -7,11 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +40,8 @@ run's remaining steps, refresh that snapshot as the same kind of second act —
 ` + "`docket run refresh-body RUN-N --issue DKT-M --reason R`" + `. This command
 warns, naming the run and that verb, when a --description edit lands on an
 issue with live steps in a live run.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runIssueEdit(cmd, args, getWriter(cmd))
 	},
@@ -53,206 +52,83 @@ issue with live steps in a live run.`,
 // on stderr, and a test that could not substitute that stream would have to
 // assert the warning somewhere other than where an operator reads it.
 func runIssueEdit(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-	st := store.StoreOn(conn)
-
-	id, err := issueArg(args[0])
-	if err != nil {
-		return err
+	in := verb.IssueEditInput{
+		Issue:    args[0],
+		Title:    changedString(cmd, "title"),
+		Status:   changedString(cmd, "status"),
+		Priority: changedString(cmd, "priority"),
+		// An explicit `--size ""` clears the declaration back to SizeNone,
+		// the same "changed and empty means clear" reading `--parent 0` and
+		// `--scope=` use.
+		Size:     changedString(cmd, "size"),
+		Kind:     changedString(cmd, "type"),
+		Assignee: changedString(cmd, "assignee"),
+		Parent:   changedString(cmd, "parent"),
+		Scope:    scopeOf(cmd),
 	}
 
-	// Verify issue exists. The row is kept: reparenting compares projects
-	// issue-to-issue, so the edited issue's own home is needed below.
-	issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-	if err != nil {
-		return err
-	}
-
-	updates := make(map[string]interface{})
-	filesChanged := false
-
-	if cmd.Flags().Changed("title") {
-		title, _ := cmd.Flags().GetString("title")
-		updates["title"] = title
-	}
-
-	if cmd.Flags().Changed("description") {
-		description, _ := cmd.Flags().GetString("description")
-		if description == "-" {
+	if description := changedString(cmd, "description"); description != nil {
+		if *description == "-" {
 			const maxStdinSize = 1 << 20 // 1 MiB
 			data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinSize))
 			if err != nil {
 				return cmdErr(fmt.Errorf("reading description from stdin: %w", err), output.ErrGeneral)
 			}
-			description = strings.TrimRight(string(data), "\n")
+			*description = strings.TrimRight(string(data), "\n")
 		}
-		updates["description"] = description
-	}
-
-	if cmd.Flags().Changed("status") {
-		status, _ := cmd.Flags().GetString("status")
-		if err := model.ValidateStatus(model.Status(status)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-		updates["status"] = status
-	}
-
-	if cmd.Flags().Changed("priority") {
-		priority, _ := cmd.Flags().GetString("priority")
-		if err := model.ValidatePriority(model.Priority(priority)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-		updates["priority"] = priority
-	}
-
-	if cmd.Flags().Changed("size") {
-		size, _ := cmd.Flags().GetString("size")
-		// An explicit `--size ""` clears the declaration back to SizeNone,
-		// the dormant default — the same "changed and empty means clear"
-		// reading `--parent 0` and `--scope=` use elsewhere in this verb.
-		// ValidateSize refuses "" as a SETTABLE value, so it is skipped only
-		// for the clearing case; any other unrecognized value still refuses.
-		if size != "" {
-			if err := model.ValidateSize(model.Size(size)); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-		}
-		updates["size"] = size
-	}
-
-	if cmd.Flags().Changed("type") {
-		kind, _ := cmd.Flags().GetString("type")
-		if err := model.ValidateIssueKind(model.IssueKind(kind)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-		updates["kind"] = kind
-	}
-
-	if cmd.Flags().Changed("assignee") {
-		assignee, _ := cmd.Flags().GetString("assignee")
-		updates["assignee"] = assignee
+		in.Description = description
 	}
 
 	if cmd.Flags().Changed("file") {
-		fileFlag, _ := cmd.Flags().GetStringSlice("file")
-		if err := st.SetIssueFiles(id, fileFlag, config.DefaultAuthor()); err != nil {
-			return cmdErr(fmt.Errorf("setting files: %w", err), output.ErrGeneral)
-		}
-		filesChanged = true
-	}
-
-	if cmd.Flags().Changed("parent") {
-		parent, _ := cmd.Flags().GetString("parent")
-		if strings.EqualFold(parent, "0") || strings.EqualFold(parent, "none") {
-			updates["parent_id"] = nil
-		} else {
-			// The parent must exist AND share the edited issue's project
-			// (DKT-22) — issue-to-issue, never against the invoking cwd.
-			parentIssue, err := resolveParentIssue(conn, parent, issue.ProjectID)
-			if err != nil {
-				return err
-			}
-			newParentID := parentIssue.ID
-			if newParentID == id {
-				return cmdErr(fmt.Errorf("cannot set parent to self"), output.ErrValidation)
-			}
-			isCycle, err := st.IsDescendant(id, newParentID)
-			if err != nil {
-				return cmdErr(fmt.Errorf("checking for cycles: %w", err), output.ErrGeneral)
-			}
-			if isCycle {
-				return cmdErr(fmt.Errorf("cannot reparent: would create a cycle"), output.ErrConflict)
-			}
-			updates["parent_id"] = newParentID
-		}
-	}
-
-	// `--scope` counts as a change. Without this the early return below
-	// would report "No changes specified" for a scope-only edit and, in
-	// JSON mode, emit the issue unchanged — after having written the
-	// scope. Scope lives on its own column and never enters `updates`,
-	// so it has to be counted here explicitly.
-	scopeChanged := cmd.Flags().Changed(scopeFlag)
-	if err := applyScope(cmd, conn, id); err != nil {
-		return err
-	}
-
-	// DKT-741: the write above landed on `issues.scope_globs` and reached
-	// no already-activated run — packets and recorded diffs read the
-	// activation snapshot, and no EDIT refreshes it (DKT-869's
-	// `run refresh-scope` is a separate, explicitly-named second act, which
-	// is what the advisory now points at). Named AFTER the write because
-	// the answer is a property of the run's frozen snapshot, which the
-	// write did not touch; an operator who meant to widen scope to unblock
-	// live work needs to learn here that this edit alone did not do it.
-	//
-	// BOTH CHANNELS, the way every advisory in this CLI travels: the
-	// stderr line for a human (suppressed in JSON mode by design), and
-	// `warnings` in the envelope for the relay that ran the edit — which
-	// is who ran it when this was found.
-	var scopeWarnings []string
-	if scopeChanged {
-		scopeWarnings = engine.ScopeEditFrozenForActiveRuns(conn, id)
-		for _, warning := range scopeWarnings {
-			w.Warn("%s", warning)
-		}
-	}
-
-	if len(updates) == 0 && !filesChanged && !scopeChanged {
-		if w.JSONMode {
-			issue, err := st.GetIssue(id)
-			if err != nil {
-				return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
-			}
-			if err := hydrateIssueAssociations(conn, issue); err != nil {
-				return err
-			}
-			w.Success(withIssueVersion(issue), "")
-		} else {
-			w.Info("No changes specified")
-		}
-		return nil
+		files, _ := cmd.Flags().GetStringSlice("file")
+		in.Files = &files
 	}
 
 	ifVersion, err := ifVersionOf(cmd)
 	if err != nil {
 		return err
 	}
+	in.IfVersion = ifVersion
 
-	if len(updates) > 0 || ifVersion != nil {
-		if err := st.UpdateIssueCAS(id, updates, config.DefaultAuthor(), ifVersion); err != nil {
-			if e := casError(err, fmt.Sprintf("issue %s", args[0])); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
-		}
+	res, err := verb.IssueEdit(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
+	// DKT-741: the advisories name the live runs whose frozen snapshot the
+	// edit did not reach, on BOTH CHANNELS: the stderr line for a human
+	// (suppressed in JSON mode by design) and `warnings` in the envelope for
+	// the relay that ran the edit. They travel even when the update itself
+	// is then refused, because the scope write before it has landed.
+	for _, warning := range res.Warnings {
+		w.Warn("%s", warning)
 	}
-
-	// The description advisory runs only once the write above has landed:
-	// it compares the live column against each run's frozen body snapshot.
-	warnings := scopeWarnings
-	if _, descriptionChanged := updates["description"]; descriptionChanged {
-		descriptionWarnings := engine.DescriptionEditFrozenForActiveRuns(conn, id)
-		for _, warning := range descriptionWarnings {
-			w.Warn("%s", warning)
-		}
-		warnings = append(warnings, descriptionWarnings...)
-	}
-
-	updated, err := st.GetIssue(id)
 	if err != nil {
-		return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
 
-	if err := hydrateIssueAssociations(conn, updated); err != nil {
-		return err
+	if !res.Changed {
+		if w.JSONMode {
+			w.Success(withIssueVersion(res.Issue), "")
+		} else {
+			w.Info("No changes specified")
+		}
+		return nil
 	}
 
+	updated := res.Issue
 	w.Success(
-		withEditWarnings(withIssueVersion(updated), warnings),
-		fmt.Sprintf("Updated %s: %s", model.FormatID(id), updated.Title))
+		withEditWarnings(withIssueVersion(updated), res.Warnings),
+		fmt.Sprintf("Updated %s: %s", model.FormatID(updated.ID), updated.Title))
 
 	return nil
+}
+
+// changedString returns a string flag's value when it was given on the
+// command line, and nil otherwise, so an edit leaves that field alone.
+func changedString(cmd *cobra.Command, name string) *string {
+	if !cmd.Flags().Changed(name) {
+		return nil
+	}
+	value, _ := cmd.Flags().GetString(name)
+	return &value
 }
 
 // editWarningsPayload is the edited issue plus the advisories the edit raised

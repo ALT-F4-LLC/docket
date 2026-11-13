@@ -1,12 +1,9 @@
 package cli
 
 import (
-	"encoding/json"
-	"fmt"
-	"strings"
-
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -33,40 +30,25 @@ func addScopeFlag(cmd *cobra.Command) {
 		"Path glob this issue is expected to touch (repeatable)")
 }
 
-// scopeGlobsJSON reads `--scope` and returns it as the JSON array the column
-// stores, or "" when the flag was not given.
-//
-// Globs are stored in DECLARED ORDER, not sorted: the order is the author's,
-// it is echoed back in the issue snapshot, and re-ordering it would make an
-// activation-time snapshot differ from what the operator wrote.
-func scopeGlobsJSON(cmd *cobra.Command) (string, error) {
+// scopeOf reads `--scope` into a verb input: nil when the flag was not given,
+// so an edit leaves the declaration alone, and an empty list for `--scope=`,
+// which clears it back to NULL.
+func scopeOf(cmd *cobra.Command) *[]string {
 	if !cmd.Flags().Changed(scopeFlag) {
-		return "", nil
+		return nil
 	}
-
 	globs, _ := cmd.Flags().GetStringSlice(scopeFlag)
+	return &globs
+}
 
-	cleaned := make([]string, 0, len(globs))
-	for _, g := range globs {
-		g = strings.TrimSpace(g)
-		if g == "" {
-			return "", cmdErr(
-				fmt.Errorf("--scope glob must not be empty"), output.ErrValidation)
-		}
-		cleaned = append(cleaned, g)
-	}
-
-	// `--scope=` with nothing after it clears the declaration back to NULL,
-	// which is how an operator retracts a scope they no longer stand behind.
-	if len(cleaned) == 0 {
+// scopeGlobsJSON reads `--scope` and returns it as the JSON array the column
+// stores, or "" when the flag was not given; verb.ScopeGlobsJSON encodes it.
+func scopeGlobsJSON(cmd *cobra.Command) (string, error) {
+	scope := scopeOf(cmd)
+	if scope == nil {
 		return "", nil
 	}
-
-	encoded, err := json.Marshal(cleaned)
-	if err != nil {
-		return "", cmdErr(fmt.Errorf("encoding --scope: %w", err), output.ErrGeneral)
-	}
-	return string(encoded), nil
+	return fromVerb(verb.ScopeGlobsJSON(*scope))
 }
 
 // applyScope writes an issue's scope when `--scope` was given, and leaves the

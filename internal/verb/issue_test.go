@@ -259,6 +259,318 @@ func requireExpiresAfter(t *testing.T, lease model.Lease, ttl time.Duration, bef
 	}
 }
 
+func createInput(title string) verb.IssueCreateInput {
+	return verb.IssueCreateInput{
+		Title: title, Status: "backlog", Priority: "none", Kind: "task",
+	}
+}
+
+func scopeOf(t *testing.T, st store.Store, id int) string {
+	t.Helper()
+	_, scope, err := st.IssueDeclaration(id)
+	if err != nil {
+		t.Fatalf("IssueDeclaration(%d): %v", id, err)
+	}
+	return scope
+}
+
+func issueCount(t *testing.T, st store.Store) int {
+	t.Helper()
+	n, err := st.CountIssues(store.DefaultProjectID)
+	if err != nil {
+		t.Fatalf("CountIssues: %v", err)
+	}
+	return n
+}
+
+func TestIssueCreateEchoesTheStoredIssue(t *testing.T) {
+	st := openStore(t)
+	in := createInput("created")
+	in.Labels = []string{"routing"}
+	in.Files = []string{"internal/verb/issue.go"}
+	in.Scope = &[]string{"z/**", " a/** "}
+
+	res, err := verb.IssueCreate(context.Background(), projectEnv(st, "", false), in)
+	if err != nil {
+		t.Fatalf("IssueCreate: %v", err)
+	}
+	got := res.Issue
+	if got == nil || got.ID == 0 || got.Title != "created" || got.ProjectID != store.DefaultProjectID {
+		t.Fatalf("Issue = %+v, want the created row in the default project", got)
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "routing" {
+		t.Errorf("Labels = %v, want the applied [routing]", got.Labels)
+	}
+	if len(got.Files) != 1 || got.Files[0] != "internal/verb/issue.go" {
+		t.Errorf("Files = %v, want the applied file", got.Files)
+	}
+	if scope := scopeOf(t, st, got.ID); scope != `["z/**","a/**"]` {
+		t.Errorf("scope_globs = %s, want the declared order, trimmed", scope)
+	}
+}
+
+func TestIssueCreateValidatesBeforeWriting(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	parent := createIssue(t, st)
+	before := issueCount(t, st)
+
+	for name, mutate := range map[string]func(*verb.IssueCreateInput){
+		"status":     func(in *verb.IssueCreateInput) { in.Status = "nope" },
+		"priority":   func(in *verb.IssueCreateInput) { in.Priority = "nope" },
+		"size":       func(in *verb.IssueCreateInput) { in.Size = "nope" },
+		"kind":       func(in *verb.IssueCreateInput) { in.Kind = "nope" },
+		"blank glob": func(in *verb.IssueCreateInput) { in.Scope = &[]string{" "} },
+		"bad parent": func(in *verb.IssueCreateInput) { in.Parent = "not-an-id" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := createInput("refused")
+			mutate(&in)
+			_, err := verb.IssueCreate(context.Background(), env, in)
+			requireCode(t, err, output.ErrValidation)
+		})
+	}
+	if after := issueCount(t, st); after != before {
+		t.Errorf("issues = %d after refused creates, want %d", after, before)
+	}
+
+	in := createInput("child")
+	in.Parent = model.FormatID(parent)
+	res, err := verb.IssueCreate(context.Background(), env, in)
+	if err != nil {
+		t.Fatalf("IssueCreate under a parent: %v", err)
+	}
+	if res.Issue.ParentID == nil || *res.Issue.ParentID != parent {
+		t.Errorf("ParentID = %v, want %d", res.Issue.ParentID, parent)
+	}
+}
+
+func TestIssueCreateRefusesAParentInAnotherProject(t *testing.T) {
+	st := openStore(t)
+	home := ensureProject(t, st, "/repos/home", "home")
+	ensureProject(t, st, "/repos/other", "other")
+	foreign, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: home, Title: "foreign parent", Status: model.StatusTodo,
+		Priority: model.PriorityNone, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent: %v", err)
+	}
+	in := createInput("child")
+	in.Parent = model.FormatID(foreign)
+
+	_, err = verb.IssueCreate(context.Background(), projectEnv(st, "/repos/other", true), in)
+	requireVerbCode(t, err, output.ErrValidation, "a sub-issue lives in its parent's project")
+}
+
+func TestIssueCreateMayRegisterTheCallersProject(t *testing.T) {
+	t.Run("anchored registers and creates there", func(t *testing.T) {
+		st := openStore(t)
+		res, err := verb.IssueCreate(context.Background(), projectEnv(st, "/repos/fresh", true), createInput("first"))
+		if err != nil {
+			t.Fatalf("IssueCreate: %v", err)
+		}
+		want, found, err := st.LookupProject("/repos/fresh")
+		if err != nil || !found {
+			t.Fatalf("LookupProject: found=%v err=%v, want the registered row", found, err)
+		}
+		if res.Registered == nil || res.Registered.ID != want || res.Registered.Verb != "issue create" {
+			t.Errorf("Registered = %+v, want project %d registered by issue create", res.Registered, want)
+		}
+		if res.Issue.ProjectID != want {
+			t.Errorf("ProjectID = %d, want the caller's project %d", res.Issue.ProjectID, want)
+		}
+	})
+
+	t.Run("unanchored is refused before the insert", func(t *testing.T) {
+		st := openStore(t)
+		_, err := verb.IssueCreate(context.Background(), projectEnv(st, "/tmp/scratch", false), createInput("stray"))
+		requireCode(t, err, output.ErrValidation)
+		requireUnregistered(t, st, "/tmp/scratch")
+		if n := issueCount(t, st); n != 0 {
+			t.Errorf("issues = %d, want the refused create to write none", n)
+		}
+	})
+}
+
+func TestIssueCreateReplayedKeyWritesNoScope(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	first := createInput("original")
+	first.IdempotencyKey = "K"
+	created, err := verb.IssueCreate(context.Background(), env, first)
+	if err != nil {
+		t.Fatalf("IssueCreate: %v", err)
+	}
+
+	replay := first
+	replay.Scope = &[]string{"a/**"}
+	res, err := verb.IssueCreate(context.Background(), env, replay)
+	if err != nil {
+		t.Fatalf("replayed IssueCreate: %v", err)
+	}
+	if res.Issue.ID != created.Issue.ID {
+		t.Errorf("replay returned issue %d, want the original %d", res.Issue.ID, created.Issue.ID)
+	}
+	if scope := scopeOf(t, st, created.Issue.ID); scope != "" {
+		t.Errorf("scope_globs = %s after a replay, want the original NULL", scope)
+	}
+}
+
+func TestIssueEditAppliesFieldsAsTheAuthor(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	env.Author = "editor-1"
+	id := createIssue(t, st)
+	title, status := "renamed", "in-progress"
+	files := []string{"a.go"}
+
+	res, err := verb.IssueEdit(context.Background(), env, verb.IssueEditInput{
+		Issue: model.FormatID(id), Title: &title, Status: &status, Files: &files,
+		Scope: &[]string{"a/**"},
+	})
+	if err != nil {
+		t.Fatalf("IssueEdit: %v", err)
+	}
+	if !res.Changed || res.Issue.Title != title || res.Issue.Status != model.StatusInProgress {
+		t.Fatalf("result = %+v, want the changed issue", res)
+	}
+	if len(res.Issue.Files) != 1 || res.Issue.Files[0] != "a.go" {
+		t.Errorf("Files = %v, want [a.go]", res.Issue.Files)
+	}
+	if scope := scopeOf(t, st, id); scope != `["a/**"]` {
+		t.Errorf("scope_globs = %s, want [\"a/**\"]", scope)
+	}
+	activity, err := st.GetActivity(id, 0)
+	if err != nil {
+		t.Fatalf("GetActivity: %v", err)
+	}
+	attributed := false
+	for _, a := range activity {
+		if a.FieldChanged == "title" {
+			attributed = a.ChangedBy == "editor-1"
+		}
+	}
+	if !attributed {
+		t.Errorf("activity %+v has no title change attributed to env.Author", activity)
+	}
+}
+
+func TestIssueEditWithNoChangesWritesNothing(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	before, err := st.GetVersion("issues", id)
+	if err != nil {
+		t.Fatalf("GetVersion: %v", err)
+	}
+
+	res, err := verb.IssueEdit(context.Background(), projectEnv(st, "", false),
+		verb.IssueEditInput{Issue: model.FormatID(id)})
+	if err != nil {
+		t.Fatalf("IssueEdit: %v", err)
+	}
+	if res.Changed || res.Issue == nil || res.Issue.ID != id {
+		t.Errorf("result = %+v, want the unchanged issue", res)
+	}
+	if after, _ := st.GetVersion("issues", id); after != before {
+		t.Errorf("version %d -> %d, want an empty edit to write nothing", before, after)
+	}
+}
+
+func TestIssueEditRefusals(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	parent := createIssue(t, st)
+	child := createIssue(t, st)
+	parentRef, childRef := model.FormatID(parent), model.FormatID(child)
+	if _, err := verb.IssueEdit(context.Background(), env,
+		verb.IssueEditInput{Issue: childRef, Parent: &parentRef}); err != nil {
+		t.Fatalf("reparenting: %v", err)
+	}
+	stale := 1
+	bad := "nope"
+	files := []string{"never.go"}
+
+	cases := []struct {
+		name string
+		in   verb.IssueEditInput
+		code output.ErrorCode
+		text string
+	}{
+		{"unknown issue", verb.IssueEditInput{Issue: "DKT-999", Title: &bad}, output.ErrNotFound, "issue DKT-999 not found"},
+		{"bad status", verb.IssueEditInput{Issue: childRef, Status: &bad}, output.ErrValidation, ""},
+		{"self parent", verb.IssueEditInput{Issue: childRef, Parent: &childRef}, output.ErrValidation, "cannot set parent to self"},
+		{"cycle", verb.IssueEditInput{Issue: parentRef, Parent: &childRef}, output.ErrConflict, "would create a cycle"},
+		{"blank glob", verb.IssueEditInput{Issue: childRef, Files: &files, Scope: &[]string{""}}, output.ErrValidation, "--scope glob must not be empty"},
+		{"stale version", verb.IssueEditInput{Issue: childRef, Title: &bad, IfVersion: &stale}, output.ErrConflict, "version mismatch"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := verb.IssueEdit(context.Background(), env, c.in)
+			requireVerbCode(t, err, c.code, c.text)
+		})
+	}
+
+	got, err := st.GetIssueFiles(child)
+	if err != nil {
+		t.Fatalf("GetIssueFiles: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("files = %v, want the refused edit to write none", got)
+	}
+}
+
+func TestIssueEditMayRegisterTheCallersProject(t *testing.T) {
+	t.Run("anchored registers and reports it", func(t *testing.T) {
+		st := openStore(t)
+		id := createIssue(t, st)
+		res, err := verb.IssueEdit(context.Background(), projectEnv(st, "/repos/fresh", true),
+			verb.IssueEditInput{Issue: model.FormatID(id)})
+		if err != nil {
+			t.Fatalf("IssueEdit: %v", err)
+		}
+		if res.Registered == nil || res.Registered.Identity != "/repos/fresh" || res.Registered.Verb != "issue edit" {
+			t.Errorf("Registered = %+v, want /repos/fresh registered by issue edit", res.Registered)
+		}
+	})
+
+	t.Run("unanchored is refused before the edit", func(t *testing.T) {
+		st := openStore(t)
+		id := createIssue(t, st)
+		title := "stray"
+		_, err := verb.IssueEdit(context.Background(), projectEnv(st, "/tmp/scratch", false),
+			verb.IssueEditInput{Issue: model.FormatID(id), Title: &title})
+		requireCode(t, err, output.ErrValidation)
+		requireUnregistered(t, st, "/tmp/scratch")
+		issue, err := st.GetIssue(id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if issue.Title == title {
+			t.Error("the refused edit renamed the issue")
+		}
+	})
+}
+
+func TestScopeGlobsJSON(t *testing.T) {
+	cases := []struct {
+		globs []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{}, ""},
+		{[]string{"z/**", "a/**"}, `["z/**","a/**"]`},
+	}
+	for _, c := range cases {
+		got, err := verb.ScopeGlobsJSON(c.globs)
+		if err != nil || got != c.want {
+			t.Errorf("ScopeGlobsJSON(%q) = %q, %v; want %q", c.globs, got, err, c.want)
+		}
+	}
+	_, err := verb.ScopeGlobsJSON([]string{"a/**", " "})
+	requireCode(t, err, output.ErrValidation)
+}
+
 func TestIssueLeaseVerbsTakeTheConfiguredTTLOfTheCallersProject(t *testing.T) {
 	st := openStore(t)
 	// The first registration takes over the default project's row; the
