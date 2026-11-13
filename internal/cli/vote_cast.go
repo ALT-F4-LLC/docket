@@ -42,6 +42,18 @@ func newVoteCastCmd() *cobra.Command {
 			w := getWriter(cmd)
 			env := verbEnv(cmd)
 
+			// The project and the proposal ID are refused before any flag
+			// check, the form or a stdin read, so nobody types a ballot
+			// that is then thrown away.
+			project, err := verb.VoteProject(cmd.Context(), env)
+			recordRegisteredProject(cmd, env, project.Registered)
+			if err != nil {
+				return verbErr(err)
+			}
+			if _, err := verb.ParseProposalRef(args[0]); err != nil {
+				return verbErr(err)
+			}
+
 			voter, _ := cmd.Flags().GetString("voter")
 			role, _ := cmd.Flags().GetString("role")
 			verdict, _ := cmd.Flags().GetString("verdict")
@@ -260,10 +272,6 @@ func newVoteCastCmd() *cobra.Command {
 				Usage:           usageRaw,
 			})
 			recordRegisteredProject(cmd, env, res.Registered)
-			result := res.Cast
-			if result == nil {
-				return verbErr(err)
-			}
 
 			// A SEAT THAT REPORTS NOTHING IS TOLD SO (DKT-257). `--usage` stays
 			// optional — a person casting a vote by hand has no token count to
@@ -273,7 +281,8 @@ func newVoteCastCmd() *cobra.Command {
 			// steps; a conductor-side seat of identical shape recorded nothing,
 			// and the only difference was where the ballot executed.
 			//
-			// stderr, not a refusal: the cast is valid and the vote landed.
+			// stderr, not a refusal: the ballot passed every check and went
+			// to the engine, which may still refuse it.
 			//
 			// The note does NOT claim the spend is unrecoverable (DKT-519).
 			// It once ended "nothing else will supply it later", which is
@@ -285,7 +294,7 @@ func newVoteCastCmd() *cobra.Command {
 			// been. `-q` silences it: a caster who has already chosen not to
 			// report asked for no non-essential output, and the cast itself
 			// still lands.
-			if strings.TrimSpace(usageRaw) == "" && !w.QuietMode {
+			if res.Attempted && strings.TrimSpace(usageRaw) == "" && !w.QuietMode {
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"note: this seat reported no --usage, so its spend is missing "+
 						"from the run's totals rather than zero. A vote step is "+
@@ -293,6 +302,11 @@ func newVoteCastCmd() *cobra.Command {
 						"it later with `docket vote backfill-usage %s` if a ledger "+
 						"outside the seat holds it.\n",
 					model.FormatProposalID(res.ProposalID))
+			}
+
+			result := res.Cast
+			if result == nil {
+				return verbErr(err)
 			}
 
 			// Build human-readable message.

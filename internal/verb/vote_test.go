@@ -145,24 +145,27 @@ func TestVoteCastRecordsTheBallotByEnvAuthorByDefault(t *testing.T) {
 	}
 }
 
+// TestVoteCastRefusalsWriteNoVote also pins Attempted: false for a ballot
+// refused by the verb's own checks, true for one the engine refused.
 func TestVoteCastRefusalsWriteNoVote(t *testing.T) {
 	cases := []struct {
-		name string
-		edit func(*verb.VoteCastInput)
-		code output.ErrorCode
-		want string
+		name      string
+		edit      func(*verb.VoteCastInput)
+		code      output.ErrorCode
+		want      string
+		attempted bool
 	}{
-		{"malformed proposal id", func(in *verb.VoteCastInput) { in.Proposal = "DKT-Vx" }, output.ErrValidation, "invalid proposal ID"},
-		{"malformed findings JSON", func(in *verb.VoteCastInput) { in.FindingsJSON = `{"blockers":` }, output.ErrValidation, "--findings-json"},
+		{"malformed proposal id", func(in *verb.VoteCastInput) { in.Proposal = "DKT-Vx" }, output.ErrValidation, "invalid proposal ID", false},
+		{"malformed findings JSON", func(in *verb.VoteCastInput) { in.FindingsJSON = `{"blockers":` }, output.ErrValidation, "--findings-json", false},
 		{"evidence on an unbound proposal", func(in *verb.VoteCastInput) {
 			in.FindingsJSON = `{"blockers":[{"text":"x","evidence":["artifact:ARTIFACT-1"]}]}`
-		}, output.ErrValidation, "DKT-V1"},
-		{"confidence out of range", func(in *verb.VoteCastInput) { in.Confidence = 1.1 }, output.ErrValidation, "--confidence"},
-		{"domain relevance out of range", func(in *verb.VoteCastInput) { in.DomainRelevance = -0.1 }, output.ErrValidation, "--domain-relevance"},
-		{"unknown verdict", func(in *verb.VoteCastInput) { in.Verdict = "maybe" }, output.ErrValidation, "maybe"},
-		{"usage that is not a spend report", func(in *verb.VoteCastInput) { in.Usage = `[1]` }, output.ErrValidation, "--usage"},
-		{"concerns without a rationale", func(in *verb.VoteCastInput) { in.Verdict = "reject" }, output.ErrValidation, "rationale"},
-		{"no such proposal", func(in *verb.VoteCastInput) { in.Proposal = "DKT-V99" }, output.ErrNotFound, "proposal DKT-V99 not found"},
+		}, output.ErrValidation, "DKT-V1", false},
+		{"confidence out of range", func(in *verb.VoteCastInput) { in.Confidence = 1.1 }, output.ErrValidation, "--confidence", false},
+		{"domain relevance out of range", func(in *verb.VoteCastInput) { in.DomainRelevance = -0.1 }, output.ErrValidation, "--domain-relevance", false},
+		{"unknown verdict", func(in *verb.VoteCastInput) { in.Verdict = "maybe" }, output.ErrValidation, "maybe", false},
+		{"usage that is not a spend report", func(in *verb.VoteCastInput) { in.Usage = `[1]` }, output.ErrValidation, "--usage", false},
+		{"concerns without a rationale", func(in *verb.VoteCastInput) { in.Verdict = "reject" }, output.ErrValidation, "rationale", true},
+		{"no such proposal", func(in *verb.VoteCastInput) { in.Proposal = "DKT-V99" }, output.ErrNotFound, "proposal DKT-V99 not found", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,6 +177,9 @@ func TestVoteCastRefusalsWriteNoVote(t *testing.T) {
 			requireVerbCode(t, err, tc.code, tc.want)
 			if res.Cast != nil {
 				t.Errorf("a refused cast returned a Cast: %+v", res.Cast)
+			}
+			if res.Attempted != tc.attempted {
+				t.Errorf("Attempted = %v, want %v", res.Attempted, tc.attempted)
 			}
 			if n := len(proposalVotes(t, st, ref)); n != 0 {
 				t.Errorf("a refused cast stored %d vote(s)", n)
@@ -358,4 +364,200 @@ func TestVoteCloseDecidedProposalIsAConflict(t *testing.T) {
 	}
 	_, err := verb.VoteClose(context.Background(), env, verb.VoteCloseInput{Proposal: ref, Reason: "r"})
 	requireVerbCode(t, err, output.ErrConflict, "")
+}
+
+func TestVoteCloseUnanchoredCallerIsRefusedBeforeTheClose(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	_, err := verb.VoteClose(context.Background(), projectEnv(st, "/work/scratch", false), verb.VoteCloseInput{
+		Proposal: ref, Reason: "r",
+	})
+	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project")
+	requireUnregistered(t, st, "/work/scratch")
+	p, err := st.GetProposal(1)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.Status != model.ProposalStatusOpen {
+		t.Errorf("a refused caller left the proposal %s", p.Status)
+	}
+}
+
+// TestVoteWritesRegisterAnAnchoredCallersProject: each vote write, and
+// VoteProject, reports the project it registered on first contact, and a
+// second call reports none.
+func TestVoteWritesRegisterAnAnchoredCallersProject(t *testing.T) {
+	writes := map[string]func(env verb.Env, ref string) (*model.Project, error){
+		"VoteProject": func(env verb.Env, _ string) (*model.Project, error) {
+			res, err := verb.VoteProject(context.Background(), env)
+			return res.Registered, err
+		},
+		"VoteCreate": func(env verb.Env, _ string) (*model.Project, error) {
+			res, err := verb.VoteCreate(context.Background(), env, verb.VoteCreateInput{
+				Description: "d", Criticality: "low", Voters: 1, Threshold: 0.5,
+			})
+			return res.Registered, err
+		},
+		"VoteCast": func(env verb.Env, ref string) (*model.Project, error) {
+			res, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat"))
+			return res.Registered, err
+		},
+		"VoteClose": func(env verb.Env, ref string) (*model.Project, error) {
+			res, err := verb.VoteClose(context.Background(), env, verb.VoteCloseInput{Proposal: ref, Reason: "r"})
+			return res.Registered, err
+		},
+	}
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			ensureProject(t, st, "/repos/first", "first")
+			env := projectEnv(st, "/repos/vote", true)
+
+			registered, err := write(env, openProposal(t, st, 2, ""))
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			id, found, err := st.LookupProject("/repos/vote")
+			if err != nil || !found {
+				t.Fatalf("LookupProject = (%d, %v, %v), want the anchored identity registered", id, found, err)
+			}
+			if registered == nil || registered.ID != id || registered.Identity != "/repos/vote" {
+				t.Errorf("Registered = %+v, want project %d for /repos/vote", registered, id)
+			}
+
+			again, err := write(env, openProposal(t, st, 2, ""))
+			if err != nil {
+				t.Fatalf("second %s: %v", name, err)
+			}
+			if again != nil {
+				t.Errorf("a second %s reported registering %+v again", name, again)
+			}
+		})
+	}
+}
+
+func TestVoteProjectRefusesAnUnanchoredCaller(t *testing.T) {
+	st := openStore(t)
+	_, err := verb.VoteProject(context.Background(), projectEnv(st, "/work/scratch", false))
+	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project")
+	requireUnregistered(t, st, "/work/scratch")
+}
+
+// voteStepWorkflow puts a one-seat vote step between two executor steps, so
+// the seat's ballot decides it and routing makes `last` claimable.
+const voteStepWorkflow = `
+[pipeline]
+name = "unit-vote-step"
+version = 1
+[match]
+kind = ["task"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+[[step]]
+name = "gate"
+after = ["first"]
+type = "vote"
+voters = ["seat"]
+vote_rule = "majority"
+on_fail = "skip"
+[[step]]
+name = "last"
+after = ["gate"]
+executor = "someone"
+emits = "result"
+`
+
+// voteStepProposal activates voteStepWorkflow and records its first step,
+// which opens the gate's proposal. It returns the proposal and the run's
+// step ids by instance.
+func voteStepProposal(t *testing.T, st store.Store) (string, map[string]int) {
+	t.Helper()
+	if err := st.SetConfig(0, store.VoteRuleThresholdKey("majority"), "0.5"); err != nil {
+		t.Fatalf("registering the vote rule: %v", err)
+	}
+	env := projectEnv(st, "", false)
+	first := activatedStepOf(t, st, voteStepWorkflow)
+	claim := claimStep(t, env, first)
+	if _, err := verb.StepComplete(context.Background(), env, verb.StepCompleteInput{
+		Step: model.FormatStepID(first), Token: claim.Claim.Token, Artifact: []byte("result"),
+	}); err != nil {
+		t.Fatalf("StepComplete: %v", err)
+	}
+
+	step, err := st.GetStep(first)
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	steps, err := st.ListRunSteps(step.RunID)
+	if err != nil {
+		t.Fatalf("ListRunSteps: %v", err)
+	}
+	byInstance := map[string]int{}
+	for _, s := range steps {
+		byInstance[s.Instance] = s.ID
+	}
+	proposals, _, err := st.ListProposals(store.DefaultProjectID, "", "", "", 10)
+	if err != nil || len(proposals) != 1 {
+		t.Fatalf("ListProposals = (%d proposals, %v), want the gate's one", len(proposals), err)
+	}
+	return model.FormatProposalID(proposals[0].ID), byInstance
+}
+
+func TestVoteCastDecidingBallotRoutesTheVoteStep(t *testing.T) {
+	st := openStore(t)
+	ref, steps := voteStepProposal(t, st)
+	env := projectEnv(st, "", false)
+
+	res, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat"))
+	if err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+	if res.Cast == nil || !res.Cast.QuorumReached {
+		t.Fatalf("Cast = %+v, want the deciding ballot", res.Cast)
+	}
+	gate, err := st.GetStep(steps["gate@0"])
+	if err != nil {
+		t.Fatalf("GetStep(gate@0): %v", err)
+	}
+	if gate.Status != store.StepDone {
+		t.Errorf("gate@0 is %s after the deciding ballot, want %s", gate.Status, store.StepDone)
+	}
+	claimStep(t, env, steps["last@0"])
+}
+
+// TestVoteCastRoutingFailureReturnsNoCast: a deciding ballot that commits and
+// then fails to route returns the routing error with no Cast, and the vote
+// stays recorded.
+func TestVoteCastRoutingFailureReturnsNoCast(t *testing.T) {
+	st := openStore(t)
+	ref, steps := voteStepProposal(t, st)
+	conn, err := store.SQLDB(st)
+	if err != nil {
+		t.Fatalf("SQLDB: %v", err)
+	}
+	if _, err := conn.Exec(
+		`CREATE TRIGGER fail_gate_routing BEFORE UPDATE ON steps
+		 WHEN OLD.instance = 'gate@0'
+		 BEGIN SELECT RAISE(ABORT, 'injected routing failure'); END`); err != nil {
+		t.Fatalf("installing the failing trigger: %v", err)
+	}
+
+	res, err := verb.VoteCast(context.Background(), projectEnv(st, "", false), castInput(ref, "seat"))
+	requireVerbCode(t, err, output.ErrGeneral,
+		"the vote recorded and the proposal decided, but routing the vote step failed: ")
+	if !strings.Contains(err.Error(), "injected routing failure") {
+		t.Errorf("error %q does not carry the routing cause", err)
+	}
+	if res.Cast != nil {
+		t.Errorf("a routing failure returned a Cast: %+v", res.Cast)
+	}
+	if _, ok := proposalVotes(t, st, ref)["seat"]; !ok {
+		t.Errorf("the committed ballot is missing after the routing failure")
+	}
+	if gate, err := st.GetStep(steps["gate@0"]); err != nil || gate.Status == store.StepDone {
+		t.Errorf("gate@0 = (%+v, %v), want it left unrouted", gate, err)
+	}
 }

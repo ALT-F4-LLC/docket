@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -268,6 +269,106 @@ func TestVoteCastUsageNoteNamesBackfill(t *testing.T) {
 	testsupport.Must(t, err, "vote cast with --usage: %v", err)
 	if strings.Contains(stderr, "note:") {
 		t.Errorf("a seat that DID report usage was noted at anyway; stderr = %q", stderr)
+	}
+}
+
+// TestVoteCastUsageNoteFollowsTheBallotToTheEngine: the no-usage note is
+// printed for every ballot that passed the command's checks and went to the
+// engine, including one the engine then refused, and for none refused before.
+func TestVoteCastUsageNoteFollowsTheBallotToTheEngine(t *testing.T) {
+	conn := newTestDB(t)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "usage note on refusal", RequiredVoters: 5, Threshold: 0.5,
+		Status: model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	id := model.FormatProposalID(proposalID)
+	base := []string{id, "--voter", "seat-a", "--verdict", "approve", "--domain-relevance", "0.8"}
+
+	err = runVoteCastCmd(t, conn, append(base, "--confidence", "0.9", "--usage", `{"tokens":1}`)...)
+	testsupport.Must(t, err, "first vote cast: %v", err)
+
+	stderr, err := runVoteCastCapturingStderr(t, conn, append(base, "--confidence", "0.9")...)
+	if code := codeOf(t, err); code != output.ErrConflict {
+		t.Fatalf("a second ballot from seat-a returned %s (%v), want %s", code, err, output.ErrConflict)
+	}
+	if !strings.Contains(stderr, "note: this seat reported no --usage") {
+		t.Errorf("a ballot the engine refused was not noted; stderr = %q", stderr)
+	}
+
+	stderr, err = runVoteCastCapturingStderr(t, conn, append(base, "--confidence", "1.5")...)
+	if code := codeOf(t, err); code != output.ErrValidation {
+		t.Fatalf("an out-of-range confidence returned %s (%v), want %s", code, err, output.ErrValidation)
+	}
+	if strings.Contains(stderr, "note:") {
+		t.Errorf("a ballot refused before the engine was noted; stderr = %q", stderr)
+	}
+}
+
+// TestVoteCastRefusesTheProjectAndProposalBeforeItsFlags: an unanchored
+// caller and a malformed proposal ID are refused before any flag check, so a
+// JSON-mode run with no flags reports them, never the missing --verdict.
+func TestVoteCastRefusesTheProjectAndProposalBeforeItsFlags(t *testing.T) {
+	conn := newTestDB(t)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "refusal order", RequiredVoters: 2, Threshold: 0.5,
+		Status: model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	for _, tc := range []struct {
+		name     string
+		cfg      *config.Config
+		proposal string
+		prefix   string
+	}{
+		{"unanchored caller", &config.Config{Identity: "/work/scratch"}, model.FormatProposalID(proposalID),
+			"cannot tell which project this belongs to"},
+		{"malformed proposal ID", nil, "bogus", "invalid proposal ID: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := runLeaseCommandOutput(t, conn, tc.cfg, voteCastCmd, tc.proposal)
+			var cmdError *CmdError
+			if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation ||
+				!strings.HasPrefix(cmdError.Error(), tc.prefix) {
+				t.Errorf("vote cast %s with no flags returned %v, want VALIDATION_ERROR %q", tc.proposal, err, tc.prefix)
+			}
+		})
+	}
+	if n := len(votesByVoter(t, conn, proposalID)); n != 0 {
+		t.Errorf("refused invocations stored %d vote(s)", n)
+	}
+}
+
+// TestVoteCastCommandStoresEveryBallotFlag reads back each flag the ballot
+// carries, each with a distinct value, so a dropped or swapped field fails.
+func TestVoteCastCommandStoresEveryBallotFlag(t *testing.T) {
+	conn := newTestDB(t)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "every flag", RequiredVoters: 2, Threshold: 0.5,
+		Status: model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	err = runVoteCastCmd(t, conn, model.FormatProposalID(proposalID),
+		"--voter", "seat-full", "--role", "security", "--verdict", "approve-with-concerns",
+		"--confidence", "0.7", "--domain-relevance", "0.6",
+		"--findings", "free-text findings", "--findings-json", `{"concerns":["thin auth check"]}`,
+		"--summary", "approve, with one concern", "--usage", `{"tokens":42}`)
+	testsupport.Must(t, err, "vote cast: %v", err)
+
+	v, ok := votesByVoter(t, conn, proposalID)["seat-full"]
+	if !ok {
+		t.Fatal("no vote stored for seat-full")
+	}
+	if v.VoterRole != "security" || v.Verdict != model.VerdictApproveWithConcerns ||
+		v.Confidence != 0.7 || v.DomainRelevance != 0.6 ||
+		v.Findings != "free-text findings" || v.Summary != "approve, with one concern" ||
+		v.Usage["tokens"] != 42 {
+		t.Errorf("stored vote = %+v, want every flag's value", v)
+	}
+	if v.FindingsJSON == nil || len(v.FindingsJSON.Concerns) != 1 || v.FindingsJSON.Concerns[0].Text != "thin auth check" {
+		t.Errorf("stored findings JSON = %+v, want the one concern", v.FindingsJSON)
 	}
 }
 

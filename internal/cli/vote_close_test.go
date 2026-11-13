@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -19,6 +20,67 @@ func TestVoteWriteCommandsOwnTheirProject(t *testing.T) {
 	for _, cmd := range []*cobra.Command{voteCreateCmd, voteCastCmd, voteCloseCmd} {
 		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
 			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
+		}
+	}
+}
+
+// TestVoteWriteCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before the vote writes
+// resolved their own project, including for a write refused after it
+// registered the project.
+func TestVoteWriteCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	newProposal := func() string {
+		id, err := db.CreateProposal(conn, &model.Proposal{
+			Description: "registration", Criticality: model.CriticalityLow,
+			Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+		})
+		testsupport.Must(t, err, "CreateProposal: %v", err)
+		return model.FormatProposalID(id)
+	}
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+	set := func(cmd *cobra.Command, flags ...string) {
+		for i := 0; i < len(flags); i += 2 {
+			testsupport.Must(t, cmd.Flags().Set(flags[i], flags[i+1]), "set --%s", flags[i])
+		}
+	}
+
+	set(voteCreateCmd, "description", "d", "voters", "1")
+	_, err = runLeaseCommandOutput(t, conn, anchored("/repos/create"), voteCreateCmd)
+	testsupport.Must(t, err, "vote create: %v", err)
+
+	set(voteCastCmd, "voter", "seat", "verdict", "approve", "confidence", "0.9",
+		"domain-relevance", "0.8", "usage", `{"tokens":1}`)
+	_, err = runLeaseCommandOutput(t, conn, anchored("/repos/cast"), voteCastCmd, newProposal())
+	testsupport.Must(t, err, "vote cast: %v", err)
+
+	set(voteCloseCmd, "reason", "r")
+	_, err = runLeaseCommandOutput(t, conn, anchored("/repos/close"), voteCloseCmd, newProposal())
+	testsupport.Must(t, err, "vote close: %v", err)
+
+	set(voteCloseCmd, "reason", "")
+	_, err = runLeaseCommandOutput(t, conn, anchored("/repos/refused"), voteCloseCmd, newProposal())
+	if code := codeOf(t, err); code != output.ErrValidation {
+		t.Fatalf("vote close without --reason returned %s (%v), want %s", code, err, output.ErrValidation)
+	}
+
+	want := map[string]string{
+		"/repos/create":  "vote create",
+		"/repos/cast":    "vote cast",
+		"/repos/close":   "vote close",
+		"/repos/refused": "vote close",
+	}
+	got := registrationEvents(t, conn)
+	if len(got) != len(want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+	for identity, verb := range want {
+		if got[identity] != verb {
+			t.Errorf("registration of %s attributed to %q, want %q", identity, got[identity], verb)
 		}
 	}
 }

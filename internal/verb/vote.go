@@ -19,6 +19,36 @@ import (
 // this family would let the caller pre-seed the step's ballot.
 const voteStepKeyPrefix = "vote-step:"
 
+// ParseProposalRef parses a proposal reference ("DKT-V5" or a bare number)
+// and reports a malformed one as VALIDATION_ERROR.
+func ParseProposalRef(ref string) (int, error) {
+	id, err := model.ParseProposalID(ref)
+	if err != nil {
+		return 0, newError(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+	}
+	return id, nil
+}
+
+// VoteProjectResult reports the project VoteProject registered. Registered is
+// as in DocCreateResult.
+type VoteProjectResult struct {
+	Registered *model.Project
+}
+
+// VoteProject resolves the project as VoteCreate, VoteCast and VoteClose do,
+// so it may register the caller's anchored project. A caller that asks a
+// person for the vote's fields calls it first, so an unanchored caller is
+// refused before anyone types.
+func VoteProject(ctx context.Context, env Env) (VoteProjectResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return VoteProjectResult{}, err
+	}
+	var result VoteProjectResult
+	result.Registered, err = registeredProject(env, projectID, created)
+	return result, err
+}
+
 // VoteCreateInput is the proposal to open. CreatedBy defaults to env.Author.
 // A replayed IdempotencyKey returns the proposal it first created.
 type VoteCreateInput struct {
@@ -42,6 +72,27 @@ type VoteCreateResult struct {
 	Registered *model.Project
 }
 
+// Validate runs the checks VoteCreate makes on its input alone, reporting the
+// first failure as VALIDATION_ERROR. A caller whose own input checks must
+// report after these calls it before them.
+func (in VoteCreateInput) Validate() error {
+	if in.Voters < 1 {
+		return newError(fmt.Errorf("--voters must be >= 1"), output.ErrValidation)
+	}
+	if in.Threshold <= 0.0 || in.Threshold > 1.0 {
+		return newError(fmt.Errorf("--threshold must be in (0.0, 1.0]"), output.ErrValidation)
+	}
+	if err := model.ValidateCriticality(model.Criticality(in.Criticality)); err != nil {
+		return newError(err, output.ErrValidation)
+	}
+	if strings.HasPrefix(in.IdempotencyKey, voteStepKeyPrefix) {
+		return newError(fmt.Errorf(
+			"--idempotency-key must not begin with %q: that key family links workflow vote steps to their proposals",
+			voteStepKeyPrefix), output.ErrValidation)
+	}
+	return nil
+}
+
 // VoteCreate opens a proposal in the caller's project. It writes into that
 // project, so it may register an anchored one.
 func VoteCreate(ctx context.Context, env Env, in VoteCreateInput) (VoteCreateResult, error) {
@@ -53,20 +104,8 @@ func VoteCreate(ctx context.Context, env Env, in VoteCreateInput) (VoteCreateRes
 	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
 		return result, err
 	}
-
-	if in.Voters < 1 {
-		return result, newError(fmt.Errorf("--voters must be >= 1"), output.ErrValidation)
-	}
-	if in.Threshold <= 0.0 || in.Threshold > 1.0 {
-		return result, newError(fmt.Errorf("--threshold must be in (0.0, 1.0]"), output.ErrValidation)
-	}
-	if err := model.ValidateCriticality(model.Criticality(in.Criticality)); err != nil {
-		return result, newError(err, output.ErrValidation)
-	}
-	if strings.HasPrefix(in.IdempotencyKey, voteStepKeyPrefix) {
-		return result, newError(fmt.Errorf(
-			"--idempotency-key must not begin with %q: that key family links workflow vote steps to their proposals",
-			voteStepKeyPrefix), output.ErrValidation)
+	if err := in.Validate(); err != nil {
+		return result, err
 	}
 
 	createdBy := in.CreatedBy
@@ -125,12 +164,16 @@ type VoteCastInput struct {
 // VoteCastResult is the recorded cast and the tally after it. Registered is
 // as in DocCreateResult.
 //
+// Attempted reports that the ballot passed every check here and went to the
+// engine, whether or not the engine then recorded it.
+//
 // Cast beside an error is a cast that committed whose panel-event write then
 // failed: the caller reports the cast together with the error, since a retry
 // would be refused. A cast that committed and decided the proposal but whose
 // vote step failed to route returns no Cast, only the error.
 type VoteCastResult struct {
 	ProposalID int
+	Attempted  bool
 	Cast       *store.CastVoteResult
 	Registered *model.Project
 }
@@ -151,9 +194,9 @@ func VoteCast(ctx context.Context, env Env, in VoteCastInput) (VoteCastResult, e
 		return result, err
 	}
 
-	proposalID, err := model.ParseProposalID(in.Proposal)
+	proposalID, err := ParseProposalRef(in.Proposal)
 	if err != nil {
-		return result, newError(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+		return result, err
 	}
 	result.ProposalID = proposalID
 
@@ -200,6 +243,7 @@ func VoteCast(ctx context.Context, env Env, in VoteCastInput) (VoteCastResult, e
 	// pinned `roster`, `weighting` and `recuse` before the tally runs: a
 	// name off a strict roster or the reviewed step's own executor is refused
 	// as VALIDATION_ERROR with no vote written.
+	result.Attempted = true
 	cast, err := engine.CastVoteStore(env.Store, &model.Vote{
 		ProposalID:      proposalID,
 		VoterName:       voter,
@@ -250,8 +294,8 @@ func castError(err error, proposalID int, voter string) error {
 		return engineError(err)
 	}
 	label := model.FormatProposalID(proposalID)
-	if errors.Is(err, store.ErrNotFound) {
-		return newError(fmt.Errorf("proposal %s not found", label), output.ErrNotFound)
+	if e := notFound(err, "proposal "+label); e != nil {
+		return e
 	}
 	if errors.Is(err, store.ErrConflict) {
 		return newError(fmt.Errorf(
@@ -336,9 +380,9 @@ func VoteClose(ctx context.Context, env Env, in VoteCloseInput) (VoteCloseResult
 		return result, err
 	}
 
-	proposalID, err := model.ParseProposalID(in.Proposal)
+	proposalID, err := ParseProposalRef(in.Proposal)
 	if err != nil {
-		return result, newError(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+		return result, err
 	}
 	label := model.FormatProposalID(proposalID)
 	if in.Reason == "" {
@@ -358,14 +402,13 @@ func VoteClose(ctx context.Context, env Env, in VoteCloseInput) (VoteCloseResult
 	}
 
 	if err := env.Store.CloseProposal(proposalID, in.Reason); err != nil {
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			return result, newError(fmt.Errorf("proposal %s not found", label), output.ErrNotFound)
-		case errors.Is(err, store.ErrConflict):
-			return result, newError(err, output.ErrConflict)
-		default:
-			return result, newError(fmt.Errorf("closing proposal: %w", err), output.ErrGeneral)
+		if e := notFound(err, "proposal "+label); e != nil {
+			return result, e
 		}
+		if errors.Is(err, store.ErrConflict) {
+			return result, newError(err, output.ErrConflict)
+		}
+		return result, newError(fmt.Errorf("closing proposal: %w", err), output.ErrGeneral)
 	}
 	result.ProposalID = proposalID
 	return result, nil

@@ -21,6 +21,15 @@ var voteCreateCmd = &cobra.Command{
 	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
+		env := verbEnv(cmd)
+
+		// The project is refused before any flag check, the form or a stdin
+		// read, so nobody types a proposal that is then thrown away.
+		project, err := verb.VoteProject(cmd.Context(), env)
+		recordRegisteredProject(cmd, env, project.Registered)
+		if err != nil {
+			return verbErr(err)
+		}
 
 		description, _ := cmd.Flags().GetString("description")
 		rationale, _ := cmd.Flags().GetString("rationale")
@@ -170,13 +179,7 @@ var voteCreateCmd = &cobra.Command{
 			}
 		}
 
-		idempotencyKey, err := idempotencyKeyOf(cmd)
-		if err != nil {
-			return err
-		}
-
-		env := verbEnv(cmd)
-		res, err := verb.VoteCreate(cmd.Context(), env, verb.VoteCreateInput{
+		in := verb.VoteCreateInput{
 			Description:      description,
 			Rationale:        rationale,
 			Criticality:      criticality,
@@ -187,8 +190,17 @@ var voteCreateCmd = &cobra.Command{
 			FilesChanged:     filesChanged,
 			EscalationReason: escalationReason,
 			Sealed:           sealed,
-			IdempotencyKey:   idempotencyKey,
-		})
+		}
+		// The proposal's own fields are refused before an empty
+		// --idempotency-key is.
+		if err := in.Validate(); err != nil {
+			return verbErr(err)
+		}
+		if in.IdempotencyKey, err = idempotencyKeyOf(cmd); err != nil {
+			return err
+		}
+
+		res, err := verb.VoteCreate(cmd.Context(), env, in)
 		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
 			return verbErr(err)
