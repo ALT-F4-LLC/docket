@@ -16,6 +16,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -34,6 +35,19 @@ func buildExport(t *testing.T, conn store.LegacyDB) *model.ExportData {
 		testsupport.Must(t, err, "fetching %s: %v", c.name, err)
 	}
 	return export
+}
+
+// doImport restores export into projectID of conn through the import verb's
+// write half, the way the import command does once it has resolved the
+// project and cleared its refusals.
+func doImport(conn store.LegacyDB, export *model.ExportData, replace bool, projectID int) (verb.ImportResult, error) {
+	return verb.RestoreExport(store.StoreOn(conn), export, replace, projectID)
+}
+
+func TestImportCommandOwnsItsProject(t *testing.T) {
+	if !verbOwnsProject(newImportCmd()) {
+		t.Error("import is not annotated verbOwnsProject, so the root hook would resolve its project too")
+	}
 }
 
 func TestDoImportRoundTripPreservesDocs(t *testing.T) {
