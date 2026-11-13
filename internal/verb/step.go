@@ -294,6 +294,321 @@ func StepFail(ctx context.Context, env Env, in StepFailInput) (StepFailResult, e
 	return res, err
 }
 
+// StepReapInput is a forced reap of a claimed step whose holder the caller
+// established is gone.
+type StepReapInput struct {
+	Step string
+	// Reason is the recorded assertion that the holder is dead; the engine
+	// refuses an empty one.
+	Reason string
+	// ConductorToken returns the run's conductor capability. It is called
+	// only when the step's run is bound to one, so a transport whose token
+	// channel can block is never read for a run that needs no token.
+	ConductorToken func() string
+}
+
+// StepReapResult is the reaped step as the reap left it.
+type StepReapResult struct {
+	Step model.StepRow
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepReap clears a claimed step's lease without waiting out its TTL, under
+// the run's conductor capability, attributed to env.Author and env.Cwd.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepReap(ctx context.Context, env Env, in StepReapInput) (StepReapResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepReapResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "step reap")
+	res := StepReapResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	if err := engine.ForceReapStepWithStore(env.Store, id, engine.ForceReapOptions{
+		Reason: in.Reason, By: rulingAttribution(env),
+		Token: stepConductorToken(env, id, in.ConductorToken), NowMS: model.NowMS(),
+	}); err != nil {
+		return res, stepError(err, id)
+	}
+	res.Step, err = stepRow(env, id)
+	return res, err
+}
+
+// StepHoldInput parks one pending step for the operator.
+type StepHoldInput struct {
+	Step string
+	// Reason becomes the step's park reason; the engine refuses an empty one.
+	Reason string
+	// ConductorToken is as on StepReapInput.
+	ConductorToken func() string
+}
+
+// StepHoldResult is the held step as the hold left it.
+type StepHoldResult struct {
+	Step model.StepRow
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepHold parks one pending step waiting-human with park class held, under
+// the run's conductor capability, attributed to env.Author and env.Cwd.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepHold(ctx context.Context, env Env, in StepHoldInput) (StepHoldResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepHoldResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "step hold")
+	res := StepHoldResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	if err := engine.HoldStepStore(env.Store, id, engine.HoldOptions{
+		Reason: in.Reason, By: rulingAttribution(env),
+		Token: stepConductorToken(env, id, in.ConductorToken), NowMS: model.NowMS(),
+	}); err != nil {
+		return res, stepError(err, id)
+	}
+	res.Step, err = stepRow(env, id)
+	return res, err
+}
+
+// StepApproveInput approves a human gate step, or a held cluster a vote
+// parked.
+type StepApproveInput struct {
+	Step string
+	Note string
+	// Value is the corrected value for a held cluster's aggregated field.
+	Value string
+	// Authority and AuthorityRef name what entitled the decision, as
+	// engine.ParseAuthority reads them.
+	Authority    string
+	AuthorityRef string
+	// ConductorToken is as on StepReapInput.
+	ConductorToken func() string
+}
+
+// StepApproveResult is the approved step as the decision left it.
+type StepApproveResult struct {
+	Step model.StepRow
+	// StaleTargets are the steps the decision un-blocked whose packets render
+	// from a recorded target the shared checkout's HEAD no longer carries. It
+	// is advisory: the decision has already committed.
+	StaleTargets []engine.StaleTarget
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepApprove approves a gate step under the run's conductor capability,
+// attributed to env.Author and env.Cwd.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepApprove(ctx context.Context, env Env, in StepApproveInput) (StepApproveResult, error) {
+	d, err := decideStep(env, "step approve", in.Step, engine.DecideOptions{
+		Approve: true, Note: in.Note, Value: in.Value,
+	}, in.Authority, in.AuthorityRef, in.ConductorToken)
+	return StepApproveResult{Step: d.step, StaleTargets: d.stale, Registered: d.registered}, err
+}
+
+// StepRejectInput rejects a human gate step, or a held cluster a vote parked.
+type StepRejectInput struct {
+	Step string
+	Note string
+	// Authority and AuthorityRef are as on StepApproveInput.
+	Authority    string
+	AuthorityRef string
+	// ConductorToken is as on StepReapInput.
+	ConductorToken func() string
+}
+
+// StepRejectResult is the rejected step as the decision left it.
+type StepRejectResult struct {
+	Step model.StepRow
+	// StaleTargets is as on StepApproveResult.
+	StaleTargets []engine.StaleTarget
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepReject rejects a gate step under the run's conductor capability,
+// attributed to env.Author and env.Cwd; the step routes per its on_fail.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepReject(ctx context.Context, env Env, in StepRejectInput) (StepRejectResult, error) {
+	d, err := decideStep(env, "step reject", in.Step, engine.DecideOptions{
+		Note: in.Note,
+	}, in.Authority, in.AuthorityRef, in.ConductorToken)
+	return StepRejectResult{Step: d.step, StaleTargets: d.stale, Registered: d.registered}, err
+}
+
+// decision is what StepApprove and StepReject share of their results.
+type decision struct {
+	step       model.StepRow
+	stale      []engine.StaleTarget
+	registered *engine.ProjectRegistration
+}
+
+// decideStep runs approve or reject: opts carries the verb's own fields, and
+// this fills the attribution, authority and token both verbs take alike.
+func decideStep(
+	env Env, verbPath, ref string, opts engine.DecideOptions,
+	authority, authorityRef string, conductorToken func() string,
+) (decision, error) {
+	id, err := parseStepRef(ref)
+	if err != nil {
+		return decision{}, err
+	}
+	under, err := parseAuthority(authority, authorityRef)
+	if err != nil {
+		return decision{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, verbPath)
+	d := decision{registered: registered}
+	if err != nil {
+		return d, err
+	}
+
+	opts.By, opts.Under = rulingAttribution(env), under
+	opts.Token = stepConductorToken(env, id, conductorToken)
+	opts.NowMS = model.NowMS()
+	e := engine.NewEngine()
+	if err := e.DecideStepWithStore(env.Store, id, opts); err != nil {
+		return d, stepError(err, id)
+	}
+
+	d.stale = e.HeldResolutionStaleTargetsStore(env.Store, id, model.NowMS())
+	d.step, err = stepRow(env, id)
+	return d, err
+}
+
+// StepResolveInput resolves a step parked waiting-human.
+type StepResolveInput struct {
+	Step string
+	// As is the resolution: one of the engine's Resolve* values.
+	As   string
+	Note string
+	// Batch and DropInterposed apply to an override-pass only.
+	Batch          bool
+	DropInterposed bool
+	// Worktree is the absolute path of the checkout to re-pin the step's
+	// recorded issue.diff to before resolving, or empty for no re-pin.
+	Worktree string
+	// Authority and AuthorityRef are as on StepApproveInput.
+	Authority    string
+	AuthorityRef string
+	// ConductorToken is as on StepReapInput.
+	ConductorToken func() string
+}
+
+// StepResolveResult is the resolved step and the facts the resolution
+// established that its row does not carry.
+type StepResolveResult struct {
+	Step model.StepRow
+	// InterposedWarnings name the interposed steps an override-pass with
+	// DropInterposed skips. They are computed before the resolution commits
+	// and are set even when StepResolve also returns an error, so a
+	// transport can report the blast radius the caller acknowledged.
+	InterposedWarnings []string
+	// StaleTargets is as on StepApproveResult.
+	StaleTargets []engine.StaleTarget
+	// Repin is the issue.diff re-pin Worktree performed, nil without one.
+	Repin *engine.IssueDiffRepin
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepResolve resolves a parked step under the run's conductor capability,
+// attributed to env.Author and env.Cwd.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepResolve(ctx context.Context, env Env, in StepResolveInput) (StepResolveResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepResolveResult{}, err
+	}
+	if in.As == "" {
+		return StepResolveResult{}, newError(errors.New(
+			"--as is required: one of retry, rerun-gates, skip, abandon-issue, override-pass, fix-round"),
+			output.ErrValidation)
+	}
+	under, err := parseAuthority(in.Authority, in.AuthorityRef)
+	if err != nil {
+		return StepResolveResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "step resolve")
+	res := StepResolveResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	if in.As == engine.ResolveOverridePass && in.DropInterposed {
+		res.InterposedWarnings = engine.OverridePassSkipsInterposedTargetsStore(env.Store, id)
+	}
+
+	e := engine.NewEngine()
+	outcome, err := e.ResolveStepWithStore(env.Store, id, engine.ResolveOptions{
+		As: in.As, Note: in.Note, Batch: in.Batch, DropInterposed: in.DropInterposed,
+		Worktree: in.Worktree, By: rulingAttribution(env), Under: under,
+		Token: stepConductorToken(env, id, in.ConductorToken), NowMS: model.NowMS(),
+	})
+	if err != nil {
+		return res, stepError(err, id)
+	}
+
+	res.Repin = outcome.Repin
+	res.StaleTargets = e.HeldResolutionStaleTargetsStore(env.Store, id, model.NowMS())
+	res.Step, err = stepRow(env, id)
+	return res, err
+}
+
+// rulingAttribution is who rules and from where. The engine refuses either
+// field empty before it writes, so a transport that cannot supply both gets
+// that refusal rather than an unattributed ruling.
+func rulingAttribution(env Env) engine.Attribution {
+	return engine.Attribution{Actor: env.Author, Cwd: env.Cwd}
+}
+
+// parseAuthority reads the authority a ruling is made under, reporting an
+// invalid answer as VALIDATION_ERROR before anything is read from the store.
+func parseAuthority(kind, ref string) (engine.Authority, error) {
+	under, err := engine.ParseAuthority(kind, ref)
+	if err != nil {
+		return engine.Authority{}, newError(err, output.ErrValidation)
+	}
+	return under, nil
+}
+
+// stepConductorToken returns source's token only when step id's run is bound
+// to a conductor capability, and "" otherwise without calling source. The
+// look is advisory: the engine re-checks the capability inside its own
+// transaction, and a step that cannot be read leaves its NOT_FOUND to the
+// engine.
+func stepConductorToken(env Env, id int, source func() string) string {
+	if source == nil {
+		return ""
+	}
+	step, err := env.Store.GetStep(id)
+	if err != nil {
+		return ""
+	}
+	hash, err := env.Store.RunConductorHash(step.RunID)
+	if err != nil || hash == "" {
+		return ""
+	}
+	return source()
+}
+
 // parseStepRef parses a step reference ("STEP-3" or a bare number) and
 // reports a malformed one as VALIDATION_ERROR.
 func parseStepRef(ref string) (int, error) {

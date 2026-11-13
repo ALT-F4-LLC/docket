@@ -522,6 +522,69 @@ func TestStepLeaseCommandsOwnTheirProject(t *testing.T) {
 	}
 }
 
+// The step ruling commands resolve their project through internal/verb too.
+func TestStepRulingCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{
+		stepReapCmd, stepHoldCmd, stepApproveCmd, stepRejectCmd, stepResolveCmd,
+	} {
+		if !verbOwnsProject(cmd) {
+			t.Errorf("step %s lacks the verbOwnsProject annotation", cmd.Name())
+		}
+	}
+}
+
+// TestStepRulingCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each step ruling
+// command resolved its own project.
+func TestStepRulingCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+	cases := map[string]func(t *testing.T, conn *sql.DB, cfg *config.Config){
+		"step hold": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			activatedRunForNext(t, conn)
+			testsupport.Must(t, stepHoldCmd.Flags().Set("reason", "for the operator"), "set --reason")
+			runLeaseCommand(t, conn, cfg, stepHoldCmd, model.FormatStepID(stepIDNamed(t, conn, "first@0")))
+		},
+		"step reap": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			activatedRunForNext(t, conn)
+			first := stepIDNamed(t, conn, "first@0")
+			_, err := engine.ClaimStep(conn, first, engine.ClaimOptions{Owner: "doomed", NowMS: model.NowMS()})
+			testsupport.Must(t, err, "claim: %v", err)
+			testsupport.Must(t, stepReapCmd.Flags().Set("reason", "spawn died"), "set --reason")
+			runLeaseCommand(t, conn, cfg, stepReapCmd, model.FormatStepID(first))
+		},
+		"step approve": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			gate := readyGate(t, conn)
+			testsupport.Must(t, stepApproveCmd.Flags().Set("authority", engine.AuthorityOperator), "set --authority")
+			runLeaseCommand(t, conn, cfg, stepApproveCmd, model.FormatStepID(gate))
+		},
+		"step reject": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			gate := readyGate(t, conn)
+			testsupport.Must(t, stepRejectCmd.Flags().Set("authority", engine.AuthorityOperator), "set --authority")
+			runLeaseCommand(t, conn, cfg, stepRejectCmd, model.FormatStepID(gate))
+		},
+		"step resolve": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			id := parkedStep(t, conn)
+			testsupport.Must(t, stepResolveCmd.Flags().Set("as", engine.ResolveSkip), "set --as")
+			testsupport.Must(t, stepResolveCmd.Flags().Set("authority", engine.AuthorityOperator), "set --authority")
+			runLeaseCommand(t, conn, cfg, stepResolveCmd, model.FormatStepID(id))
+		},
+	}
+	for verb, run := range cases {
+		t.Run(verb, func(t *testing.T) {
+			conn := newTestDB(t)
+			identity := "/repos/" + strings.ReplaceAll(verb, " ", "-")
+			run(t, conn, anchored(identity))
+
+			got := registrationEvents(t, conn)
+			if len(got) != 1 || got[identity] != verb {
+				t.Errorf("registration events = %v, want %s registered by %q", got, identity, verb)
+			}
+		})
+	}
+}
+
 // TestStepClaimCommandWritesTheMetadataFlag drives the REAL `step claim` RunE
 // over its REAL flag set and reads the step back out of the store (DKT-592).
 //

@@ -423,7 +423,8 @@ Unlike an expiry, a forced reap does not consume the step's attempt budget: a
 holder asserted dead is not an executor that failed, so the reaped attempt
 does not count against max_attempts. The attempt number itself stands, and the
 dead attempt's usage remains back-fillable against it.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepReap(cmd, args, getWriter(cmd))
 	},
@@ -448,50 +449,65 @@ carrying the reason, the actor, and the working directory.
 
 Like reap, it requires the RUN'S CONDUCTOR CAPABILITY via DOCKET_TOKEN or stdin;
 a run activated before the capability existed asks for none.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepHold(cmd, args, getWriter(cmd))
 	},
 }
 
 func runStepHold(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-	id, err := stepArg(args[0])
-	if err != nil {
-		return err
-	}
 	reason, _ := cmd.Flags().GetString("reason")
-	by, err := rulingBy()
+	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	if err := engine.HoldStep(conn, id, engine.HoldOptions{
-		Reason: reason, By: by, Token: stepConductorToken(conn, id, os.Stdin),
-		NowMS: model.NowMS(),
-	}); err != nil {
-		return stepErr(err, stepLabel(id))
+	res, err := verb.StepHold(cmd.Context(), env, verb.StepHoldInput{
+		Step: args[0], Reason: reason, ConductorToken: stdinConductorToken,
+	})
+	recordProjectRegistration(cmd, res.Registered)
+	if err != nil {
+		return verbErr(err)
 	}
-	return emitStepState(w, conn, id, "Held")
+	renderStepState(w, res.Step, "Held", nil, nil)
+	return nil
 }
 
 func runStepReap(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-	id, err := stepArg(args[0])
+	reason, _ := cmd.Flags().GetString("reason")
+	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	reason, _ := cmd.Flags().GetString("reason")
+	res, err := verb.StepReap(cmd.Context(), env, verb.StepReapInput{
+		Step: args[0], Reason: reason, ConductorToken: stdinConductorToken,
+	})
+	recordProjectRegistration(cmd, res.Registered)
+	if err != nil {
+		return verbErr(err)
+	}
+	renderStepState(w, res.Step, "Reaped", nil, nil)
+	return nil
+}
+
+// rulingEnv is the Env a step ruling runs under: verbEnv with the working
+// directory rulingBy resolved, so an unreadable one refuses the ruling with
+// rulingBy's message before the verb runs.
+func rulingEnv(cmd *cobra.Command) (verb.Env, error) {
 	by, err := rulingBy()
 	if err != nil {
-		return err
+		return verb.Env{}, err
 	}
-	if err := engine.ForceReapStepWith(conn, id, engine.ForceReapOptions{
-		Reason: reason, By: by, Token: stepConductorToken(conn, id, os.Stdin),
-		NowMS: model.NowMS(),
-	}); err != nil {
-		return stepErr(err, stepLabel(id))
-	}
-	return emitStepState(w, conn, id, "Reaped")
+	env := verbEnv(cmd)
+	env.Cwd = by.Cwd
+	return env, nil
+}
+
+// stdinConductorToken reads the run's conductor capability for a step ruling.
+// The verb calls it only on a run bound to one, since the stdin fallback
+// drains its reader to EOF.
+func stdinConductorToken() string {
+	return optionalToken(os.Stdin)
 }
 
 // rulingBy resolves who is ruling and from where, for the four step verbs that
@@ -931,7 +947,8 @@ re-mints — supplied via DOCKET_TOKEN or stdin, never argv. A caller without
 it is refused: a gate is the conductor's to answer, not any executor's. A run
 activated before the capability existed asks for none.
 Approving a step that is neither is a VALIDATION_ERROR.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDecide(cmd, args, true, getWriter(cmd))
 	},
@@ -951,54 +968,57 @@ Rejecting a held cluster is the ESCALATING answer: the aggregate it gates routes
 per its own on_fail, and the cluster is recorded as unresolved.
 
 Requires the run's conductor capability, exactly as approve does.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDecide(cmd, args, false, getWriter(cmd))
 	},
 }
 
 func runDecide(cmd *cobra.Command, args []string, approve bool, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
-	if err != nil {
-		return err
-	}
 	note, _ := cmd.Flags().GetString("note")
-	value := ""
+	authority, _ := cmd.Flags().GetString("authority")
+	authorityRef, _ := cmd.Flags().GetString("authority-ref")
+	env, err := rulingEnv(cmd)
+	if err != nil {
+		return err
+	}
+
+	var (
+		row        model.StepRow
+		stale      []engine.StaleTarget
+		registered *engine.ProjectRegistration
+		action     string
+	)
 	if approve {
-		value, _ = cmd.Flags().GetString("value")
+		value, _ := cmd.Flags().GetString("value")
+		var res verb.StepApproveResult
+		res, err = verb.StepApprove(cmd.Context(), env, verb.StepApproveInput{
+			Step: args[0], Note: note, Value: value,
+			Authority: authority, AuthorityRef: authorityRef,
+			ConductorToken: stdinConductorToken,
+		})
+		row, stale, registered, action = res.Step, res.StaleTargets, res.Registered, "Approved"
+	} else {
+		var res verb.StepRejectResult
+		res, err = verb.StepReject(cmd.Context(), env, verb.StepRejectInput{
+			Step: args[0], Note: note,
+			Authority: authority, AuthorityRef: authorityRef,
+			ConductorToken: stdinConductorToken,
+		})
+		row, stale, registered, action = res.Step, res.StaleTargets, res.Registered, "Rejected"
 	}
-
-	by, err := rulingBy()
+	recordProjectRegistration(cmd, registered)
 	if err != nil {
-		return err
-	}
-	under, err := rulingAuthority(cmd)
-	if err != nil {
-		return err
-	}
-
-	label := stepLabel(id)
-	e := engine.NewEngine()
-	if err := e.DecideStepWith(conn, id, engine.DecideOptions{
-		Approve: approve, Note: note, Value: value, By: by, Under: under,
-		Token: stepConductorToken(conn, id, os.Stdin), NowMS: model.NowMS(),
-	}); err != nil {
-		return stepErr(err, label)
-	}
-
-	verb := "Approved"
-	if !approve {
-		verb = "Rejected"
+		return verbErr(err)
 	}
 	// DKT-414: deciding a materialized held cluster may have just un-blocked
 	// downstream verify/review steps whose packets render from a recorded
 	// target sha the shared checkout's HEAD no longer carries. Advisory only —
-	// the decision above already committed — and nil for every declared step,
-	// so ordinary gate approvals emit exactly what they always have.
-	return emitStepStateAdvised(w, conn, id, verb,
-		e.HeldResolutionStaleTargets(conn, id, model.NowMS()))
+	// the decision already committed — and nil for every declared step, so
+	// ordinary gate approvals emit exactly what they always have.
+	renderStepState(w, row, action, stale, nil)
+	return nil
 }
 
 var stepResolveCmd = &cobra.Command{
@@ -1129,28 +1149,20 @@ renders in the same step's next packet as its == RESOLUTION section; a note on
 you authorized the round for renders in each of its packets. Steering left as
 an issue comment NEVER reaches a packet, and a mid-run description edit does
 not either — packets read the description snapshot frozen at activation.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepResolve(cmd, args, getWriter(cmd))
 	},
 }
 
 func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
-	if err != nil {
-		return err
-	}
 	as, _ := cmd.Flags().GetString("as")
-	if as == "" {
-		return cmdErr(
-			fmt.Errorf("--as is required: one of retry, rerun-gates, skip, abandon-issue, override-pass, fix-round"),
-			output.ErrValidation)
-	}
 	note, _ := cmd.Flags().GetString("note")
 	batch, _ := cmd.Flags().GetBool("batch")
 	dropInterposed, _ := cmd.Flags().GetBool("drop-interposed")
+	authority, _ := cmd.Flags().GetString("authority")
+	authorityRef, _ := cmd.Flags().GetString("authority-ref")
 
 	// --worktree names the checkout the patched tree stands in (DKT-1034),
 	// normalized to absolute for `step record --worktree`'s reason: the path
@@ -1158,59 +1170,48 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// another cwd must still resolve it.
 	worktree, _ := cmd.Flags().GetString("worktree")
 	if worktree != "" {
+		var err error
 		if worktree, err = filepath.Abs(worktree); err != nil {
 			return cmdErr(fmt.Errorf("resolving --worktree: %w", err), output.ErrValidation)
 		}
 	}
 
-	by, err := rulingBy()
+	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	// Parsed BEFORE the interposed warning below, so a resolution refused for
-	// its authority prints no warning about a blast radius it never had.
-	under, err := rulingAuthority(cmd)
-	if err != nil {
-		return err
-	}
-
-	label := stepLabel(id)
-	e := engine.NewEngine()
-
+	res, err := verb.StepResolve(cmd.Context(), env, verb.StepResolveInput{
+		Step: args[0], As: as, Note: note,
+		Batch: batch, DropInterposed: dropInterposed, Worktree: worktree,
+		Authority: authority, AuthorityRef: authorityRef,
+		ConductorToken: stdinConductorToken,
+	})
 	// DKT-470/DKT-861: override-pass records a generic "pass" and never
 	// evaluates the step's threshold, so an interposed step it names is
 	// skipped no matter what the (unevaluated) payload would have decided.
 	// Without --drop-interposed the ENGINE refuses such a resolution before
-	// anything commits, carrying this same sentence; with it, the warning is
-	// still printed BEFORE the resolution commits, so it names the blast
-	// radius the operator acknowledged rather than reporting damage already
-	// done.
-	if as == engine.ResolveOverridePass && dropInterposed {
-		for _, warning := range engine.OverridePassSkipsInterposedTargets(conn, id) {
-			w.Warn("%s", warning)
-		}
+	// anything commits, carrying this same sentence; with it, the verb names
+	// the interposed steps before the resolution commits, and they print
+	// ahead of the outcome, so they name the blast radius the operator
+	// acknowledged rather than reporting damage already done.
+	for _, warning := range res.InterposedWarnings {
+		w.Warn("%s", warning)
 	}
-
-	outcome, err := e.ResolveStepWith(conn, id, engine.ResolveOptions{
-		As: as, Note: note, Batch: batch, DropInterposed: dropInterposed,
-		Worktree: worktree, By: by, Under: under,
-		Token: stepConductorToken(conn, id, os.Stdin),
-		NowMS: model.NowMS(),
-	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return stepErr(err, label)
+		return verbErr(err)
 	}
 
 	// DKT-414: resolving a materialized held cluster (override-pass, skip,
 	// abandon-issue, fix-round) may have just un-blocked downstream steps
 	// whose packets render from a recorded target sha the shared checkout's
-	// HEAD no longer carries. Advisory only — the resolution above already
+	// HEAD no longer carries. Advisory only — the resolution already
 	// committed — and nil for every non-materialized step.
 	//
 	// DKT-1034: a re-pin the resolution performed rides beside the row too —
 	// it is the fact this invocation established that the row does not carry.
-	return emitResolvedState(w, conn, id, "Resolved",
-		e.HeldResolutionStaleTargets(conn, id, model.NowMS()), outcome.Repin)
+	renderStepState(w, res.Step, "Resolved", res.StaleTargets, res.Repin)
+	return nil
 }
 
 var stepAnnotateCmd = &cobra.Command{

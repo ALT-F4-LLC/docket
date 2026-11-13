@@ -60,6 +60,19 @@ func activatedStep(t *testing.T, st store.Store) int {
 // activatedStepOf is activatedStep over the workflow source src.
 func activatedStepOf(t *testing.T, st store.Store, src string) int {
 	t.Helper()
+	steps, _ := activatedRun(t, st, src)
+	id, ok := steps["first@0"]
+	if !ok {
+		t.Fatalf("no first@0 step among %v", steps)
+	}
+	return id
+}
+
+// activatedRun activates a run of the workflow source src in the default
+// project and returns its step ids by instance and the conductor capability
+// activation minted.
+func activatedRun(t *testing.T, st store.Store, src string) (map[string]int, string) {
+	t.Helper()
 	t.Setenv("DOCKET_PATH", filepath.Join(t.TempDir(), ".docket"))
 	def, err := workflow.Load([]byte(src))
 	if err != nil {
@@ -84,7 +97,8 @@ func activatedStepOf(t *testing.T, st store.Store, src string) int {
 	if err != nil {
 		t.Fatalf("InsertRunWithContextIdempotent: %v", err)
 	}
-	if _, err := engine.ActivateStore(st, run.ID, engine.ActivateOptions{NowMS: model.NowMS()}); err != nil {
+	activated, err := engine.ActivateStore(st, run.ID, engine.ActivateOptions{NowMS: model.NowMS()})
+	if err != nil {
 		t.Fatalf("ActivateStore: %v", err)
 	}
 
@@ -92,13 +106,11 @@ func activatedStepOf(t *testing.T, st store.Store, src string) int {
 	if err != nil {
 		t.Fatalf("ListRunSteps: %v", err)
 	}
+	ids := make(map[string]int, len(steps))
 	for _, s := range steps {
-		if s.Instance == "first@0" {
-			return s.ID
-		}
+		ids[s.Instance] = s.ID
 	}
-	t.Fatalf("no first@0 step among %d steps", len(steps))
-	return 0
+	return ids, activated.ConductorToken
 }
 
 func claimStep(t *testing.T, env verb.Env, id int) verb.StepClaimResult {
@@ -391,3 +403,311 @@ func TestStepClaimHandsBackTheTokenOfAnIncompleteClaim(t *testing.T) {
 
 // strandingTemplate renders before the claim and fails after it.
 const strandingTemplate = `{{.Step.Step}}{{if eq .Step.Status "claimed"}}{{index .Files 99}}{{end}}`
+
+// rulingWorkflow is an executor step that parks on its first failure,
+// followed by a human gate.
+const rulingWorkflow = `
+[pipeline]
+name = "unit-ruling"
+version = 1
+[match]
+kind = ["task"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+max_attempts = 1
+on_fail = "waiting-human"
+[[step]]
+name = "second"
+after = ["first"]
+type = "human"
+on_fail = "skip"
+`
+
+// rulerEnv is projectEnv with the author a ruling is attributed to.
+func rulerEnv(st store.Store, identity string, anchored bool) verb.Env {
+	env := projectEnv(st, identity, anchored)
+	env.Author = "operator"
+	return env
+}
+
+// rulingVerb is one conductor-gated step ruling: setup readies the step the
+// verb rules on in a run of rulingWorkflow and returns its id, and call runs
+// the verb on ref with the conductor token source token.
+type rulingVerb struct {
+	setup func(t *testing.T, st store.Store, steps map[string]int) int
+	call  func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error)
+	// ruled is the status the step reads after the ruling.
+	ruled string
+}
+
+// readyGateOf completes first@0 so its human gate second@0 is ready.
+func readyGateOf(t *testing.T, st store.Store, steps map[string]int) int {
+	t.Helper()
+	env := projectEnv(st, "", false)
+	token := claimStep(t, env, steps["first@0"]).Claim.Token
+	if _, err := verb.StepComplete(context.Background(), env, verb.StepCompleteInput{
+		Step: model.FormatStepID(steps["first@0"]), Token: token, Artifact: []byte("result"),
+	}); err != nil {
+		t.Fatalf("StepComplete: %v", err)
+	}
+	return steps["second@0"]
+}
+
+var stepRulingVerbs = map[string]rulingVerb{
+	"step reap": {
+		setup: func(t *testing.T, st store.Store, steps map[string]int) int {
+			claimStep(t, projectEnv(st, "", false), steps["first@0"])
+			return steps["first@0"]
+		},
+		call: func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error) {
+			res, err := verb.StepReap(context.Background(), env, verb.StepReapInput{
+				Step: ref, Reason: "the holder died", ConductorToken: token,
+			})
+			return res.Step, res.Registered, err
+		},
+		ruled: store.StepReady,
+	},
+	"step hold": {
+		setup: func(t *testing.T, st store.Store, steps map[string]int) int {
+			return steps["first@0"]
+		},
+		call: func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error) {
+			res, err := verb.StepHold(context.Background(), env, verb.StepHoldInput{
+				Step: ref, Reason: "for the operator", ConductorToken: token,
+			})
+			return res.Step, res.Registered, err
+		},
+		ruled: store.StepWaitingHuman,
+	},
+	"step approve": {
+		setup: readyGateOf,
+		call: func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error) {
+			res, err := verb.StepApprove(context.Background(), env, verb.StepApproveInput{
+				Step: ref, Note: "looks right", Authority: engine.AuthorityOperator, ConductorToken: token,
+			})
+			return res.Step, res.Registered, err
+		},
+		ruled: store.StepDone,
+	},
+	"step reject": {
+		setup: readyGateOf,
+		call: func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error) {
+			res, err := verb.StepReject(context.Background(), env, verb.StepRejectInput{
+				Step: ref, Note: "not yet", Authority: engine.AuthorityOperator, ConductorToken: token,
+			})
+			return res.Step, res.Registered, err
+		},
+		ruled: store.StepSkipped,
+	},
+	"step resolve": {
+		setup: func(t *testing.T, st store.Store, steps map[string]int) int {
+			env := projectEnv(st, "", false)
+			id := steps["first@0"]
+			token := claimStep(t, env, id).Claim.Token
+			if _, err := verb.StepFail(context.Background(), env, verb.StepFailInput{
+				Step: model.FormatStepID(id), Token: token, Note: "gave up",
+			}); err != nil {
+				t.Fatalf("StepFail: %v", err)
+			}
+			return id
+		},
+		call: func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error) {
+			res, err := verb.StepResolve(context.Background(), env, verb.StepResolveInput{
+				Step: ref, As: engine.ResolveSkip, Authority: engine.AuthorityOperator, ConductorToken: token,
+			})
+			return res.Step, res.Registered, err
+		},
+		ruled: store.StepSkipped,
+	},
+}
+
+// readyRuling activates a run of rulingWorkflow, readies the step v rules on,
+// and returns its id, its status before the ruling, and the run's conductor
+// capability.
+func readyRuling(t *testing.T, st store.Store, v rulingVerb) (int, string, string) {
+	t.Helper()
+	steps, conductor := activatedRun(t, st, rulingWorkflow)
+	if conductor == "" {
+		t.Fatal("premise: activation minted no conductor capability")
+	}
+	id := v.setup(t, st, steps)
+	return id, effectiveStatus(t, st, id), conductor
+}
+
+// effectiveStatus is step id's status as every step read reports it.
+func effectiveStatus(t *testing.T, st store.Store, id int) string {
+	t.Helper()
+	view, err := engine.LoadStepViewStore(st, id, model.NowMS())
+	if err != nil {
+		t.Fatalf("LoadStepViewStore: %v", err)
+	}
+	return view.Row.Status
+}
+
+func requireStatus(t *testing.T, st store.Store, id int, want string) {
+	t.Helper()
+	if got := effectiveStatus(t, st, id); got != want {
+		t.Errorf("%s status = %s, want %s", model.FormatStepID(id), got, want)
+	}
+}
+
+func TestStepRulingVerbsRuleUnderTheConductorCapability(t *testing.T) {
+	for name, v := range stepRulingVerbs {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			id, _, conductor := readyRuling(t, st, v)
+
+			row, _, err := v.call(rulerEnv(st, "", false), model.FormatStepID(id),
+				func() string { return conductor })
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if row.Step != model.FormatStepID(id) || row.Status != v.ruled {
+				t.Errorf("row = %s (%s), want %s %s", row.Step, row.Status, model.FormatStepID(id), v.ruled)
+			}
+			requireStatus(t, st, id, v.ruled)
+		})
+	}
+}
+
+func TestStepRulingVerbsRefuseAWrongConductorToken(t *testing.T) {
+	for name, v := range stepRulingVerbs {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			id, before, _ := readyRuling(t, st, v)
+
+			_, _, err := v.call(rulerEnv(st, "", false), model.FormatStepID(id),
+				func() string { return "not-the-capability" })
+			requireCode(t, err, output.ErrAuth)
+			requireStatus(t, st, id, before)
+		})
+	}
+}
+
+// TestStepRulingVerbsReadNoTokenOnAnUnboundRun pins the blocking-channel
+// hazard: a run bound to no capability never calls the token source.
+func TestStepRulingVerbsReadNoTokenOnAnUnboundRun(t *testing.T) {
+	for name, v := range stepRulingVerbs {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			id, _, _ := readyRuling(t, st, v)
+			step, err := st.GetStep(id)
+			if err != nil {
+				t.Fatalf("GetStep: %v", err)
+			}
+			tx, err := st.Begin()
+			if err != nil {
+				t.Fatalf("Begin: %v", err)
+			}
+			if err := tx.SetRunConductorHashTx(step.RunID, ""); err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("unbinding the run: %v", err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+
+			_, _, err = v.call(rulerEnv(st, "", false), model.FormatStepID(id), func() string {
+				t.Error("the token source was read for a run bound to no capability")
+				return ""
+			})
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			requireStatus(t, st, id, v.ruled)
+		})
+	}
+}
+
+// TestStepRulingVerbsRefuseAnUnattributedRuling: a transport that supplies no
+// working directory gets a refusal, never a ruling recorded without one.
+func TestStepRulingVerbsRefuseAnUnattributedRuling(t *testing.T) {
+	for name, v := range stepRulingVerbs {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			id, before, conductor := readyRuling(t, st, v)
+			env := rulerEnv(st, "", false)
+			env.Cwd = ""
+
+			if _, _, err := v.call(env, model.FormatStepID(id), func() string { return conductor }); err == nil {
+				t.Fatal("a ruling with no working directory was accepted")
+			}
+			requireStatus(t, st, id, before)
+		})
+	}
+}
+
+// TestStepRulingVerbsAreRunAddressed pins the policy each ruling declares,
+// as TestStepLeaseVerbsAreRunAddressed does for the lease verbs.
+func TestStepRulingVerbsAreRunAddressed(t *testing.T) {
+	for name, v := range stepRulingVerbs {
+		t.Run(name+" registers an anchored identity", func(t *testing.T) {
+			st := openStore(t)
+			id, _, conductor := readyRuling(t, st, v)
+			const identity = "/work/repo"
+
+			_, registered, err := v.call(rulerEnv(st, identity, true), model.FormatStepID(id),
+				func() string { return conductor })
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if registered == nil {
+				t.Fatal("Registered = nil, want the registration this call made")
+			}
+			if registered.Identity != identity || registered.Verb != name {
+				t.Errorf("Registered = %+v, want %s attributed to %s", *registered, identity, name)
+			}
+		})
+
+		t.Run(name+" runs for an unanchored identity without registering", func(t *testing.T) {
+			st := openStore(t)
+			id, _, conductor := readyRuling(t, st, v)
+			const identity = "/work/scratch"
+
+			_, registered, err := v.call(rulerEnv(st, identity, false), model.FormatStepID(id),
+				func() string { return conductor })
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if registered != nil {
+				t.Errorf("Registered = %+v, want none for an unanchored identity", *registered)
+			}
+			requireUnregistered(t, st, identity)
+		})
+	}
+}
+
+func TestStepRulingVerbsValidateBeforeTheStore(t *testing.T) {
+	st := openStore(t)
+	env := rulerEnv(st, "/work/repo", true)
+	ctx := context.Background()
+	const ref = "STEP-1"
+
+	_, malformedErr := verb.StepReap(ctx, env, verb.StepReapInput{Step: "ISSUE-1", Reason: "dead"})
+	_, approveErr := verb.StepApprove(ctx, env, verb.StepApproveInput{Step: ref})
+	_, rejectErr := verb.StepReject(ctx, env, verb.StepRejectInput{
+		Step: ref, Authority: engine.AuthorityStandingGrant,
+	})
+	_, noAsErr := verb.StepResolve(ctx, env, verb.StepResolveInput{
+		Step: ref, Authority: engine.AuthorityOperator,
+	})
+	_, unknownAuthorityErr := verb.StepResolve(ctx, env, verb.StepResolveInput{
+		Step: ref, As: engine.ResolveSkip, Authority: "someone",
+	})
+
+	for name, err := range map[string]error{
+		"malformed ref":                      malformedErr,
+		"approve without authority":          approveErr,
+		"standing grant without its ref":     rejectErr,
+		"resolve without --as":               noAsErr,
+		"resolve under an unknown authority": unknownAuthorityErr,
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireCode(t, err, output.ErrValidation)
+		})
+	}
+	requireUnregistered(t, st, "/work/repo")
+}
