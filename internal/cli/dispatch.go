@@ -75,6 +75,10 @@ gone.`,
 }
 
 func runDispatchOpen(cmd *cobra.Command, w *output.Writer) error {
+	// The run is refused before --limit, as it always was.
+	if _, err := dispatchRunID(cmd); err != nil {
+		return err
+	}
 	run, _ := cmd.Flags().GetString("run")
 	limit, _ := cmd.Flags().GetInt("limit")
 	if err := validateLimit(cmd, limit); err != nil {
@@ -556,6 +560,18 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 	in.NoConditions, _ = cmd.Flags().GetString("no-conditions")
 	from, _ := cmd.Flags().GetString("backfill-from")
 
+	// The run, then a ruling's working directory, are refused before the
+	// batch is read, as they always were. rulingBy names the getwd cause,
+	// which the Env's empty Cwd cannot carry to the verb.
+	if _, err := dispatchRunID(cmd); err != nil {
+		return err
+	}
+	if in.NoConditions != "" {
+		if _, err := rulingBy(); err != nil {
+			return err
+		}
+	}
+
 	// The verb reads the token only for an override on a bound run, so a
 	// plain close never touches stdin. `--backfill-from -` carries the usage
 	// rows on stdin, so there the token comes from DOCKET_TOKEN alone.
@@ -603,6 +619,7 @@ func runDispatchReconcile(
 	if err != nil {
 		return err
 	}
+	in.Reconcile = true
 	in.BackfillRows = rows
 	in.Source, _ = cmd.Flags().GetString("source")
 	in.OnDuplicate, _ = cmd.Flags().GetString("on-duplicate")

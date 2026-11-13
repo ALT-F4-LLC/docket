@@ -2,14 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -600,12 +605,115 @@ func TestDispatchOpenRefusesANonPositiveAckSeq(t *testing.T) {
 	conn := newTestDB(t)
 	runID := activatedDispatchRunForCLI(t, conn)
 	cmd := dispatchCmdWithDB(conn, model.FormatRunID(runID))
-	testsupport.Must(t, cmd.Flags().Set("ack-reap", "0"), "set --ack-reap: %v", nil)
+	if err := cmd.Flags().Set("ack-reap", "0"); err != nil {
+		t.Fatalf("set --ack-reap: %v", err)
+	}
 
 	w, _ := bufWriter(true)
 	err := runDispatchOpen(cmd, w)
 	assertCmdCode(t, err, output.ErrValidation, "dispatch open --ack-reap 0")
 	if !strings.Contains(err.Error(), "--ack-reap 0 is not an event seq") {
 		t.Errorf("error = %v, want it to name the flag", err)
+	}
+}
+
+// withAnchoredIdentity gives cmd the anchored config identity the root hook
+// would have loaded for it.
+func withAnchoredIdentity(cmd *cobra.Command, identity string) *cobra.Command {
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey,
+		&config.Config{Identity: identity, Anchored: true}))
+	return cmd
+}
+
+// TestDispatchCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each dispatch command
+// resolved its own project, including for a reconcile refused after it
+// registered the project.
+func TestDispatchCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	conn := newTestDB(t)
+	ref := model.FormatRunID(activatedDispatchRunForCLI(t, conn))
+	w, _ := bufWriter(true)
+
+	err := runDispatchOpen(withAnchoredIdentity(dispatchCmdWithDB(conn, ref), "/repos/dispatch-open"), w)
+	testsupport.Must(t, err, "dispatch open: %v", err)
+	err = runDispatchExtend(withAnchoredIdentity(dispatchCmdWithDB(conn, ref), "/repos/dispatch-extend"), w)
+	testsupport.Must(t, err, "dispatch extend: %v", err)
+
+	// An empty batch is refused at the back-fill stage, after the close has
+	// registered its project.
+	batch := filepath.Join(t.TempDir(), "usage.json")
+	testsupport.Must(t, os.WriteFile(batch, []byte("[]"), 0o600), "writing the batch")
+	reconcile := withAnchoredIdentity(dispatchCloseCmdWithDB(conn, ref), "/repos/dispatch-reconcile")
+	if err := reconcile.Flags().Set("backfill-from", batch); err != nil {
+		t.Fatalf("set --backfill-from: %v", err)
+	}
+	assertCmdCode(t, runDispatchClose(reconcile, w), output.ErrValidation, "dispatch close --backfill-from []")
+
+	err = runDispatchClose(withAnchoredIdentity(dispatchCloseCmdWithDB(conn, ref), "/repos/dispatch-close"), w)
+	testsupport.Must(t, err, "dispatch close: %v", err)
+
+	want := map[string]string{
+		"/repos/dispatch-open":      "dispatch open",
+		"/repos/dispatch-extend":    "dispatch extend",
+		"/repos/dispatch-reconcile": "dispatch close",
+		"/repos/dispatch-close":     "dispatch close",
+	}
+	if got := registrationEvents(t, conn); !maps.Equal(got, want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+}
+
+// A doubly malformed invocation reports the malformed --run first, as each
+// command did before it called its verb.
+func TestDispatchCommandsRefuseAMalformedRunFirst(t *testing.T) {
+	conn := newTestDB(t)
+	w, _ := bufWriter(true)
+
+	open := dispatchCmdWithDB(conn, "nope")
+	if err := open.Flags().Set("json", "true"); err != nil {
+		t.Fatalf("set --json: %v", err)
+	}
+	if err := open.Flags().Set("limit", "-1"); err != nil {
+		t.Fatalf("set --limit: %v", err)
+	}
+	err := runDispatchOpen(open, w)
+	assertCmdCode(t, err, output.ErrValidation, "dispatch open --run nope --limit -1")
+	if !strings.HasPrefix(err.Error(), "invalid run ID") {
+		t.Errorf("dispatch open error = %v, want the run refused first", err)
+	}
+
+	reconcile := dispatchCloseCmdWithDB(conn, "nope")
+	if err := reconcile.Flags().Set("backfill-from", filepath.Join(t.TempDir(), "missing.json")); err != nil {
+		t.Fatalf("set --backfill-from: %v", err)
+	}
+	err = runDispatchClose(reconcile, w)
+	assertCmdCode(t, err, output.ErrValidation, "dispatch close --run nope --backfill-from missing")
+	if !strings.HasPrefix(err.Error(), "invalid run ID") {
+		t.Errorf("dispatch close error = %v, want the run refused first", err)
+	}
+}
+
+// A --no-conditions ruling from an unreadable working directory is refused
+// GENERAL naming the getwd cause, before the batch file is read.
+func TestDispatchCloseNoConditionsRefusesAnUnreadableWorkingDirectory(t *testing.T) {
+	conn := newTestDB(t)
+	ref := model.FormatRunID(activatedDispatchRunForCLI(t, conn))
+	saved := getwd
+	getwd = func() (string, error) { return "", errors.New("getwd: no such file or directory") }
+	t.Cleanup(func() { getwd = saved })
+
+	cmd := dispatchCloseCmdWithDB(conn, ref)
+	cmd.Flags().String("no-conditions", "", "")
+	if err := cmd.Flags().Set("no-conditions", "tracked elsewhere"); err != nil {
+		t.Fatalf("set --no-conditions: %v", err)
+	}
+	if err := cmd.Flags().Set("backfill-from", filepath.Join(t.TempDir(), "missing.json")); err != nil {
+		t.Fatalf("set --backfill-from: %v", err)
+	}
+	w, _ := bufWriter(true)
+	err := runDispatchClose(cmd, w)
+	assertCmdCode(t, err, output.ErrGeneral, "dispatch close --no-conditions")
+	if !strings.Contains(err.Error(), "could not be resolved (getwd: no such file or directory)") {
+		t.Errorf("error = %v, want the getwd cause named", err)
 	}
 }

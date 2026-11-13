@@ -137,10 +137,11 @@ func DispatchVerify(ctx context.Context, env Env, in DispatchVerifyInput) (Dispa
 type DispatchCloseInput struct {
 	Run                string
 	AcceptMissingUsage bool
-	// BackfillRows, when non-nil, makes the close the one-invocation wave
-	// reconcile: back-fill these rows, verify, then close. An empty non-nil
-	// batch is refused at the back-fill stage. Source and OnDuplicate apply
-	// to that stage only.
+	// Reconcile makes the close the one-invocation wave reconcile: back-fill
+	// BackfillRows, verify, then close. An empty batch is refused at the
+	// back-fill stage. BackfillRows, Source and OnDuplicate apply to that
+	// stage only.
+	Reconcile    bool
 	BackfillRows []engine.BackfillRow
 	Source       string
 	OnDuplicate  string
@@ -160,9 +161,9 @@ type DispatchCloseInput struct {
 
 // DispatchCloseResult is the close, or for a batch the reconcile.
 type DispatchCloseResult struct {
-	// Close is set by a close without a batch.
+	// Close is set by a plain close.
 	Close *engine.CloseOutcome
-	// Reconcile is set by a close with a batch, and on a stage's refusal
+	// Reconcile is set by a reconcile, and on a stage's refusal
 	// carries the stages that ran before it.
 	Reconcile *engine.ReconcileOutcome
 	// Registered is as on DispatchOpenResult.
@@ -170,7 +171,7 @@ type DispatchCloseResult struct {
 }
 
 // DispatchClose closes the run's open manifest when the run has no
-// discrepancy. With BackfillRows it first back-fills and verifies, refusing
+// discrepancy. With Reconcile it first back-fills and verifies, refusing
 // with an *engine.StageError naming the stage that failed.
 //
 // It takes its project from the run it is handed, so it is run-addressed.
@@ -208,7 +209,7 @@ func DispatchClose(ctx context.Context, env Env, in DispatchCloseInput) (Dispatc
 	}
 
 	e := engine.NewEngine()
-	if in.BackfillRows != nil {
+	if in.Reconcile {
 		res.Reconcile, err = e.ReconcileDispatchStore(env.Store, runID, in.BackfillRows,
 			in.Source, in.OnDuplicate, in.AcceptMissingUsage, skip, model.NowMS())
 	} else {
