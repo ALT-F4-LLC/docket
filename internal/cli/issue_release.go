@@ -37,6 +37,12 @@ issue to the pool; releasing does it now and without waiting out the TTL.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
+		// A malformed ref is reported before the token is read, so it is
+		// not masked by a missing token and leaves stdin undrained.
+		if _, err := verb.ParseIssueRef(args[0]); err != nil {
+			return verbErr(err)
+		}
+
 		token, err := readToken(os.Stdin)
 		if err != nil {
 			return err

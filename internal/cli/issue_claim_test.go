@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -86,6 +89,25 @@ func TestIssueLeaseCommandsRenderTheLease(t *testing.T) {
 	}
 }
 
+// TestIssueReleaseAndHeartbeatReportAMalformedRefBeforeTheToken keeps the
+// first error a malformed ref with no token reports: the ref, as before the
+// commands called internal/verb, not the missing token.
+func TestIssueReleaseAndHeartbeatReportAMalformedRefBeforeTheToken(t *testing.T) {
+	conn := newTestDB(t)
+	t.Setenv(TokenEnvVar, "")
+	for _, cmd := range []*cobra.Command{releaseCmd, heartbeatCmd} {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			withStdin(t, "")
+			_, err := runLeaseCommandOutput(t, conn, nil, cmd, "not-an-id")
+			var ce *CmdError
+			if !errors.As(err, &ce) || ce.Code != output.ErrValidation ||
+				!strings.HasPrefix(ce.Error(), "invalid issue ID") {
+				t.Errorf("error = %v, want a VALIDATION_ERROR reporting the invalid issue ID", err)
+			}
+		})
+	}
+}
+
 // registrationEvents maps each project-registered event's identity to the
 // verb that registered it, failing on a second event for one identity.
 func registrationEvents(t *testing.T, conn *sql.DB) map[string]string {
@@ -131,12 +153,21 @@ func TestIssueLeaseCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 	if _, err := runLeaseCommandOutput(t, conn, anchored("/repos/refused"), claimCmd, "DKT-999"); err == nil {
 		t.Fatal("claim of a missing issue succeeded, want NOT_FOUND")
 	}
+	t.Setenv(TokenEnvVar, "deadbeef")
+	if _, err := runLeaseCommandOutput(t, conn, anchored("/repos/refused-heartbeat"), heartbeatCmd, ref); err == nil {
+		t.Fatal("heartbeat with a wrong token succeeded, want AUTH_ERROR")
+	}
+	if _, err := runLeaseCommandOutput(t, conn, anchored("/repos/refused-release"), releaseCmd, ref); err == nil {
+		t.Fatal("release with a wrong token succeeded, want AUTH_ERROR")
+	}
 
 	want := map[string]string{
-		"/repos/claim":     "issue claim",
-		"/repos/heartbeat": "issue heartbeat",
-		"/repos/release":   "issue release",
-		"/repos/refused":   "issue claim",
+		"/repos/claim":             "issue claim",
+		"/repos/heartbeat":         "issue heartbeat",
+		"/repos/release":           "issue release",
+		"/repos/refused":           "issue claim",
+		"/repos/refused-heartbeat": "issue heartbeat",
+		"/repos/refused-release":   "issue release",
 	}
 	got := registrationEvents(t, conn)
 	if len(got) != len(want) {

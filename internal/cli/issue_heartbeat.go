@@ -40,6 +40,12 @@ which tells the holder to claim again rather than that it was never trusted.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
+		// A malformed ref is reported before the token is read, so it is
+		// not masked by a missing token and leaves stdin undrained.
+		if _, err := verb.ParseIssueRef(args[0]); err != nil {
+			return verbErr(err)
+		}
+
 		token, err := readToken(os.Stdin)
 		if err != nil {
 			return err

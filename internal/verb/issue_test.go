@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -205,13 +206,39 @@ func TestIssueClaimMayRegisterTheCallersProject(t *testing.T) {
 	})
 }
 
-func TestIssueClaimReportsTheRegistrationWhenItFailsAfterRegistering(t *testing.T) {
+func TestIssueLeaseVerbsReportTheRegistrationWhenTheyFailAfterRegistering(t *testing.T) {
 	st := openStore(t)
-	res, err := verb.IssueClaim(context.Background(), projectEnv(st, "/repos/fresh", true),
-		verb.IssueClaimInput{Issue: "999", Owner: "worker-1"})
-	requireCode(t, err, output.ErrNotFound)
-	if res.Registered == nil || res.Registered.Identity != "/repos/fresh" {
-		t.Errorf("Registered = %+v, want /repos/fresh: the project stays registered after the refusal", res.Registered)
+	id := createIssue(t, st)
+	claim(t, projectEnv(st, "", false), id)
+	ref := model.FormatID(id)
+	ctx := context.Background()
+
+	cases := []struct {
+		identity string
+		code     output.ErrorCode
+		call     func(env verb.Env) (*engine.ProjectRegistration, error)
+	}{
+		{"/repos/claim", output.ErrNotFound, func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueClaim(ctx, env, verb.IssueClaimInput{Issue: "999", Owner: "worker-1"})
+			return res.Registered, err
+		}},
+		{"/repos/release", output.ErrAuth, func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueRelease(ctx, env, verb.IssueReleaseInput{Issue: ref, Token: "deadbeef"})
+			return res.Registered, err
+		}},
+		{"/repos/heartbeat", output.ErrAuth, func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueHeartbeat(ctx, env, verb.IssueHeartbeatInput{Issue: ref, Token: "deadbeef"})
+			return res.Registered, err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.identity, func(t *testing.T) {
+			registered, err := c.call(projectEnv(st, c.identity, true))
+			requireCode(t, err, c.code)
+			if registered == nil || registered.Identity != c.identity {
+				t.Errorf("Registered = %+v, want %s: the project stays registered after the refusal", registered, c.identity)
+			}
+		})
 	}
 }
 
