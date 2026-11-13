@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -52,9 +51,10 @@ func (p workflowListPayload) VersionedPayload() any {
 }
 
 var workflowListCmd = &cobra.Command{
-	Use:     "list",
-	Short:   "List registered workflows",
-	Aliases: []string{"ls"},
+	Use:         "list",
+	Short:       "List registered workflows",
+	Aliases:     []string{"ls"},
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	Long: `List registered workflows.
 
 --orphans narrows the list to ORPHANED REGISTRATIONS: registered names that no
@@ -90,107 +90,34 @@ directory reads as orphaned here.`,
 }
 
 func runWorkflowList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
 	name, _ := cmd.Flags().GetString("name")
 	limit, _ := cmd.Flags().GetInt("limit")
 	orphans, _ := cmd.Flags().GetBool("orphans")
 	deprecated, _ := cmd.Flags().GetBool("deprecated")
+	project, _ := cmd.Flags().GetString("project")
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
-	projectID, err := resolveReadProject(cmd, conn)
-	if err != nil {
-		return err
-	}
 
-	// The orphan verdict needs the FILESYSTEM, which internal/db does not
-	// touch anywhere else, so it is applied here over the query's rows — the
-	// same shape `workflow show` uses for the source check. That is also why
-	// the query runs UNLIMITED under --orphans: a SQL LIMIT would cut the rows
-	// before the filter saw them, so `total` would count workflows rather than
-	// orphans and truncation would be computed against the wrong population.
-	queryLimit := limit
-	if orphans {
-		queryLimit = 0
-	}
-
-	// --orphans keeps its own rule (deprecated rows are listed like any
-	// other) regardless of --deprecated: orphan status is a filesystem
-	// verdict on the NAME, binding eligibility a verdict on the VERSION, and
-	// narrowing by one must not silently narrow by the other.
-	excludeDeprecated := !deprecated && !orphans
-
-	workflows, total, err := store.StoreOn(conn).ListWorkflows(store.WorkflowListOptions{
-		ProjectID:         projectID,
+	listed, err := verb.WorkflowList(cmd.Context(), verbEnv(cmd), verb.WorkflowListInput{
 		Name:              name,
-		Limit:             queryLimit,
-		ExcludeDeprecated: excludeDeprecated,
+		Limit:             limit,
+		IncludeDeprecated: deprecated,
+		Orphans:           orphans,
+		Project:           project,
 	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing workflows: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
 
-	if orphans {
-		if workflows, total, err = keepOrphans(workflows, limit); err != nil {
-			return err
-		}
-	}
-
-	result := workflowListResult{Workflows: workflows, Total: total, limit: limit}
+	result := workflowListResult{Workflows: listed.Workflows, Total: listed.Total, limit: limit}
 
 	var message string
 	if !w.JSONMode {
-		message = renderWorkflowList(workflows, orphans)
+		message = renderWorkflowList(listed.Workflows, orphans)
 	}
 	w.Success(result, message)
 	return nil
-}
-
-// keepOrphans reduces the listed rows to the orphaned ones, stamping each with
-// the verdict that put it there, and returns the true pre-limit total of THAT
-// population.
-//
-// IT REFUSES RATHER THAN REPORTING AN UNCHECKED ANSWER. With no instance-config
-// root to scan, every registration in the store trivially has "no file in any
-// root", and rendering that as a list of orphans would be the verb inventing
-// its entire result out of having looked nowhere. The two ways that happens —
-// no root exists, and a root that would not scan — are separate messages
-// because they send an operator to different places.
-func keepOrphans(workflows []*model.Workflow, limit int) ([]*model.Workflow, int, error) {
-	index, err := engine.ScanWorkflowOrigins()
-	if err != nil {
-		return nil, 0, cmdErr(err, output.ErrValidation)
-	}
-	if !index.Scanned() {
-		return nil, 0, cmdErr(fmt.Errorf(
-			"no instance-config root exists on this machine, so no registration "+
-				"can be classified: with nothing to scan, every registered name "+
-				"would look orphaned"), output.ErrValidation)
-	}
-	if err := index.Err(); err != nil {
-		return nil, 0, cmdErr(fmt.Errorf(
-			"scanning the instance config for workflow definitions: %w", err),
-			output.ErrGeneral)
-	}
-
-	out := make([]*model.Workflow, 0, len(workflows))
-	for _, wf := range workflows {
-		status := index.Status(wf.Name)
-		if !status.Orphaned() {
-			continue
-		}
-		// The verdict rides on the row, so the JSON payload carries the FACT
-		// and not merely the fact that a flag was passed.
-		wf.Origin = status
-		out = append(out, wf)
-	}
-
-	total := len(out)
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out, total, nil
 }
 
 func renderWorkflowList(workflows []*model.Workflow, orphans bool) string {

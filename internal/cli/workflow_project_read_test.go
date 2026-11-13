@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -27,9 +29,14 @@ import (
 // way the root hook does.
 
 // inCheckoutOf builds a command as if the working directory resolved to
-// projectID, with no --project flag set.
-func inCheckoutOf(cmd *cobra.Command, projectID int) *cobra.Command {
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, projectID))
+// projectID, with no --project flag set: its config carries that project's
+// identity, which the verb resolves.
+func inCheckoutOf(t *testing.T, cmd *cobra.Command, projectID int) *cobra.Command {
+	t.Helper()
+	p, err := store.StoreOn(getDB(cmd)).GetProject(projectID)
+	testsupport.Must(t, err, "reading project %d: %v", projectID, err)
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey,
+		&config.Config{Identity: p.Identity, Anchored: true}))
 	return cmd
 }
 
@@ -72,7 +79,7 @@ func TestWorkflowListProjectReadsAnotherRegistry(t *testing.T) {
 	testsupport.Must(t, err, "retiring unit@2 in B: %v", err)
 
 	// A holds nothing, and says so without the flag.
-	if out := workflowListJSON(t, inCheckoutOf(workflowListCmdWithDB(conn, 50), a)); strings.Contains(out, `"unit"`) {
+	if out := workflowListJSON(t, inCheckoutOf(t, workflowListCmdWithDB(conn, 50), a)); strings.Contains(out, `"unit"`) {
 		t.Fatalf("A's own listing shows B's rows:\n%s", out)
 	}
 
@@ -80,11 +87,11 @@ func TestWorkflowListProjectReadsAnotherRegistry(t *testing.T) {
 	fromA := workflowListCmdWithDB(conn, 50)
 	testsupport.Must(t, fromA.Flags().Set("project", "two.git"), "setting --project")
 	testsupport.Must(t, fromA.Flags().Set("deprecated", "true"), "setting --deprecated")
-	viaFlag := workflowListJSON(t, inCheckoutOf(fromA, a))
+	viaFlag := workflowListJSON(t, inCheckoutOf(t, fromA, a))
 
 	fromB := workflowListCmdWithDB(conn, 50)
 	testsupport.Must(t, fromB.Flags().Set("deprecated", "true"), "setting --deprecated")
-	inB := workflowListJSON(t, inCheckoutOf(fromB, b))
+	inB := workflowListJSON(t, inCheckoutOf(t, fromB, b))
 
 	if viaFlag != inB {
 		t.Errorf("--project B from A differs from B's own listing:\n%s\n---\n%s", viaFlag, inB)
@@ -99,7 +106,7 @@ func TestWorkflowListProjectReadsAnotherRegistry(t *testing.T) {
 	// project changes which registry is read, not how it is read.
 	fromA = workflowListCmdWithDB(conn, 50)
 	testsupport.Must(t, fromA.Flags().Set("project", "two.git"), "setting --project")
-	if out := workflowListJSON(t, inCheckoutOf(fromA, a)); strings.Contains(out, `"version":2`) || !strings.Contains(out, `"total":1`) {
+	if out := workflowListJSON(t, inCheckoutOf(t, fromA, a)); strings.Contains(out, `"version":2`) || !strings.Contains(out, `"total":1`) {
 		t.Errorf("--project B without --deprecated shows the retired version:\n%s", out)
 	}
 
@@ -109,7 +116,7 @@ func TestWorkflowListProjectReadsAnotherRegistry(t *testing.T) {
 		cmd := workflowListCmdWithDB(conn, 50)
 		testsupport.Must(t, cmd.Flags().Set("project", ref), "setting --project")
 		testsupport.Must(t, cmd.Flags().Set("deprecated", "true"), "setting --deprecated")
-		if out := workflowListJSON(t, inCheckoutOf(cmd, a)); out != inB {
+		if out := workflowListJSON(t, inCheckoutOf(t, cmd, a)); out != inB {
 			t.Errorf("--project %s resolves differently from two.git:\n%s", ref, out)
 		}
 	}
@@ -133,15 +140,15 @@ func TestWorkflowLintProjectJudgesAgainstAnotherRegistry(t *testing.T) {
 		[]string{writeWorkflowFile(t, readsFindings)}, w), "registering reads@1 in B")
 
 	// From A without the flag: the schema does not resolve here.
-	_, err = lintWith(t, inCheckoutOf(lintCmd(conn, ""), a), readsFindings)
+	_, err = lintWith(t, inCheckoutOf(t, lintCmd(conn, ""), a), readsFindings)
 	if err == nil || codeOf(t, err) != output.ErrValidation {
 		t.Fatalf("lint in A of a definition whose schema lives in B = %v, want VALIDATION_ERROR", err)
 	}
 
 	// From A with --project B: B's verdict, unchanged.
-	viaFlag, err := lintWith(t, inCheckoutOf(lintCmd(conn, "two.git"), a), readsFindings)
+	viaFlag, err := lintWith(t, inCheckoutOf(t, lintCmd(conn, "two.git"), a), readsFindings)
 	testsupport.Must(t, err, "lint --project B: %v", err)
-	inB, _ := lintWith(t, inCheckoutOf(lintCmd(conn, ""), b), readsFindings)
+	inB, _ := lintWith(t, inCheckoutOf(t, lintCmd(conn, ""), b), readsFindings)
 	if viaFlag != inB {
 		t.Errorf("--project B from A differs from B's own verdict:\n%s\n---\n%s", viaFlag, inB)
 	}
@@ -153,11 +160,11 @@ func TestWorkflowLintProjectJudgesAgainstAnotherRegistry(t *testing.T) {
 	// `new` (A holds no reads@1) — and would also fail on the schema — so the
 	// flag is the only way to see B's conflict from A.
 	edited := readsFindings + "\n# edited\n"
-	_, err = lintWith(t, inCheckoutOf(lintCmd(conn, "two.git"), a), edited)
+	_, err = lintWith(t, inCheckoutOf(t, lintCmd(conn, "two.git"), a), edited)
 	if err == nil || codeOf(t, err) != output.ErrConflict {
 		t.Errorf("lint --project B of an edit at B's frozen slot = %v, want CONFLICT", err)
 	}
-	_, errB := lintWith(t, inCheckoutOf(lintCmd(conn, ""), b), edited)
+	_, errB := lintWith(t, inCheckoutOf(t, lintCmd(conn, ""), b), edited)
 	if errB == nil || err.Error() != errB.Error() {
 		t.Errorf("--project B's conflict differs from B's own:\n%v\n---\n%v", err, errB)
 	}

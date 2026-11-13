@@ -95,3 +95,27 @@ func TestWorkflowLintReportsRegistrationOutcome(t *testing.T) {
 		t.Errorf("refusal does not name the fix: %v", err)
 	}
 }
+
+func TestWorkflowLintOwnsItsProject(t *testing.T) {
+	if _, ok := workflowLintCmd.Annotations["verbOwnsProject"]; !ok {
+		t.Error("workflow lint lacks the verbOwnsProject annotation")
+	}
+}
+
+// The verb, not the root hook, decides which registry judges the file: the
+// command carries only the config's identity, and the verdict is that
+// project's.
+func TestWorkflowLintJudgesTheConfiguredProject(t *testing.T) {
+	conn := newTestDB(t)
+	cmd := lintCmd(conn, "")
+	inCallerProject(t, conn, cmd, "/repo/caller")
+	w, _ := bufWriter(true)
+	testsupport.Must(t, runWorkflowRegister(fanoutCmd(conn, "caller", false),
+		[]string{writeWorkflowFile(t, minimalWorkflow)}, w), "registering unit@1 in the caller's project")
+
+	out, err := lintWith(t, cmd, minimalWorkflow)
+	testsupport.Must(t, err, "lint in the configured project: %v", err)
+	if !strings.Contains(out, `"registration":"unchanged"`) {
+		t.Errorf("the verdict is not the configured project's:\n%s", out)
+	}
+}
