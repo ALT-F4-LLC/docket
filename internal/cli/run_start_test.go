@@ -153,3 +153,25 @@ func TestRunStartReportsANegativeBudgetBeforeAMissingRequestFile(t *testing.T) {
 		t.Errorf("error = %v, want the negative --budget named", err)
 	}
 }
+
+// The run records the head of the checkout it was started from.
+func TestRunStartRecordsTheCheckoutHead(t *testing.T) {
+	conn := newTestDB(t)
+	checkout := t.TempDir()
+	repinGit(t, checkout, "init", "-q", "-b", "trunk")
+	repinGit(t, checkout, "commit", "-q", "--allow-empty", "-m", "base")
+	commit := repinGit(t, checkout, "rev-parse", "HEAD")
+
+	cmd := runStartCmdWithDB(conn)
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey, &config.Config{ExecRoot: checkout}))
+	w, _ := bufWriter(true)
+	err := runRunStart(cmd, w)
+	testsupport.Must(t, err, "run start: %v", err)
+
+	run, err := db.GetRun(conn, 1)
+	testsupport.Must(t, err, "reading the run: %v", err)
+	if run.ExecRoot != checkout || run.Branch != "trunk" || run.CommitSHA != commit {
+		t.Errorf("run context = %q %q %q, want %s on trunk at %s",
+			run.ExecRoot, run.Branch, run.CommitSHA, checkout, commit)
+	}
+}

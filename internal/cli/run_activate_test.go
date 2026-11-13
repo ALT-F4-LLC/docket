@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -217,5 +219,36 @@ func TestRunActivateScopeWarningsNameEachWarningsOwnRemedy(t *testing.T) {
 		if strings.Contains(line, "  ") {
 			t.Errorf("warning with no workflow leaves a doubled space: %q", line)
 		}
+	}
+}
+
+// The activating checkout's head rides on the run-activated event.
+func TestRunActivateRecordsTheCheckoutHead(t *testing.T) {
+	conn, runRef := reactivationFixture(t, true)
+	checkout := t.TempDir()
+	repinGit(t, checkout, "init", "-q", "-b", "trunk")
+	repinGit(t, checkout, "commit", "-q", "--allow-empty", "-m", "base")
+	commit := repinGit(t, checkout, "rev-parse", "HEAD")
+
+	cmd := newRunActivateCmd()
+	cmd.SetContext(context.WithValue(context.WithValue(context.Background(), dbKey, conn),
+		cfgKey, &config.Config{ExecRoot: checkout}))
+	w, _ := bufWriter(true)
+	err := runRunActivate(cmd, []string{runRef}, w)
+	testsupport.Must(t, err, "run activate: %v", err)
+
+	var data string
+	err = conn.QueryRow(`SELECT data FROM events WHERE kind = ? ORDER BY seq DESC LIMIT 1`,
+		engine.EventRunActivated).Scan(&data)
+	testsupport.Must(t, err, "reading the run-activated event: %v", err)
+	var head struct {
+		Branch string `json:"head_branch"`
+		Commit string `json:"head_commit"`
+	}
+	if err := json.Unmarshal([]byte(data), &head); err != nil {
+		t.Fatalf("decoding the event %s: %v", data, err)
+	}
+	if head.Branch != "trunk" || head.Commit != commit {
+		t.Errorf("event head = %+v, want branch trunk at %s", head, commit)
 	}
 }
