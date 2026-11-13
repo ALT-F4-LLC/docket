@@ -55,6 +55,12 @@ func runRunStart(cmd *cobra.Command, w *output.Writer) error {
 	if requestFile != "" {
 		content, err := os.ReadFile(requestFile)
 		if err != nil {
+			// A negative --budget outranks the file error. The verb refuses it
+			// too, but only once the file has been read.
+			if in.Budget != nil && *in.Budget < 0 {
+				return cmdErr(fmt.Errorf("--budget must be >= 0, got %g (0 means unlimited)",
+					*in.Budget), output.ErrValidation)
+			}
 			if os.IsNotExist(err) {
 				return cmdErr(
 					fmt.Errorf("request file %s not found", requestFile), output.ErrNotFound)

@@ -2,10 +2,12 @@ package verb_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -62,6 +64,8 @@ func TestRunStartInheritsOmittedBudgetsAndKeepsExplicitZero(t *testing.T) {
 		Issues:      []string{model.FormatID(issue)},
 		UsageBudget: &unlimited,
 		ExecRoot:    "/src/checkout",
+		Branch:      "main",
+		CommitSHA:   "0123456789abcdef0123456789abcdef01234567",
 		Hostname:    "host-1",
 	})
 	if err != nil {
@@ -75,8 +79,13 @@ func TestRunStartInheritsOmittedBudgetsAndKeepsExplicitZero(t *testing.T) {
 		t.Errorf("budget = %g, usage budget = %g; want the omitted cap's default 7 and the explicit 0",
 			run.Budget, run.UsageBudget)
 	}
-	if run.Request != "the request" || run.ExecRoot != "/src/checkout" || run.Hostname != "host-1" {
-		t.Errorf("run = %+v, want the request and context it was started with", run)
+	stored, err := st.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Request != "the request" || stored.ExecRoot != "/src/checkout" || stored.Hostname != "host-1" ||
+		stored.Branch != "main" || stored.CommitSHA != "0123456789abcdef0123456789abcdef01234567" {
+		t.Errorf("stored run = %+v, want the request and context it was started with", stored)
 	}
 	issues, err := st.ListRunIssues(run.ID)
 	if err != nil {
@@ -126,11 +135,47 @@ func TestRunStartRefusesAnIssueHomedInAnotherProject(t *testing.T) {
 	}
 }
 
+// The missing issue is named under the caller's project prefix, which the
+// verb reads from the store rather than from process state.
 func TestRunStartRefusesAMissingIssue(t *testing.T) {
 	st := openStore(t)
+	if err := st.SetProjectPrefix(store.DefaultProjectID, "ABC"); err != nil {
+		t.Fatalf("SetProjectPrefix: %v", err)
+	}
 	_, err := verb.RunStart(context.Background(), projectEnv(st, "", false),
-		verb.RunStartInput{Issues: []string{"DKT-999"}})
-	requireCode(t, err, output.ErrNotFound)
+		verb.RunStartInput{Issues: []string{"999"}})
+	requireVerbCode(t, err, output.ErrNotFound, "issue ABC-999 not found")
+	requireNoRuns(t, st)
+}
+
+// The faults run start can report are checked in a fixed order: a negative
+// --budget, then the issues, then the configured budget default. A bad issue
+// is the reported fault even when budget.default is unusable.
+func TestRunStartChecksTheIssuesBetweenTheBudgetAndItsDefault(t *testing.T) {
+	st := openStore(t)
+	// SetConfig refuses a non-number, so the unusable default is written as
+	// the raw row a store holding one would carry.
+	conn, err := store.SQLDB(st)
+	if err != nil {
+		t.Fatalf("SQLDB: %v", err)
+	}
+	if _, err := conn.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)`,
+		"config.p1."+store.KeyBudgetDefault, "lots"); err != nil {
+		t.Fatalf("writing an unusable budget.default: %v", err)
+	}
+	env := projectEnv(st, "", false)
+	missing := []string{"999"}
+
+	_, err = verb.RunStart(context.Background(), env, verb.RunStartInput{Issues: missing})
+	requireVerbCode(t, err, output.ErrNotFound, "issue DKT-999 not found")
+
+	negative := -1.0
+	_, err = verb.RunStart(context.Background(), env, verb.RunStartInput{Issues: missing, Budget: &negative})
+	requireVerbCode(t, err, output.ErrValidation, "--budget must be >= 0")
+
+	issue := model.FormatID(createIssue(t, st))
+	_, err = verb.RunStart(context.Background(), env, verb.RunStartInput{Issues: []string{issue}})
+	requireVerbCode(t, err, output.ErrValidation, `budget.default is "lots"`)
 	requireNoRuns(t, st)
 }
 
@@ -148,8 +193,10 @@ func TestRunActivateActivatesAPlanningRun(t *testing.T) {
 	st := openStore(t)
 	run := plannedRun(t, st)
 
-	res, err := verb.RunActivate(context.Background(), projectEnv(st, "", false),
-		verb.RunActivateInput{Run: run, Reason: "go"})
+	res, err := verb.RunActivate(context.Background(), projectEnv(st, "", false), verb.RunActivateInput{
+		Run: run, Reason: "go",
+		HeadBranch: "main", HeadCommit: "0123456789abcdef0123456789abcdef01234567",
+	})
 	if err != nil {
 		t.Fatalf("RunActivate: %v", err)
 	}
@@ -160,11 +207,50 @@ func TestRunActivateActivatesAPlanningRun(t *testing.T) {
 	if got.ConductorToken == "" {
 		t.Error("a first activation returned no conductor token")
 	}
+	want := runActivated{Reason: "go", HeadBranch: "main", HeadCommit: "0123456789abcdef0123456789abcdef01234567"}
+	if events := runActivatedEvents(t, st, got.Run.ID); len(events) != 1 || events[0] != want {
+		t.Errorf("run-activated events = %+v, want one carrying %+v", events, want)
+	}
+}
+
+// runActivated is the data a run-activated event carries.
+type runActivated struct {
+	Reason     string `json:"reason"`
+	HeadBranch string `json:"head_branch"`
+	HeadCommit string `json:"head_commit"`
+}
+
+func runActivatedEvents(t *testing.T, st store.Store, runID int) []runActivated {
+	t.Helper()
+	tx, err := st.BeginReadSnapshot()
+	if err != nil {
+		t.Fatalf("BeginReadSnapshot: %v", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.RunEventsTx(runID, engine.EventRunActivated)
+	if err != nil {
+		t.Fatalf("RunEventsTx: %v", err)
+	}
+	out := make([]runActivated, 0, len(rows))
+	for _, row := range rows {
+		var e runActivated
+		if row.Data != "" {
+			if err := json.Unmarshal([]byte(row.Data), &e); err != nil {
+				t.Fatalf("decoding event data %q: %v", row.Data, err)
+			}
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func TestRunActivateDryRunWritesNothing(t *testing.T) {
 	st := openStore(t)
 	run := plannedRun(t, st)
+	runID, err := model.ParseRunID(run)
+	if err != nil {
+		t.Fatalf("ParseRunID: %v", err)
+	}
 
 	res, err := verb.RunActivate(context.Background(), projectEnv(st, "", false),
 		verb.RunActivateInput{Run: run, DryRun: true})
@@ -173,6 +259,62 @@ func TestRunActivateDryRunWritesNothing(t *testing.T) {
 	}
 	if !res.Activation.DryRun || res.Activation.Run.Status != model.RunPlanning {
 		t.Errorf("activation = %+v, want a dry run leaving the run in planning", res.Activation)
+	}
+	stored, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Status != model.RunPlanning {
+		t.Errorf("stored run status = %s, want planning", stored.Status)
+	}
+	steps, err := st.ListRunSteps(runID)
+	if err != nil {
+		t.Fatalf("ListRunSteps: %v", err)
+	}
+	pins, err := st.ListPins(runID)
+	if err != nil {
+		t.Fatalf("ListPins: %v", err)
+	}
+	if len(steps) != 0 || len(pins) != 0 {
+		t.Errorf("dry run stored %d step(s) and %d pin(s), want none", len(steps), len(pins))
+	}
+	if events := runActivatedEvents(t, st, runID); len(events) != 0 {
+		t.Errorf("dry run recorded run-activated events %+v, want none", events)
+	}
+}
+
+// Activation and taking the conductor seat write into the caller's project,
+// so each refuses an unanchored caller with no project rather than giving it
+// one, and registers an anchored caller's project on first contact.
+func TestRunActivateAndConductResolveTheCallersProject(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(verb.Env) (*engine.ProjectRegistration, error){
+		"run activate": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunActivate(ctx, env, verb.RunActivateInput{Run: "RUN-42"})
+			return res.Registered, err
+		},
+		"run conduct": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunConduct(ctx, env, verb.RunConductInput{Run: "RUN-42"})
+			return res.Registered, err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			unanchored := projectEnv(st, "/tmp/scratch", false)
+			unanchored.Author = "someone"
+			_, err := call(unanchored)
+			requireVerbCode(t, err, output.ErrValidation, "")
+			requireUnregistered(t, st, "/tmp/scratch")
+
+			anchored := projectEnv(st, "/repos/caller", true)
+			anchored.Author = "someone"
+			registered, err := call(anchored)
+			requireCode(t, err, output.ErrNotFound)
+			if registered == nil || registered.Identity != "/repos/caller" || registered.Verb != name {
+				t.Errorf("Registered = %+v, want the caller's project as `%s` registered it", registered, name)
+			}
+		})
 	}
 }
 
@@ -205,9 +347,7 @@ func TestRunConductRefusesAnUnattributedCaller(t *testing.T) {
 	run := plannedRun(t, st)
 
 	_, err := verb.RunConduct(context.Background(), projectEnv(st, "", false), verb.RunConductInput{Run: run})
-	if err == nil {
-		t.Fatal("RunConduct minted a capability for a caller with no author")
-	}
+	requireVerbCode(t, err, output.ErrGeneral, "refusing to record an unattributed run conduct")
 }
 
 func TestRunVerbsRefuseAMalformedRunRef(t *testing.T) {

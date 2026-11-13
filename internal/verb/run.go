@@ -58,8 +58,7 @@ func RunStart(ctx context.Context, env Env, in RunStartInput) (RunStartResult, e
 		return res, err
 	}
 
-	budget, err := startCap(env, projectID, in.Budget, "--budget", store.KeyBudgetDefault)
-	if err != nil {
+	if err := checkCap(in.Budget, "--budget"); err != nil {
 		return res, err
 	}
 
@@ -95,7 +94,14 @@ func RunStart(ctx context.Context, env Env, in RunStartInput) (RunStartResult, e
 		issueIDs = append(issueIDs, id)
 	}
 
-	usageBudget, err := startCap(env, projectID, in.UsageBudget, "--usage-budget", store.KeyUsageBudgetDefault)
+	budget, err := capOrDefault(env, projectID, in.Budget, store.KeyBudgetDefault)
+	if err != nil {
+		return res, err
+	}
+	if err := checkCap(in.UsageBudget, "--usage-budget"); err != nil {
+		return res, err
+	}
+	usageBudget, err := capOrDefault(env, projectID, in.UsageBudget, store.KeyUsageBudgetDefault)
 	if err != nil {
 		return res, err
 	}
@@ -118,16 +124,20 @@ func RunStart(ctx context.Context, env Env, in RunStartInput) (RunStartResult, e
 	return res, nil
 }
 
-// startCap resolves one of a run's caps: the caller's value when set, which
-// must not be negative, else the project's configured default under key. flag
-// names the cap in a refusal.
-func startCap(env Env, projectID int, set *float64, flag, key string) (float64, error) {
+// checkCap refuses a negative cap the caller set; flag names it in the refusal.
+func checkCap(set *float64, flag string) error {
+	if set != nil && *set < 0 {
+		return newError(
+			fmt.Errorf("%s must be >= 0, got %g (0 means unlimited)", flag, *set),
+			output.ErrValidation)
+	}
+	return nil
+}
+
+// capOrDefault resolves one of a run's caps: the caller's value when set,
+// else the project's configured default under key.
+func capOrDefault(env Env, projectID int, set *float64, key string) (float64, error) {
 	if set != nil {
-		if *set < 0 {
-			return 0, newError(
-				fmt.Errorf("%s must be >= 0, got %g (0 means unlimited)", flag, *set),
-				output.ErrValidation)
-		}
 		return *set, nil
 	}
 	entry, err := env.Store.GetConfig(projectID, key)
