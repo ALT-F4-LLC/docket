@@ -1,16 +1,12 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/schema"
-	"github.com/ALT-F4-LLC/docket/internal/store"
-	"github.com/ALT-F4-LLC/docket/internal/workflow"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -41,160 +37,66 @@ schema that does not exist in the next. The project that cannot resolve them is
 refused there and reported as invalid; the rest still register. Register the
 schemas first — 'docket schema register <ref> <file> --all-projects' — when
 sweeping a corpus into a store that has not seen it.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowRegister(cmd, args, getWriter(cmd))
 	},
 }
 
 func runWorkflowRegister(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
 	path := args[0]
+	project, _ := cmd.Flags().GetString("project")
+	all, _ := cmd.Flags().GetBool("all-projects")
 
-	src, err := readWorkflowSource(cmd, path)
+	res, err := verb.WorkflowRegister(cmd.Context(), verbEnv(cmd), verb.WorkflowRegisterInput{
+		Source:      func() ([]byte, error) { return readWorkflowSource(cmd, path) },
+		SourcePath:  path,
+		Project:     project,
+		AllProjects: all,
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
 
-	def, err := loadWorkflowSource(src, path)
-	if err != nil {
-		return workflowErr(err)
+	if res.Targets != nil {
+		return finishWorkflowFanout(w, &registryFanoutReport{
+			Operation: "workflow register",
+			Subject:   fmt.Sprintf("%s@%d", res.Name, res.Version),
+			Scope:     fanoutScope(cmd),
+		}, res.Targets, outcomeRegistered, outcomeUnchanged)
 	}
 
-	// The GRAMMAR is decided before the targets are: a definition that does not
-	// parse is wrong everywhere, and telling an operator which of thirteen
-	// projects rejected a typo would be noise. Everything past this point is
-	// environment, and environment is per project.
-	targets, fannedOut, err := resolveRegistryTargets(cmd, conn)
-	if err != nil {
-		return err
+	message := fmt.Sprintf("Registered %s", res.Workflow.Ref())
+	if !res.Created {
+		message = fmt.Sprintf("%s is already registered with these bytes", res.Workflow.Ref())
 	}
-	if fannedOut {
-		return registerWorkflowAcrossProjects(cmd, w, conn, def, src, path, targets)
-	}
-
-	// V26 and V21a-V21d/V25a: vote rules and schemas,
-	// resolved against THIS project's registry. See validateWorkflowEnvironment.
-	if err := validateWorkflowEnvironment(conn, def, getProjectID(cmd)); err != nil {
-		return workflowErr(err)
-	}
-
-	parsed, err := workflow.Canonical(def)
-	if err != nil {
-		return cmdErr(err, output.ErrGeneral)
-	}
-
-	stored, created, err := store.StoreOn(conn).InsertWorkflow(
-		workflowRow(def, src, path, parsed, getProjectID(cmd)), model.NowMS())
-	if err != nil {
-		return workflowErr(err)
-	}
-
-	message := fmt.Sprintf("Registered %s", stored.Ref())
-	if !created {
-		message = fmt.Sprintf("%s is already registered with these bytes", stored.Ref())
-	}
-	w.Success(stored, message)
+	w.Success(res.Workflow, message)
 	return nil
 }
 
-// workflowRow builds the row to insert. Shared by the single-project path and
-// the fan-out so the two can never store different columns for the same bytes.
-func workflowRow(
-	def *workflow.Definition, src []byte, path string, parsed []byte, projectID int,
-) *model.Workflow {
-	// source_path is provenance only — it records where the bytes came from
-	// and is never re-read. stdin has no path to record.
-	sourcePath := path
-	if path == "-" {
-		sourcePath = ""
-	}
-	return &model.Workflow{
-		ProjectID:    projectID,
-		Name:         def.Pipeline.Name,
-		Version:      def.Pipeline.Version,
-		Description:  def.Pipeline.Description,
-		SourcePath:   sourcePath,
-		SourceSHA256: workflow.SHA256(src),
-		Body:         string(src),
-		Parsed:       string(parsed),
-	}
-}
-
-// validateWorkflowEnvironment runs the two checks that ask a question about a
-// PROJECT rather than about the bytes.
-//
-// V26: every `vote_rule` names a REGISTERED threshold configuration. V21a-V21d
-// and V25a: threshold fields and literals cross-validated against the
-// REGISTERED schema at `workflow register` time. Both run here rather than
-// inside workflow.Validate, which stays pure and holds no database handle.
-//
-// The order — Validate, then vote rules, then schemas — is deliberate: an
-// author sees GRAMMAR errors before ENVIRONMENT errors, so a definition with a
-// typo in a step name is not first told that a schema is missing.
-//
-// Both resolve against a project's own registry, which is why the fan-out runs
-// them once per target instead of once per invocation: a `payload` reference
-// that resolves in the invoking project may name nothing in the next one, and
-// registering there anyway would store a definition guaranteed to fail at
-// activation — the exact failure this validation exists to move forward in time.
-func validateWorkflowEnvironment(
-	conn store.LegacyDB, def *workflow.Definition, projectID int,
+// finishWorkflowFanout writes a --project / --all-projects registry write's
+// per-project report. Each project's refusal keeps the code its
+// single-project write would exit with; a success reads changed when the
+// write changed that project's row, else unchanged.
+func finishWorkflowFanout(
+	w *output.Writer, report *registryFanoutReport,
+	targets []verb.WorkflowTargetOutcome, changed, unchanged string,
 ) error {
-	st := store.StoreOn(conn)
-	if err := workflow.ValidateVoteRules(def, voteRuleResolver{st, projectID}); err != nil {
-		return err
-	}
-	return workflow.ValidateSchemas(def, schemaResolver{st, projectID})
-}
-
-// registerWorkflowAcrossProjects is the --project / --all-projects path.
-//
-// The bytes are canonicalized ONCE — that is a pure function of the definition
-// and cannot differ per project — and then each target gets its own validation
-// and its own insert. A failure is recorded and the loop continues: the whole
-// point of the flag is that one command covers a store, and stopping at the
-// first conflict would leave the operator to work out by hand which projects
-// the sweep had reached.
-func registerWorkflowAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn store.LegacyDB,
-	def *workflow.Definition, src []byte, path string, targets []*model.Project,
-) error {
-	parsed, err := workflow.Canonical(def)
-	if err != nil {
-		return cmdErr(err, output.ErrGeneral)
-	}
-
-	st := store.StoreOn(conn)
-	report := &registryFanoutReport{
-		Operation: "workflow register",
-		Subject:   fmt.Sprintf("%s@%d", def.Pipeline.Name, def.Pipeline.Version),
-		Scope:     fanoutScope(cmd),
-	}
-
 	for _, target := range targets {
-		if err := validateWorkflowEnvironment(conn, def, target.ID); err != nil {
+		if target.Err != nil {
 			report.Results = append(report.Results,
-				registryFailureResult(target, err, workflowErr))
+				registryFailureResult(target.Project, target.Err, verbErr))
 			continue
 		}
-
-		stored, created, err := st.InsertWorkflow(
-			workflowRow(def, src, path, parsed, target.ID), model.NowMS())
-		if err != nil {
-			report.Results = append(report.Results,
-				registryFailureResult(target, err, workflowErr))
-			continue
-		}
-
-		outcome := outcomeUnchanged
-		if created {
-			outcome = outcomeRegistered
+		outcome := unchanged
+		if target.Changed {
+			outcome = changed
 		}
 		report.Results = append(report.Results,
-			registrySuccessResult(target, outcome, stored.Ref()))
+			registrySuccessResult(target.Project, outcome, target.Workflow.Ref()))
 	}
-
 	return finishRegistryFanout(w, report)
 }
 
@@ -227,56 +129,4 @@ func readWorkflowSource(cmd *cobra.Command, path string) ([]byte, error) {
 func init() {
 	addRegistryTargetFlags(workflowRegisterCmd, "Register")
 	workflowCmd.AddCommand(workflowRegisterCmd)
-}
-
-// schemaResolver adapts the schema registry to V21a-V21d/V25a's resolver, so
-// the validator never holds a database handle.
-//
-// It COMPILES the stored bytes rather than reading a cached parse, because the
-// rules ask about the document's declared fields and their orders, and the
-// registered bytes are the only authority on those.
-type schemaResolver struct {
-	st store.Store
-	// projectID scopes resolution (v12): a `payload` reference resolves in
-	// the invoking project's registry, plus builtins.
-	projectID int
-}
-
-func (r schemaResolver) Schema(name string, version int) (*workflow.Registered, error) {
-	row, err := r.st.GetSchema(r.projectID, name, version)
-	if errors.Is(err, store.ErrSchemaNotFound) {
-		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrNotRegistered, name, version)
-	}
-	if err != nil {
-		return nil, err
-	}
-	// A retired version is refused for NEW references (v36). The row still
-	// resolves — GetSchema at an explicit version never filters — so this is
-	// the resolver's own verdict, not the store's, and the engine's
-	// txSchemaResolver makes the same one.
-	if row.Deprecated() {
-		return nil, fmt.Errorf("%w: %s@%d", workflow.ErrRetired, name, version)
-	}
-	return schema.Compile(row.Name, row.Version, []byte(row.Body))
-}
-
-// voteRuleResolver adapts the engine-config registry to V26's resolver, so the
-// validator never holds a database handle.
-type voteRuleResolver struct {
-	st store.Store
-	// projectID scopes rule resolution (v12): a project sees its own rules
-	// plus the store-wide ones.
-	projectID int
-}
-
-func (r voteRuleResolver) VoteRuleExists(rule string) (bool, error) {
-	return r.st.VoteRuleExists(r.projectID, rule)
-}
-
-func (r voteRuleResolver) RuleSetElsewhere(rule string) (int, string, error) {
-	return r.st.VoteRuleSetElsewhere(r.projectID, rule)
-}
-
-func (r voteRuleResolver) RegisteredVoteRules() ([]string, error) {
-	return r.st.RegisteredVoteRules(r.projectID)
 }
