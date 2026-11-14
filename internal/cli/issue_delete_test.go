@@ -3,10 +3,12 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -87,5 +89,48 @@ func TestIssueDeleteThroughTheRoot(t *testing.T) {
 	_, err = runRootVerb(t, deleteCmd, "issue", "delete", child)
 	if !errors.As(err, &ce) || ce.Code != output.ErrNotFound || err.Error() != "issue "+child+" not found" {
 		t.Errorf("deleting %s twice: error = %v, want NOT_FOUND naming it", child, err)
+	}
+}
+
+// TestIssueDeleteCascadesThroughTheRoot keeps the cascade paths' reports on
+// the verb path: --force and its alias --yes each delete the parent with its
+// sub-issues and say so, and without either a caller that cannot be prompted
+// is refused with the choice it has to make.
+func TestIssueDeleteCascadesThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+
+	for _, flag := range []string{"--force", "--yes"} {
+		parent := createThroughRoot(t, "--title", "parent")
+		child := createThroughRoot(t, "--title", "child", "--parent", parent)
+
+		out, err := runRootVerb(t, deleteCmd, "issue", "delete", parent, flag)
+		testsupport.Must(t, err, "issue delete %s %s: %v", parent, flag, err)
+		if want := "Deleted " + parent + ": parent (and 1 sub-issue(s))"; !strings.Contains(out, want) {
+			t.Errorf("%s delete printed %q, want it to contain %q", flag, out, want)
+		}
+		_, err = runRootVerb(t, showCmd, "issue", "show", child, "--json")
+		var ce *CmdError
+		if !errors.As(err, &ce) || ce.Code != output.ErrNotFound {
+			t.Errorf("issue show %s after a %s delete: error = %v, want NOT_FOUND", child, flag, err)
+		}
+	}
+
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal: the delete would prompt instead of refusing")
+	}
+	parent := createThroughRoot(t, "--title", "parent")
+	createThroughRoot(t, "--title", "child", "--parent", parent)
+	_, err = runRootVerb(t, deleteCmd, "issue", "delete", parent)
+	var ce *CmdError
+	if !errors.As(err, &ce) || ce.Code != output.ErrValidation {
+		t.Fatalf("issue delete %s without a terminal: error = %v, want a %s CmdError",
+			parent, err, output.ErrValidation)
+	}
+	want := "non-interactive environment detected; issue " + parent +
+		" has 1 sub-issue(s): use --force to cascade-delete or --orphan to make them root issues"
+	if err.Error() != want {
+		t.Errorf("refusal = %q, want %q", err.Error(), want)
 	}
 }

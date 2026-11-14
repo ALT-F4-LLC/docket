@@ -840,14 +840,8 @@ func issueDetail(env Env, ref string) (IssueDetail, error) {
 	if err != nil {
 		return IssueDetail{}, issueFetchError(err, "issue "+ref)
 	}
-	if issue.Labels, err = env.Store.GetIssueLabels(id); err != nil {
-		return IssueDetail{}, newError(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-	}
-	if issue.Files, err = env.Store.GetIssueFiles(id); err != nil {
-		return IssueDetail{}, newError(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-	}
-	if err := env.Store.HydrateDocs([]*model.Issue{issue}); err != nil {
-		return IssueDetail{}, newError(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	if err := hydrateIssue(env, issue); err != nil {
+		return IssueDetail{}, err
 	}
 
 	d := IssueDetail{Issue: issue}
@@ -888,32 +882,33 @@ func issueDetail(env Env, ref string) (IssueDetail, error) {
 // Project lists the project it names instead of the caller's; Run lists the
 // issues a run's activation bound, done ones included. The two cannot be
 // combined. Sort is field[:direction]. Limit caps the rows; 0 means no limit.
-// WithParents also reads what a grouped rendering needs: the parents of
-// listed issues that the listing itself leaves out, and sub-issue progress.
+// ForTable also reads what a table rendering needs beyond the rows: the
+// parents of listed issues that the listing itself leaves out, sub-issue
+// progress, and the done issues an empty listing hid.
 type IssueListInput struct {
-	Statuses    []string
-	Priorities  []string
-	Sizes       []string
-	Labels      []string
-	Types       []string
-	Assignee    string
-	Parent      string
-	RootsOnly   bool
-	All         bool
-	Sort        string
-	Limit       int
-	Run         string
-	Project     string
-	WithParents bool
+	Statuses   []string
+	Priorities []string
+	Sizes      []string
+	Labels     []string
+	Types      []string
+	Assignee   string
+	Parent     string
+	RootsOnly  bool
+	All        bool
+	Sort       string
+	Limit      int
+	Run        string
+	Project    string
+	ForTable   bool
 }
 
 // IssueListResult is the listing. Total counts every match before Limit.
 // Project is the listed project when it is not the caller's: the one
 // IssueListInput.Project names, or the run's. RunID is the listed run, 0
-// without one. HiddenDone counts the done issues an empty listing left out,
-// and is 0 for a run's roster or when done issues were included. Parents and
-// Progress are set under WithParents; Progress maps a parent id to its done
-// and total sub-issue counts.
+// without one. HiddenDone, Parents and Progress are set under ForTable.
+// HiddenDone counts the done issues an empty listing left out, and is 0 for a
+// run's roster or when done issues were included. Progress maps a parent id
+// to its done and total sub-issue counts.
 type IssueListResult struct {
 	Issues     []*model.Issue
 	Total      int
@@ -1015,6 +1010,9 @@ func IssueList(ctx context.Context, env Env, in IssueListInput) (IssueListResult
 		return IssueListResult{}, newError(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
 	}
 
+	if !in.ForTable {
+		return res, nil
+	}
 	if len(res.Issues) == 0 && res.RunID == 0 && !all {
 		withDone := opts
 		withDone.IncludeDone, withDone.Limit = true, 1
@@ -1024,11 +1022,8 @@ func IssueList(ctx context.Context, env Env, in IssueListInput) (IssueListResult
 			res.HiddenDone = total
 		}
 	}
-
-	if in.WithParents {
-		if err := listParents(env, &res); err != nil {
-			return IssueListResult{}, err
-		}
+	if err := listParents(env, &res); err != nil {
+		return IssueListResult{}, err
 	}
 	return res, nil
 }

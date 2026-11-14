@@ -1225,8 +1225,10 @@ func TestIssueDeleteOrphansSubIssues(t *testing.T) {
 	st := openStore(t)
 	parent := createIssue(t, st)
 	child := createChild(t, st, parent, "child", model.StatusTodo)
+	env := projectEnv(st, "", false)
+	env.Author = "deleter"
 
-	if _, err := verb.IssueDelete(context.Background(), projectEnv(st, "", false),
+	if _, err := verb.IssueDelete(context.Background(), env,
 		verb.IssueDeleteInput{Issue: model.FormatID(parent), Orphan: true}); err != nil {
 		t.Fatalf("IssueDelete --orphan: %v", err)
 	}
@@ -1238,6 +1240,30 @@ func TestIssueDeleteOrphansSubIssues(t *testing.T) {
 	if orphan.ParentID != nil {
 		t.Errorf("child parent = %d, want a root issue", *orphan.ParentID)
 	}
+	requireChangedBy(t, st, child, "parent_id", "", "deleter")
+}
+
+// IssueDelete names the deleted issue under its owning project's prefix, not
+// the caller's, though the owner is gone from the store once it returns.
+func TestIssueDeleteNamesTheIssueUnderItsOwnersPrefix(t *testing.T) {
+	st := openStore(t)
+	// The first identity registered claims the default project's row.
+	ensureProject(t, st, "/repos/alpha", "alpha")
+	beta := ensureProject(t, st, "/repos/beta", "beta")
+	if err := st.SetProjectPrefix(beta, "BETA"); err != nil {
+		t.Fatalf("SetProjectPrefix: %v", err)
+	}
+	id := createExportIssue(t, st, beta, "in beta", model.StatusTodo, "")
+
+	res, err := verb.IssueDelete(context.Background(), projectEnv(st, "/repos/alpha", true),
+		verb.IssueDeleteInput{Issue: model.FormatID(id)})
+	if err != nil {
+		t.Fatalf("IssueDelete: %v", err)
+	}
+	if want := model.FormatIDWithPrefix(id, "BETA"); res.Issue != want {
+		t.Errorf("Issue = %q, want %q under the owner's prefix", res.Issue, want)
+	}
+	requireIssueGone(t, st, id)
 }
 
 func TestIssueDeleteRefusals(t *testing.T) {
@@ -1319,6 +1345,53 @@ func TestIssueShowReadsEachIssueAtFullDetailInOrder(t *testing.T) {
 	}
 }
 
+// IssueShow carries the issue's labels and files and the relations and
+// comments around it, and caps activity at the latest ten entries.
+func TestIssueShowCarriesEachCollectionAndTheLatestTenActivities(t *testing.T) {
+	st := openStore(t)
+	id, _, err := st.CreateIssueIdempotent(&model.Issue{
+		Title:    "detailed",
+		Status:   model.StatusTodo,
+		Priority: model.PriorityMedium,
+		Kind:     model.IssueKindTask,
+	}, []string{"area:verb"}, []string{"internal/verb/issue.go"}, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent: %v", err)
+	}
+	blocker := createIssue(t, st)
+	relate(t, st, id, model.RelationBlocks, blocker)
+	const comments = 11
+	for i := range comments {
+		if _, err := st.CreateCommentIdempotent(&model.Comment{
+			IssueID: id, Body: fmt.Sprintf("comment %d", i), Author: "reviewer",
+		}, ""); err != nil {
+			t.Fatalf("CreateCommentIdempotent: %v", err)
+		}
+	}
+
+	res, err := verb.IssueShow(context.Background(), projectEnv(st, "", false),
+		verb.IssueShowInput{Issues: []string{model.FormatID(id)}})
+	if err != nil {
+		t.Fatalf("IssueShow: %v", err)
+	}
+	d := res.Issues[0]
+	if len(d.Issue.Labels) != 1 || d.Issue.Labels[0] != "area:verb" {
+		t.Errorf("labels = %v, want [area:verb]", d.Issue.Labels)
+	}
+	if len(d.Issue.Files) != 1 || d.Issue.Files[0] != "internal/verb/issue.go" {
+		t.Errorf("files = %v, want [internal/verb/issue.go]", d.Issue.Files)
+	}
+	if len(d.Relations) != 1 || d.Relations[0].TargetIssueID != blocker {
+		t.Errorf("relations = %+v, want one to %d", d.Relations, blocker)
+	}
+	if len(d.Comments) != comments {
+		t.Errorf("comments = %d, want %d", len(d.Comments), comments)
+	}
+	if len(d.Activity) != 10 {
+		t.Errorf("activity = %d entries, want the latest 10 of more than 10", len(d.Activity))
+	}
+}
+
 func TestIssueShowStopsAtTheFirstMissingIssue(t *testing.T) {
 	st := openStore(t)
 	id := createIssue(t, st)
@@ -1395,9 +1468,9 @@ func TestIssueListOfAnUnregisteredProjectIsEmptyAndRegistersNothing(t *testing.T
 	requireUnregistered(t, st, "/repos/fresh")
 }
 
-// An empty default listing counts the done issues it hid, so its hint can say
-// so instead of claiming the store is empty; a listing that included them
-// counts none.
+// An empty default listing for a table counts the done issues it hid, so its
+// hint can say so instead of claiming the store is empty; a listing that
+// included them, or one not read for a table, counts none.
 func TestIssueListCountsTheDoneIssuesAnEmptyListingHid(t *testing.T) {
 	st := openStore(t)
 	for _, title := range []string{"first", "second"} {
@@ -1406,7 +1479,7 @@ func TestIssueListCountsTheDoneIssuesAnEmptyListingHid(t *testing.T) {
 	ctx := context.Background()
 	env := projectEnv(st, "", false)
 
-	open, err := verb.IssueList(ctx, env, verb.IssueListInput{})
+	open, err := verb.IssueList(ctx, env, verb.IssueListInput{ForTable: true})
 	if err != nil {
 		t.Fatalf("IssueList: %v", err)
 	}
@@ -1414,18 +1487,94 @@ func TestIssueListCountsTheDoneIssuesAnEmptyListingHid(t *testing.T) {
 		t.Errorf("listing = %v, hidden %d; want none listed and 2 hidden", issueTitles(open.Issues), open.HiddenDone)
 	}
 
-	all, err := verb.IssueList(ctx, env, verb.IssueListInput{All: true})
+	all, err := verb.IssueList(ctx, env, verb.IssueListInput{All: true, ForTable: true})
 	if err != nil {
 		t.Fatalf("IssueList --all: %v", err)
 	}
 	if len(all.Issues) != 2 || all.HiddenDone != 0 {
 		t.Errorf("--all listing = %v, hidden %d; want both listed and none hidden", issueTitles(all.Issues), all.HiddenDone)
 	}
+
+	rows, err := verb.IssueList(ctx, env, verb.IssueListInput{})
+	if err != nil {
+		t.Fatalf("IssueList without ForTable: %v", err)
+	}
+	if len(rows.Issues) != 0 || rows.HiddenDone != 0 {
+		t.Errorf("listing without ForTable = %v, hidden %d; want none listed and no count read",
+			issueTitles(rows.Issues), rows.HiddenDone)
+	}
 }
 
-// WithParents reads the parent a filter left out and the sub-issue progress
+// A --parent listing returns that parent's sub-issues and nothing else, and a
+// table listing reads the progress of a parent it lists itself.
+func TestIssueListParentFilterAndListedParentProgress(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	createChild(t, st, parent, "open child", model.StatusTodo)
+	createChild(t, st, parent, "done child", model.StatusDone)
+	other := createIssue(t, st)
+	createChild(t, st, other, "other child", model.StatusTodo)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+
+	children, err := verb.IssueList(ctx, env, verb.IssueListInput{Parent: model.FormatID(parent), All: true})
+	if err != nil {
+		t.Fatalf("IssueList --parent: %v", err)
+	}
+	if got := issueTitles(children.Issues); len(got) != 2 || children.Total != 2 {
+		t.Errorf("--parent listing = %v (total %d), want only parent's two children", got, children.Total)
+	}
+	for _, issue := range children.Issues {
+		if issue.ParentID == nil || *issue.ParentID != parent {
+			t.Errorf("--parent listed %q, which is not a child of %d", issue.Title, parent)
+		}
+	}
+
+	table, err := verb.IssueList(ctx, env, verb.IssueListInput{All: true, ForTable: true})
+	if err != nil {
+		t.Fatalf("IssueList: %v", err)
+	}
+	if table.Parents[parent] != nil {
+		t.Errorf("Parents = %v, want no fetch of a parent the listing holds", table.Parents)
+	}
+	if got := table.Progress[parent]; got != [2]int{1, 2} {
+		t.Errorf("progress of the listed parent = %v, want 1 of 2 done", got)
+	}
+}
+
+// Listing a run bound to another project lists that run's roster in its own
+// project's voice: Project names the run's project and RunID the run.
+func TestIssueListOfARunInAnotherProjectListsItsRoster(t *testing.T) {
+	st := openStore(t)
+	// The first identity registered claims the default project's row.
+	ensureProject(t, st, "/repos/alpha", "alpha")
+	beta := ensureProject(t, st, "/repos/beta", "beta")
+	bound := createExportIssue(t, st, beta, "bound in beta", model.StatusDone, "")
+	createExportIssue(t, st, beta, "unbound in beta", model.StatusTodo, "")
+	runID := insertLedgerRun(t, st, beta, time.Now().UnixMilli())
+	if err := st.AddRunIssue(runID, bound); err != nil {
+		t.Fatalf("AddRunIssue: %v", err)
+	}
+
+	res, err := verb.IssueList(context.Background(), projectEnv(st, "/repos/alpha", true),
+		verb.IssueListInput{Run: model.FormatRunID(runID)})
+	if err != nil {
+		t.Fatalf("IssueList --run: %v", err)
+	}
+	if res.RunID != runID {
+		t.Errorf("RunID = %d, want %d", res.RunID, runID)
+	}
+	if res.Project == nil || res.Project.ID != beta {
+		t.Errorf("Project = %+v, want the run's project %d", res.Project, beta)
+	}
+	if got := issueTitles(res.Issues); len(got) != 1 || got[0] != "bound in beta" {
+		t.Errorf("roster = %v, want [bound in beta], done issues included", got)
+	}
+}
+
+// ForTable reads the parent a filter left out and the sub-issue progress
 // a grouped rendering shows under it.
-func TestIssueListWithParentsReadsFilteredOutParentsAndProgress(t *testing.T) {
+func TestIssueListForTableReadsParentsAndProgress(t *testing.T) {
 	st := openStore(t)
 	parent := createIssue(t, st)
 	createChild(t, st, parent, "open child", model.StatusBacklog)
@@ -1434,7 +1583,7 @@ func TestIssueListWithParentsReadsFilteredOutParentsAndProgress(t *testing.T) {
 	env := projectEnv(st, "", false)
 	backlog := []string{string(model.StatusBacklog)}
 
-	res, err := verb.IssueList(ctx, env, verb.IssueListInput{Statuses: backlog, WithParents: true})
+	res, err := verb.IssueList(ctx, env, verb.IssueListInput{Statuses: backlog, ForTable: true})
 	if err != nil {
 		t.Fatalf("IssueList: %v", err)
 	}
@@ -1453,7 +1602,7 @@ func TestIssueListWithParentsReadsFilteredOutParentsAndProgress(t *testing.T) {
 		t.Fatalf("IssueList without parents: %v", err)
 	}
 	if flat.Parents != nil || flat.Progress != nil {
-		t.Errorf("without WithParents: parents %v, progress %v; want neither read", flat.Parents, flat.Progress)
+		t.Errorf("without ForTable: parents %v, progress %v; want neither read", flat.Parents, flat.Progress)
 	}
 }
 

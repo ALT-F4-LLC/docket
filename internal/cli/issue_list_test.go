@@ -398,3 +398,38 @@ func TestIssueListPrimaryKeyAlias(t *testing.T) {
 		}
 	}
 }
+
+// TestIssueListThroughTheRoot drives the annotated command through the real
+// root, which leaves project resolution to the verb: the checkout's issues
+// are listed under the ids, prefix included, that `issue create` reported,
+// in both the JSON rows and the table.
+func TestIssueListThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	parent := createThroughRoot(t, "--title", "listed parent")
+	child := createThroughRoot(t, "--title", "listed child", "--parent", parent)
+
+	out, err := runRootVerb(t, listCmd, "issue", "list", "--json")
+	testsupport.Must(t, err, "issue list --json: %v", err)
+	var listed listJSON
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	var ids []string
+	for _, row := range listed.Data.Items {
+		ids = append(ids, row.ID)
+	}
+	if len(ids) != 2 || !strings.Contains(strings.Join(ids, " "), parent) ||
+		!strings.Contains(strings.Join(ids, " "), child) {
+		t.Errorf("listed ids = %v, want %s and %s", ids, parent, child)
+	}
+
+	out, err = runRootVerb(t, listCmd, "issue", "list")
+	testsupport.Must(t, err, "issue list: %v", err)
+	for _, id := range []string{parent, child} {
+		if !strings.Contains(out, id) {
+			t.Errorf("table does not name %s:\n%s", id, out)
+		}
+	}
+}

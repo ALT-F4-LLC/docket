@@ -714,3 +714,28 @@ func TestIssueShowPrimaryKeyAlias(t *testing.T) {
 		}
 	}
 }
+
+// TestIssueShowThroughTheRoot drives the annotated command through the real
+// root, which leaves project resolution to the verb: the shown issue keeps
+// the id, prefix included, that `issue create` reported for the checkout.
+func TestIssueShowThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	id := createThroughRoot(t, "--title", "shown")
+
+	out, err := runRootVerb(t, showCmd, "issue", "show", id, "--json")
+	testsupport.Must(t, err, "issue show %s --json: %v", id, err)
+	var env struct {
+		Data struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if env.Data.ID != id || env.Data.Title != "shown" {
+		t.Errorf("shown = %+v, want id %q titled shown", env.Data, id)
+	}
+}

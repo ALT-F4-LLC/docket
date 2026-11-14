@@ -83,20 +83,20 @@ func runIssueList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	// working directory resolves to (DKT-72), and `--run` to ONE RUN'S ROSTER
 	// (DKT-405), done issues included.
 	listed, err := verb.IssueList(cmd.Context(), verbEnv(cmd), verb.IssueListInput{
-		Statuses:    statuses,
-		Priorities:  priorities,
-		Sizes:       sizes,
-		Labels:      labels,
-		Types:       types,
-		Assignee:    assignee,
-		Parent:      parent,
-		RootsOnly:   rootsOnly,
-		All:         all,
-		Sort:        sortFlag,
-		Limit:       limit,
-		Run:         runRef,
-		Project:     projectRef,
-		WithParents: !w.JSONMode,
+		Statuses:   statuses,
+		Priorities: priorities,
+		Sizes:      sizes,
+		Labels:     labels,
+		Types:      types,
+		Assignee:   assignee,
+		Parent:     parent,
+		RootsOnly:  rootsOnly,
+		All:        all,
+		Sort:       sortFlag,
+		Limit:      limit,
+		Run:        runRef,
+		Project:    projectRef,
+		ForTable:   !w.JSONMode,
 	})
 	if err != nil {
 		return verbErr(err)
