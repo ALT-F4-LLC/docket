@@ -18,43 +18,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
-// recordingClaimer is a stepClaimer that records each claim it receives and
-// answers with a fixed lease.
-type recordingClaimer struct {
-	calls []recordedClaim
-}
-
-type recordedClaim struct {
-	stepID   int
-	opts     engine.ClaimOptions
-	rendered bool
-	executor string
-}
-
-func (c *recordingClaimer) ClaimStepWithGates(stepID int, opts engine.ClaimOptions) (*engine.ClaimResult, error) {
-	c.calls = append(c.calls, recordedClaim{stepID: stepID, opts: opts})
-	return &engine.ClaimResult{Step: model.FormatStepID(stepID), Token: "lease-token", Attempt: 1}, nil
-}
-
-func (c *recordingClaimer) ClaimStepRendered(stepID int, opts engine.ClaimOptions, executor string) (*engine.ClaimResult, *engine.RenderResult, error) {
-	c.calls = append(c.calls, recordedClaim{stepID: stepID, opts: opts, rendered: true, executor: executor})
-	return &engine.ClaimResult{Step: model.FormatStepID(stepID), Token: "lease-token", Attempt: 1},
-		&engine.RenderResult{Packet: "packet"}, nil
-}
-
-func claimClient(t *testing.T, claimer stepClaimer) docketv1connect.DocketServiceClient {
-	t.Helper()
-	server := serve(t, ClaimHandler{claimer: claimer})
-	return client.NewClient(server.Client(), server.URL, discardLogger)
-}
-
-// validClaim is a request every boundary check accepts.
-func validClaim() *docketv1.StepClaimRequest {
-	return &docketv1.StepClaimRequest{Step: "STEP-1", Owner: "w", RecoverySecret: "s"}
+// validClaim is a request on stepID every boundary check accepts.
+func validClaim(stepID int) *docketv1.StepClaimRequest {
+	return &docketv1.StepClaimRequest{Step: model.FormatStepID(stepID), Owner: "w", RecoverySecret: "s"}
 }
 
 func assertValidationRefusal(t *testing.T, err error) {
@@ -70,68 +41,77 @@ func assertValidationRefusal(t *testing.T, err error) {
 	}
 }
 
+// assertNotClaimed fails when the step recorded a claim.
+func assertNotClaimed(t *testing.T, conn *sql.DB, stepID int) {
+	t.Helper()
+	if n := countEvents(t, conn, engine.EventStepClaimed, stepID); n != 0 {
+		t.Errorf("%d step-claimed events after a refused claim, want none", n)
+	}
+}
+
 func TestClaimRequiresRecoverySecret(t *testing.T) {
 	for _, secret := range []string{"", " \t\n"} {
 		for _, render := range []bool{false, true} {
-			claimer := &recordingClaimer{}
-			client := claimClient(t, claimer)
-			req := validClaim()
+			conn, stepID, _ := activatedClaimDB(t)
+			client := engineClaimClient(t, conn)
+			req := validClaim(stepID)
 			req.RecoverySecret = secret
 			req.Render = render
 
 			_, err := client.StepClaim(context.Background(), connect.NewRequest(req))
 
 			assertValidationRefusal(t, err)
-			if len(claimer.calls) != 0 {
-				t.Errorf("secret %q, render=%v: the engine claim ran %d time(s), want none",
-					secret, render, len(claimer.calls))
-			}
+			assertNotClaimed(t, conn, stepID)
 		}
 	}
 }
 
 func TestClaimForwardsTheRecoverySecretUnchanged(t *testing.T) {
 	for _, render := range []bool{false, true} {
-		claimer := &recordingClaimer{}
-		client := claimClient(t, claimer)
-		req := validClaim()
+		conn, stepID, _ := activatedClaimDB(t)
+		client := engineClaimClient(t, conn)
+		req := validClaim(stepID)
 		req.RecoverySecret = " s "
 		req.Render = render
 		req.Executor = "hint"
 
 		res, err := client.StepClaim(context.Background(), connect.NewRequest(req))
+		testsupport.Must(t, err, "render=%v: a valid claim was refused: %v", render, err)
+		if render && !strings.Contains(res.Msg.GetPacket(), "target: hint") {
+			t.Errorf("rendered claim: the packet does not carry the executor hint:\n%s", res.Msg.GetPacket())
+		}
+		if !render && res.Msg.GetContext().GetStep().GetStep() != model.FormatStepID(stepID) {
+			t.Errorf("claim: context bundle = %v, want %s's", res.Msg.GetContext(), model.FormatStepID(stepID))
+		}
 
-		testsupport.Must(t, err, "a valid claim was refused: %v", err)
-		if len(claimer.calls) != 1 {
-			t.Fatalf("render=%v: %d engine claims, want 1", render, len(claimer.calls))
+		// Only the secret the claim stored, untrimmed, re-mints the lease.
+		trimmed := validClaim(stepID)
+		_, err = client.StepClaim(context.Background(), connect.NewRequest(trimmed))
+		if got := output.ErrorCodeFromConnectError(err); got != output.ErrConflict {
+			t.Errorf("render=%v: a re-claim with the trimmed secret: code %s (err %v), want %s",
+				render, got, err, output.ErrConflict)
 		}
-		call := claimer.calls[0]
-		if call.opts.RecoverySecret != " s " || call.opts.Owner != "w" || call.stepID != 1 {
-			t.Errorf("render=%v: forwarded step=%d owner=%q secret=%q, want 1, %q, %q",
-				render, call.stepID, call.opts.Owner, call.opts.RecoverySecret, "w", " s ")
-		}
-		if call.rendered != render {
-			t.Errorf("render=%v: the engine claim rendered=%v", render, call.rendered)
-		}
-		if render && (call.executor != "hint" || res.Msg.GetPacket() != "packet") {
-			t.Errorf("rendered claim: executor=%q packet=%q", call.executor, res.Msg.GetPacket())
+		again := validClaim(stepID)
+		again.RecoverySecret = " s "
+		reminted, err := client.StepClaim(context.Background(), connect.NewRequest(again))
+		testsupport.Must(t, err, "render=%v: a re-claim with the stored secret was refused: %v", render, err)
+		if !reminted.Msg.GetReMinted() {
+			t.Errorf("render=%v: the re-claim with the stored secret did not re-mint", render)
 		}
 	}
 }
 
 func TestClaimRefusesAClientTemplatePath(t *testing.T) {
-	claimer := &recordingClaimer{}
-	client := claimClient(t, claimer)
-	req := validClaim()
+	conn, stepID, _ := activatedClaimDB(t)
+	client := engineClaimClient(t, conn)
+	req := validClaim(stepID)
 	req.Render = true
 	req.Template = "/etc/passwd"
 
 	_, err := client.StepClaim(context.Background(), connect.NewRequest(req))
 
 	assertValidationRefusal(t, err)
-	if len(claimer.calls) != 0 {
-		t.Errorf("the engine claim ran %d time(s) for a client template path, want none", len(claimer.calls))
-	}
+	assertNotClaimed(t, conn, stepID)
 }
 
 func TestClaimRefusesInvalidBoundaryFields(t *testing.T) {
@@ -150,41 +130,56 @@ func TestClaimRefusesInvalidBoundaryFields(t *testing.T) {
 		{"malformed step", func(r *docketv1.StepClaimRequest) { r.Step = "not-a-step" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			claimer := &recordingClaimer{}
-			client := claimClient(t, claimer)
-			req := validClaim()
+			conn, stepID, _ := activatedClaimDB(t)
+			client := engineClaimClient(t, conn)
+			req := validClaim(stepID)
 			tc.edit(req)
 
 			_, err := client.StepClaim(context.Background(), connect.NewRequest(req))
 
 			assertValidationRefusal(t, err)
-			if len(claimer.calls) != 0 {
-				t.Errorf("the engine claim ran %d time(s), want none", len(claimer.calls))
-			}
+			assertNotClaimed(t, conn, stepID)
 		})
 	}
 }
 
+// claimEventData is the data the step's one step-claimed event carries.
+func claimEventData(t *testing.T, conn *sql.DB, stepID int) string {
+	t.Helper()
+	var data string
+	err := conn.QueryRow(`SELECT COALESCE(data, '') FROM events WHERE kind = ? AND step_id = ?`,
+		engine.EventStepClaimed, stepID).Scan(&data)
+	testsupport.Must(t, err, "reading the claim event: %v", err)
+	return data
+}
+
 func TestClaimForwardsOptionalFieldsOnlyWhenPresent(t *testing.T) {
-	claimer := &recordingClaimer{}
-	client := claimClient(t, claimer)
+	const ttl = int64(60000)
+	inWindow := func(expires, from, to int64) bool { return expires >= from+ttl && expires <= to+ttl }
 
-	_, err := client.StepClaim(context.Background(), connect.NewRequest(validClaim()))
+	conn, stepID, _ := activatedClaimDB(t)
+	from := model.NowMS()
+	plain, err := engineClaimClient(t, conn).StepClaim(context.Background(), connect.NewRequest(validClaim(stepID)))
 	testsupport.Must(t, err, "a claim without optional fields was refused: %v", err)
-	req := validClaim()
-	req.TtlMs = proto.Int64(60000)
-	req.CostMultiplier = proto.Float64(2.5)
-	_, err = client.StepClaim(context.Background(), connect.NewRequest(req))
-	testsupport.Must(t, err, "a claim with ttl and multiplier was refused: %v", err)
+	if inWindow(plain.Msg.GetLeaseExpiresMs(), from, model.NowMS()) {
+		t.Errorf("a claim without ttl_ms leased for %d ms, want the step's configured TTL", ttl)
+	}
+	if data := claimEventData(t, conn, stepID); strings.Contains(data, "expected_cost") {
+		t.Errorf("a claim without cost_multiplier recorded a scaled cost: %s", data)
+	}
 
-	if len(claimer.calls) != 2 {
-		t.Fatalf("%d engine claims, want 2", len(claimer.calls))
+	conn, stepID, _ = activatedClaimDB(t)
+	req := validClaim(stepID)
+	req.TtlMs = proto.Int64(ttl)
+	req.CostMultiplier = proto.Float64(2.5)
+	from = model.NowMS()
+	scaled, err := engineClaimClient(t, conn).StepClaim(context.Background(), connect.NewRequest(req))
+	testsupport.Must(t, err, "a claim with ttl and multiplier was refused: %v", err)
+	if !inWindow(scaled.Msg.GetLeaseExpiresMs(), from, model.NowMS()) {
+		t.Errorf("lease_expires_ms = %d, want %d ms after the claim", scaled.Msg.GetLeaseExpiresMs(), ttl)
 	}
-	if got := claimer.calls[0].opts; got.TTLOverride != 0 || got.CostMultiplier != 0 {
-		t.Errorf("absent fields forwarded ttl=%d multiplier=%g, want both unset", got.TTLOverride, got.CostMultiplier)
-	}
-	if got := claimer.calls[1].opts; got.TTLOverride != 60000 || got.CostMultiplier != 2.5 {
-		t.Errorf("forwarded ttl=%d multiplier=%g, want 60000 and 2.5", got.TTLOverride, got.CostMultiplier)
+	if data := claimEventData(t, conn, stepID); !strings.Contains(data, "expected_cost") {
+		t.Errorf("a claim with cost_multiplier recorded no scaled cost: %q", data)
 	}
 }
 
@@ -252,9 +247,10 @@ func activatedClaimDB(t *testing.T) (conn *sql.DB, first, second int) {
 	return conn, first, second
 }
 
+// engineClaimClient is a client of a Service over conn.
 func engineClaimClient(t *testing.T, conn *sql.DB) docketv1connect.DocketServiceClient {
 	t.Helper()
-	server := serve(t, NewClaimHandler(engine.NewEngine(), conn))
+	server := serve(t, NewService(store.StoreOn(conn), "test"))
 	return client.NewClient(server.Client(), server.URL, discardLogger)
 }
 
