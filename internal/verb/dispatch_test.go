@@ -145,7 +145,7 @@ func TestDispatchVerbsRefuseBadInputBeforeTheStore(t *testing.T) {
 // nothing.
 func TestDispatchVerbsDeclareTheirProjectPolicy(t *testing.T) {
 	st := openStore(t)
-	run, _ := dispatchRun(t, st)
+	run, stepID := dispatchRun(t, st)
 	ctx := context.Background()
 
 	_, err := verb.DispatchVerify(ctx, projectEnv(st, "/repo/reader", true),
@@ -208,12 +208,33 @@ func TestDispatchVerbsDeclareTheirProjectPolicy(t *testing.T) {
 	if waived.Registered == nil || waived.Registered.Verb != "dispatch waive-target" {
 		t.Errorf("registered = %+v, want the waive-target's registration", waived.Registered)
 	}
-	unanchoredBackfill := projectEnv(st, "/scratch/backfill", false)
-	if _, err := verb.DispatchBackfillUsage(ctx, unanchoredBackfill,
-		verb.DispatchBackfillUsageInput{Run: run}); err == nil {
-		t.Fatal("an empty back-fill batch was accepted")
+	// An unanchored identity reaches the engine and stays unregistered: a
+	// run-addressed verb takes the run's project where a may-register one
+	// would refuse.
+	bindConductor(t, st, run, "")
+	if _, err := verb.DispatchBackfillUsage(ctx, projectEnv(st, "/scratch/backfill", false),
+		verb.DispatchBackfillUsageInput{
+			Run: run, Rows: []engine.BackfillRow{{Step: stepID, Unit: "tokens", Quantity: 1}},
+		}); err != nil {
+		t.Fatalf("unanchored DispatchBackfillUsage: %v", err)
 	}
 	requireUnregistered(t, st, "/scratch/backfill")
+
+	unanchoredRuler := projectEnv(st, "/scratch/waiver", false)
+	unanchoredRuler.Author = "tester"
+	if _, err := verb.DispatchWaiveTarget(ctx, unanchoredRuler, verb.DispatchWaiveTargetInput{
+		Run: run, Steps: []string{"review@0#0"}, Target: "cafe1234cafe",
+	}); err != nil {
+		t.Fatalf("unanchored DispatchWaiveTarget: %v", err)
+	}
+	requireUnregistered(t, st, "/scratch/waiver")
+
+	openDispatch(t, projectEnv(st, "", false), run)
+	if _, err := verb.DispatchAbandon(ctx, projectEnv(st, "/scratch/abandoner", false),
+		verb.DispatchAbandonInput{Run: run}); err != nil {
+		t.Fatalf("unanchored DispatchAbandon: %v", err)
+	}
+	requireUnregistered(t, st, "/scratch/abandoner")
 }
 
 // The conductor token is read only when an override needs it, so a plain
@@ -387,16 +408,28 @@ func TestDispatchBackfillAbandonAndWaiveThroughTheVerbs(t *testing.T) {
 	token := func() string { return conductor }
 	ctx := context.Background()
 
+	rows := []engine.BackfillRow{{Step: stepID, Unit: "tokens", Quantity: 42}}
 	backfilled, err := verb.DispatchBackfillUsage(ctx, env, verb.DispatchBackfillUsageInput{
-		Run:  run,
-		Rows: []engine.BackfillRow{{Step: stepID, Unit: "tokens", Quantity: 42}},
+		Run: run, Rows: rows, Source: "relay-journal",
 	})
 	if err != nil {
 		t.Fatalf("DispatchBackfillUsage: %v", err)
 	}
-	if b := backfilled.Backfill; b == nil || b.Written != 1 || b.Source != engine.UsageSourceBackfilled ||
+	if b := backfilled.Backfill; b == nil || b.Written != 1 || b.Source != "relay-journal" ||
 		len(b.Unclaimed) != 1 {
-		t.Errorf("backfill = %+v, want one backfilled row on the never-claimed step", b)
+		t.Errorf("backfill = %+v, want one relay-journal row on the never-claimed step", b)
+	}
+
+	// The same row again is a duplicate, which skip reports instead of
+	// refusing the batch.
+	again, err := verb.DispatchBackfillUsage(ctx, env, verb.DispatchBackfillUsageInput{
+		Run: run, Rows: rows, OnDuplicate: engine.OnDuplicateSkip,
+	})
+	if err != nil {
+		t.Fatalf("DispatchBackfillUsage with skip: %v", err)
+	}
+	if a := again.Backfill; a == nil || a.Written != 0 || len(a.Skipped) != 1 {
+		t.Errorf("backfill = %+v, want the duplicate row skipped", a)
 	}
 
 	waived, err := verb.DispatchWaiveTarget(ctx, env, verb.DispatchWaiveTargetInput{
@@ -409,6 +442,11 @@ func TestDispatchBackfillAbandonAndWaiveThroughTheVerbs(t *testing.T) {
 	if len(waived.Waivers) != 1 || waived.Waivers[0].Instance != "review@0#0" || waived.Waivers[0].ID == 0 {
 		t.Errorf("waivers = %+v, want one recorded waiver on review@0#0", waived.Waivers)
 	}
+	runID, _ := verb.ParseRunRef(run)
+	if recorded, err := st.StaleTargetWaiversForRun(runID); err != nil || len(recorded) != 1 ||
+		recorded[0].Note != "adjudicated" {
+		t.Errorf("stored waivers = %+v (err %v), want one with note adjudicated", recorded, err)
+	}
 
 	opened := openDispatch(t, env, run)
 	abandoned, err := verb.DispatchAbandon(ctx, env, verb.DispatchAbandonInput{
@@ -419,6 +457,25 @@ func TestDispatchBackfillAbandonAndWaiveThroughTheVerbs(t *testing.T) {
 	}
 	if a := abandoned.Abandon; a == nil || a.Dispatch != opened.Manifest.Dispatch || a.Status != "abandoned" {
 		t.Errorf("abandon = %+v, want %s abandoned", a, opened.Manifest.Dispatch)
+	}
+
+	snap, err := st.BeginReadSnapshot()
+	if err != nil {
+		t.Fatalf("BeginReadSnapshot: %v", err)
+	}
+	defer snap.Rollback()
+	data, found, err := snap.LatestEventDataTx(runID, engine.EventDispatchAbandoned)
+	if err != nil || !found {
+		t.Fatalf("dispatch-abandoned event: found %v, err %v", found, err)
+	}
+	var event struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		t.Fatalf("dispatch-abandoned data %q: %v", data, err)
+	}
+	if event.Detail != "relay crashed" {
+		t.Errorf("abandon detail = %q, want the reason relay crashed", event.Detail)
 	}
 }
 
