@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -555,6 +557,17 @@ func TestVerifyPinsMissingExitsNotFound(t *testing.T) {
 	}
 	if cerr.Code != output.ErrNotFound {
 		t.Errorf("code = %q, want %q", cerr.Code, output.ErrNotFound)
+	}
+}
+
+// TestRunReadCommandsOwnTheirProject pins `run status`, `run report` and
+// `run verify-pins` to the verb layer: the root hook leaves project
+// resolution to internal/verb for each.
+func TestRunReadCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{runStatusCmd, runReportCmd, runVerifyPinsCmd} {
+		if !verbOwnsProject(cmd) {
+			t.Errorf("`run %s` lacks the verbOwnsProject annotation", cmd.Name())
+		}
 	}
 }
 

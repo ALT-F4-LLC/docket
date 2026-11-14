@@ -519,6 +519,9 @@ func RunBudget(ctx context.Context, env Env, in RunBudgetInput) (RunBudgetResult
 // when it is empty.
 type RunStatusInput struct {
 	Run string
+	// OneRun reads Run as one run's ref even when it is empty, so an empty
+	// ref is refused rather than answered as a list.
+	OneRun bool
 	// All widens a list to done and abandoned runs; it does not apply to one
 	// run.
 	All bool
@@ -558,7 +561,7 @@ func RunStatus(ctx context.Context, env Env, in RunStatusInput) (RunStatusResult
 	if err != nil {
 		return RunStatusResult{}, err
 	}
-	if in.Run == "" {
+	if in.Run == "" && !in.OneRun {
 		runs, total, err := env.Store.ListRuns(store.RunListOptions{
 			ProjectID: projectID, ActiveOnly: !in.All, Limit: in.Limit,
 		})

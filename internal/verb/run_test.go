@@ -22,8 +22,14 @@ import (
 // pinned to an empty store, as in activatedStepOf.
 func plannedRun(t *testing.T, st store.Store) string {
 	t.Helper()
+	return plannedRunOf(t, st, stepWorkflow)
+}
+
+// plannedRunOf is plannedRun over the workflow body wf.
+func plannedRunOf(t *testing.T, st store.Store, wf string) string {
+	t.Helper()
 	t.Setenv("DOCKET_PATH", filepath.Join(t.TempDir(), ".docket"))
-	def, err := workflow.Load([]byte(stepWorkflow))
+	def, err := workflow.Load([]byte(wf))
 	if err != nil {
 		t.Fatalf("workflow.Load: %v", err)
 	}
@@ -34,8 +40,8 @@ func plannedRun(t *testing.T, st store.Store) string {
 	if _, _, err := st.InsertWorkflow(&model.Workflow{
 		ProjectID: store.DefaultProjectID,
 		Name:      def.Pipeline.Name, Version: def.Pipeline.Version,
-		SourceSHA256: workflow.SHA256([]byte(stepWorkflow)),
-		Body:         stepWorkflow, Parsed: string(parsed),
+		SourceSHA256: workflow.SHA256([]byte(wf)),
+		Body:         wf, Parsed: string(parsed),
 	}, model.NowMS()); err != nil {
 		t.Fatalf("InsertWorkflow: %v", err)
 	}
@@ -818,6 +824,13 @@ func pinDriftedFile(t *testing.T, st store.Store, runID int, ref string) {
 	if err := os.WriteFile(path, []byte("AFTER\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	insertFilePin(t, st, runID, ref)
+}
+
+// insertFilePin pins ref on runID at bytes no file under the config root
+// holds.
+func insertFilePin(t *testing.T, st store.Store, runID int, ref string) {
+	t.Helper()
 	tx, err := st.Begin()
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
@@ -910,6 +923,23 @@ func TestRunStatusRefusesAllWithARun(t *testing.T) {
 	requireVerbCode(t, err, output.ErrValidation, "--all widens a list")
 }
 
+// A caller that names one run by an empty ref is refused, never answered with
+// the list an empty Run alone asks for.
+func TestRunStatusRefusesAnEmptyNamedRun(t *testing.T) {
+	st := openStore(t)
+	runAt(t, st, model.RunActive)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	res, err := verb.RunStatus(ctx, env, verb.RunStatusInput{OneRun: true})
+	requireVerbCode(t, err, output.ErrValidation, "empty run ID")
+	if res.Runs != nil || res.Detail != nil {
+		t.Errorf("result = %+v, want nothing beside the refusal", res)
+	}
+	_, err = verb.RunStatus(ctx, env, verb.RunStatusInput{OneRun: true, All: true})
+	requireVerbCode(t, err, output.ErrValidation, "--all widens a list")
+}
+
 // One run's status carries its issue count, its step rollup and its pins,
 // and the drift among those pins while the run is live.
 func TestRunStatusShowsOneRunsRollupAndDrift(t *testing.T) {
@@ -935,6 +965,22 @@ func TestRunStatusShowsOneRunsRollupAndDrift(t *testing.T) {
 	}
 	if len(d.PinDrift) != 1 || d.PinDrift[0].Ref != ref {
 		t.Errorf("PinDrift = %+v, want the one drifted pin %s", d.PinDrift, ref)
+	}
+}
+
+// A parked run still reads its drift, so a resuming conductor sees it first.
+func TestRunStatusStatesDriftOnAParkedRun(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := runAt(t, st, model.RunWaitingHuman)
+	const ref = "contracts/drifted.md"
+	pinDriftedFile(t, st, runID, ref)
+
+	res, err := verb.RunStatus(context.Background(), projectEnv(st, "", false), verb.RunStatusInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+	if res.Detail == nil || len(res.Detail.PinDrift) != 1 || res.Detail.PinDrift[0].Ref != ref {
+		t.Errorf("result = %+v, want the parked run's one drifted pin %s", res.Detail, ref)
 	}
 }
 
@@ -987,5 +1033,79 @@ func TestRunVerifyPinsRefusesAnUnsoundPinSetWithItsReport(t *testing.T) {
 	requireVerbCode(t, err, output.ErrConflict, "docket run repin "+run)
 	if drifted.Report == nil || drifted.Report.Changed != 1 {
 		t.Errorf("report = %+v, want the one changed pin beside the refusal", drifted.Report)
+	}
+}
+
+// A pin whose file is gone has no bytes a repin could adopt, so the refusal
+// is NOT_FOUND and names restore or abandon instead.
+func TestRunVerifyPinsRefusesAMissingPinAsNotFound(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := activeRun(t, st)
+	insertFilePin(t, st, runID, "contracts/gone.md")
+
+	res, err := verb.RunVerifyPins(context.Background(), projectEnv(st, "", false),
+		verb.RunVerifyPinsInput{Run: run})
+	requireVerbCode(t, err, output.ErrNotFound, "restore the file(s) or abandon the run")
+	if strings.Contains(err.Error(), "docket run repin") {
+		t.Errorf("error = %q names repin, which has no bytes to adopt", err)
+	}
+	if res.Report == nil || res.Report.Missing != 1 {
+		t.Errorf("report = %+v, want the one missing pin beside the refusal", res.Report)
+	}
+}
+
+// packetWorkflow's one step reads contracts/judge.md, so activation pins
+// that contract and the closure its packet_includes can see.
+const packetWorkflow = `
+[pipeline]
+name = "unit-packet"
+version = 1
+[match]
+kind = ["task"]
+[[step]]
+name = "first"
+after = []
+executor = "someone"
+emits = "result"
+packet = ["contracts/judge.md"]
+`
+
+// A pin set that froze without a ref its pinned contract includes is refused
+// with the code the blocked claim returns, VALIDATION_ERROR, and a remedy
+// that starts a new run: nothing drifted, so repin has nothing to adopt.
+func TestRunVerifyPinsRefusesAnOpenClosureAsValidation(t *testing.T) {
+	st := openStore(t)
+	run := plannedRunOf(t, st, packetWorkflow)
+	configDir := filepath.Join(os.Getenv("DOCKET_PATH"), "config")
+	write := func(rel, body string) {
+		path := filepath.Join(configDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("contracts/judge.md", "---\npacket_includes:\n  - fragments/ladder.md\n---\nthe judge contract\n")
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+	if _, err := verb.RunActivate(ctx, env, verb.RunActivateInput{Run: run}); err != nil {
+		t.Fatalf("RunActivate: %v", err)
+	}
+	// The fragment lands after the pin set froze.
+	write("fragments/ladder.md", "the laziness ladder\n")
+
+	res, err := verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: run})
+	requireVerbCode(t, err, output.ErrValidation, "start a new run to pin them")
+	for _, want := range []string{"contracts/judge.md", "fragments/ladder.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %s", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "docket run repin") {
+		t.Errorf("error = %q names repin, which has no drift to adopt", err)
+	}
+	if res.Report == nil || res.Report.Unpinned != 1 || res.Report.Changed != 0 || res.Report.Missing != 0 {
+		t.Errorf("report = %+v, want only the one unpinned reference", res.Report)
 	}
 }

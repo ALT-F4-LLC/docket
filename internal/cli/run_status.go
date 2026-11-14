@@ -126,7 +126,7 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 	in := verb.RunStatusInput{All: all, Limit: limit}
 	if len(args) == 1 {
-		in.Run = args[0]
+		in.Run, in.OneRun = args[0], true
 	} else if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
