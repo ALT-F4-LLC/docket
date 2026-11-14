@@ -429,6 +429,12 @@ func TestRunVerbsRefuseAMalformedRunRef(t *testing.T) {
 	requireCode(t, err, output.ErrValidation)
 	_, err = verb.RunNoteList(ctx, env, verb.RunNoteListInput{Run: "RUN-x"})
 	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunRefreshBody(ctx, env, verb.RunRefreshBodyInput{Run: "RUN-x", Issue: "DKT-1", Reason: "r"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunRefreshFiles(ctx, env, verb.RunRefreshFilesInput{Run: "RUN-x", Issue: "DKT-1", Reason: "r"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunRefreshScope(ctx, env, verb.RunRefreshScopeInput{Run: "RUN-x", Issue: "DKT-1", Reason: "r"})
+	requireCode(t, err, output.ErrValidation)
 }
 
 func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
@@ -1531,6 +1537,18 @@ func TestRunIssueAndRepinVerbsMayRegisterTheCallersProject(t *testing.T) {
 			res, err := verb.RunRepin(ctx, env, verb.RunRepinInput{Run: "RUN-x", Reason: "drift"})
 			return res.Registered, err
 		},
+		"refresh-body": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunRefreshBody(ctx, env, verb.RunRefreshBodyInput{Run: "RUN-x", Issue: "DKT-1", Reason: "r"})
+			return res.Registered, err
+		},
+		"refresh-files": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunRefreshFiles(ctx, env, verb.RunRefreshFilesInput{Run: "RUN-x", Issue: "DKT-1", Reason: "r"})
+			return res.Registered, err
+		},
+		"refresh-scope": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunRefreshScope(ctx, env, verb.RunRefreshScopeInput{Run: "RUN-x", Issue: "DKT-1", Reason: "r"})
+			return res.Registered, err
+		},
 	}
 	for name, call := range calls {
 		st := openStore(t)
@@ -1695,4 +1713,144 @@ func runRepinnedEvents(t *testing.T, st store.Store, runID int) int {
 		t.Fatalf("ListEventsStore: %v", err)
 	}
 	return len(page.Events)
+}
+
+// snapshotRefresh is one of the three run refresh verbs, reduced to what the
+// shared contract checks: the issue its outcome names and the steps it reached.
+type snapshotRefresh struct {
+	name string
+	// amend changes what issue declares, so the refresh has something to copy.
+	amend   func(t *testing.T, st store.Store, issue int)
+	refresh func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error)
+}
+
+var snapshotRefreshes = []snapshotRefresh{
+	{
+		name: "refresh-body",
+		amend: func(t *testing.T, st store.Store, issue int) {
+			t.Helper()
+			if err := st.UpdateIssueCAS(issue, map[string]interface{}{"description": "AC1: amended"}, "operator", nil); err != nil {
+				t.Fatalf("UpdateIssueCAS: %v", err)
+			}
+		},
+		refresh: func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error) {
+			res, err := verb.RunRefreshBody(context.Background(), env, verb.RunRefreshBodyInput{
+				Run: run, Issue: issue, Reason: reason, ConductorToken: token,
+			})
+			if res.Outcome == nil {
+				return "", nil, err
+			}
+			return res.Outcome.Issue, res.Outcome.Steps, err
+		},
+	},
+	{
+		name: "refresh-files",
+		amend: func(t *testing.T, st store.Store, issue int) {
+			t.Helper()
+			if err := st.AttachFiles(issue, []string{"docs/attached.md"}, "operator"); err != nil {
+				t.Fatalf("AttachFiles: %v", err)
+			}
+		},
+		refresh: func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error) {
+			res, err := verb.RunRefreshFiles(context.Background(), env, verb.RunRefreshFilesInput{
+				Run: run, Issue: issue, Reason: reason, ConductorToken: token,
+			})
+			if res.Outcome == nil {
+				return "", nil, err
+			}
+			return res.Outcome.Issue, res.Outcome.Steps, err
+		},
+	},
+	{
+		name: "refresh-scope",
+		amend: func(t *testing.T, st store.Store, issue int) {
+			t.Helper()
+			if err := st.SetIssueScopeGlobs(issue, `["a/**"]`); err != nil {
+				t.Fatalf("SetIssueScopeGlobs: %v", err)
+			}
+		},
+		refresh: func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error) {
+			res, err := verb.RunRefreshScope(context.Background(), env, verb.RunRefreshScopeInput{
+				Run: run, Issue: issue, Reason: reason, ConductorToken: token,
+			})
+			if res.Outcome == nil {
+				return "", nil, err
+			}
+			return res.Outcome.Issue, res.Outcome.Steps, err
+		},
+	},
+}
+
+// Each refresh names one issue and a reason, refuses a wrong or missing
+// conductor capability on a bound run and an unattributed caller, and with
+// all of them moves that issue's snapshot for its remaining steps.
+func TestRunRefreshVerbsMoveOneIssuesSnapshotUnderTheCapability(t *testing.T) {
+	for _, r := range snapshotRefreshes {
+		t.Run(r.name, func(t *testing.T) {
+			st := openStore(t)
+			run, runID, token := activeRun(t, st)
+			issueID := runIssueIDs(t, st, runID)[0]
+			issue := model.FormatID(issueID)
+			r.amend(t, st, issueID)
+			env := projectEnv(st, "", false)
+			env.Author = "operator"
+
+			_, _, err := r.refresh(env, run, "", "amended", tokenOf(token))
+			requireVerbCode(t, err, output.ErrValidation, "--issue is required")
+			_, _, err = r.refresh(env, run, "DKT-x", "amended", tokenOf(token))
+			requireVerbCode(t, err, output.ErrValidation, "invalid issue ID")
+			_, _, err = r.refresh(env, run, issue, "", tokenOf(token))
+			requireVerbCode(t, err, output.ErrValidation, "--reason is required")
+
+			for _, tc := range []struct {
+				name      string
+				presented func() string
+				code      output.ErrorCode
+			}{
+				{"wrong", tokenOf("wrong"), output.ErrAuth},
+				{"empty", tokenOf(""), output.ErrValidation},
+				{"absent", nil, output.ErrValidation},
+			} {
+				_, _, err := r.refresh(env, run, issue, "amended", tc.presented)
+				if err == nil {
+					t.Fatalf("%s token: the refresh was accepted", tc.name)
+				}
+				requireCode(t, err, tc.code)
+			}
+
+			_, _, err = r.refresh(projectEnv(st, "", false), run, issue, "amended", tokenOf(token))
+			requireVerbCode(t, err, output.ErrGeneral, "refusing to record an unattributed run "+r.name)
+
+			got, steps, err := r.refresh(env, run, issue, "amended", tokenOf(token))
+			if err != nil {
+				t.Fatalf("%s: %v", r.name, err)
+			}
+			if got != issue || len(steps) == 0 {
+				t.Errorf("outcome names %s reaching %v, want %s reaching its remaining steps", got, steps, issue)
+			}
+		})
+	}
+}
+
+// Every refresh input check runs through Validate, so a transport whose
+// attribution fails can still report the request's own fault first.
+func TestRunRefreshInputsValidateTheirReferences(t *testing.T) {
+	for name, validate := range map[string]func(run, issue, reason string) error{
+		"refresh-body": func(run, issue, reason string) error {
+			return verb.RunRefreshBodyInput{Run: run, Issue: issue, Reason: reason}.Validate()
+		},
+		"refresh-files": func(run, issue, reason string) error {
+			return verb.RunRefreshFilesInput{Run: run, Issue: issue, Reason: reason}.Validate()
+		},
+		"refresh-scope": func(run, issue, reason string) error {
+			return verb.RunRefreshScopeInput{Run: run, Issue: issue, Reason: reason}.Validate()
+		},
+	} {
+		requireVerbCode(t, validate("RUN-x", "DKT-1", "r"), output.ErrValidation, `invalid run ID "RUN-x"`)
+		requireVerbCode(t, validate("RUN-1", "", "r"), output.ErrValidation, "--issue is required")
+		requireVerbCode(t, validate("RUN-1", "DKT-1", ""), output.ErrValidation, "--reason is required")
+		if err := validate("RUN-1", "DKT-1", "r"); err != nil {
+			t.Errorf("%s: Validate of a well-formed request = %v, want nil", name, err)
+		}
+	}
 }

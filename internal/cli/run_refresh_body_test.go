@@ -22,6 +22,14 @@ import (
 
 const frozenBody = "AC1: the original wording"
 
+// TestRunRefreshBodyOwnsItsProject: run refresh-body resolves its project
+// through internal/verb, so the root hook must skip its eager resolution.
+func TestRunRefreshBodyOwnsItsProject(t *testing.T) {
+	if !verbOwnsProject(runRefreshBodyCmd) {
+		t.Errorf("%s lacks the verbOwnsProject annotation", runRefreshBodyCmd.CommandPath())
+	}
+}
+
 // bodyFrozenIssueInLiveRun is scopedIssueInLiveRun with a description frozen
 // into the run's body snapshot, as activation would have written it.
 func bodyFrozenIssueInLiveRun(t *testing.T, conn *sql.DB) (int, int) {

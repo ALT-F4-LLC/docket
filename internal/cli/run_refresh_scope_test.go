@@ -19,6 +19,14 @@ import (
 // is the wiring an operator and a conductor actually meet, on the fixture
 // RUN-52 was: an issue with a pending `fix@2` step in an activated run.
 
+// TestRunRefreshScopeOwnsItsProject: run refresh-scope resolves its project
+// through internal/verb, so the root hook must skip its eager resolution.
+func TestRunRefreshScopeOwnsItsProject(t *testing.T) {
+	if !verbOwnsProject(runRefreshScopeCmd) {
+		t.Errorf("%s lacks the verbOwnsProject annotation", runRefreshScopeCmd.CommandPath())
+	}
+}
+
 // refreshScope drives the real verb body with a substituted Writer.
 func refreshScope(
 	t *testing.T, conn *sql.DB, runID, issueID int, reason string, jsonMode bool,

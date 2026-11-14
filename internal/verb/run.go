@@ -750,6 +750,186 @@ func RunRepin(ctx context.Context, env Env, in RunRepinInput) (RunRepinResult, e
 	return res, nil
 }
 
+// RunRefreshBodyInput re-snapshots one issue's description in a live run.
+type RunRefreshBodyInput struct {
+	Run string
+	// Issue names the one issue whose snapshot moves; it is required.
+	Issue string
+	// Reason is required: it is recorded on the issue-body-refreshed event.
+	Reason string
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// Validate refuses a malformed run or issue reference or a missing issue or
+// reason, the faults RunRefreshBody reports after the project, as on
+// RunFactAddInput.
+func (in RunRefreshBodyInput) Validate() error {
+	_, _, err := refreshBody.parse(in.Run, in.Issue, in.Reason)
+	return err
+}
+
+// RunRefreshBodyResult is what the body refresh changed.
+type RunRefreshBodyResult struct {
+	Outcome *engine.RefreshedBody
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunRefreshBody copies one issue's live description into its run snapshot,
+// so the issue's remaining steps render the amended text, under the run's
+// conductor capability. Its project policy is RunPause's.
+func RunRefreshBody(ctx context.Context, env Env, in RunRefreshBodyInput) (RunRefreshBodyResult, error) {
+	outcome, registered, err := refreshRunIssue(env, refreshBody, in.Run, in.Issue, in.Reason,
+		in.ConductorToken, engine.RefreshIssueBodyInRunStore)
+	return RunRefreshBodyResult{Outcome: outcome, Registered: registered}, err
+}
+
+// RunRefreshFilesInput re-snapshots one issue's attached files in a live run.
+type RunRefreshFilesInput struct {
+	Run string
+	// Issue names the one issue whose snapshot moves; it is required.
+	Issue string
+	// Reason is required: it is recorded on the issue-files-refreshed event.
+	Reason string
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// Validate is as on RunRefreshBodyInput.
+func (in RunRefreshFilesInput) Validate() error {
+	_, _, err := refreshFiles.parse(in.Run, in.Issue, in.Reason)
+	return err
+}
+
+// RunRefreshFilesResult is what the attachment refresh changed.
+type RunRefreshFilesResult struct {
+	Outcome *engine.RefreshedFiles
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunRefreshFiles copies one issue's live attachment list into its run
+// snapshot, under the run's conductor capability. Its project policy is
+// RunPause's.
+func RunRefreshFiles(ctx context.Context, env Env, in RunRefreshFilesInput) (RunRefreshFilesResult, error) {
+	outcome, registered, err := refreshRunIssue(env, refreshFiles, in.Run, in.Issue, in.Reason,
+		in.ConductorToken, engine.RefreshIssueFilesInRunStore)
+	return RunRefreshFilesResult{Outcome: outcome, Registered: registered}, err
+}
+
+// RunRefreshScopeInput re-snapshots one issue's declared scope in a live run.
+type RunRefreshScopeInput struct {
+	Run string
+	// Issue names the one issue whose snapshot moves; it is required.
+	Issue string
+	// Reason is required: it is recorded on the issue-scope-refreshed event.
+	Reason string
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// Validate is as on RunRefreshBodyInput.
+func (in RunRefreshScopeInput) Validate() error {
+	_, _, err := refreshScope.parse(in.Run, in.Issue, in.Reason)
+	return err
+}
+
+// RunRefreshScopeResult is what the scope refresh changed.
+type RunRefreshScopeResult struct {
+	Outcome *engine.RefreshedScope
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunRefreshScope copies one issue's live scope globs into its run snapshot,
+// under the run's conductor capability. Its project policy is RunPause's.
+func RunRefreshScope(ctx context.Context, env Env, in RunRefreshScopeInput) (RunRefreshScopeResult, error) {
+	outcome, registered, err := refreshRunIssue(env, refreshScope, in.Run, in.Issue, in.Reason,
+		in.ConductorToken, engine.RefreshIssueScopeInRunStore)
+	return RunRefreshScopeResult{Outcome: outcome, Registered: registered}, err
+}
+
+// issueSnapshotRefresh is one of the run verbs that copy a field an issue
+// declares now into that issue's frozen run snapshot. The texts are the
+// refusals for a missing --issue or --reason, which say what is frozen.
+type issueSnapshotRefresh struct {
+	verb           string
+	issueRequired  string
+	reasonRequired string
+}
+
+var (
+	refreshBody = issueSnapshotRefresh{
+		verb: "refresh-body",
+		issueRequired: "--issue is required: the body snapshot is frozen per " +
+			"issue, so a refresh names the one issue whose remaining steps " +
+			"should render the amended description",
+		reasonRequired: "--reason is required to refresh a snapshotted body; the " +
+			"event trail must say why a live run's packets changed what " +
+			"they ask for",
+	}
+	refreshFiles = issueSnapshotRefresh{
+		verb: "refresh-files",
+		issueRequired: "--issue is required: the attachment list is frozen per " +
+			"issue, so a refresh names the one issue whose remaining steps " +
+			"should render the live list",
+		reasonRequired: "--reason is required to refresh a snapshotted attachment " +
+			"list; the event trail must say why a live run's packets changed " +
+			"which files they carry",
+	}
+	refreshScope = issueSnapshotRefresh{
+		verb: "refresh-scope",
+		issueRequired: "--issue is required: the snapshot is frozen per issue, " +
+			"so a refresh names the one issue whose remaining steps should " +
+			"render the widened scope",
+		reasonRequired: "--reason is required to refresh a snapshotted scope; the " +
+			"event trail must say why a live run's packets changed what " +
+			"they declare",
+	}
+)
+
+// parse reads a refresh request's run and issue references, refusing a
+// missing issue or reason with r's texts.
+func (r issueSnapshotRefresh) parse(run, issue, reason string) (runID, issueID int, err error) {
+	if runID, err = model.ParseRunID(run); err != nil {
+		return 0, 0, newError(err, output.ErrValidation)
+	}
+	if issue == "" {
+		return 0, 0, newError(errors.New(r.issueRequired), output.ErrValidation)
+	}
+	if issueID, err = ParseIssueRef(issue); err != nil {
+		return 0, 0, err
+	}
+	if reason == "" {
+		return 0, 0, newError(errors.New(r.reasonRequired), output.ErrValidation)
+	}
+	return runID, issueID, nil
+}
+
+// refreshRunIssue runs refresh, one engine snapshot refresh, for the request
+// r describes. The engine checks the run's state, the issue's quiescence and
+// the conductor capability inside its own transaction.
+func refreshRunIssue[T any](
+	env Env, r issueSnapshotRefresh, run, issue, reason string, conductorToken func() string,
+	refresh func(store.Store, int, int, string, engine.Attribution, string, int64) (*T, error),
+) (*T, *engine.ProjectRegistration, error) {
+	_, registered, err := resolveRegisteringProject(env, "run "+r.verb)
+	if err != nil {
+		return nil, registered, err
+	}
+	runID, issueID, err := r.parse(run, issue, reason)
+	if err != nil {
+		return nil, registered, err
+	}
+	outcome, err := refresh(env.Store, runID, issueID, reason, rulingAttribution(env),
+		runConductorToken(env, runID, conductorToken), model.NowMS())
+	if err != nil {
+		return nil, registered, engineError(err)
+	}
+	return outcome, registered, nil
+}
+
 // RunFactAddInput is one coordination fact only the conductor observes.
 type RunFactAddInput struct {
 	Run string

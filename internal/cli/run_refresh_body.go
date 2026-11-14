@@ -2,12 +2,11 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -51,58 +50,36 @@ changed what they ask for.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunRefreshBody(cmd, args[0], getWriter(cmd))
 	},
 }
 
 func runRunRefreshBody(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	issueRef, _ := cmd.Flags().GetString("issue")
-	if issueRef == "" {
-		return cmdErr(
-			fmt.Errorf("--issue is required: the body snapshot is frozen per "+
-				"issue, so a refresh names the one issue whose remaining steps "+
-				"should render the amended description"),
-			output.ErrValidation)
-	}
-	issueID, err := issueArg(issueRef)
-	if err != nil {
-		return err
-	}
-
+	issue, _ := cmd.Flags().GetString("issue")
 	reason, _ := cmd.Flags().GetString("reason")
-	if reason == "" {
-		return cmdErr(
-			fmt.Errorf("--reason is required to refresh a snapshotted body; the "+
-				"event trail must say why a live run's packets changed what "+
-				"they ask for"),
-			output.ErrValidation)
+	in := verb.RunRefreshBodyInput{
+		Run: ref, Issue: issue, Reason: reason,
+		ConductorToken: func() string { return optionalToken(cmd.InOrStdin()) },
 	}
-
-	by, err := rulingBy()
+	env, err := runRulingEnv(cmd, in.Validate)
 	if err != nil {
 		return err
 	}
-	outcome, err := engine.RefreshIssueBodyInRun(
-		conn, runID, issueID, reason, by, conductorToken(conn, runID, os.Stdin),
-		model.NowMS())
+
+	res, err := verb.RunRefreshBody(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = renderRefreshBodyOutcome(outcome)
+		message = renderRefreshBodyOutcome(res.Outcome)
 	}
-	w.Success(outcome, message)
+	w.Success(res.Outcome, message)
 	return nil
 }
 
