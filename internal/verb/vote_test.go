@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -813,5 +814,291 @@ func TestVoteReadsNeverRegisterAProject(t *testing.T) {
 				requireUnregistered(t, st, "/repos/vote")
 			})
 		}
+	}
+}
+
+// listedRefs is the proposal references a VoteList result carries.
+func listedRefs(res verb.VoteListResult) []string {
+	refs := make([]string, 0, len(res.Proposals))
+	for _, p := range res.Proposals {
+		refs = append(refs, model.FormatProposalID(p.ID))
+	}
+	return refs
+}
+
+// TestVoteListFiltersTheCallersProposals: open proposals only by default,
+// every status under All, exactly the named status otherwise, and vote counts
+// only when asked for.
+func TestVoteListFiltersTheCallersProposals(t *testing.T) {
+	st := openStore(t)
+	open := openProposal(t, st, 2, "")
+	closed := openProposal(t, st, 2, "")
+	env := projectEnv(st, "", false)
+	if _, err := verb.VoteClose(context.Background(), env, verb.VoteCloseInput{Proposal: closed, Reason: "r"}); err != nil {
+		t.Fatalf("VoteClose: %v", err)
+	}
+	if _, err := verb.VoteCast(context.Background(), env, castInput(open, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		in   verb.VoteListInput
+		want []string
+	}{
+		{"default", verb.VoteListInput{}, []string{open}},
+		{"all", verb.VoteListInput{All: true}, []string{open, closed}},
+		{"status", verb.VoteListInput{Status: "closed"}, []string{closed}},
+		{"all with status", verb.VoteListInput{All: true, Status: "closed"}, []string{closed}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := verb.VoteList(context.Background(), env, tc.in)
+			if err != nil {
+				t.Fatalf("VoteList: %v", err)
+			}
+			got := listedRefs(res)
+			if res.Total != len(tc.want) || len(got) != len(tc.want) {
+				t.Fatalf("VoteList(%+v) = %v (total %d), want %v", tc.in, got, res.Total, tc.want)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(strings.Join(got, " "), want) {
+					t.Errorf("VoteList(%+v) = %v, missing %s", tc.in, got, want)
+				}
+			}
+			if res.VoteCounts != nil {
+				t.Errorf("VoteCounts = %v without asking, want nil", res.VoteCounts)
+			}
+		})
+	}
+
+	res, err := verb.VoteList(context.Background(), env, verb.VoteListInput{VoteCounts: true})
+	if err != nil {
+		t.Fatalf("VoteList with counts: %v", err)
+	}
+	pid, _ := model.ParseProposalID(open)
+	if !reflect.DeepEqual(res.VoteCounts, map[int]int{pid: 1}) {
+		t.Errorf("VoteCounts = %v, want {%d: 1}", res.VoteCounts, pid)
+	}
+}
+
+func TestVoteListRefusesAnUnknownFilter(t *testing.T) {
+	env := projectEnv(openStore(t), "", false)
+	for name, in := range map[string]verb.VoteListInput{
+		"status":      {Status: "bogus"},
+		"criticality": {Criticality: "bogus"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := verb.VoteList(context.Background(), env, in)
+			requireVerbCode(t, err, output.ErrValidation, "bogus")
+		})
+	}
+}
+
+// TestVoteListNeverRegistersAProject: the listing is a read, so an anchored
+// unregistered identity is not registered and sees none of the default
+// project's proposals, and an unanchored one is not refused.
+func TestVoteListNeverRegistersAProject(t *testing.T) {
+	for _, anchored := range []bool{true, false} {
+		t.Run(fmt.Sprintf("anchored=%v", anchored), func(t *testing.T) {
+			st := openStore(t)
+			ensureProject(t, st, "/repos/first", "first")
+			openProposal(t, st, 2, "")
+			res, err := verb.VoteList(context.Background(), projectEnv(st, "/repos/vote", anchored), verb.VoteListInput{})
+			if err != nil {
+				t.Fatalf("VoteList: %v", err)
+			}
+			if len(res.Proposals) != 0 || res.Total != 0 {
+				t.Errorf("VoteList from an unregistered identity = %v, want none", listedRefs(res))
+			}
+			requireUnregistered(t, st, "/repos/vote")
+		})
+	}
+}
+
+// TestVoteLinkAndUnlink: link writes the link and reports the pair, a second
+// link is a conflict, unlink removes it, and a second unlink finds nothing.
+func TestVoteLinkAndUnlink(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	pid, _ := model.ParseProposalID(ref)
+	issue := createIssue(t, st)
+	env := projectEnv(st, "", false)
+	in := verb.VoteLinkInput{Proposal: ref, Issue: model.FormatID(issue)}
+
+	res, err := verb.VoteLink(context.Background(), env, in)
+	if err != nil {
+		t.Fatalf("VoteLink: %v", err)
+	}
+	if res.ProposalID != pid || res.IssueID != issue {
+		t.Errorf("VoteLink = %+v, want proposal %d and issue %d", res, pid, issue)
+	}
+	if linked, err := st.GetProposalIssues(pid); err != nil || !reflect.DeepEqual(linked, []int{issue}) {
+		t.Errorf("GetProposalIssues = (%v, %v), want [%d]", linked, err, issue)
+	}
+	_, err = verb.VoteLink(context.Background(), env, in)
+	requireVerbCode(t, err, output.ErrConflict, "link already exists")
+
+	unlinked, err := verb.VoteUnlink(context.Background(), env, verb.VoteUnlinkInput(in))
+	if err != nil {
+		t.Fatalf("VoteUnlink: %v", err)
+	}
+	if unlinked.ProposalID != pid || unlinked.IssueID != issue {
+		t.Errorf("VoteUnlink = %+v, want proposal %d and issue %d", unlinked, pid, issue)
+	}
+	if linked, err := st.GetProposalIssues(pid); err != nil || len(linked) != 0 {
+		t.Errorf("GetProposalIssues after unlink = (%v, %v), want none", linked, err)
+	}
+	_, err = verb.VoteUnlink(context.Background(), env, verb.VoteUnlinkInput(in))
+	requireVerbCode(t, err, output.ErrNotFound, "link not found")
+}
+
+func TestVoteLinkRefusals(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	issue := model.FormatID(createIssue(t, st))
+	env := projectEnv(st, "", false)
+
+	link := func(proposal, issue string) error {
+		_, err := verb.VoteLink(context.Background(), env, verb.VoteLinkInput{Proposal: proposal, Issue: issue})
+		return err
+	}
+	unlink := func(proposal, issue string) error {
+		_, err := verb.VoteUnlink(context.Background(), env, verb.VoteUnlinkInput{Proposal: proposal, Issue: issue})
+		return err
+	}
+	for name, call := range map[string]func(string, string) error{"VoteLink": link, "VoteUnlink": unlink} {
+		t.Run(name, func(t *testing.T) {
+			requireVerbCode(t, call("nope", issue), output.ErrValidation, "invalid proposal ID")
+			requireVerbCode(t, call(ref, "nope"), output.ErrValidation, "invalid issue ID")
+		})
+	}
+	requireVerbCode(t, link("DKT-V999", issue), output.ErrNotFound, "proposal or issue not found")
+}
+
+// TestVoteBackfillUsageRecordsTheBatch: the batch lands on each seat's cast,
+// and the result counts its rows and distinct seats under the source the
+// rows carry, "backfilled" by default.
+func TestVoteBackfillUsageRecordsTheBatch(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 3, "")
+	pid, _ := model.ParseProposalID(ref)
+	env := projectEnv(st, "", false)
+	for _, seat := range []string{"seat-a", "seat-b"} {
+		if _, err := verb.VoteCast(context.Background(), env, castInput(ref, seat)); err != nil {
+			t.Fatalf("VoteCast(%s): %v", seat, err)
+		}
+	}
+
+	res, err := verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{
+		Proposal: ref,
+		Rows: []engine.VoteBackfillRow{
+			{Voter: "seat-a", Unit: "input_tokens", Quantity: 10},
+			{Voter: "seat-a", Unit: "output_tokens", Quantity: 20},
+			{Voter: "seat-b", Unit: "input_tokens", Quantity: 30},
+		},
+	})
+	if err != nil {
+		t.Fatalf("VoteBackfillUsage: %v", err)
+	}
+	if res.ProposalID != pid || res.Rows != 3 || res.Seats != 2 || res.Source != "backfilled" {
+		t.Errorf("VoteBackfillUsage = %+v, want proposal %d, 3 rows, 2 seats, source backfilled", res, pid)
+	}
+	votes := proposalVotes(t, st, ref)
+	if got := votes["seat-a"].Usage; !reflect.DeepEqual(got, map[string]float64{"input_tokens": 10, "output_tokens": 20}) {
+		t.Errorf("seat-a usage = %v", got)
+	}
+
+	res, err = verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{
+		Proposal: ref, Source: "relay",
+		Rows: []engine.VoteBackfillRow{{Voter: "seat-b", Unit: "output_tokens", Quantity: 40}},
+	})
+	if err != nil {
+		t.Fatalf("VoteBackfillUsage with a source: %v", err)
+	}
+	if res.Rows != 1 || res.Seats != 1 || res.Source != "relay" {
+		t.Errorf("VoteBackfillUsage = %+v, want 1 row, 1 seat, source relay", res)
+	}
+}
+
+func TestVoteBackfillUsageRefusals(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	env := projectEnv(st, "", false)
+	if _, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+	row := []engine.VoteBackfillRow{{Voter: "seat", Unit: "tokens", Quantity: 1}}
+	backfill := func(proposal string, rows []engine.VoteBackfillRow) error {
+		_, err := verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{Proposal: proposal, Rows: rows})
+		return err
+	}
+
+	requireVerbCode(t, backfill("nope", row), output.ErrValidation, "invalid proposal ID")
+	requireVerbCode(t, backfill("DKT-V999", row), output.ErrNotFound, "proposal DKT-V999 not found")
+	requireVerbCode(t, backfill(ref, nil), output.ErrValidation, "no usage rows")
+	requireVerbCode(t, backfill(ref, []engine.VoteBackfillRow{{Voter: "absent", Unit: "tokens", Quantity: 1}}),
+		output.ErrValidation, "absent")
+}
+
+// TestVoteLinkWritesRegisterAnAnchoredCallersProject: link, unlink and the
+// usage back-fill write into the caller's project, so each registers an
+// anchored identity on first contact and refuses an unanchored one before it
+// writes.
+func TestVoteLinkWritesRegisterAnAnchoredCallersProject(t *testing.T) {
+	writes := map[string]func(env verb.Env, ref, issue string) (*model.Project, error){
+		"VoteLink": func(env verb.Env, ref, issue string) (*model.Project, error) {
+			res, err := verb.VoteLink(context.Background(), env, verb.VoteLinkInput{Proposal: ref, Issue: issue})
+			return res.Registered, err
+		},
+		"VoteUnlink": func(env verb.Env, ref, issue string) (*model.Project, error) {
+			if _, err := verb.VoteLink(context.Background(), projectEnv(env.Store, "", false),
+				verb.VoteLinkInput{Proposal: ref, Issue: issue}); err != nil {
+				return nil, err
+			}
+			res, err := verb.VoteUnlink(context.Background(), env, verb.VoteUnlinkInput{Proposal: ref, Issue: issue})
+			return res.Registered, err
+		},
+		"VoteBackfillUsage": func(env verb.Env, ref, _ string) (*model.Project, error) {
+			if _, err := verb.VoteCast(context.Background(), projectEnv(env.Store, "", false), castInput(ref, "seat")); err != nil {
+				return nil, err
+			}
+			res, err := verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{
+				Proposal: ref, Rows: []engine.VoteBackfillRow{{Voter: "seat", Unit: "tokens", Quantity: 1}},
+			})
+			return res.Registered, err
+		},
+	}
+	for name, write := range writes {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			ensureProject(t, st, "/repos/first", "first")
+			issue := model.FormatID(createIssue(t, st))
+
+			_, err := write(projectEnv(st, "/work/scratch", false), openProposal(t, st, 2, ""), issue)
+			requireVerbCode(t, err, output.ErrValidation, "cannot tell which project")
+			requireUnregistered(t, st, "/work/scratch")
+
+			env := projectEnv(st, "/repos/vote", true)
+			registered, err := write(env, openProposal(t, st, 2, ""), issue)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			id, found, err := st.LookupProject("/repos/vote")
+			if err != nil || !found {
+				t.Fatalf("LookupProject = (%d, %v, %v), want the anchored identity registered", id, found, err)
+			}
+			if registered == nil || registered.ID != id || registered.Identity != "/repos/vote" {
+				t.Errorf("Registered = %+v, want project %d for /repos/vote", registered, id)
+			}
+
+			again, err := write(env, openProposal(t, st, 2, ""), issue)
+			if err != nil {
+				t.Fatalf("second %s: %v", name, err)
+			}
+			if again != nil {
+				t.Errorf("a second %s reported registering %+v again", name, again)
+			}
+		})
 	}
 }

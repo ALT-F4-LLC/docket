@@ -9,6 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -36,7 +37,8 @@ spend on a decision that did not happen.
 ` + "`--source`" + ` defaults to "backfilled" and is free text — recorded on every
 row, so a relay's reconstruction stays distinguishable from the seats' own
 cast-time reports forever.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runVoteBackfillUsage(cmd, args, getWriter(cmd))
 	},
@@ -52,34 +54,27 @@ type voteBackfillOutcome struct {
 }
 
 func runVoteBackfillUsage(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	proposalID, err := model.ParseProposalID(args[0])
-	if err != nil {
-		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-	}
-
-	rows, err := voteBackfillRows(cmd)
-	if err != nil {
+	// The proposal is refused before the batch is read, as it always was.
+	if _, err := fromVerb(verb.ParseProposalRef(args[0])); err != nil {
 		return err
 	}
-	source, _ := cmd.Flags().GetString("source")
+	in := verb.VoteBackfillUsageInput{Proposal: args[0]}
+	var err error
+	if in.Rows, err = voteBackfillRows(cmd); err != nil {
+		return err
+	}
+	in.Source, _ = cmd.Flags().GetString("source")
 
-	if err := engine.NewEngine().BackfillVoteUsage(
-		conn, proposalID, rows, source, model.NowMS()); err != nil {
-		return runErr(err)
+	env := verbEnv(cmd)
+	res, err := verb.VoteBackfillUsage(cmd.Context(), env, in)
+	recordRegisteredProject(cmd, env, res.Registered)
+	if err != nil {
+		return verbErr(err)
 	}
 
-	seen := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		seen[r.Voter] = true
-	}
-	if source == "" {
-		source = engine.UsageSourceBackfilled
-	}
 	outcome := &voteBackfillOutcome{
-		Proposal: model.FormatProposalID(proposalID), Rows: len(rows),
-		Seats: len(seen), Source: source,
+		Proposal: model.FormatProposalID(res.ProposalID), Rows: res.Rows,
+		Seats: res.Seats, Source: res.Source,
 	}
 
 	var message string

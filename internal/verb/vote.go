@@ -561,3 +561,223 @@ func proposalWithVotes(env Env, ref string) (*model.Proposal, []*model.Vote, err
 	}
 	return proposal, votes, nil
 }
+
+// VoteListInput filters the caller's proposals. An empty Status lists open
+// proposals only, unless All is set. VoteCounts asks for each listed
+// proposal's cast count, which costs one read per proposal.
+type VoteListInput struct {
+	Status      string
+	Criticality string
+	DomainTag   string
+	All         bool
+	Limit       int
+	VoteCounts  bool
+}
+
+// VoteListResult is the listed proposals and the pre-limit count of every
+// match. VoteCounts maps each listed proposal's id to its cast count, and is
+// nil unless the input asked for it.
+type VoteListResult struct {
+	Proposals  []*model.Proposal
+	Total      int
+	VoteCounts map[int]int
+}
+
+// VoteList lists the caller's proposals. It is a read, so it never registers
+// a project.
+func VoteList(ctx context.Context, env Env, in VoteListInput) (VoteListResult, error) {
+	projectID, _, err := env.ResolveProject(ProjectReadOnly)
+	if err != nil {
+		return VoteListResult{}, err
+	}
+	if in.Status != "" {
+		if err := model.ValidateProposalStatus(model.ProposalStatus(in.Status)); err != nil {
+			return VoteListResult{}, newError(err, output.ErrValidation)
+		}
+	}
+	if in.Criticality != "" {
+		if err := model.ValidateCriticality(model.Criticality(in.Criticality)); err != nil {
+			return VoteListResult{}, newError(err, output.ErrValidation)
+		}
+	}
+	status := in.Status
+	if !in.All && status == "" {
+		status = string(model.ProposalStatusOpen)
+	}
+
+	proposals, total, err := env.Store.ListProposals(projectID, status, in.Criticality, in.DomainTag, in.Limit)
+	if err != nil {
+		return VoteListResult{}, newError(fmt.Errorf("listing proposals: %w", err), output.ErrGeneral)
+	}
+	if proposals == nil {
+		proposals = []*model.Proposal{}
+	}
+	result := VoteListResult{Proposals: proposals, Total: total}
+	if !in.VoteCounts {
+		return result, nil
+	}
+
+	result.VoteCounts = make(map[int]int, len(proposals))
+	for _, p := range proposals {
+		votes, err := env.Store.GetProposalVotes(p.ID)
+		if err != nil {
+			return VoteListResult{}, newError(fmt.Errorf("fetching vote counts: fetching votes for %s: %w",
+				model.FormatProposalID(p.ID), err), output.ErrGeneral)
+		}
+		result.VoteCounts[p.ID] = len(votes)
+	}
+	return result, nil
+}
+
+// VoteLinkInput names the proposal and the issue to link.
+type VoteLinkInput struct {
+	Proposal string
+	Issue    string
+}
+
+// VoteLinkResult is the linked pair. Registered is as in DocCreateResult.
+type VoteLinkResult struct {
+	ProposalID int
+	IssueID    int
+	Registered *model.Project
+}
+
+// VoteLink links a proposal to an issue, then records the panel's
+// vote-opened event on every run the link makes attribute it. It is a
+// write, so it may register the caller's anchored project.
+func VoteLink(ctx context.Context, env Env, in VoteLinkInput) (VoteLinkResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return VoteLinkResult{}, err
+	}
+	var result VoteLinkResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	proposalID, issueID, err := parseProposalLink(in.Proposal, in.Issue)
+	if err != nil {
+		return result, err
+	}
+
+	if err := env.Store.LinkProposalIssue(proposalID, issueID); err != nil {
+		if e := notFound(err, "proposal or issue"); e != nil {
+			return result, e
+		}
+		if errors.Is(err, store.ErrConflict) {
+			return result, newError(fmt.Errorf("link already exists"), output.ErrConflict)
+		}
+		return result, newError(fmt.Errorf("linking proposal to issue: %w", err), output.ErrGeneral)
+	}
+	if err := engine.RecordConductorPanelOpenedStore(env.Store, proposalID); err != nil {
+		return result, newError(fmt.Errorf("the link recorded, but recording %s's run events failed: %w",
+			model.FormatProposalID(proposalID), err), output.ErrGeneral)
+	}
+	result.ProposalID, result.IssueID = proposalID, issueID
+	return result, nil
+}
+
+// VoteUnlinkInput names the proposal and the issue to unlink.
+type VoteUnlinkInput struct {
+	Proposal string
+	Issue    string
+}
+
+// VoteUnlinkResult is the unlinked pair. Registered is as in
+// DocCreateResult.
+type VoteUnlinkResult struct {
+	ProposalID int
+	IssueID    int
+	Registered *model.Project
+}
+
+// VoteUnlink removes a proposal-issue link. It is a write, so it may
+// register the caller's anchored project.
+func VoteUnlink(ctx context.Context, env Env, in VoteUnlinkInput) (VoteUnlinkResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return VoteUnlinkResult{}, err
+	}
+	var result VoteUnlinkResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	proposalID, issueID, err := parseProposalLink(in.Proposal, in.Issue)
+	if err != nil {
+		return result, err
+	}
+
+	if err := env.Store.UnlinkProposalIssue(proposalID, issueID); err != nil {
+		if e := notFound(err, "link"); e != nil {
+			return result, e
+		}
+		return result, newError(fmt.Errorf("unlinking proposal from issue: %w", err), output.ErrGeneral)
+	}
+	result.ProposalID, result.IssueID = proposalID, issueID
+	return result, nil
+}
+
+// parseProposalLink parses the two ends of a proposal-issue link, the
+// proposal first.
+func parseProposalLink(proposal, issue string) (proposalID, issueID int, err error) {
+	if proposalID, err = ParseProposalRef(proposal); err != nil {
+		return 0, 0, err
+	}
+	if issueID, err = ParseIssueRef(issue); err != nil {
+		return 0, 0, err
+	}
+	return proposalID, issueID, nil
+}
+
+// VoteBackfillUsageInput is a relay's measured spend for a proposal's seats.
+// An empty Source records the rows as engine.UsageSourceBackfilled.
+type VoteBackfillUsageInput struct {
+	Proposal string
+	Rows     []engine.VoteBackfillRow
+	Source   string
+}
+
+// VoteBackfillUsageResult counts what was recorded: the rows, the distinct
+// seats they cover, and the source every row carries. Registered is as in
+// DocCreateResult.
+type VoteBackfillUsageResult struct {
+	ProposalID int
+	Rows       int
+	Seats      int
+	Source     string
+	Registered *model.Project
+}
+
+// VoteBackfillUsage records seat spend a relay measured after the casts
+// landed (DKT-115), in one transaction. Each row attaches to its seat's
+// cast, so a seat that never cast refuses the batch. It is a write, so it
+// may register the caller's anchored project.
+func VoteBackfillUsage(ctx context.Context, env Env, in VoteBackfillUsageInput) (VoteBackfillUsageResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return VoteBackfillUsageResult{}, err
+	}
+	var result VoteBackfillUsageResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+	proposalID, err := ParseProposalRef(in.Proposal)
+	if err != nil {
+		return result, err
+	}
+
+	if err := engine.NewEngine().BackfillVoteUsageStore(
+		env.Store, proposalID, in.Rows, in.Source, model.NowMS()); err != nil {
+		return result, engineError(err)
+	}
+
+	seats := make(map[string]bool, len(in.Rows))
+	for _, r := range in.Rows {
+		seats[r.Voter] = true
+	}
+	result.ProposalID, result.Rows, result.Seats = proposalID, len(in.Rows), len(seats)
+	result.Source = in.Source
+	if result.Source == "" {
+		result.Source = engine.UsageSourceBackfilled
+	}
+	return result, nil
+}

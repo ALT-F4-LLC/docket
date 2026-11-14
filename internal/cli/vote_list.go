@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -26,9 +24,10 @@ func (r voteListResult) CollectionTruncated() bool {
 }
 
 var voteListCmd = &cobra.Command{
-	Use:     "list",
-	Short:   "List proposals",
-	Aliases: []string{"ls"},
+	Use:         "list",
+	Short:       "List proposals",
+	Aliases:     []string{"ls"},
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runVoteList)
 	},
@@ -36,62 +35,31 @@ var voteListCmd = &cobra.Command{
 
 // runVoteList contains the query + render + output logic for vote list.
 func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
+	in := verb.VoteListInput{VoteCounts: !w.JSONMode}
+	in.Status, _ = cmd.Flags().GetString("status")
+	in.Criticality, _ = cmd.Flags().GetString("criticality")
+	in.DomainTag, _ = cmd.Flags().GetString("domain-tag")
+	in.All, _ = cmd.Flags().GetBool("all")
+	in.Limit, _ = cmd.Flags().GetInt("limit")
 
-	status, _ := cmd.Flags().GetString("status")
-	criticality, _ := cmd.Flags().GetString("criticality")
-	domainTag, _ := cmd.Flags().GetString("domain-tag")
-	all, _ := cmd.Flags().GetBool("all")
-	limit, _ := cmd.Flags().GetInt("limit")
-
-	if err := validateLimit(cmd, limit); err != nil {
+	if err := validateLimit(cmd, in.Limit); err != nil {
 		return err
 	}
 
-	// Validate filter enum values.
-	if status != "" {
-		if err := model.ValidateProposalStatus(model.ProposalStatus(status)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-	if criticality != "" {
-		if err := model.ValidateCriticality(model.Criticality(criticality)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
-
-	// Default behavior: show only open proposals unless --all or explicit --status.
-	if !all && status == "" {
-		status = string(model.ProposalStatusOpen)
-	}
-	// If --all is set with no explicit status, clear the status filter.
-	if all && !cmd.Flags().Changed("status") {
-		status = ""
-	}
-
-	proposals, total, err := st.ListProposals(getProjectID(cmd), status, criticality, domainTag, limit)
+	res, err := verb.VoteList(cmd.Context(), verbEnv(cmd), in)
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing proposals: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
 
-	if proposals == nil {
-		proposals = []*model.Proposal{}
-	}
-
-	result := voteListResult{Proposals: proposals, Total: total, limit: limit}
+	result := voteListResult{Proposals: res.Proposals, Total: res.Total, limit: in.Limit}
 
 	var message string
 	if !w.JSONMode {
-		// Fetch vote counts per proposal for human-readable output.
-		voteCounts, err := getVoteCounts(st, proposals)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching vote counts: %w", err), output.ErrGeneral)
-		}
-		rows := make([]render.ProposalRow, 0, len(proposals))
-		for _, p := range proposals {
+		rows := make([]render.ProposalRow, 0, len(res.Proposals))
+		for _, p := range res.Proposals {
 			rows = append(rows, render.ProposalRow{
 				Proposal: p,
-				VoteCast: voteCounts[p.ID],
+				VoteCast: res.VoteCounts[p.ID],
 			})
 		}
 		message = render.RenderProposalTable(rows)
@@ -99,19 +67,6 @@ func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	w.Success(result, message)
 
 	return nil
-}
-
-// getVoteCounts returns a map of proposal ID to votes cast count.
-func getVoteCounts(st store.Store, proposals []*model.Proposal) (map[int]int, error) {
-	counts := make(map[int]int, len(proposals))
-	for _, p := range proposals {
-		votes, err := st.GetProposalVotes(p.ID)
-		if err != nil {
-			return nil, fmt.Errorf("fetching votes for %s: %w", model.FormatProposalID(p.ID), err)
-		}
-		counts[p.ID] = len(votes)
-	}
-	return counts, nil
 }
 
 func init() {
