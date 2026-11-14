@@ -12,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
@@ -1039,6 +1040,224 @@ func IssueLog(ctx context.Context, env Env, in IssueLogInput) (IssueLogResult, e
 		return IssueLogResult{}, newError(fmt.Errorf("counting activity: %w", err), output.ErrGeneral)
 	}
 	return IssueLogResult{IssueID: id, Entries: entries, Total: total, Limit: limit}, nil
+}
+
+// IssueFileAddInput names the issue and the file paths to attach to it.
+type IssueFileAddInput struct {
+	Issue string
+	Paths []string
+}
+
+// IssueFileAddResult is the issue and its full file list after the attach.
+// Registered is as on IssueClaimResult.
+type IssueFileAddResult struct {
+	Issue      *model.Issue
+	Files      []string
+	Registered *engine.ProjectRegistration
+}
+
+// IssueFileAdd attaches files to an issue as env.Author. It writes into the
+// caller's project, so it may register it.
+func IssueFileAdd(ctx context.Context, env Env, in IssueFileAddInput) (IssueFileAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue file add")
+	res := IssueFileAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	id, issue, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return res, err
+	}
+	res.Issue = issue
+	if err := env.Store.AttachFiles(id, in.Paths, env.Author); err != nil {
+		return res, newError(fmt.Errorf("attaching files: %w", err), output.ErrGeneral)
+	}
+	res.Files, err = issueFiles(env, id)
+	return res, err
+}
+
+// IssueFileRemoveInput names the issue and the file paths to detach from it.
+type IssueFileRemoveInput struct {
+	Issue string
+	Paths []string
+}
+
+// IssueFileRemoveResult is the issue and its full file list after the
+// detach. Registered is as on IssueClaimResult.
+type IssueFileRemoveResult struct {
+	Issue      *model.Issue
+	Files      []string
+	Registered *engine.ProjectRegistration
+}
+
+// IssueFileRemove detaches files from an issue as env.Author. It writes into
+// the caller's project, so it may register it.
+func IssueFileRemove(ctx context.Context, env Env, in IssueFileRemoveInput) (IssueFileRemoveResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue file remove")
+	res := IssueFileRemoveResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	id, issue, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return res, err
+	}
+	res.Issue = issue
+	if err := env.Store.DetachFiles(id, in.Paths, env.Author); err != nil {
+		return res, newError(fmt.Errorf("removing files: %w", err), output.ErrGeneral)
+	}
+	res.Files, err = issueFiles(env, id)
+	return res, err
+}
+
+// IssueFileListInput names the issue whose attached files to list.
+type IssueFileListInput struct {
+	Issue string
+}
+
+// IssueFileListResult is an issue's attached file paths.
+type IssueFileListResult struct {
+	IssueID int
+	Files   []string
+}
+
+// IssueFileList lists the files attached to one issue. Issue ids are
+// store-wide, so it is a read that names no project.
+func IssueFileList(ctx context.Context, env Env, in IssueFileListInput) (IssueFileListResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return IssueFileListResult{}, err
+	}
+	id, _, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return IssueFileListResult{}, err
+	}
+	files, err := issueFiles(env, id)
+	if err != nil {
+		return IssueFileListResult{}, err
+	}
+	return IssueFileListResult{IssueID: id, Files: files}, nil
+}
+
+func issueFiles(env Env, id int) ([]string, error) {
+	files, err := env.Store.GetIssueFiles(id)
+	if err != nil {
+		return nil, newError(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
+	}
+	return files, nil
+}
+
+// IssueGraphInput names the focal issue of a dependency graph. Direction is
+// up (its blockers), down (what it blocks) or both; Depth caps the hops from
+// the focal issue, and 0 means unlimited.
+type IssueGraphInput struct {
+	Issue     string
+	Direction string
+	Depth     int
+}
+
+// IssueGraphEdge is one dependency in a graph: From blocks To. Type is always
+// "blocks", whichever relation recorded it.
+type IssueGraphEdge struct {
+	From int
+	To   int
+	Type string
+}
+
+// IssueGraphResult is the dependency graph around Issue. Issues holds every
+// issue the walk reached, the focal one included, keyed by id; Edges lists
+// the dependencies in walk order, down before up. Forward and Backward are
+// the store-wide blocks and blocked-by adjacency the walk followed.
+type IssueGraphResult struct {
+	Issue    *model.Issue
+	Issues   map[int]*model.Issue
+	Edges    []IssueGraphEdge
+	Forward  map[int][]int
+	Backward map[int][]int
+}
+
+// IssueGraph walks the dependency graph from one issue. Issue ids are
+// store-wide, so it is a read that names no project.
+func IssueGraph(ctx context.Context, env Env, in IssueGraphInput) (IssueGraphResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return IssueGraphResult{}, err
+	}
+	id, issue, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return IssueGraphResult{}, err
+	}
+	if in.Direction != "up" && in.Direction != "down" && in.Direction != "both" {
+		return IssueGraphResult{}, newError(fmt.Errorf(
+			"invalid direction %q: must be one of [up, down, both]", in.Direction), output.ErrValidation)
+	}
+	if in.Depth < 0 {
+		return IssueGraphResult{}, newError(errors.New("depth must be non-negative"), output.ErrValidation)
+	}
+
+	relations, err := env.Store.GetAllDirectionalRelations()
+	if err != nil {
+		return IssueGraphResult{}, newError(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+	}
+	res := IssueGraphResult{Issue: issue}
+	res.Forward, res.Backward = planner.BuildAdjacency(relations)
+
+	visited := map[int]bool{id: true}
+	if in.Direction == "down" || in.Direction == "both" {
+		walkGraph(id, res.Forward, true, visited, &res.Edges, in.Depth)
+	}
+	if in.Direction == "up" || in.Direction == "both" {
+		walkGraph(id, res.Backward, false, visited, &res.Edges, in.Depth)
+	}
+
+	visitedIDs := make([]int, 0, len(visited))
+	for nodeID := range visited {
+		visitedIDs = append(visitedIDs, nodeID)
+	}
+	if res.Issues, err = env.Store.GetIssuesByIDs(visitedIDs); err != nil {
+		return IssueGraphResult{}, newError(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
+	}
+	res.Issues[id] = issue
+	return res, nil
+}
+
+// walkGraph runs a breadth-first walk from start along adj, marking each
+// issue it reaches in visited and appending each edge once. downward says adj
+// runs from blocker to blocked; otherwise it runs from blocked to blocker.
+// maxDepth caps the hops from start, and 0 means unlimited.
+func walkGraph(start int, adj map[int][]int, downward bool, visited map[int]bool, edges *[]IssueGraphEdge, maxDepth int) {
+	type queueItem struct {
+		id    int
+		depth int
+	}
+	type edgeKey struct{ from, to int }
+	seen := make(map[edgeKey]bool)
+
+	queue := []queueItem{{id: start, depth: 0}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		if maxDepth > 0 && current.depth >= maxDepth {
+			continue
+		}
+
+		for _, neighbor := range adj[current.id] {
+			edge := IssueGraphEdge{From: neighbor, To: current.id, Type: "blocks"}
+			if downward {
+				edge = IssueGraphEdge{From: current.id, To: neighbor, Type: "blocks"}
+			}
+
+			k := edgeKey{edge.From, edge.To}
+			if !seen[k] {
+				seen[k] = true
+				*edges = append(*edges, edge)
+			}
+
+			if !visited[neighbor] {
+				visited[neighbor] = true
+				queue = append(queue, queueItem{id: neighbor, depth: current.depth + 1})
+			}
+		}
+	}
 }
 
 // IssueListInput filters an issue listing; every filter set must match.

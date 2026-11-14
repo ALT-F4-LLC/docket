@@ -6,9 +6,8 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/planner"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/tree"
 	"github.com/spf13/cobra"
@@ -36,75 +35,34 @@ type graphResult struct {
 }
 
 var graphCmd = &cobra.Command{
-	Use:   "graph [id]",
-	Short: "Show dependency graph for an issue",
-	Args:  cobra.ExactArgs(1),
+	Use:         "graph [id]",
+	Short:       "Show dependency graph for an issue",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueGraph)
 	},
 }
 
 func runIssueGraph(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := issueArg(args[0])
-	if err != nil {
-		return err
-	}
-
-	issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-	if err != nil {
-		return err
-	}
-
 	direction, _ := cmd.Flags().GetString("direction")
-	if direction != "up" && direction != "down" && direction != "both" {
-		return cmdErr(fmt.Errorf("invalid direction %q: must be one of [up, down, both]", direction), output.ErrValidation)
-	}
-
 	depth, _ := cmd.Flags().GetInt("depth")
-	if depth < 0 {
-		return cmdErr(fmt.Errorf("depth must be non-negative"), output.ErrValidation)
-	}
 
-	// Fetch all directional relations for graph traversal.
-	st := store.StoreOn(conn)
-	allRelations, err := st.GetAllDirectionalRelations()
+	graph, err := verb.IssueGraph(cmd.Context(), verbEnv(cmd), verb.IssueGraphInput{
+		Issue:     args[0],
+		Direction: direction,
+		Depth:     depth,
+	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
+	id, issueMap := graph.Issue.ID, graph.Issues
 
-	// Build adjacency lists from relations.
-	forward, backward := planner.BuildAdjacency(allRelations)
-
-	// BFS to collect reachable nodes.
-	visited := map[int]bool{id: true}
 	var edges []graphEdge
-
-	// maxDepth: 0 means unlimited.
-	maxDepth := depth
-
-	if direction == "down" || direction == "both" {
-		bfsGraph(id, forward, visited, &edges, "blocks", maxDepth)
+	for _, e := range graph.Edges {
+		edges = append(edges, graphEdge{From: e.From, To: e.To, Type: e.Type})
 	}
 
-	if direction == "up" || direction == "both" {
-		bfsGraph(id, backward, visited, &edges, "blocked_by", maxDepth)
-	}
-
-	// Bulk-fetch issue details for all visited nodes.
-	visitedIDs := make([]int, 0, len(visited))
-	for nodeID := range visited {
-		visitedIDs = append(visitedIDs, nodeID)
-	}
-	issueMap, err := st.GetIssuesByIDs(visitedIDs)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
-	}
-	// Ensure the focal issue is in the map (it was already fetched above).
-	issueMap[id] = issue
-
-	// Build nodes list.
 	nodes := make([]graphNode, 0, len(issueMap))
 	for _, iss := range issueMap {
 		nodes = append(nodes, graphNode{
@@ -131,50 +89,8 @@ func runIssueGraph(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return nil
 	}
 
-	w.Success(result, renderGraphTree(id, issueMap, forward, backward, direction, maxDepth))
+	w.Success(result, renderGraphTree(id, issueMap, graph.Forward, graph.Backward, direction, depth))
 	return nil
-}
-
-// bfsGraph performs BFS from the start node, following the given adjacency list,
-// collecting edges and marking visited nodes. edgeType labels the edges.
-func bfsGraph(start int, adj map[int][]int, visited map[int]bool, edges *[]graphEdge, edgeType string, maxDepth int) {
-	type queueItem struct {
-		id    int
-		depth int
-	}
-	type edgeKey struct{ from, to int }
-	seen := make(map[edgeKey]bool)
-
-	queue := []queueItem{{id: start, depth: 0}}
-
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-
-		if maxDepth > 0 && current.depth >= maxDepth {
-			continue
-		}
-
-		for _, neighbor := range adj[current.id] {
-			var edge graphEdge
-			if edgeType == "blocks" {
-				edge = graphEdge{From: current.id, To: neighbor, Type: "blocks"}
-			} else {
-				edge = graphEdge{From: neighbor, To: current.id, Type: "blocks"}
-			}
-
-			k := edgeKey{edge.From, edge.To}
-			if !seen[k] {
-				seen[k] = true
-				*edges = append(*edges, edge)
-			}
-
-			if !visited[neighbor] {
-				visited[neighbor] = true
-				queue = append(queue, queueItem{id: neighbor, depth: current.depth + 1})
-			}
-		}
-	}
 }
 
 // renderMermaid outputs a Mermaid flowchart definition.

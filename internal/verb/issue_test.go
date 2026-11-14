@@ -1848,3 +1848,190 @@ func TestIssueCommentListAndLogRegisterNothing(t *testing.T) {
 	}
 	requireUnregistered(t, st, "/repos/fresh")
 }
+
+func TestIssueFileAddAndRemoveEchoTheStoredFilesAsTheAuthor(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	env.Author = "file-author"
+	ref := model.FormatID(id)
+
+	added, err := verb.IssueFileAdd(ctx, env, verb.IssueFileAddInput{Issue: ref, Paths: []string{"a/one.go", "b/two.go"}})
+	if err != nil {
+		t.Fatalf("IssueFileAdd: %v", err)
+	}
+	if added.Issue == nil || added.Issue.ID != id {
+		t.Errorf("added Issue = %+v, want issue %d", added.Issue, id)
+	}
+	if len(added.Files) != 2 {
+		t.Errorf("added Files = %v, want a/one.go and b/two.go", added.Files)
+	}
+	requireChangedBy(t, st, id, "files", "a/one.go, b/two.go", "file-author")
+
+	removed, err := verb.IssueFileRemove(ctx, env, verb.IssueFileRemoveInput{Issue: ref, Paths: []string{"a/one.go"}})
+	if err != nil {
+		t.Fatalf("IssueFileRemove: %v", err)
+	}
+	if removed.Issue == nil || removed.Issue.ID != id {
+		t.Errorf("removed Issue = %+v, want issue %d", removed.Issue, id)
+	}
+	if len(removed.Files) != 1 || removed.Files[0] != "b/two.go" {
+		t.Errorf("removed Files = %v, want [b/two.go]", removed.Files)
+	}
+
+	listed, err := verb.IssueFileList(ctx, env, verb.IssueFileListInput{Issue: ref})
+	if err != nil {
+		t.Fatalf("IssueFileList: %v", err)
+	}
+	if listed.IssueID != id || len(listed.Files) != 1 || listed.Files[0] != "b/two.go" {
+		t.Errorf("IssueFileList = issue %d, files %v; want issue %d, [b/two.go]", listed.IssueID, listed.Files, id)
+	}
+}
+
+func TestIssueFileVerbRefusals(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	paths := []string{"a.go"}
+
+	_, err := verb.IssueFileAdd(ctx, env, verb.IssueFileAddInput{Issue: "DKT-9999", Paths: paths})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueFileRemove(ctx, env, verb.IssueFileRemoveInput{Issue: "DKT-9999", Paths: paths})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueFileList(ctx, env, verb.IssueFileListInput{Issue: "DKT-9999"})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+
+	_, err = verb.IssueFileAdd(ctx, env, verb.IssueFileAddInput{Issue: "not-an-id", Paths: paths})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueFileRemove(ctx, env, verb.IssueFileRemoveInput{Issue: "not-an-id", Paths: paths})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueFileList(ctx, env, verb.IssueFileListInput{Issue: "not-an-id"})
+	requireCode(t, err, output.ErrValidation)
+}
+
+// Attaching and detaching files write, so they register an anchored caller's
+// project and refuse an unanchored one before writing; listing is a read.
+func TestIssueFileVerbsDeclareTheirProjectPolicy(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	ref := model.FormatID(id)
+	paths := []string{"a.go"}
+
+	unanchored := projectEnv(st, "/work/scratch", false)
+	_, err := verb.IssueFileAdd(ctx, unanchored, verb.IssueFileAddInput{Issue: ref, Paths: paths})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueFileRemove(ctx, unanchored, verb.IssueFileRemoveInput{Issue: ref, Paths: paths})
+	requireCode(t, err, output.ErrValidation)
+	requireUnregistered(t, st, "/work/scratch")
+	if files, _ := st.GetIssueFiles(id); len(files) != 0 {
+		t.Errorf("issue has files %v after unanchored adds, want none", files)
+	}
+
+	if _, err := verb.IssueFileList(ctx, projectEnv(st, "/repos/reader", true),
+		verb.IssueFileListInput{Issue: ref}); err != nil {
+		t.Fatalf("IssueFileList: %v", err)
+	}
+	requireUnregistered(t, st, "/repos/reader")
+
+	added, err := verb.IssueFileAdd(ctx, projectEnv(st, "/repos/fresh", true),
+		verb.IssueFileAddInput{Issue: ref, Paths: paths})
+	if err != nil {
+		t.Fatalf("IssueFileAdd: %v", err)
+	}
+	if added.Registered == nil || added.Registered.Identity != "/repos/fresh" ||
+		added.Registered.Verb != "issue file add" {
+		t.Errorf("Registered = %+v, want /repos/fresh registered by issue file add", added.Registered)
+	}
+
+	removed, err := verb.IssueFileRemove(ctx, projectEnv(st, "/repos/other", true),
+		verb.IssueFileRemoveInput{Issue: ref, Paths: paths})
+	if err != nil {
+		t.Fatalf("IssueFileRemove: %v", err)
+	}
+	if removed.Registered == nil || removed.Registered.Identity != "/repos/other" ||
+		removed.Registered.Verb != "issue file remove" {
+		t.Errorf("Registered = %+v, want /repos/other registered by issue file remove", removed.Registered)
+	}
+}
+
+// blocks records that blocker blocks blocked.
+func blocks(t *testing.T, st store.Store, blocker, blocked int) {
+	t.Helper()
+	if _, err := st.CreateRelation(&model.Relation{
+		SourceIssueID: blocker, TargetIssueID: blocked, RelationType: model.RelationBlocks,
+	}); err != nil {
+		t.Fatalf("CreateRelation: %v", err)
+	}
+}
+
+// The graph walks a chain up -> focal -> down -> further in the requested
+// direction, stops at Depth, names every edge blocker-to-blocked, and is a
+// read that registers nothing.
+func TestIssueGraphWalksTheRequestedDirectionToTheDepth(t *testing.T) {
+	st := openStore(t)
+	up, focal, down, further := createIssue(t, st), createIssue(t, st), createIssue(t, st), createIssue(t, st)
+	blocks(t, st, up, focal)
+	blocks(t, st, focal, down)
+	blocks(t, st, down, further)
+	ctx := context.Background()
+	env := projectEnv(st, "/repos/reader", true)
+	ref := model.FormatID(focal)
+
+	for _, tc := range []struct {
+		direction string
+		depth     int
+		nodes     []int
+		edges     []verb.IssueGraphEdge
+	}{
+		{"both", 0, []int{up, focal, down, further}, []verb.IssueGraphEdge{
+			{From: focal, To: down, Type: "blocks"}, {From: down, To: further, Type: "blocks"},
+			{From: up, To: focal, Type: "blocks"}}},
+		{"down", 1, []int{focal, down}, []verb.IssueGraphEdge{{From: focal, To: down, Type: "blocks"}}},
+		{"up", 0, []int{up, focal}, []verb.IssueGraphEdge{{From: up, To: focal, Type: "blocks"}}},
+	} {
+		res, err := verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: ref, Direction: tc.direction, Depth: tc.depth})
+		if err != nil {
+			t.Fatalf("IssueGraph(%s, %d): %v", tc.direction, tc.depth, err)
+		}
+		if res.Issue == nil || res.Issue.ID != focal {
+			t.Errorf("IssueGraph(%s, %d) Issue = %+v, want issue %d", tc.direction, tc.depth, res.Issue, focal)
+		}
+		if len(res.Issues) != len(tc.nodes) {
+			t.Errorf("IssueGraph(%s, %d) reached %d issues, want %v", tc.direction, tc.depth, len(res.Issues), tc.nodes)
+		}
+		for _, n := range tc.nodes {
+			if res.Issues[n] == nil {
+				t.Errorf("IssueGraph(%s, %d) did not reach issue %d", tc.direction, tc.depth, n)
+			}
+		}
+		if fmt.Sprint(res.Edges) != fmt.Sprint(tc.edges) {
+			t.Errorf("IssueGraph(%s, %d) edges = %v, want %v", tc.direction, tc.depth, res.Edges, tc.edges)
+		}
+		if got := res.Forward[focal]; len(got) != 1 || got[0] != down {
+			t.Errorf("IssueGraph(%s, %d) Forward[focal] = %v, want [%d]", tc.direction, tc.depth, got, down)
+		}
+		if got := res.Backward[focal]; len(got) != 1 || got[0] != up {
+			t.Errorf("IssueGraph(%s, %d) Backward[focal] = %v, want [%d]", tc.direction, tc.depth, got, up)
+		}
+	}
+	requireUnregistered(t, st, "/repos/reader")
+}
+
+func TestIssueGraphRefusals(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	ref := model.FormatID(id)
+
+	_, err := verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: "DKT-9999", Direction: "sideways"})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: "not-an-id", Direction: "both"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: ref, Direction: "sideways"})
+	requireVerbError(t, err, output.ErrValidation, `invalid direction "sideways": must be one of [up, down, both]`)
+	_, err = verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: ref, Direction: "both", Depth: -1})
+	requireVerbError(t, err, output.ErrValidation, "depth must be non-negative")
+}
