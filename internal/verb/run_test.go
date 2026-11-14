@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1405,6 +1406,10 @@ func TestRunIssueAddRefusesTheWholeSetBeforeWriting(t *testing.T) {
 	if err != nil || otherProject == store.DefaultProjectID {
 		t.Fatalf("EnsureProjectCreated = %d, %v; want a project other than the default", otherProject, err)
 	}
+	// The foreign issue is named in its owner's prefix, not the caller's.
+	if err := st.SetProjectPrefix(otherProject, "OTH"); err != nil {
+		t.Fatalf("SetProjectPrefix: %v", err)
+	}
 	foreign, _, err := st.CreateIssueIdempotent(&model.Issue{
 		ProjectID: otherProject, Title: "elsewhere", Status: model.StatusTodo,
 		Priority: model.PriorityMedium, Kind: model.IssueKindTask,
@@ -1426,7 +1431,8 @@ func TestRunIssueAddRefusesTheWholeSetBeforeWriting(t *testing.T) {
 		{"issue ref", verb.RunIssueAddInput{Run: run, Issues: []string{fresh, "nope"}}, output.ErrValidation, `invalid issue ID "nope"`},
 		{"unknown issue", verb.RunIssueAddInput{Run: run, Issues: []string{fresh, "DKT-99"}}, output.ErrNotFound, "issue DKT-99 not found"},
 		{"other project", verb.RunIssueAddInput{Run: run, Issues: []string{fresh, model.FormatID(foreign)}},
-			output.ErrValidation, `belongs to project "other"`},
+			output.ErrValidation, fmt.Sprintf(`issue OTH-%d belongs to project "other" (id %d), run %s to project "default" (id %d)`,
+				foreign, otherProject, run, store.DefaultProjectID)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := verb.RunIssueAdd(ctx, env, tc.in)
