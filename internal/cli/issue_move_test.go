@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -44,6 +46,55 @@ func TestIssueMoveThroughRootReportsTheMove(t *testing.T) {
 	}
 }
 
+// migrationTarget registers /repos/elsewhere as a project apart from the
+// default one the test's issues live in. The first project a fresh store
+// registers takes over the default row, so a home project claims it first.
+func migrationTarget(t *testing.T, conn *sql.DB) int {
+	t.Helper()
+	_, err := db.EnsureProject(conn, "/repos/home", "home", model.NowMS())
+	testsupport.Must(t, err, "EnsureProject /repos/home: %v", err)
+	target, err := db.EnsureProject(conn, "/repos/elsewhere", "elsewhere", model.NowMS())
+	testsupport.Must(t, err, "EnsureProject /repos/elsewhere: %v", err)
+	if target == db.DefaultProjectID {
+		t.Fatalf("migration target is the default project %d", target)
+	}
+	return target
+}
+
+// TestIssueMoveThroughRootRefusesAnEmptyStatus:an empty status positional is
+// a status the caller gave, not an absent one, so it is refused as an invalid
+// status, and with --project as a status move combined with a migration.
+func TestIssueMoveThroughRootRefusesAnEmptyStatus(t *testing.T) {
+	conn := newVoteCreateStore(t)
+	id := createIssue(t, conn, "misfiled", model.StatusBacklog, model.PriorityNone)
+	ref := model.FormatID(id)
+	migrationTarget(t, conn)
+	home := issueState(t, conn, id).ProjectID
+
+	cases := []struct {
+		name string
+		args []string
+		text string
+	}{
+		{"alone", []string{"issue", "move", ref, ""}, `invalid status ""`},
+		{"with --project", []string{"issue", "move", ref, "", "--project", "/repos/elsewhere"}, "separate operations"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := runThroughRoot(t, moveCmd, c.args...)
+			if got := codeOf(t, err); got != output.ErrValidation {
+				t.Errorf("code = %s, want %s", got, output.ErrValidation)
+			}
+			if err == nil || !strings.Contains(err.Error(), c.text) {
+				t.Errorf("error = %v, want it to contain %q", err, c.text)
+			}
+		})
+	}
+	if got := issueState(t, conn, id); got.ProjectID != home || got.Status != model.StatusBacklog {
+		t.Errorf("issue = project %d status %q, want the refusals to leave it in place", got.ProjectID, got.Status)
+	}
+}
+
 // TestIssueMoveThroughRootMigratesTheSubtree: `--project` re-homes a root
 // issue and its sub-issues, and the JSON payload names the target project and
 // every migrated issue.
@@ -53,8 +104,7 @@ func TestIssueMoveThroughRootMigratesTheSubtree(t *testing.T) {
 	child := createIssue(t, conn, "misfiled child", model.StatusBacklog, model.PriorityNone)
 	testsupport.Must(t, db.UpdateIssue(conn, child, map[string]interface{}{"parent_id": root}, "test"),
 		"reparenting the child")
-	target, err := db.EnsureProject(conn, "/repos/elsewhere", "elsewhere", model.NowMS())
-	testsupport.Must(t, err, "EnsureProject: %v", err)
+	target := migrationTarget(t, conn)
 
 	out, err := runThroughRoot(t, moveCmd, "issue", "move", model.FormatID(root), "--project", "/repos/elsewhere", "--json")
 	testsupport.Must(t, err, "issue move --project: %v", err)

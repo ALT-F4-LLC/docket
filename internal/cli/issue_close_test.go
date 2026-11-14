@@ -86,7 +86,10 @@ func TestIssueCloseThroughRootPresentsTheTokenUnderALiveLease(t *testing.T) {
 	token, _, err := db.ClaimIssue(conn, id, "owner", 60_000, model.NowMS())
 	testsupport.Must(t, err, "ClaimIssue: %v", err)
 
+	// With DOCKET_TOKEN empty the CLI falls back to stdin, so stdin is an
+	// empty file: the test's own stdin may be a pipe that never reaches EOF.
 	t.Setenv(TokenEnvVar, "")
+	withStdin(t, "")
 	_, err = runThroughRoot(t, closeCmd, "issue", "close", ref)
 	if got := codeOf(t, err); got != output.ErrAuth {
 		t.Errorf("code = %s, want %s for a close without the holder's token", got, output.ErrAuth)

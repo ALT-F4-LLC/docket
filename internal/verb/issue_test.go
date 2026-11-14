@@ -801,6 +801,34 @@ func TestIssueCloseOfADoneIssueWritesNothing(t *testing.T) {
 	}
 }
 
+// requireStatusChangedBy asserts the activity log attributes issue id's move
+// to status to author.
+func requireStatusChangedBy(t *testing.T, st store.Store, id int, status model.Status, author string) {
+	t.Helper()
+	activity, err := st.GetActivity(id, 0)
+	if err != nil {
+		t.Fatalf("GetActivity: %v", err)
+	}
+	for _, a := range activity {
+		if a.FieldChanged == "status" && a.NewValue == string(status) && a.ChangedBy == author {
+			return
+		}
+	}
+	t.Errorf("activity %+v has no move to %s attributed to %q", activity, status, author)
+}
+
+func TestIssueCloseAttributesTheCloseToTheAuthor(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	env.Author = "closer-1"
+	id := createIssue(t, st)
+
+	if _, err := verb.IssueClose(context.Background(), env, verb.IssueCloseInput{Issue: model.FormatID(id)}); err != nil {
+		t.Fatalf("IssueClose: %v", err)
+	}
+	requireStatusChangedBy(t, st, id, model.StatusDone, "closer-1")
+}
+
 func TestIssueCloseAndReopenRefusals(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)
@@ -878,20 +906,11 @@ func TestIssueReopenReturnsAClosedIssueToBacklog(t *testing.T) {
 	if !res.Changed || res.Issue.Status != model.StatusBacklog {
 		t.Errorf("result = %+v, want the issue back in backlog", res)
 	}
-	activity, err := st.GetActivity(id, 0)
-	if err != nil {
-		t.Fatalf("GetActivity: %v", err)
-	}
-	attributed := false
-	for _, a := range activity {
-		if a.FieldChanged == "status" && a.NewValue == string(model.StatusBacklog) {
-			attributed = a.ChangedBy == "reopener-1"
-		}
-	}
-	if !attributed {
-		t.Errorf("activity %+v has no reopen attributed to env.Author", activity)
-	}
+	requireStatusChangedBy(t, st, id, model.StatusBacklog, "reopener-1")
 }
+
+// givenStatus is a status the caller supplied, empty included.
+func givenStatus(s string) *string { return &s }
 
 func TestIssueMoveChangesTheStatus(t *testing.T) {
 	ctx := context.Background()
@@ -899,7 +918,7 @@ func TestIssueMoveChangesTheStatus(t *testing.T) {
 	env := projectEnv(st, "", false)
 	id := createIssue(t, st)
 
-	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: model.FormatID(id), Status: "review"})
+	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: model.FormatID(id), Status: givenStatus("review")})
 	if err != nil {
 		t.Fatalf("IssueMove: %v", err)
 	}
@@ -915,7 +934,7 @@ func TestIssueMoveToTheSameStatusRecordsTheNoteOnly(t *testing.T) {
 	id := createIssue(t, st)
 
 	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{
-		Issue: model.FormatID(id), Status: string(model.StatusTodo), Note: "still todo",
+		Issue: model.FormatID(id), Status: givenStatus(string(model.StatusTodo)), Note: "still todo",
 	})
 	if err != nil {
 		t.Fatalf("IssueMove: %v", err)
@@ -932,6 +951,64 @@ func TestIssueMoveToTheSameStatusRecordsTheNoteOnly(t *testing.T) {
 	}
 }
 
+// TestIssueMoveToTheSameStatusHonorsTheVersion: a no-op move with a stale
+// IfVersion is a conflict, so the caller does not conclude its precondition
+// held, and its note is not recorded.
+func TestIssueMoveToTheSameStatusHonorsTheVersion(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+	stale := issueVersion(t, st, id) + 1
+
+	for _, note := range []string{"", "still todo"} {
+		t.Run(fmt.Sprintf("note %q", note), func(t *testing.T) {
+			_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{
+				Issue: model.FormatID(id), Status: givenStatus(string(model.StatusTodo)), IfVersion: &stale, Note: note,
+			})
+			requireVerbCode(t, err, output.ErrConflict, "version mismatch")
+		})
+	}
+	if comments, _ := st.ListComments(id); len(comments) != 0 {
+		t.Errorf("the refused no-op moves recorded %d comment(s)", len(comments))
+	}
+}
+
+func TestIssueMoveRefusesToMigrateARunHeldIssue(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+	if _, _, err := st.InsertRunWithContextIdempotent(
+		store.DefaultProjectID, "", 0, model.NowMS(), store.RunContext{}, "", id); err != nil {
+		t.Fatalf("InsertRunWithContextIdempotent: %v", err)
+	}
+	target := migrationTarget(t, st)
+
+	_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: model.FormatID(id), Project: "/repos/elsewhere"})
+	requireVerbCode(t, err, output.ErrConflict, "belongs to a run")
+	issue, err := st.GetIssue(id)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if issue.ProjectID == target {
+		t.Errorf("issue migrated to project %d, want the run-held issue left in place", target)
+	}
+}
+
+// migrationTarget registers /repos/elsewhere as a project apart from the
+// default one the test's issues live in. The first project a fresh store
+// registers takes over the default row, so a home project claims it first.
+func migrationTarget(t *testing.T, st store.Store) int {
+	t.Helper()
+	ensureProject(t, st, "/repos/home", "home")
+	target := ensureProject(t, st, "/repos/elsewhere", "elsewhere")
+	if target == store.DefaultProjectID {
+		t.Fatalf("migration target is the default project %d", target)
+	}
+	return target
+}
+
 func TestIssueMoveRefusals(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)
@@ -946,14 +1023,16 @@ func TestIssueMoveRefusals(t *testing.T) {
 		code output.ErrorCode
 		text string
 	}{
-		{"status and project", verb.IssueMoveInput{Issue: ref, Status: "done", Project: "elsewhere"}, output.ErrValidation, "separate operations"},
+		{"status and project", verb.IssueMoveInput{Issue: ref, Status: givenStatus("done"), Project: "elsewhere"}, output.ErrValidation, "separate operations"},
 		{"if-version on migration", verb.IssueMoveInput{Issue: ref, Project: "elsewhere", IfVersion: &stale}, output.ErrValidation, "--if-version applies to status moves only"},
 		{"note on migration", verb.IssueMoveInput{Issue: ref, Project: "elsewhere", Note: "x"}, output.ErrValidation, "--note applies to status moves only"},
+		{"empty status and project", verb.IssueMoveInput{Issue: ref, Status: givenStatus(""), Project: "elsewhere"}, output.ErrValidation, "separate operations"},
 		{"neither", verb.IssueMoveInput{Issue: ref}, output.ErrValidation, "usage: docket issue move"},
-		{"bad status", verb.IssueMoveInput{Issue: ref, Status: "nope"}, output.ErrValidation, ""},
-		{"unknown issue", verb.IssueMoveInput{Issue: "DKT-999", Status: "done"}, output.ErrNotFound, "issue DKT-999 not found"},
-		{"stale version", verb.IssueMoveInput{Issue: ref, Status: "done", IfVersion: &stale}, output.ErrConflict, "version mismatch"},
-		{"zero version on a no-op", verb.IssueMoveInput{Issue: ref, Status: "todo", IfVersion: &zero}, output.ErrValidation, "--if-version must be >= 1"},
+		{"bad status", verb.IssueMoveInput{Issue: ref, Status: givenStatus("nope")}, output.ErrValidation, `invalid status "nope"`},
+		{"empty status", verb.IssueMoveInput{Issue: ref, Status: givenStatus("")}, output.ErrValidation, `invalid status ""`},
+		{"unknown issue", verb.IssueMoveInput{Issue: "DKT-999", Status: givenStatus("done")}, output.ErrNotFound, "issue DKT-999 not found"},
+		{"stale version", verb.IssueMoveInput{Issue: ref, Status: givenStatus("done"), IfVersion: &stale}, output.ErrConflict, "version mismatch"},
+		{"zero version on a no-op", verb.IssueMoveInput{Issue: ref, Status: givenStatus("todo"), IfVersion: &zero}, output.ErrValidation, "--if-version must be >= 1"},
 		{"unknown project", verb.IssueMoveInput{Issue: ref, Project: "elsewhere"}, output.ErrNotFound, ""},
 		{"unknown issue on migration", verb.IssueMoveInput{Issue: "DKT-999", Project: "1"}, output.ErrNotFound, "issue DKT-999 not found"},
 	}
@@ -981,12 +1060,9 @@ func TestIssueMoveMigratesARootWithItsSubtree(t *testing.T) {
 	if _, err := verb.IssueEdit(ctx, env, verb.IssueEditInput{Issue: childRef, Parent: &rootRef}); err != nil {
 		t.Fatalf("reparenting: %v", err)
 	}
-	target, err := st.EnsureProject("/repos/elsewhere", "elsewhere", model.NowMS())
-	if err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
+	target := migrationTarget(t, st)
 
-	_, err = verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: childRef, Project: "/repos/elsewhere"})
+	_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: childRef, Project: "/repos/elsewhere"})
 	requireVerbCode(t, err, output.ErrValidation, "has a parent")
 
 	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: rootRef, Project: "/repos/elsewhere"})
@@ -1027,7 +1103,7 @@ func TestIssueStatusVerbsMayRegisterTheCallersProject(t *testing.T) {
 			return res.Registered, err
 		}},
 		{"issue move", model.StatusTodo, func(env verb.Env, ref string) (*engine.ProjectRegistration, error) {
-			res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: ref, Status: "review"})
+			res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: ref, Status: givenStatus("review")})
 			return res.Registered, err
 		}},
 	}

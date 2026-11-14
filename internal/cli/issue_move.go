@@ -42,7 +42,7 @@ root, not alone.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		in := verb.IssueMoveInput{Issue: args[0], IfVersion: ifVersionFlagValue(cmd)}
 		if len(args) == 2 {
-			in.Status = args[1]
+			in.Status = &args[1]
 		}
 		in.Project, _ = cmd.Flags().GetString("project")
 		in.Note, _ = cmd.Flags().GetString("note")

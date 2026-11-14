@@ -564,13 +564,14 @@ func IssueReopen(ctx context.Context, env Env, in IssueReopenInput) (IssueReopen
 	return res, err
 }
 
-// IssueMoveInput is an issue move request: a status move when Status is set,
-// a project migration when Project is set, never both. Note records the
-// reason for a status move as a comment in the move's own transaction.
-// IfVersion and Note apply to status moves only.
+// IssueMoveInput is an issue move request: a status move when Status is
+// given, a project migration when Project is set, never both. A given empty
+// Status is an invalid status, not an absent one. Note records the reason for
+// a status move as a comment in the move's own transaction. IfVersion and
+// Note apply to status moves only.
 type IssueMoveInput struct {
 	Issue     string
-	Status    string
+	Status    *string
 	Project   string
 	Note      string
 	IfVersion *int
@@ -614,7 +615,7 @@ func IssueMove(ctx context.Context, env Env, in IssueMoveInput) (IssueMoveResult
 
 	if in.Project != "" {
 		switch {
-		case in.Status != "":
+		case in.Status != nil:
 			return res, newError(errors.New(
 				"a status move and a project migration are separate operations; "+
 					"pass a status or --project, not both"), output.ErrValidation)
@@ -630,13 +631,13 @@ func IssueMove(ctx context.Context, env Env, in IssueMoveInput) (IssueMoveResult
 		res.Migration, err = migrateIssue(env, projectID, id, in.Project)
 		return res, err
 	}
-	if in.Status == "" {
+	if in.Status == nil {
 		return res, newError(errors.New(
 			"usage: docket issue move <id> <status>, or docket issue move <id> --project <target>"),
 			output.ErrValidation)
 	}
 
-	newStatus := model.Status(in.Status)
+	newStatus := model.Status(*in.Status)
 	if err := model.ValidateStatus(newStatus); err != nil {
 		return res, newError(err, output.ErrValidation)
 	}
@@ -648,7 +649,6 @@ func IssueMove(ctx context.Context, env Env, in IssueMoveInput) (IssueMoveResult
 		return res, err
 	}
 	res.From = issue.Status
-	label := "issue " + issueDisplayID(env, projectID, id)
 
 	if issue.Status == newStatus {
 		// A no-op move still honors IfVersion, so a caller cannot read a stale
@@ -656,7 +656,7 @@ func IssueMove(ctx context.Context, env Env, in IssueMoveInput) (IssueMoveResult
 		// as the comment-then-move pair it replaces would have.
 		if in.IfVersion != nil || in.Note != "" {
 			if err := env.Store.UpdateIssueCASNote(id, nil, env.Author, in.IfVersion, in.Note); err != nil {
-				if e := CASError(err, label); e != nil {
+				if e := CASError(err, "issue "+issueDisplayID(env, projectID, id)); e != nil {
 					return res, e
 				}
 				return res, newError(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
@@ -671,7 +671,7 @@ func IssueMove(ctx context.Context, env Env, in IssueMoveInput) (IssueMoveResult
 
 	fields := map[string]interface{}{"status": string(newStatus)}
 	if err := env.Store.UpdateIssueCASNote(id, fields, env.Author, in.IfVersion, in.Note); err != nil {
-		if e := CASError(err, label); e != nil {
+		if e := CASError(err, "issue "+issueDisplayID(env, projectID, id)); e != nil {
 			return res, e
 		}
 		return res, newError(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
