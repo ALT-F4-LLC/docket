@@ -947,8 +947,11 @@ func TestIssueMoveToTheSameStatusRecordsTheNoteOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListComments: %v", err)
 	}
-	if len(comments) != 1 || comments[0].Body != "still todo" || comments[0].Author != "mover-1" {
-		t.Errorf("comments = %+v, want the one note by mover-1", comments)
+	if len(comments) != 1 {
+		t.Fatalf("comments = %d, want the one note", len(comments))
+	}
+	if c := comments[0]; c.Body != "still todo" || c.Author != "mover-1" {
+		t.Errorf("note = %q by %q, want \"still todo\" by mover-1", c.Body, c.Author)
 	}
 }
 
