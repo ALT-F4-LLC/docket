@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"fmt"
-
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -28,9 +26,10 @@ type voteResultData struct {
 }
 
 var voteResultCmd = &cobra.Command{
-	Use:   "result <id>",
-	Short: "Show consensus result for a proposal",
-	Args:  cobra.ExactArgs(1),
+	Use:         "result <id>",
+	Short:       "Show consensus result for a proposal",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runVoteResult)
 	},
@@ -38,25 +37,11 @@ var voteResultCmd = &cobra.Command{
 
 // runVoteResult contains the query + render + output logic for vote result.
 func runVoteResult(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
-	proposalID, err := model.ParseProposalID(args[0])
+	res, err := verb.VoteResult(cmd.Context(), verbEnv(cmd), verb.VoteResultInput{Proposal: args[0]})
 	if err != nil {
-		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+		return verbErr(err)
 	}
-
-	proposal, err := st.GetProposal(proposalID)
-	if err != nil {
-		if e := notFound(err, fmt.Sprintf("proposal %s", args[0])); e != nil {
-			return e
-		}
-		return cmdErr(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
-	}
-
-	votes, err := st.GetProposalVotes(proposalID)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
-	}
+	proposal, votes := res.Proposal, res.Votes
 
 	votesCast := len(votes)
 	quorumReached := votesCast >= proposal.RequiredVoters

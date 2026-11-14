@@ -413,3 +413,151 @@ func VoteClose(ctx context.Context, env Env, in VoteCloseInput) (VoteCloseResult
 	result.ProposalID = proposalID
 	return result, nil
 }
+
+// VoteCommitInput names the approved proposal to commit and the outcome to
+// record on it.
+type VoteCommitInput struct {
+	Proposal         string
+	Outcome          string
+	EscalationReason string
+	// ConductorToken returns the run's conductor capability. It is called
+	// only when the proposal belongs to a vote step whose run is bound to
+	// one, so a transport whose token channel can block is never read for a
+	// commit that needs no token.
+	ConductorToken func() string
+}
+
+// VoteCommitResult is the committed proposal's id. Registered is as in
+// DocCreateResult.
+type VoteCommitResult struct {
+	ProposalID int
+	Registered *model.Project
+}
+
+// VoteCommit commits an approved proposal. A vote step's proposal is routed
+// by its run, so committing it out of band is a conductor's ruling: a bound
+// run requires its capability. It is a write, so it may register the
+// caller's anchored project.
+func VoteCommit(ctx context.Context, env Env, in VoteCommitInput) (VoteCommitResult, error) {
+	projectID, created, err := env.ResolveProject(ProjectMayRegister)
+	if err != nil {
+		return VoteCommitResult{}, err
+	}
+	var result VoteCommitResult
+	if result.Registered, err = registeredProject(env, projectID, created); err != nil {
+		return result, err
+	}
+
+	proposalID, err := ParseProposalRef(in.Proposal)
+	if err != nil {
+		return result, err
+	}
+
+	runID, stepOwned, err := engine.VoteProposalRunStore(env.Store, proposalID)
+	if err != nil {
+		return result, newError(err, output.ErrGeneral)
+	}
+	if stepOwned {
+		// The binding look is advisory: AuthorizeConductorStore re-reads the
+		// capability and refuses an empty token on a bound run.
+		var token string
+		if in.ConductorToken != nil {
+			if hash, err := env.Store.RunConductorHash(runID); err == nil && hash != "" {
+				token = in.ConductorToken()
+			}
+		}
+		if err := engine.AuthorizeConductorStore(env.Store, runID, token, "vote commit"); err != nil {
+			return result, engineError(err)
+		}
+	}
+
+	if err := env.Store.CommitProposal(proposalID, in.Outcome, in.EscalationReason); err != nil {
+		if e := notFound(err, "proposal "+model.FormatProposalID(proposalID)); e != nil {
+			return result, e
+		}
+		if errors.Is(err, store.ErrConflict) {
+			return result, newError(err, output.ErrConflict)
+		}
+		return result, newError(fmt.Errorf("committing proposal: %w", err), output.ErrGeneral)
+	}
+	result.ProposalID = proposalID
+	return result, nil
+}
+
+// VoteResultInput names the proposal whose tally to report.
+type VoteResultInput struct {
+	Proposal string
+}
+
+// VoteResultResult is the proposal and every vote cast on it, in full: a
+// transport projects a sealed open proposal's votes before reporting them.
+type VoteResultResult struct {
+	Proposal *model.Proposal
+	Votes    []*model.Vote
+}
+
+// VoteResult reads a proposal's tally. It is a read, so it never registers a
+// project.
+func VoteResult(ctx context.Context, env Env, in VoteResultInput) (VoteResultResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return VoteResultResult{}, err
+	}
+	proposal, votes, err := proposalWithVotes(env, in.Proposal)
+	return VoteResultResult{Proposal: proposal, Votes: votes}, err
+}
+
+// VoteShowInput names the proposal to show.
+type VoteShowInput struct {
+	Proposal string
+}
+
+// VoteShowResult is the proposal, its votes in full as on VoteResultResult,
+// and the ids of the issues and docs linked to it.
+type VoteShowResult struct {
+	Proposal     *model.Proposal
+	Votes        []*model.Vote
+	LinkedIssues []int
+	LinkedDocs   []int
+}
+
+// VoteShow reads a proposal with its votes and links. It is a read, so it
+// never registers a project.
+func VoteShow(ctx context.Context, env Env, in VoteShowInput) (VoteShowResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return VoteShowResult{}, err
+	}
+	proposal, votes, err := proposalWithVotes(env, in.Proposal)
+	if err != nil {
+		return VoteShowResult{}, err
+	}
+	result := VoteShowResult{Proposal: proposal, Votes: votes}
+
+	if result.LinkedIssues, err = env.Store.GetProposalIssues(proposal.ID); err != nil {
+		return VoteShowResult{}, newError(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
+	}
+	if result.LinkedDocs, err = env.Store.GetProposalDocs(proposal.ID); err != nil {
+		return VoteShowResult{}, newError(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	}
+	return result, nil
+}
+
+// proposalWithVotes reads the proposal ref names and its votes. A missing
+// proposal is reported by ref as the caller gave it.
+func proposalWithVotes(env Env, ref string) (*model.Proposal, []*model.Vote, error) {
+	id, err := ParseProposalRef(ref)
+	if err != nil {
+		return nil, nil, err
+	}
+	proposal, err := env.Store.GetProposal(id)
+	if err != nil {
+		if e := notFound(err, "proposal "+ref); e != nil {
+			return nil, nil, e
+		}
+		return nil, nil, newError(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
+	}
+	votes, err := env.Store.GetProposalVotes(id)
+	if err != nil {
+		return nil, nil, newError(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
+	}
+	return proposal, votes, nil
+}

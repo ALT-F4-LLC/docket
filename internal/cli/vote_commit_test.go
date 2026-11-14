@@ -6,10 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
 // runVoteCommit drives the registered `vote commit` RunE on a fresh command
@@ -19,6 +21,41 @@ func runVoteCommit(conn *sql.DB, proposalID int) error {
 	cmd.Flags().String("outcome", "Committed", "")
 	cmd.Flags().String("escalation-reason", "", "")
 	return voteCommitCmd.RunE(cmd, []string{model.FormatProposalID(proposalID)})
+}
+
+// TestVoteCommitResultShowOwnTheirProject: vote commit, vote result and vote
+// show resolve their project through internal/verb, so the root hook must
+// skip its eager resolution for them.
+func TestVoteCommitResultShowOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{voteCommitCmd, voteResultCmd, voteShowCmd} {
+		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
+			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
+		}
+	}
+}
+
+// TestVoteCommitRecordsTheProjectItRegisters keeps the project-registered
+// event the root hook wrote before vote commit resolved its own project.
+func TestVoteCommitRecordsTheProjectItRegisters(t *testing.T) {
+	t.Setenv(TokenEnvVar, "")
+	withStdin(t, "")
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "registration", Criticality: model.CriticalityLow,
+		Status: model.ProposalStatusApproved, RequiredVoters: 1, Threshold: 0.5,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	_, err = runLeaseCommandOutput(t, conn, &config.Config{Identity: "/repos/commit", Anchored: true},
+		voteCommitCmd, model.FormatProposalID(proposalID))
+	testsupport.Must(t, err, "vote commit: %v", err)
+
+	got := registrationEvents(t, conn)
+	if len(got) != 1 || got["/repos/commit"] != "vote commit" {
+		t.Errorf("registration events = %v, want /repos/commit attributed to vote commit", got)
+	}
 }
 
 // approvedVoteStepProposal opens a vote step's proposal on a fresh run and

@@ -2,13 +2,12 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -109,9 +108,10 @@ func (r voteShowResult) MarshalJSON() ([]byte, error) {
 }
 
 var voteShowCmd = &cobra.Command{
-	Use:   "show [id]",
-	Short: "Show proposal details",
-	Args:  cobra.ExactArgs(1),
+	Use:         "show [id]",
+	Short:       "Show proposal details",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runVoteShow)
 	},
@@ -119,46 +119,21 @@ var voteShowCmd = &cobra.Command{
 
 // runVoteShow contains the query + render + output logic for vote show.
 func runVoteShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-
-	id, err := model.ParseProposalID(args[0])
+	res, err := verb.VoteShow(cmd.Context(), verbEnv(cmd), verb.VoteShowInput{Proposal: args[0]})
 	if err != nil {
-		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-	}
-
-	proposal, err := st.GetProposal(id)
-	if err != nil {
-		if e := notFound(err, fmt.Sprintf("proposal %s", args[0])); e != nil {
-			return e
-		}
-		return cmdErr(fmt.Errorf("fetching proposal: %w", err), output.ErrGeneral)
-	}
-
-	votes, err := st.GetProposalVotes(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching votes: %w", err), output.ErrGeneral)
-	}
-
-	linkedIssues, err := st.GetProposalIssues(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching linked issues: %w", err), output.ErrGeneral)
-	}
-
-	linkedDocs, err := st.GetProposalDocs(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
 
 	result := voteShowResult{
-		Proposal:     proposal,
-		Votes:        votes,
-		LinkedIssues: linkedIssues,
-		LinkedDocs:   linkedDocs,
+		Proposal:     res.Proposal,
+		Votes:        res.Votes,
+		LinkedIssues: res.LinkedIssues,
+		LinkedDocs:   res.LinkedDocs,
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = render.RenderProposalDetail(proposal, votes, linkedIssues, linkedDocs)
+		message = render.RenderProposalDetail(res.Proposal, res.Votes, res.LinkedIssues, res.LinkedDocs)
 	}
 	w.Success(result, message)
 

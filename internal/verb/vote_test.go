@@ -2,6 +2,7 @@ package verb_test
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -559,5 +560,258 @@ func TestVoteCastRoutingFailureReturnsNoCast(t *testing.T) {
 	}
 	if gate, err := st.GetStep(steps["gate@0"]); err != nil || gate.Status == store.StepDone {
 		t.Errorf("gate@0 = (%+v, %v), want it left unrouted", gate, err)
+	}
+}
+
+// approvedVoteStepProposal decides a vote step's proposal with the seat's
+// approving ballot and binds its run to token's conductor capability, or
+// leaves the run unbound when token is empty.
+func approvedVoteStepProposal(t *testing.T, st store.Store, token string) string {
+	t.Helper()
+	ref, steps := voteStepProposal(t, st)
+	if _, err := verb.VoteCast(context.Background(), projectEnv(st, "", false), castInput(ref, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+	gate, err := st.GetStep(steps["gate@0"])
+	if err != nil {
+		t.Fatalf("GetStep(gate@0): %v", err)
+	}
+	bindConductor(t, st, model.FormatRunID(gate.RunID), token)
+	return ref
+}
+
+func requireProposalStatus(t *testing.T, st store.Store, ref string, want model.ProposalStatus) {
+	t.Helper()
+	id, err := model.ParseProposalID(ref)
+	if err != nil {
+		t.Fatalf("ParseProposalID: %v", err)
+	}
+	p, err := st.GetProposal(id)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.Status != want {
+		t.Errorf("proposal %s is %s, want %s", ref, p.Status, want)
+	}
+}
+
+func TestVoteCommitCommitsAnApprovedProposal(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 1, "")
+	env := projectEnv(st, "", false)
+	if _, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+
+	res, err := verb.VoteCommit(context.Background(), env, verb.VoteCommitInput{
+		Proposal: ref, Outcome: "shipped", EscalationReason: "out of hours",
+	})
+	if err != nil {
+		t.Fatalf("VoteCommit: %v", err)
+	}
+	p, err := st.GetProposal(res.ProposalID)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if model.FormatProposalID(p.ID) != ref || p.Status != model.ProposalStatusCommitted ||
+		p.FinalOutcome != "shipped" || p.EscalationReason == nil || *p.EscalationReason != "out of hours" {
+		t.Errorf("proposal after commit = %+v, want %s committed with the outcome and reason", p, ref)
+	}
+}
+
+func TestVoteCommitRefusals(t *testing.T) {
+	cases := []struct {
+		name     string
+		proposal string
+		code     output.ErrorCode
+		want     string
+	}{
+		{"malformed proposal id", "nope", output.ErrValidation, "invalid proposal ID"},
+		{"no such proposal", "DKT-V99", output.ErrNotFound, "proposal DKT-V99 not found"},
+		{"an open proposal", "DKT-V1", output.ErrConflict, "must be approved"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			openProposal(t, st, 2, "")
+			_, err := verb.VoteCommit(context.Background(), projectEnv(st, "", false),
+				verb.VoteCommitInput{Proposal: tc.proposal, Outcome: "o"})
+			requireVerbCode(t, err, tc.code, tc.want)
+			requireProposalStatus(t, st, "DKT-V1", model.ProposalStatusOpen)
+		})
+	}
+}
+
+func TestVoteCommitUnanchoredCallerIsRefusedBeforeTheCommit(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 1, "")
+	if _, err := verb.VoteCast(context.Background(), projectEnv(st, "", false), castInput(ref, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+	_, err := verb.VoteCommit(context.Background(), projectEnv(st, "/work/scratch", false),
+		verb.VoteCommitInput{Proposal: ref, Outcome: "o"})
+	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project")
+	requireUnregistered(t, st, "/work/scratch")
+	requireProposalStatus(t, st, ref, model.ProposalStatusApproved)
+}
+
+// TestVoteCommitVoteStepProposalNeedsTheRunsCapability: a bound run's
+// proposal commits only under the run's own capability, and the token source
+// is never read for an unbound run.
+func TestVoteCommitVoteStepProposalNeedsTheRunsCapability(t *testing.T) {
+	capability, _, err := model.MintToken()
+	if err != nil {
+		t.Fatalf("MintToken: %v", err)
+	}
+	wrong, _, err := model.MintToken()
+	if err != nil {
+		t.Fatalf("MintToken: %v", err)
+	}
+	cases := []struct {
+		name      string
+		bound     bool
+		presented string
+		code      output.ErrorCode
+		want      string
+	}{
+		{name: "no token", bound: true, code: output.ErrValidation, want: "requires it"},
+		{name: "a token that is not the capability", bound: true, presented: wrong, code: output.ErrAuth, want: "is not"},
+		{name: "the run's capability", bound: true, presented: capability},
+		{name: "an unbound run", presented: wrong},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			bound := ""
+			if tc.bound {
+				bound = capability
+			}
+			ref := approvedVoteStepProposal(t, st, bound)
+			read := 0
+			_, err := verb.VoteCommit(context.Background(), projectEnv(st, "", false), verb.VoteCommitInput{
+				Proposal: ref, Outcome: "o",
+				ConductorToken: func() string { read++; return tc.presented },
+			})
+			if tc.code != "" {
+				requireVerbCode(t, err, tc.code, tc.want)
+				if tc.presented != "" && strings.Contains(err.Error(), tc.presented) {
+					t.Errorf("the refusal echoes the presented token: %v", err)
+				}
+				requireProposalStatus(t, st, ref, model.ProposalStatusApproved)
+				return
+			}
+			if err != nil {
+				t.Fatalf("VoteCommit: %v", err)
+			}
+			requireProposalStatus(t, st, ref, model.ProposalStatusCommitted)
+			if !tc.bound && read != 0 {
+				t.Errorf("the token source was read %d times for an unbound run", read)
+			}
+		})
+	}
+}
+
+func TestVoteResultReportsTheProposalAndItsVotes(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	env := projectEnv(st, "", false)
+	if _, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+
+	res, err := verb.VoteResult(context.Background(), env, verb.VoteResultInput{Proposal: ref})
+	if err != nil {
+		t.Fatalf("VoteResult: %v", err)
+	}
+	if res.Proposal == nil || model.FormatProposalID(res.Proposal.ID) != ref || res.Proposal.RequiredVoters != 2 {
+		t.Errorf("Proposal = %+v, want %s needing 2 voters", res.Proposal, ref)
+	}
+	if len(res.Votes) != 1 || res.Votes[0].VoterName != "seat" {
+		t.Errorf("Votes = %+v, want the seat's one ballot", res.Votes)
+	}
+}
+
+func TestVoteShowReportsTheProposalVotesAndLinks(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	env := projectEnv(st, "", false)
+	if _, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat")); err != nil {
+		t.Fatalf("VoteCast: %v", err)
+	}
+	pid, err := model.ParseProposalID(ref)
+	if err != nil {
+		t.Fatalf("ParseProposalID: %v", err)
+	}
+	issue := createIssue(t, st)
+	if err := st.LinkProposalIssue(pid, issue); err != nil {
+		t.Fatalf("LinkProposalIssue: %v", err)
+	}
+
+	res, err := verb.VoteShow(context.Background(), env, verb.VoteShowInput{Proposal: ref})
+	if err != nil {
+		t.Fatalf("VoteShow: %v", err)
+	}
+	if res.Proposal == nil || res.Proposal.ID != pid {
+		t.Errorf("Proposal = %+v, want %s", res.Proposal, ref)
+	}
+	if len(res.Votes) != 1 || res.Votes[0].VoterName != "seat" {
+		t.Errorf("Votes = %+v, want the seat's one ballot", res.Votes)
+	}
+	if !reflect.DeepEqual(res.LinkedIssues, []int{issue}) {
+		t.Errorf("LinkedIssues = %v, want [%d]", res.LinkedIssues, issue)
+	}
+	if len(res.LinkedDocs) != 0 {
+		t.Errorf("LinkedDocs = %v, want none", res.LinkedDocs)
+	}
+}
+
+// TestVoteReadsRefuseByTheGivenReference: both reads refuse a malformed id
+// and name a missing proposal by the reference the caller gave.
+func TestVoteReadsRefuseByTheGivenReference(t *testing.T) {
+	reads := map[string]func(env verb.Env, ref string) error{
+		"VoteResult": func(env verb.Env, ref string) error {
+			_, err := verb.VoteResult(context.Background(), env, verb.VoteResultInput{Proposal: ref})
+			return err
+		},
+		"VoteShow": func(env verb.Env, ref string) error {
+			_, err := verb.VoteShow(context.Background(), env, verb.VoteShowInput{Proposal: ref})
+			return err
+		},
+	}
+	for name, read := range reads {
+		t.Run(name, func(t *testing.T) {
+			env := projectEnv(openStore(t), "", false)
+			requireVerbCode(t, read(env, "nope"), output.ErrValidation, "invalid proposal ID")
+			requireVerbCode(t, read(env, "99"), output.ErrNotFound, "proposal 99 not found")
+		})
+	}
+}
+
+// TestVoteReadsNeverRegisterAProject: the reads resolve read-only, so an
+// anchored caller's unregistered identity is not registered and an
+// unanchored one is not refused.
+func TestVoteReadsNeverRegisterAProject(t *testing.T) {
+	reads := map[string]func(env verb.Env, ref string) error{
+		"VoteResult": func(env verb.Env, ref string) error {
+			_, err := verb.VoteResult(context.Background(), env, verb.VoteResultInput{Proposal: ref})
+			return err
+		},
+		"VoteShow": func(env verb.Env, ref string) error {
+			_, err := verb.VoteShow(context.Background(), env, verb.VoteShowInput{Proposal: ref})
+			return err
+		},
+	}
+	for name, read := range reads {
+		for _, anchored := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s anchored=%v", name, anchored), func(t *testing.T) {
+				st := openStore(t)
+				ensureProject(t, st, "/repos/first", "first")
+				ref := openProposal(t, st, 2, "")
+				if err := read(projectEnv(st, "/repos/vote", anchored), ref); err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				requireUnregistered(t, st, "/repos/vote")
+			})
+		}
 	}
 }
