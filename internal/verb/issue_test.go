@@ -1404,6 +1404,24 @@ func TestIssueShowStopsAtTheFirstMissingIssue(t *testing.T) {
 	}
 }
 
+// A docs read that fails after the issue read reports the linked docs, the
+// text issue show has always printed for it.
+func TestIssueShowNamesAFailedLinkedDocsRead(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	conn, err := store.SQLDB(st)
+	if err != nil {
+		t.Fatalf("SQLDB: %v", err)
+	}
+	if _, err := conn.Exec(`DROP TABLE doc_issue_links`); err != nil {
+		t.Fatalf("dropping doc_issue_links: %v", err)
+	}
+
+	_, err = verb.IssueShow(context.Background(), projectEnv(st, "", false),
+		verb.IssueShowInput{Issues: []string{model.FormatID(id)}})
+	requireVerbCode(t, err, output.ErrGeneral, "fetching linked docs: ")
+}
+
 // IssueShow is a read: an anchored identity no project holds still shows an
 // issue by id, and is not registered.
 func TestIssueShowRegistersNothing(t *testing.T) {

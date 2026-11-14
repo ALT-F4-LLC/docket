@@ -840,7 +840,7 @@ func issueDetail(env Env, ref string) (IssueDetail, error) {
 	if err != nil {
 		return IssueDetail{}, issueFetchError(err, "issue "+ref)
 	}
-	if err := hydrateIssue(env, issue); err != nil {
+	if err := hydrateIssueNamingDocs(env, issue, "linked docs"); err != nil {
 		return IssueDetail{}, err
 	}
 
@@ -1179,6 +1179,12 @@ func issueFetchError(err error, label string) error {
 // hydrateIssue fills an issue's labels, files and docs from their join
 // tables, which GetIssue does not read, so a result echoes what is stored.
 func hydrateIssue(env Env, issue *model.Issue) error {
+	return hydrateIssueNamingDocs(env, issue, "docs")
+}
+
+// hydrateIssueNamingDocs is hydrateIssue with the noun a failed docs read
+// reports: issue show has always called them "linked docs".
+func hydrateIssueNamingDocs(env Env, issue *model.Issue, docsNoun string) error {
 	labels, err := env.Store.GetIssueLabels(issue.ID)
 	if err != nil {
 		return newError(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
@@ -1192,7 +1198,7 @@ func hydrateIssue(env Env, issue *model.Issue) error {
 	issue.Files = files
 
 	if err := env.Store.HydrateDocs([]*model.Issue{issue}); err != nil {
-		return newError(fmt.Errorf("fetching docs: %w", err), output.ErrGeneral)
+		return newError(fmt.Errorf("fetching %s: %w", docsNoun, err), output.ErrGeneral)
 	}
 	return nil
 }
