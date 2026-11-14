@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -46,21 +45,6 @@ func TestIssueMoveThroughRootReportsTheMove(t *testing.T) {
 	}
 }
 
-// migrationTarget registers /repos/elsewhere as a project apart from the
-// default one the test's issues live in. The first project a fresh store
-// registers takes over the default row, so a home project claims it first.
-func migrationTarget(t *testing.T, conn *sql.DB) int {
-	t.Helper()
-	_, err := db.EnsureProject(conn, "/repos/home", "home", model.NowMS())
-	testsupport.Must(t, err, "EnsureProject /repos/home: %v", err)
-	target, err := db.EnsureProject(conn, "/repos/elsewhere", "elsewhere", model.NowMS())
-	testsupport.Must(t, err, "EnsureProject /repos/elsewhere: %v", err)
-	if target == db.DefaultProjectID {
-		t.Fatalf("migration target is the default project %d", target)
-	}
-	return target
-}
-
 // TestIssueMoveThroughRootRefusesAnEmptyStatus:an empty status positional is
 // a status the caller gave, not an absent one, so it is refused as an invalid
 // status, and with --project as a status move combined with a migration.
@@ -68,7 +52,7 @@ func TestIssueMoveThroughRootRefusesAnEmptyStatus(t *testing.T) {
 	conn := newVoteCreateStore(t)
 	id := createIssue(t, conn, "misfiled", model.StatusBacklog, model.PriorityNone)
 	ref := model.FormatID(id)
-	migrationTarget(t, conn)
+	otherProject(t, conn)
 	home := issueState(t, conn, id).ProjectID
 
 	cases := []struct {
@@ -77,7 +61,7 @@ func TestIssueMoveThroughRootRefusesAnEmptyStatus(t *testing.T) {
 		text string
 	}{
 		{"alone", []string{"issue", "move", ref, ""}, `invalid status ""`},
-		{"with --project", []string{"issue", "move", ref, "", "--project", "/repos/elsewhere"}, "separate operations"},
+		{"with --project", []string{"issue", "move", ref, "", "--project", "/repo/other"}, "separate operations"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -104,9 +88,9 @@ func TestIssueMoveThroughRootMigratesTheSubtree(t *testing.T) {
 	child := createIssue(t, conn, "misfiled child", model.StatusBacklog, model.PriorityNone)
 	testsupport.Must(t, db.UpdateIssue(conn, child, map[string]interface{}{"parent_id": root}, "test"),
 		"reparenting the child")
-	target := migrationTarget(t, conn)
+	target := otherProject(t, conn)
 
-	out, err := runThroughRoot(t, moveCmd, "issue", "move", model.FormatID(root), "--project", "/repos/elsewhere", "--json")
+	out, err := runThroughRoot(t, moveCmd, "issue", "move", model.FormatID(root), "--project", "/repo/other", "--json")
 	testsupport.Must(t, err, "issue move --project: %v", err)
 
 	var env struct {

@@ -801,20 +801,20 @@ func TestIssueCloseOfADoneIssueWritesNothing(t *testing.T) {
 	}
 }
 
-// requireStatusChangedBy asserts the activity log attributes issue id's move
-// to status to author.
-func requireStatusChangedBy(t *testing.T, st store.Store, id int, status model.Status, author string) {
+// requireChangedBy asserts the activity log attributes a change of issue id's
+// field to value to author.
+func requireChangedBy(t *testing.T, st store.Store, id int, field, value, author string) {
 	t.Helper()
 	activity, err := st.GetActivity(id, 0)
 	if err != nil {
 		t.Fatalf("GetActivity: %v", err)
 	}
 	for _, a := range activity {
-		if a.FieldChanged == "status" && a.NewValue == string(status) && a.ChangedBy == author {
+		if a.FieldChanged == field && a.NewValue == value && a.ChangedBy == author {
 			return
 		}
 	}
-	t.Errorf("activity %+v has no move to %s attributed to %q", activity, status, author)
+	t.Errorf("activity %+v has no change of %s to %q attributed to %q", activity, field, value, author)
 }
 
 func TestIssueCloseAttributesTheCloseToTheAuthor(t *testing.T) {
@@ -826,7 +826,7 @@ func TestIssueCloseAttributesTheCloseToTheAuthor(t *testing.T) {
 	if _, err := verb.IssueClose(context.Background(), env, verb.IssueCloseInput{Issue: model.FormatID(id)}); err != nil {
 		t.Fatalf("IssueClose: %v", err)
 	}
-	requireStatusChangedBy(t, st, id, model.StatusDone, "closer-1")
+	requireChangedBy(t, st, id, "status", string(model.StatusDone), "closer-1")
 }
 
 func TestIssueCloseAndReopenRefusals(t *testing.T) {
@@ -906,7 +906,7 @@ func TestIssueReopenReturnsAClosedIssueToBacklog(t *testing.T) {
 	if !res.Changed || res.Issue.Status != model.StatusBacklog {
 		t.Errorf("result = %+v, want the issue back in backlog", res)
 	}
-	requireStatusChangedBy(t, st, id, model.StatusBacklog, "reopener-1")
+	requireChangedBy(t, st, id, "status", string(model.StatusBacklog), "reopener-1")
 }
 
 // givenStatus is a status the caller supplied, empty included.
@@ -931,6 +931,7 @@ func TestIssueMoveToTheSameStatusRecordsTheNoteOnly(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)
 	env := projectEnv(st, "", false)
+	env.Author = "mover-1"
 	id := createIssue(t, st)
 
 	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{
@@ -946,8 +947,8 @@ func TestIssueMoveToTheSameStatusRecordsTheNoteOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListComments: %v", err)
 	}
-	if len(comments) != 1 || comments[0].Body != "still todo" {
-		t.Errorf("comments = %d, want the one note", len(comments))
+	if len(comments) != 1 || comments[0].Body != "still todo" || comments[0].Author != "mover-1" {
+		t.Errorf("comments = %+v, want the one note by mover-1", comments)
 	}
 }
 
@@ -969,7 +970,11 @@ func TestIssueMoveToTheSameStatusHonorsTheVersion(t *testing.T) {
 			requireVerbCode(t, err, output.ErrConflict, "version mismatch")
 		})
 	}
-	if comments, _ := st.ListComments(id); len(comments) != 0 {
+	comments, err := st.ListComments(id)
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	if len(comments) != 0 {
 		t.Errorf("the refused no-op moves recorded %d comment(s)", len(comments))
 	}
 }
@@ -983,9 +988,9 @@ func TestIssueMoveRefusesToMigrateARunHeldIssue(t *testing.T) {
 		store.DefaultProjectID, "", 0, model.NowMS(), store.RunContext{}, "", id); err != nil {
 		t.Fatalf("InsertRunWithContextIdempotent: %v", err)
 	}
-	target := migrationTarget(t, st)
+	target := callerProject(t, st)
 
-	_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: model.FormatID(id), Project: "/repos/elsewhere"})
+	_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: model.FormatID(id), Project: "/repos/caller"})
 	requireVerbCode(t, err, output.ErrConflict, "belongs to a run")
 	issue, err := st.GetIssue(id)
 	if err != nil {
@@ -994,19 +999,6 @@ func TestIssueMoveRefusesToMigrateARunHeldIssue(t *testing.T) {
 	if issue.ProjectID == target {
 		t.Errorf("issue migrated to project %d, want the run-held issue left in place", target)
 	}
-}
-
-// migrationTarget registers /repos/elsewhere as a project apart from the
-// default one the test's issues live in. The first project a fresh store
-// registers takes over the default row, so a home project claims it first.
-func migrationTarget(t *testing.T, st store.Store) int {
-	t.Helper()
-	ensureProject(t, st, "/repos/home", "home")
-	target := ensureProject(t, st, "/repos/elsewhere", "elsewhere")
-	if target == store.DefaultProjectID {
-		t.Fatalf("migration target is the default project %d", target)
-	}
-	return target
 }
 
 func TestIssueMoveRefusals(t *testing.T) {
@@ -1045,7 +1037,11 @@ func TestIssueMoveRefusals(t *testing.T) {
 	if got := issueStatus(t, st, id); got != model.StatusTodo {
 		t.Errorf("status = %q, want the refused moves to leave todo", got)
 	}
-	if comments, _ := st.ListComments(id); len(comments) != 0 {
+	comments, err := st.ListComments(id)
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	if len(comments) != 0 {
 		t.Errorf("the refused moves recorded %d comment(s)", len(comments))
 	}
 }
@@ -1060,12 +1056,13 @@ func TestIssueMoveMigratesARootWithItsSubtree(t *testing.T) {
 	if _, err := verb.IssueEdit(ctx, env, verb.IssueEditInput{Issue: childRef, Parent: &rootRef}); err != nil {
 		t.Fatalf("reparenting: %v", err)
 	}
-	target := migrationTarget(t, st)
+	target := callerProject(t, st)
+	env.Author = "migrator-1"
 
-	_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: childRef, Project: "/repos/elsewhere"})
+	_, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: childRef, Project: "/repos/caller"})
 	requireVerbCode(t, err, output.ErrValidation, "has a parent")
 
-	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: rootRef, Project: "/repos/elsewhere"})
+	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: rootRef, Project: "/repos/caller"})
 	if err != nil {
 		t.Fatalf("IssueMove --project: %v", err)
 	}
@@ -1081,6 +1078,7 @@ func TestIssueMoveMigratesARootWithItsSubtree(t *testing.T) {
 		if issue.ProjectID != target {
 			t.Errorf("issue %d project = %d, want %d", id, issue.ProjectID, target)
 		}
+		requireChangedBy(t, st, id, "project", "/repos/caller", "migrator-1")
 	}
 }
 
