@@ -539,7 +539,7 @@ type RunIssueAddResult struct {
 // decision in progress and a terminal run's issue set is history, so both
 // refuse. Its project policy is RunPause's.
 func RunIssueAdd(ctx context.Context, env Env, in RunIssueAddInput) (RunIssueAddResult, error) {
-	_, registered, err := resolveRegisteringProject(env, "run issue add")
+	projectID, registered, err := resolveRegisteringProject(env, "run issue add")
 	res := RunIssueAddResult{Registered: registered}
 	if err != nil {
 		return res, err
@@ -563,20 +563,21 @@ func RunIssueAdd(ctx context.Context, env Env, in RunIssueAddInput) (RunIssueAdd
 		issueProject, err := env.Store.IssueProjectID(id)
 		if errors.Is(err, store.ErrNotFound) {
 			return res, newError(
-				fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
+				fmt.Errorf("issue %s not found", issueDisplayID(env, projectID, id)), output.ErrNotFound)
 		}
 		if err != nil {
-			return res, newError(fmt.Errorf("checking issue %s: %w", model.FormatID(id), err),
+			return res, newError(fmt.Errorf("checking issue %s: %w", issueDisplayID(env, projectID, id), err),
 				output.ErrGeneral)
 		}
 		if issueProject != run.ProjectID {
+			display := issueDisplayID(env, projectID, id)
 			return res, newError(fmt.Errorf(
 				"issue %s belongs to %s, run %s to %s — a run's issues live in the "+
 					"run's own project; migrate the issue first with `docket issue "+
 					"move %s --project <target>`, or start the run from the issue's "+
 					"own repository",
-				model.FormatID(id), projectLabel(env.Store, issueProject), run.Ref(),
-				projectLabel(env.Store, run.ProjectID), model.FormatID(id)),
+				display, projectLabel(env.Store, issueProject), run.Ref(),
+				projectLabel(env.Store, run.ProjectID), display),
 				output.ErrValidation)
 		}
 	}
@@ -615,7 +616,7 @@ type RunIssueRemoveResult struct {
 // binds the set, so a run past planning refuses: removing would strand steps
 // that already exist. Its project policy is RunPause's.
 func RunIssueRemove(ctx context.Context, env Env, in RunIssueRemoveInput) (RunIssueRemoveResult, error) {
-	_, registered, err := resolveRegisteringProject(env, "run issue remove")
+	projectID, registered, err := resolveRegisteringProject(env, "run issue remove")
 	res := RunIssueRemoveResult{Registered: registered}
 	if err != nil {
 		return res, err
@@ -641,7 +642,7 @@ func RunIssueRemove(ctx context.Context, env Env, in RunIssueRemoveInput) (RunIs
 	for _, id := range issueIDs {
 		if !slices.Contains(attached, id) {
 			return res, newError(
-				fmt.Errorf("issue %s is not attached to %s", model.FormatID(id), run.Ref()),
+				fmt.Errorf("issue %s is not attached to %s", issueDisplayID(env, projectID, id), run.Ref()),
 				output.ErrNotFound)
 		}
 	}

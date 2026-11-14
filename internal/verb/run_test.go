@@ -1489,6 +1489,24 @@ func TestRunIssueRemoveRefusesBeforeDetachingAny(t *testing.T) {
 	}
 }
 
+// A refused id no project owns is named in the caller's project's prefix, the
+// voice the rest of its board reads in.
+func TestRunIssueRefusalsNameAnUnownedIdInTheCallersPrefix(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	run, _, _ := runAt(t, st, model.RunPlanning)
+	if err := st.SetProjectPrefix(store.DefaultProjectID, "VOR"); err != nil {
+		t.Fatalf("SetProjectPrefix: %v", err)
+	}
+	env := projectEnv(st, "", false)
+
+	_, err := verb.RunIssueAdd(ctx, env, verb.RunIssueAddInput{Run: run, Issues: []string{"DKT-99"}})
+	requireVerbCode(t, err, output.ErrNotFound, "issue VOR-99 not found")
+
+	_, err = verb.RunIssueRemove(ctx, env, verb.RunIssueRemoveInput{Run: run, Issues: []string{"DKT-77"}})
+	requireVerbCode(t, err, output.ErrNotFound, "issue VOR-77 is not attached to "+run)
+}
+
 // The run issue verbs and repin write on the caller's behalf, so an
 // unanchored caller is refused before its run reference is read, and an
 // anchored one is registered.
@@ -1545,10 +1563,17 @@ func TestRunRepinRequiresAReasonAndTheConductorToken(t *testing.T) {
 		t.Fatalf("rewrite: %v", err)
 	}
 
+	runID, err := model.ParseRunID(run)
+	if err != nil {
+		t.Fatalf("ParseRunID: %v", err)
+	}
+	pinned := pinSHA(t, st, runID, "contracts/judge.md")
+
 	_, err = verb.RunRepin(ctx, env, verb.RunRepinInput{Run: run, ConductorToken: tokenOf(token)})
 	requireVerbCode(t, err, output.ErrValidation, "--reason is required to repin a run")
 
-	// A wrong token is refused as AUTH_ERROR; a missing one asks for it.
+	// A wrong token is refused as AUTH_ERROR; a missing one asks for it. A
+	// refused repin moves no pin and records no run-repinned event.
 	for _, tc := range []struct {
 		name      string
 		presented func() string
@@ -1563,6 +1588,12 @@ func TestRunRepinRequiresAReasonAndTheConductorToken(t *testing.T) {
 			t.Fatalf("%s token: RunRepin accepted the repin", tc.name)
 		}
 		requireCode(t, err, tc.code)
+		if got := pinSHA(t, st, runID, "contracts/judge.md"); got != pinned {
+			t.Errorf("%s token: pin sha = %s after a refused repin, want %s", tc.name, got, pinned)
+		}
+		if n := runRepinnedEvents(t, st, runID); n != 0 {
+			t.Errorf("%s token: %d run-repinned events after a refused repin, want none", tc.name, n)
+		}
 	}
 
 	res, err := verb.RunRepin(ctx, env, verb.RunRepinInput{Run: run, Reason: "drift", ConductorToken: tokenOf(token)})
@@ -1573,4 +1604,89 @@ func TestRunRepinRequiresAReasonAndTheConductorToken(t *testing.T) {
 		res.Outcome.Repinned[0].Ref != "contracts/judge.md" {
 		t.Errorf("outcome = %+v, want %s repinning contracts/judge.md", res.Outcome, run)
 	}
+	if got := pinSHA(t, st, runID, "contracts/judge.md"); got == pinned {
+		t.Errorf("pin sha = %s after the repin, want the bytes on disk adopted", got)
+	}
+	if n := runRepinnedEvents(t, st, runID); n != 1 {
+		t.Errorf("%d run-repinned events after the repin, want one", n)
+	}
+}
+
+// A pinned file missing from disk has no bytes to adopt, so the repin refuses
+// it unless Drop names its ref or DropUnresolvable covers it; either one
+// retires a pin no step reads.
+func TestRunRepinDropsAnUnresolvablePinOnlyWhenAsked(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		in   verb.RunRepinInput
+	}{
+		{"drop", verb.RunRepinInput{Drop: []string{"contracts/retired.md"}}},
+		{"drop-unresolvable", verb.RunRepinInput{DropUnresolvable: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			run := plannedRunOf(t, st, packetWorkflow)
+			contract := filepath.Join(os.Getenv("DOCKET_PATH"), "config", "contracts", "judge.md")
+			if err := os.MkdirAll(filepath.Dir(contract), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(contract, []byte("before\n"), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			env := projectEnv(st, "", false)
+			activated, err := verb.RunActivate(ctx, env, verb.RunActivateInput{Run: run})
+			if err != nil {
+				t.Fatalf("RunActivate: %v", err)
+			}
+			runID, err := model.ParseRunID(run)
+			if err != nil {
+				t.Fatalf("ParseRunID: %v", err)
+			}
+			// A pin no step reads, on a file that is not on disk.
+			insertFilePin(t, st, runID, "contracts/retired.md")
+			token := tokenOf(activated.Activation.ConductorToken)
+
+			_, err = verb.RunRepin(ctx, env, verb.RunRepinInput{Run: run, Reason: "deleted", ConductorToken: token})
+			requireVerbCode(t, err, output.ErrNotFound, "--drop")
+
+			in := tc.in
+			in.Run, in.Reason, in.ConductorToken = run, "deleted", token
+			res, err := verb.RunRepin(ctx, env, in)
+			if err != nil {
+				t.Fatalf("RunRepin(%s): %v", tc.name, err)
+			}
+			if res.Outcome == nil || len(res.Outcome.Dropped) != 1 || res.Outcome.Dropped[0].Ref != "contracts/retired.md" {
+				t.Errorf("outcome = %+v, want contracts/retired.md dropped", res.Outcome)
+			}
+			if got := pinSHA(t, st, runID, "contracts/retired.md"); got != "" {
+				t.Errorf("pin sha = %s after the drop, want the pin retired", got)
+			}
+		})
+	}
+}
+
+// pinSHA is the sha runID's pin on ref records, or "" when it has none.
+func pinSHA(t *testing.T, st store.Store, runID int, ref string) string {
+	t.Helper()
+	pins, err := st.ListPins(runID)
+	if err != nil {
+		t.Fatalf("ListPins: %v", err)
+	}
+	for _, p := range pins {
+		if p.Ref == ref {
+			return p.SHA256
+		}
+	}
+	return ""
+}
+
+// runRepinnedEvents counts runID's run-repinned events.
+func runRepinnedEvents(t *testing.T, st store.Store, runID int) int {
+	t.Helper()
+	page, err := engine.ListEventsStore(st, engine.EventQuery{RunID: runID, Kind: engine.EventRunRepinned})
+	if err != nil {
+		t.Fatalf("ListEventsStore: %v", err)
+	}
+	return len(page.Events)
 }

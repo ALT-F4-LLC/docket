@@ -182,6 +182,28 @@ func TestRunIssueRemoveIsAllOrNothing(t *testing.T) {
 	}
 }
 
+// TestRunIssueRefusalsSpeakTheProjectsPrefix: an id no project owns is named
+// in the invoking project's prefix, as the root hook's display prefix named it
+// before these commands resolved their own project.
+func TestRunIssueRefusalsSpeakTheProjectsPrefix(t *testing.T) {
+	conn := newTestDB(t)
+	testsupport.Must(t, db.SetProjectPrefix(conn, 1, "VOR"), "SetProjectPrefix")
+	run := planningRun(t, conn)
+	cmd := cmdWithDB(conn)
+
+	w, _ := bufWriter(false)
+	err := runRunIssueAdd(cmd, []string{run.Ref(), "DKT-99"}, w)
+	if err == nil || !strings.Contains(err.Error(), "issue VOR-99 not found") {
+		t.Errorf("add refusal = %v, want it to name VOR-99", err)
+	}
+
+	w, _ = bufWriter(false)
+	err = runRunIssueRemove(cmd, []string{run.Ref(), "DKT-77"}, w)
+	if want := "issue VOR-77 is not attached to " + run.Ref(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("remove refusal = %v, want it to say %q", err, want)
+	}
+}
+
 // TestRunIssueAddRefusesCrossProjectIssue pins DKT-21 at the add edge: issue
 // ids are store-wide, so another project's issue parses from any cwd, but a
 // run's issues live in the run's own project — activation binds them against
