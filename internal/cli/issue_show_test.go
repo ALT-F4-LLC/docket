@@ -717,12 +717,20 @@ func TestIssueShowPrimaryKeyAlias(t *testing.T) {
 
 // TestIssueShowThroughTheRoot drives the annotated command through the real
 // root, which leaves project resolution to the verb: the shown issue keeps
-// the id, prefix included, that `issue create` reported for the checkout.
+// the id, under its project's own prefix, that `issue create` reported.
 func TestIssueShowThroughTheRoot(t *testing.T) {
 	clientConfigSandbox(t)
+	t.Cleanup(func() { model.SetDisplayPrefix("DKT") })
 	_, err := runRootVerb(t, initCmd, "init")
 	testsupport.Must(t, err, "docket init: %v", err)
+	_, err = runRootVerb(t, projectSetPrefixCmd, "project", "set-prefix", "abc")
+	testsupport.Must(t, err, "docket project set-prefix: %v", err)
 	id := createThroughRoot(t, "--title", "shown")
+	if !strings.HasPrefix(id, "ABC-") {
+		t.Fatalf("created id = %q, want it under the project's ABC prefix", id)
+	}
+	// The prefix the process renders by default must not supply the owner's.
+	model.SetDisplayPrefix("DKT")
 
 	out, err := runRootVerb(t, showCmd, "issue", "show", id, "--json")
 	testsupport.Must(t, err, "issue show %s --json: %v", id, err)
