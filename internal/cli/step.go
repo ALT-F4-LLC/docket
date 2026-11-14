@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1679,22 +1678,20 @@ THIS step declares. It is not a whole-run pin check and a clean exit here does
 not mean the run's pin state is sound: a contract another step depends on can
 have drifted already, blocking that step, while this one renders and exits 0.
 Use ` + "`docket run verify-pins RUN-N`" + ` for the whole-run question.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := stepArg(args[0])
-		if err != nil {
-			return err
-		}
 		templatePath, _ := cmd.Flags().GetString("template")
 		executor, _ := cmd.Flags().GetString("executor")
 
-		result, err := engine.RenderStepAs(conn, id, templatePath, executor, model.NowMS())
+		res, err := verb.StepRender(cmd.Context(), verbEnv(cmd), verb.StepRenderInput{
+			Step: args[0], Template: templatePath, Executor: executor,
+		})
 		if err != nil {
-			return stepErr(err, stepLabel(id))
+			return verbErr(err)
 		}
+		result := res.Packet
 
 		if w.JSONMode {
 			w.Success(result, "")
@@ -1744,32 +1741,18 @@ there.
 A MATERIALIZED HELD STEP produces nothing by construction, and its empty
 listing names where its payload does live: the cluster index it decides, out
 of how many, and the routing step's artifact carrying it (DKT-239).`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := stepArg(args[0])
+		res, err := verb.StepArtifacts(cmd.Context(), verbEnv(cmd), verb.StepArtifactsInput{Step: args[0]})
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-
-		artifacts, err := engine.ListStepArtifacts(conn, id)
-		if err != nil {
-			return stepErr(err, stepLabel(id))
-		}
-
+		artifacts := res.Artifacts
 		result := stepArtifactsResult{
-			Step: model.FormatStepID(id), Artifacts: artifacts,
-		}
-
-		// Only on the empty path, and only then: resolving the hold costs a
-		// scheduler load, and a step that produced something has already
-		// answered the question this is for.
-		if len(artifacts) == 0 {
-			if view, verr := engine.LoadStepView(conn, id, model.NowMS()); verr == nil {
-				result.HeldCluster = view.HeldCluster
-			}
+			Step: res.Step, Artifacts: artifacts, HeldCluster: res.HeldCluster,
 		}
 
 		var message string
@@ -1829,20 +1812,16 @@ report's artifact index; both print the same ` + "`ARTIFACT-N`" + ` form.
 
 --payload prints ONLY the structured payload, so a verdict can be piped
 straight into jq without slicing the body out of the envelope first.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := artifactArg(args[0])
+		res, err := verb.StepArtifact(cmd.Context(), verbEnv(cmd), verb.StepArtifactInput{Artifact: args[0]})
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-
-		artifact, err := engine.ReadArtifact(conn, id)
-		if err != nil {
-			return stepErr(err, fmt.Sprintf("artifact ARTIFACT-%d", id))
-		}
+		artifact := res.Artifact
 
 		// --payload narrows to the structured half. In JSON mode the payload
 		// is emitted as the data itself rather than a string field, so `jq`
@@ -1893,22 +1872,6 @@ func emitArtifactPayload(w *output.Writer, artifact *engine.StepArtifact) error 
 
 	fmt.Fprintln(w.Stdout, artifact.Payload)
 	return nil
-}
-
-// artifactArg parses an ARTIFACT-N reference, or a bare N.
-//
-// The bare form is accepted because the run report and this package both print
-// the prefixed form, but an operator copying an id out of a JSON field has the
-// number alone — and refusing that would be a papercut with no upside.
-func artifactArg(arg string) (int, error) {
-	raw := strings.TrimPrefix(strings.TrimPrefix(arg, "ARTIFACT-"), "artifact-")
-	id, err := strconv.Atoi(raw)
-	if err != nil || id <= 0 {
-		return 0, cmdErr(
-			fmt.Errorf("invalid artifact ID %q: want ARTIFACT-N", arg),
-			output.ErrValidation)
-	}
-	return id, nil
 }
 
 // resolvedStepPayload is the resolution verbs' JSON shape when the resolution

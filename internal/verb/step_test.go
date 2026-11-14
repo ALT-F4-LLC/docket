@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1009,5 +1010,158 @@ func TestStepReadVerbsNeverRegisterAProject(t *testing.T) {
 	if _, err := verb.StepList(ctx, env, verb.StepListInput{Run: model.FormatRunID(step.RunID)}); err != nil {
 		t.Fatalf("StepList: %v", err)
 	}
+	if _, err := verb.StepRender(ctx, env, verb.StepRenderInput{Step: ref}); err != nil {
+		t.Fatalf("StepRender: %v", err)
+	}
+	if _, err := verb.StepArtifacts(ctx, env, verb.StepArtifactsInput{Step: ref}); err != nil {
+		t.Fatalf("StepArtifacts: %v", err)
+	}
+	if _, err := verb.StepGates(ctx, env, verb.StepGatesInput{Step: ref}); err != nil {
+		t.Fatalf("StepGates: %v", err)
+	}
+	// An artifact read registers nothing even when the artifact is missing.
+	_, err = verb.StepArtifact(ctx, env, verb.StepArtifactInput{Artifact: "ARTIFACT-99999"})
+	requireCode(t, err, output.ErrNotFound)
 	requireUnregistered(t, st, identity)
+}
+
+func TestStepRenderRendersTheStepsPacket(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	ref := model.FormatStepID(activatedStep(t, st))
+	ctx := context.Background()
+
+	res, err := verb.StepRender(ctx, env, verb.StepRenderInput{Step: ref})
+	if err != nil {
+		t.Fatalf("StepRender: %v", err)
+	}
+	if res.Packet == nil || res.Packet.Packet == "" || !res.Packet.TemplatePinned {
+		t.Errorf("packet = %+v, want a packet rendered from the pinned shipped template", res.Packet)
+	}
+
+	_, err = verb.StepRender(ctx, env, verb.StepRenderInput{Step: "STEP-999"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.StepRender(ctx, env, verb.StepRenderInput{Step: "ISSUE-1"})
+	requireCode(t, err, output.ErrValidation)
+}
+
+// resultArtifact returns the listing's one artifact of the declared emit
+// kind; a completion also records the step's issue.diff beside it.
+func resultArtifact(t *testing.T, res verb.StepArtifactsResult) engine.StepArtifact {
+	t.Helper()
+	var found []engine.StepArtifact
+	for _, a := range res.Artifacts {
+		if a.Kind == "result" {
+			found = append(found, a)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("artifacts = %+v, want exactly one of kind result", res.Artifacts)
+	}
+	return found[0]
+}
+
+func TestStepArtifactsListsWhatAStepProduced(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	done := model.FormatStepID(finishedStep(t, st))
+	live := model.FormatStepID(activatedStep(t, st))
+	ctx := context.Background()
+
+	res, err := verb.StepArtifacts(ctx, env, verb.StepArtifactsInput{Step: done})
+	if err != nil {
+		t.Fatalf("StepArtifacts: %v", err)
+	}
+	result := resultArtifact(t, res)
+	if res.Step != done || result.Bytes != len("result") || result.Body != "" || res.HeldCluster != nil {
+		t.Errorf("listing = %+v, want %s's result artifact sized but without its body", res, done)
+	}
+
+	empty, err := verb.StepArtifacts(ctx, env, verb.StepArtifactsInput{Step: live})
+	if err != nil {
+		t.Fatalf("StepArtifacts on an unfinished step: %v", err)
+	}
+	if empty.Step != live || len(empty.Artifacts) != 0 || empty.HeldCluster != nil {
+		t.Errorf("listing = %+v, want %s with nothing produced", empty, live)
+	}
+
+	_, err = verb.StepArtifacts(ctx, env, verb.StepArtifactsInput{Step: "STEP-999"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.StepArtifacts(ctx, env, verb.StepArtifactsInput{Step: "ISSUE-1"})
+	requireCode(t, err, output.ErrValidation)
+}
+
+func TestStepArtifactReadsOneArtifactInFull(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+	listing, err := verb.StepArtifacts(ctx, env, verb.StepArtifactsInput{
+		Step: model.FormatStepID(finishedStep(t, st)),
+	})
+	if err != nil {
+		t.Fatalf("StepArtifacts: %v", err)
+	}
+	ref := resultArtifact(t, listing).Artifact
+
+	for _, in := range []string{ref, strings.TrimPrefix(ref, "ARTIFACT-")} {
+		res, err := verb.StepArtifact(ctx, env, verb.StepArtifactInput{Artifact: in})
+		if err != nil {
+			t.Fatalf("StepArtifact(%q): %v", in, err)
+		}
+		if res.Artifact == nil || res.Artifact.Artifact != ref || res.Artifact.Body != "result" {
+			t.Errorf("StepArtifact(%q) = %+v, want %s with its body", in, res.Artifact, ref)
+		}
+	}
+
+	refusals := map[string]struct {
+		ref  string
+		want output.ErrorCode
+	}{
+		"missing artifact": {"ARTIFACT-99999", output.ErrNotFound},
+		"zero id":          {"ARTIFACT-0", output.ErrValidation},
+		"malformed ref":    {"STEP-1", output.ErrValidation},
+	}
+	for name, tc := range refusals {
+		t.Run(name, func(t *testing.T) {
+			_, err := verb.StepArtifact(ctx, env, verb.StepArtifactInput{Artifact: tc.ref})
+			requireCode(t, err, tc.want)
+		})
+	}
+}
+
+func TestStepGatesListsTheRecordedGateRows(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := activatedStepOf(t, st, gatedStepWorkflow)
+	ref := model.FormatStepID(id)
+	ctx := context.Background()
+
+	before, err := verb.StepGates(ctx, env, verb.StepGatesInput{Step: ref})
+	if err != nil {
+		t.Fatalf("StepGates before the gates ran: %v", err)
+	}
+	if before.Step != ref || len(before.Gates) != 0 {
+		t.Errorf("gates = %+v, want %s with no rows before completion", before, ref)
+	}
+
+	token := claimStep(t, env, id).Claim.Token
+	if _, err := verb.StepComplete(ctx, env, verb.StepCompleteInput{
+		Step: ref, Token: token, Artifact: []byte("result"),
+	}); err != nil {
+		t.Fatalf("StepComplete: %v", err)
+	}
+
+	res, err := verb.StepGates(ctx, env, verb.StepGatesInput{Step: ref})
+	if err != nil {
+		t.Fatalf("StepGates: %v", err)
+	}
+	if res.Step != ref || len(res.Gates) != 1 || res.Gates[0].Gate != "verb-test-untrusted-gate" ||
+		res.Gates[0].Verdict != store.GateVerdictUnmatched {
+		t.Errorf("gates = %+v, want %s's one unmatched gate row", res, ref)
+	}
+
+	_, err = verb.StepGates(ctx, env, verb.StepGatesInput{Step: "STEP-999"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.StepGates(ctx, env, verb.StepGatesInput{Step: "ISSUE-1"})
+	requireCode(t, err, output.ErrValidation)
 }

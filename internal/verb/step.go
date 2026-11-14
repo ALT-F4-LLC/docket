@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -766,6 +768,149 @@ func StepContext(ctx context.Context, env Env, in StepContextInput) (StepContext
 	return res, nil
 }
 
+// StepRenderInput names the step whose work packet to render.
+type StepRenderInput struct {
+	Step string
+	// Template is the template file's path, or empty for the shipped default.
+	// A path the run pinned is verified against its pin.
+	Template string
+	// Executor substitutes the packet's {executor} entries in place of the
+	// step's declared hint; empty keeps the declared one.
+	Executor string
+}
+
+// StepRenderResult is the rendered packet.
+type StepRenderResult struct {
+	Packet *engine.RenderResult
+}
+
+// StepRender renders a step's context bundle through a template into its
+// work packet. It is a read: nothing is written and the caller's identity is
+// never registered.
+func StepRender(ctx context.Context, env Env, in StepRenderInput) (StepRenderResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepRenderResult{}, err
+	}
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepRenderResult{}, err
+	}
+
+	packet, err := engine.RenderStepAsStore(env.Store, id, in.Template, in.Executor, model.NowMS())
+	if err != nil {
+		return StepRenderResult{}, stepError(err, id)
+	}
+	return StepRenderResult{Packet: packet}, nil
+}
+
+// StepArtifactsInput names the step whose artifacts to list.
+type StepArtifactsInput struct {
+	Step string
+}
+
+// StepArtifactsResult is what a step produced, without the bodies.
+type StepArtifactsResult struct {
+	// Step is the step's canonical reference.
+	Step      string
+	Artifacts []engine.StepArtifact
+	// HeldCluster is set only for a held step that produced nothing: it names
+	// the artifact the step's payload lives on.
+	HeldCluster *engine.HeldClusterLink
+}
+
+// StepArtifacts lists the artifacts a step produced. A step that produced
+// nothing lists nothing; a step that does not exist is NOT_FOUND. It is a
+// read: nothing is written and the caller's identity is never registered.
+func StepArtifacts(ctx context.Context, env Env, in StepArtifactsInput) (StepArtifactsResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepArtifactsResult{}, err
+	}
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepArtifactsResult{}, err
+	}
+
+	artifacts, err := engine.ListStepArtifactsStore(env.Store, id)
+	if err != nil {
+		return StepArtifactsResult{}, stepError(err, id)
+	}
+	res := StepArtifactsResult{Step: model.FormatStepID(id), Artifacts: artifacts}
+
+	// Resolving the hold costs a scheduler load, so it runs only for a step
+	// that produced nothing, the one case the link answers.
+	if len(artifacts) == 0 {
+		if view, err := engine.LoadStepViewStore(env.Store, id, model.NowMS()); err == nil {
+			res.HeldCluster = view.HeldCluster
+		}
+	}
+	return res, nil
+}
+
+// StepArtifactInput names one artifact, as "ARTIFACT-N" or a bare N.
+type StepArtifactInput struct {
+	Artifact string
+}
+
+// StepArtifactResult is one artifact, body and payload included.
+type StepArtifactResult struct {
+	Artifact *engine.StepArtifact
+}
+
+// StepArtifact reads one artifact in full. It is a read: nothing is written
+// and the caller's identity is never registered.
+func StepArtifact(ctx context.Context, env Env, in StepArtifactInput) (StepArtifactResult, error) {
+	id, err := parseArtifactRef(in.Artifact)
+	if err != nil {
+		return StepArtifactResult{}, err
+	}
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepArtifactResult{}, err
+	}
+
+	artifact, err := engine.ReadArtifactStore(env.Store, id)
+	if err != nil {
+		return StepArtifactResult{}, labeledStepError(err, fmt.Sprintf("artifact ARTIFACT-%d", id))
+	}
+	return StepArtifactResult{Artifact: artifact}, nil
+}
+
+// StepGatesInput names the step whose recorded gate results to list.
+type StepGatesInput struct {
+	Step string
+}
+
+// StepGatesResult is every recorded gate execution of the step, in insertion
+// order. The rows carry their full stored capture; how much of it to show is
+// the transport's choice.
+type StepGatesResult struct {
+	// Step is the step's canonical reference.
+	Step  string
+	Gates []store.GateResultRow
+}
+
+// StepGates lists a step's recorded gate results. A step whose gates have not
+// run lists nothing; a step that does not exist is NOT_FOUND. It is a read:
+// nothing is written and the caller's identity is never registered.
+func StepGates(ctx context.Context, env Env, in StepGatesInput) (StepGatesResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepGatesResult{}, err
+	}
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepGatesResult{}, err
+	}
+
+	// Existence first, so a typoed id is NOT_FOUND instead of an empty listing.
+	if _, err := engine.LoadStepViewStore(env.Store, id, model.NowMS()); err != nil {
+		return StepGatesResult{}, stepError(err, id)
+	}
+	rows, err := env.Store.GateResultsForStep(id)
+	if err != nil {
+		return StepGatesResult{}, stepError(err, id)
+	}
+	return StepGatesResult{Step: model.FormatStepID(id), Gates: rows}, nil
+}
+
 // StepListInput scopes a step listing by run, by issue across every run that
 // holds one, or by both; at least one is required.
 type StepListInput struct {
@@ -891,6 +1036,19 @@ func parseStepRef(ref string) (int, error) {
 	return id, nil
 }
 
+// parseArtifactRef parses an artifact reference ("ARTIFACT-3" or a bare
+// number) and reports a malformed one as VALIDATION_ERROR. The bare form is
+// the number a JSON field carries.
+func parseArtifactRef(ref string) (int, error) {
+	raw := strings.TrimPrefix(strings.TrimPrefix(ref, "ARTIFACT-"), "artifact-")
+	id, err := strconv.Atoi(raw)
+	if err != nil || id <= 0 {
+		return 0, newError(
+			fmt.Errorf("invalid artifact ID %q: want ARTIFACT-N", ref), output.ErrValidation)
+	}
+	return id, nil
+}
+
 // resolveRunAddressedProject resolves the caller's project for a verb that
 // takes its project from the step it is handed. When it registers one, it
 // returns the registration, attributed to verbPath, for the caller to record
@@ -936,7 +1094,12 @@ func stepRow(env Env, id int) (model.StepRow, error) {
 // the lease refusal matrix first, then a missing step, then the engine's own
 // taxonomy.
 func stepError(err error, id int) error {
-	label := "step " + model.FormatStepID(id)
+	return labeledStepError(err, "step "+model.FormatStepID(id))
+}
+
+// labeledStepError is stepError naming the failing entity by label, for a
+// step-family read addressed by something other than a step id.
+func labeledStepError(err error, label string) error {
 	if e := LeaseError(err, label); e != nil {
 		return e
 	}

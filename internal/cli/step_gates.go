@@ -3,11 +3,10 @@ package cli
 import (
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -130,33 +129,22 @@ gate that ran, so a typo shows up as a body that did not appear next to the
 A step whose gates have not run lists nothing and exits 0. A step that does
 not EXIST is NOT_FOUND, because "no gate results" would otherwise read as a
 fact about a step that is not there.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepGates(cmd, args, getWriter(cmd))
 	},
 }
 
 func runStepGates(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
+	res, err := verb.StepGates(cmd.Context(), verbEnv(cmd), verb.StepGatesInput{Step: args[0]})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	// Existence first, so a typoed id is NOT_FOUND instead of an empty
-	// listing. LoadStepView is the same read `step show` performs.
-	if _, err := engine.LoadStepView(conn, id, model.NowMS()); err != nil {
-		return stepErr(err, stepLabel(id))
-	}
-
-	rows, err := store.StoreOn(conn).GateResultsForStep(id)
-	if err != nil {
-		return stepErr(err, stepLabel(id))
-	}
+	rows := res.Gates
 
 	scope := gateOutputScopeOf(cmd)
-	result := buildStepGatesResult(model.FormatStepID(id), rows, scope)
+	result := buildStepGatesResult(res.Step, rows, scope)
 
 	var message string
 	if !w.JSONMode {
