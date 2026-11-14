@@ -245,3 +245,266 @@ func RunConduct(ctx context.Context, env Env, in RunConductInput) (RunConductRes
 	}
 	return res, nil
 }
+
+// RunPauseInput parks an active run at waiting-human.
+type RunPauseInput struct {
+	Run    string
+	Reason string
+	// Authority and AuthorityRef name what entitled the pause, as
+	// engine.ParseAuthority reads them.
+	Authority    string
+	AuthorityRef string
+	// ConductorToken returns the run's conductor capability. It is called
+	// only when the run is bound to one, so a transport whose token channel
+	// can block is never read for a run that needs no token.
+	ConductorToken func() string
+}
+
+// RunPauseResult is the run as the pause left it.
+type RunPauseResult struct {
+	Run *model.Run
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunPause moves an active run to waiting-human under the run's conductor
+// capability. The run is addressed by reference, but the verb writes on the
+// caller's behalf as `run activate` does, so it may register the caller's
+// anchored project.
+func RunPause(ctx context.Context, env Env, in RunPauseInput) (RunPauseResult, error) {
+	moved, err := moveRun(env, runPause, in.Run, in.Reason, in.Authority, in.AuthorityRef, in.ConductorToken)
+	return RunPauseResult{Run: moved.run, Registered: moved.registered}, err
+}
+
+// RunResumeInput returns a parked run to active. A resume disposes of
+// nothing, so it names no authority.
+type RunResumeInput struct {
+	Run    string
+	Reason string
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// RunResumeResult is the resumed run and the pins that drifted while it was
+// parked.
+type RunResumeResult struct {
+	Run *model.Run
+	// PinDrift is the run's unsound pins, read after the resume committed. It
+	// is advisory: a failed drift check leaves it empty rather than failing a
+	// resume that already happened.
+	PinDrift []engine.PinVerdict
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunResume moves a waiting-human run back to active under the run's
+// conductor capability. Its project policy is RunPause's.
+func RunResume(ctx context.Context, env Env, in RunResumeInput) (RunResumeResult, error) {
+	moved, err := moveRun(env, runResume, in.Run, in.Reason, "", "", in.ConductorToken)
+	res := RunResumeResult{Run: moved.run, Registered: moved.registered}
+	if err != nil {
+		return res, err
+	}
+	if drift, driftErr := engine.PinDriftStore(env.Store, moved.run.ID); driftErr == nil {
+		res.PinDrift = drift
+	}
+	return res, nil
+}
+
+// RunAbandonInput ends a run without completing it, or, with Issue, stops one
+// issue's remaining steps in it.
+type RunAbandonInput struct {
+	Run string
+	// Issue, when set, narrows the abandon to that issue's remaining steps;
+	// the run and its other issues continue.
+	Issue string
+	// Reason is required on both forms.
+	Reason string
+	// Authority and AuthorityRef are as on RunPauseInput, and required on
+	// both forms.
+	Authority    string
+	AuthorityRef string
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// RunAbandonResult is what the abandon did: Run and Worktrees for the whole
+// run, or IssueOutcome alone when the input named an issue.
+type RunAbandonResult struct {
+	Run *model.Run
+	// Worktrees are the work roots the run's steps recorded, which no close
+	// will sweep now.
+	Worktrees    []string
+	IssueOutcome *engine.AbandonIssueOutcome
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunAbandon abandons a run, or one issue's work in it, under the run's
+// conductor capability. Its project policy is RunPause's.
+func RunAbandon(ctx context.Context, env Env, in RunAbandonInput) (RunAbandonResult, error) {
+	if in.Issue != "" {
+		return abandonIssueInRun(env, in)
+	}
+	moved, err := moveRun(env, runAbandon, in.Run, in.Reason, in.Authority, in.AuthorityRef, in.ConductorToken)
+	return RunAbandonResult{Run: moved.run, Worktrees: moved.worktrees, Registered: moved.registered}, err
+}
+
+// abandonIssueInRun is RunAbandon narrowed to one issue.
+func abandonIssueInRun(env Env, in RunAbandonInput) (RunAbandonResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run abandon")
+	res := RunAbandonResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+	issueID, err := ParseIssueRef(in.Issue)
+	if err != nil {
+		return res, err
+	}
+	if in.Reason == "" {
+		return res, newError(
+			errors.New("--reason is required to abandon an issue's work"), output.ErrValidation)
+	}
+	// The authority is required on both forms (DKT-1899), so narrowing the
+	// disposition to one issue cannot evade it. This form emits no
+	// run-abandoned event, so the authority is validated and recorded nowhere.
+	if _, err := parseAuthority(in.Authority, in.AuthorityRef); err != nil {
+		return res, err
+	}
+
+	res.IssueOutcome, err = engine.AbandonIssueInRunWithStore(env.Store, engine.AbandonIssueOptions{
+		RunID: runID, IssueID: issueID, Reason: in.Reason,
+		Token: runConductorToken(env, runID, in.ConductorToken), NowMS: model.NowMS(),
+	})
+	if err != nil {
+		return res, engineError(err)
+	}
+	return res, nil
+}
+
+// runTransition is one edge of the run status machine an operator verb
+// takes:
+//
+//	planning -> active <-> waiting-human -> done | abandoned
+type runTransition struct {
+	verb string
+	to   model.RunStatus
+	from []model.RunStatus
+	// disposes marks a pause or an abandon, which must name the authority it
+	// was made under; a resume disposes of nothing.
+	disposes       bool
+	requiresReason bool
+}
+
+var (
+	runPause = runTransition{
+		verb: "pause", to: model.RunWaitingHuman,
+		from: []model.RunStatus{model.RunActive}, disposes: true,
+	}
+	runResume = runTransition{
+		verb: "resume", to: model.RunActive,
+		from: []model.RunStatus{model.RunWaitingHuman},
+	}
+	runAbandon = runTransition{
+		verb: "abandon", to: model.RunAbandoned,
+		from:     []model.RunStatus{model.RunPlanning, model.RunActive, model.RunWaitingHuman},
+		disposes: true, requiresReason: true,
+	}
+)
+
+// movedRun is what a lifecycle move returns to its verb.
+type movedRun struct {
+	run        *model.Run
+	worktrees  []string
+	registered *engine.ProjectRegistration
+}
+
+// moveRun takes transition t on the run ref names. The engine writes the
+// status and its run-paused, run-resumed or run-abandoned event in one
+// transaction, and checks the conductor capability inside it.
+func moveRun(
+	env Env, t runTransition, ref, reason, authority, authorityRef string, conductorToken func() string,
+) (movedRun, error) {
+	_, registered, err := resolveRegisteringProject(env, "run "+t.verb)
+	moved := movedRun{registered: registered}
+	if err != nil {
+		return moved, err
+	}
+	runID, err := model.ParseRunID(ref)
+	if err != nil {
+		return moved, newError(err, output.ErrValidation)
+	}
+	if t.requiresReason && reason == "" {
+		return moved, newError(fmt.Errorf("--reason is required to %s a run", t.verb), output.ErrValidation)
+	}
+	var under engine.Authority
+	if t.disposes {
+		if under, err = parseAuthority(authority, authorityRef); err != nil {
+			return moved, err
+		}
+	}
+
+	moved.run, moved.worktrees, err = engine.MoveRunWithStore(env.Store, engine.MoveRunOptions{
+		RunID: runID, Verb: t.verb, To: t.to, From: t.from, Reason: reason, Under: under,
+		Token: runConductorToken(env, runID, conductorToken), NowMS: model.NowMS(),
+	})
+	if err != nil {
+		return moved, engineError(err)
+	}
+	return moved, nil
+}
+
+// RunBudgetInput reads a run's cap, or changes it when Set is non-nil.
+type RunBudgetInput struct {
+	Run string
+	// Set is the new cap; 0 means unlimited.
+	Set *float64
+	// Reason is recorded on the cap change's event, and IfVersion makes the
+	// change conditional on the run's row version. Both apply only with Set.
+	Reason    string
+	IfVersion *int
+}
+
+// RunBudgetResult is the run's effective cap and the spend it is compared
+// against, after any change.
+type RunBudgetResult struct {
+	Budget *engine.RunBudget
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunBudget reads or sets a run's declared-cost cap. Raising the cap of a
+// run parked on a breach does not resume it. Its project policy is
+// RunPause's.
+func RunBudget(ctx context.Context, env Env, in RunBudgetInput) (RunBudgetResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run budget")
+	res := RunBudgetResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+
+	if in.Set == nil {
+		res.Budget, err = engine.GetRunBudgetStore(env.Store, runID)
+		if err != nil {
+			return res, engineError(err)
+		}
+		return res, nil
+	}
+
+	res.Budget, err = engine.SetRunBudgetStore(env.Store, runID, *in.Set, in.Reason, in.IfVersion, model.NowMS())
+	if err != nil {
+		if mapped := CASError(err, model.FormatRunID(runID)); mapped != nil {
+			return res, mapped
+		}
+		return res, engineError(err)
+	}
+	return res, nil
+}

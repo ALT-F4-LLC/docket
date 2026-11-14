@@ -10,6 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +40,8 @@ under way finishes rather than being abandoned mid-step.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return moveRun(cmd, args[0], runMove{
 			to:   model.RunWaitingHuman,
@@ -57,7 +59,8 @@ var runResumeCmd = &cobra.Command{
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return moveRun(cmd, args[0], runMove{
 			to:   model.RunActive,
@@ -85,7 +88,8 @@ answer the question.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin, with or without --issue; a run activated before the
 capability existed asks for none.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if issueRef, _ := cmd.Flags().GetString("issue"); issueRef != "" {
 			return abandonIssueInRun(cmd, args[0], issueRef)
@@ -103,38 +107,18 @@ capability existed asks for none.`,
 // disposition, leaving the run and its other issues intact.
 func abandonIssueInRun(cmd *cobra.Command, runRef, issueRef string) error {
 	w := getWriter(cmd)
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(runRef)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-	issueID, err := issueArg(issueRef)
-	if err != nil {
-		return err
-	}
 	reason, _ := cmd.Flags().GetString("reason")
-	if reason == "" {
-		return cmdErr(
-			fmt.Errorf("--reason is required to abandon an issue's work"),
-			output.ErrValidation)
-	}
-	// `abandon` states its authority on BOTH paths (DKT-1899), so the flag
-	// cannot be evaded by narrowing the disposition to one issue. This path
-	// emits no `run-abandoned` — it disposes of an issue's steps, not the run
-	// — so the answer is validated and, today, recorded nowhere; see the
-	// change summary's known limits.
-	if _, err := rulingAuthority(cmd); err != nil {
-		return err
-	}
+	authority, authorityRef := authorityFlags(cmd)
 
-	outcome, err := engine.AbandonIssueInRunWith(conn, engine.AbandonIssueOptions{
-		RunID: runID, IssueID: issueID, Reason: reason,
-		Token: conductorToken(conn, runID, os.Stdin), NowMS: model.NowMS(),
+	res, err := verb.RunAbandon(cmd.Context(), verbEnv(cmd), verb.RunAbandonInput{
+		Run: runRef, Issue: issueRef, Reason: reason,
+		Authority: authority, AuthorityRef: authorityRef, ConductorToken: stdinConductorToken,
 	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	outcome := res.IssueOutcome
 	message := fmt.Sprintf("Abandoned %s in %s (%d step(s)); the run is %s: %s",
 		outcome.Issue, outcome.Run, len(outcome.Steps), outcome.RunStatus, reason)
 	message += worktreeNotice(outcome.Worktrees, "the issue's steps")
@@ -207,7 +191,10 @@ func splitRecordedWorktrees(worktrees []string) (present, removed []string) {
 	return present, removed
 }
 
-// runMove describes one status transition.
+// runMove describes one status transition. The verb layer owns each
+// transition's rules, so moveRun reads only to, which picks the verb, and
+// verb, which renders the result; from and requiresReason restate the rules
+// RunPause, RunResume and RunAbandon enforce.
 type runMove struct {
 	to   model.RunStatus
 	from []model.RunStatus
@@ -216,43 +203,53 @@ type runMove struct {
 	requiresReason bool
 }
 
+// authorityFlags reads --authority and --authority-ref. A resume registers
+// neither, and reads them as empty.
+func authorityFlags(cmd *cobra.Command) (string, string) {
+	authority, _ := cmd.Flags().GetString("authority")
+	authorityRef, _ := cmd.Flags().GetString("authority-ref")
+	return authority, authorityRef
+}
+
 func moveRun(cmd *cobra.Command, ref string, move runMove, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
+	env := verbEnv(cmd)
 	reason, _ := cmd.Flags().GetString("reason")
-	if move.requiresReason && reason == "" {
-		return cmdErr(
-			fmt.Errorf("--reason is required to %s a run", cmd.Name()),
-			output.ErrValidation)
-	}
+	authority, authorityRef := authorityFlags(cmd)
 
-	// DKT-1899, on the two dispositions only — a resume registers no authority
-	// flags, so asking for one here would refuse a verb that cannot answer.
-	var under engine.Authority
-	if move.to != model.RunActive {
-		var err error
-		if under, err = rulingAuthority(cmd); err != nil {
-			return err
-		}
+	var (
+		updated    *model.Run
+		worktrees  []string
+		drift      []engine.PinVerdict
+		registered *engine.ProjectRegistration
+		err        error
+	)
+	switch move.to {
+	case model.RunWaitingHuman:
+		var res verb.RunPauseResult
+		res, err = verb.RunPause(cmd.Context(), env, verb.RunPauseInput{
+			Run: ref, Reason: reason, Authority: authority, AuthorityRef: authorityRef,
+			ConductorToken: stdinConductorToken,
+		})
+		updated, registered = res.Run, res.Registered
+	case model.RunActive:
+		var res verb.RunResumeResult
+		res, err = verb.RunResume(cmd.Context(), env, verb.RunResumeInput{
+			Run: ref, Reason: reason, ConductorToken: stdinConductorToken,
+		})
+		updated, drift, registered = res.Run, res.PinDrift, res.Registered
+	case model.RunAbandoned:
+		var res verb.RunAbandonResult
+		res, err = verb.RunAbandon(cmd.Context(), env, verb.RunAbandonInput{
+			Run: ref, Reason: reason, Authority: authority, AuthorityRef: authorityRef,
+			ConductorToken: stdinConductorToken,
+		})
+		updated, worktrees, registered = res.Run, res.Worktrees, res.Registered
+	default:
+		return cmdErr(fmt.Errorf("no run verb moves a run to %s", move.to), output.ErrGeneral)
 	}
-
-	// The transition, its refusal rules, and its EVENT live engine-side
-	// (DKT-86): the status write and the `run-paused` / `run-resumed` /
-	// `run-abandoned` event commit in one transaction, so the feed is a
-	// complete transition trail rather than one that goes silent exactly at
-	// the terminal step.
-	updated, worktrees, err := engine.MoveRunWith(conn, engine.MoveRunOptions{
-		RunID: runID, Verb: cmd.Name(), To: move.to, From: move.from, Reason: reason,
-		Under: under,
-		Token: conductorToken(conn, runID, os.Stdin), NowMS: model.NowMS(),
-	})
+	recordProjectRegistration(cmd, registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	message := fmt.Sprintf("%s %s", move.verb, updated.Ref())
@@ -275,16 +272,15 @@ func moveRun(cmd *cobra.Command, ref string, move runMove, w *output.Writer) err
 	// by hand — the engine owning the warning removes that dependence. The
 	// resume itself still SUCCEEDS: the operator may be resuming precisely in
 	// order to repin, and the per-step CONFLICT remains the enforcement.
-	// Advisory posture throughout — the transition committed above, so a
-	// failed drift check must not turn a completed resume into an error.
-	if move.to == model.RunActive {
-		if drift, driftErr := engine.PinDrift(conn, runID); driftErr == nil && len(drift) > 0 {
-			if notice := engine.PinDriftNotice(drift, updated.Ref()); notice != "" {
-				message += "\n" + notice
-			}
-			w.Success(runResumePayload{run: updated, pinDrift: drift}, message)
-			return nil
+	// Advisory posture throughout — the transition committed, so a failed
+	// drift check leaves RunResume's drift empty rather than turning a
+	// completed resume into an error.
+	if len(drift) > 0 {
+		if notice := engine.PinDriftNotice(drift, updated.Ref()); notice != "" {
+			message += "\n" + notice
 		}
+		w.Success(runResumePayload{run: updated, pinDrift: drift}, message)
+		return nil
 	}
 	w.Success(withRunVersion(updated), message)
 	return nil

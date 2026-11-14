@@ -283,12 +283,31 @@ func TestRunActivateDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// Activation and taking the conductor seat write into the caller's project,
-// so each refuses an unanchored caller with no project rather than giving it
-// one, and registers an anchored caller's project on first contact.
-func TestRunActivateAndConductResolveTheCallersProject(t *testing.T) {
+// Activation, taking the conductor seat, the lifecycle moves and the budget
+// verb write into the caller's project, so each refuses an unanchored caller
+// with no project rather than giving it one, and registers an anchored
+// caller's project on first contact.
+func TestRunWritesResolveTheCallersProject(t *testing.T) {
 	ctx := context.Background()
 	calls := map[string]func(verb.Env) (*engine.ProjectRegistration, error){
+		"run pause": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunPause(ctx, env, verb.RunPauseInput{Run: "RUN-42", Authority: "operator"})
+			return res.Registered, err
+		},
+		"run resume": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunResume(ctx, env, verb.RunResumeInput{Run: "RUN-42"})
+			return res.Registered, err
+		},
+		"run abandon": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+				Run: "RUN-42", Reason: "r", Authority: "operator",
+			})
+			return res.Registered, err
+		},
+		"run budget": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: "RUN-42"})
+			return res.Registered, err
+		},
 		"run activate": func(env verb.Env) (*engine.ProjectRegistration, error) {
 			res, err := verb.RunActivate(ctx, env, verb.RunActivateInput{Run: "RUN-42"})
 			return res.Registered, err
@@ -360,6 +379,14 @@ func TestRunVerbsRefuseAMalformedRunRef(t *testing.T) {
 	requireCode(t, err, output.ErrValidation)
 	_, err = verb.RunConduct(ctx, env, verb.RunConductInput{Run: "RUN-x"})
 	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunPause(ctx, env, verb.RunPauseInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunResume(ctx, env, verb.RunResumeInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
 }
 
 func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
@@ -372,4 +399,179 @@ func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
 	requireCode(t, err, output.ErrNotFound)
 	_, err = verb.RunConduct(ctx, env, verb.RunConductInput{Run: "RUN-42"})
 	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunPause(ctx, env, verb.RunPauseInput{Run: "RUN-42", Authority: "operator"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunResume(ctx, env, verb.RunResumeInput{Run: "RUN-42"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{Run: "RUN-42", Reason: "r", Authority: "operator"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: "RUN-42"})
+	requireCode(t, err, output.ErrNotFound)
+}
+
+// activeRun activates a planned run, returning its reference, its id and
+// the conductor capability the activation minted.
+func activeRun(t *testing.T, st store.Store) (string, int, string) {
+	t.Helper()
+	run := plannedRun(t, st)
+	res, err := verb.RunActivate(context.Background(), projectEnv(st, "", false), verb.RunActivateInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunActivate: %v", err)
+	}
+	return run, res.Activation.Run.ID, res.Activation.ConductorToken
+}
+
+func requireRunStatus(t *testing.T, st store.Store, runID int, want model.RunStatus) {
+	t.Helper()
+	got, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Status != want {
+		t.Errorf("run status = %s, want %s", got.Status, want)
+	}
+}
+
+func tokenOf(token string) func() string { return func() string { return token } }
+
+func TestRunPauseResumeAbandonMoveTheRun(t *testing.T) {
+	st := openStore(t)
+	run, runID, token := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	paused, err := verb.RunPause(ctx, env, verb.RunPauseInput{
+		Run: run, Reason: "operator review", Authority: "operator", ConductorToken: tokenOf(token),
+	})
+	if err != nil {
+		t.Fatalf("RunPause: %v", err)
+	}
+	if paused.Run.Status != model.RunWaitingHuman || paused.Run.Reason != "operator review" {
+		t.Errorf("paused run = %+v, want waiting-human with the reason", paused.Run)
+	}
+
+	_, err = verb.RunPause(ctx, env, verb.RunPauseInput{Run: run, Authority: "operator", ConductorToken: tokenOf(token)})
+	requireCode(t, err, output.ErrConflict)
+
+	resumed, err := verb.RunResume(ctx, env, verb.RunResumeInput{Run: run, ConductorToken: tokenOf(token)})
+	if err != nil {
+		t.Fatalf("RunResume: %v", err)
+	}
+	if resumed.Run.Status != model.RunActive || len(resumed.PinDrift) != 0 {
+		t.Errorf("resumed = %+v, want an active run with no pin drift", resumed)
+	}
+
+	abandoned, err := verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+		Run: run, Reason: "done with it", Authority: "operator", ConductorToken: tokenOf(token),
+	})
+	if err != nil {
+		t.Fatalf("RunAbandon: %v", err)
+	}
+	if abandoned.Run.Status != model.RunAbandoned || abandoned.IssueOutcome != nil {
+		t.Errorf("abandoned = %+v, want the whole run abandoned", abandoned)
+	}
+	requireRunStatus(t, st, runID, model.RunAbandoned)
+}
+
+// The two dispositions say under what authority they were made and abandon
+// says why; each refusal comes before the run moves.
+func TestRunPauseAndAbandonRefuseAMissingAuthorityOrReason(t *testing.T) {
+	st := openStore(t)
+	run, runID, token := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	_, err := verb.RunPause(ctx, env, verb.RunPauseInput{Run: run, ConductorToken: tokenOf(token)})
+	requireVerbCode(t, err, output.ErrValidation, "")
+	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{Run: run, Reason: "r", ConductorToken: tokenOf(token)})
+	requireVerbCode(t, err, output.ErrValidation, "")
+	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{Run: run, Authority: "operator", ConductorToken: tokenOf(token)})
+	requireVerbCode(t, err, output.ErrValidation, "--reason is required to abandon a run")
+	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+		Run: run, Issue: "1", Authority: "operator", ConductorToken: tokenOf(token),
+	})
+	requireVerbCode(t, err, output.ErrValidation, "--reason is required to abandon an issue's work")
+	requireRunStatus(t, st, runID, model.RunActive)
+}
+
+// A bound run moves only under its conductor capability: a missing token is
+// refused as VALIDATION, a wrong one as AUTH, and the run stays where it was.
+func TestRunLifecycleVerbsRequireTheConductorCapability(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	_, err := verb.RunPause(ctx, env, verb.RunPauseInput{Run: run, Authority: "operator"})
+	requireVerbCode(t, err, output.ErrValidation, "run pause requires it")
+	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+		Run: run, Reason: "r", Authority: "operator", ConductorToken: tokenOf("not-the-token"),
+	})
+	requireCode(t, err, output.ErrAuth)
+	_, err = verb.RunResume(ctx, env, verb.RunResumeInput{Run: run, ConductorToken: tokenOf("not-the-token")})
+	requireCode(t, err, output.ErrAuth)
+	requireRunStatus(t, st, runID, model.RunActive)
+}
+
+// Abandoning an issue stops its steps without abandoning the run; the run's
+// only issue was its last unfinished work, so the rollup completes the run.
+func TestRunAbandonWithAnIssueDoesNotAbandonTheRun(t *testing.T) {
+	st := openStore(t)
+	run, runID, token := activeRun(t, st)
+	issues, err := st.ListRunIssues(runID)
+	if err != nil || len(issues) != 1 {
+		t.Fatalf("ListRunIssues = %+v, %v; want one issue", issues, err)
+	}
+
+	res, err := verb.RunAbandon(context.Background(), projectEnv(st, "", false), verb.RunAbandonInput{
+		Run: run, Issue: model.FormatID(issues[0].IssueID), Reason: "mis-routed",
+		Authority: "operator", ConductorToken: tokenOf(token),
+	})
+	if err != nil {
+		t.Fatalf("RunAbandon --issue: %v", err)
+	}
+	if res.Run != nil || res.IssueOutcome == nil || len(res.IssueOutcome.Steps) != 1 {
+		t.Fatalf("result = %+v, want one issue's single step abandoned", res)
+	}
+	if res.IssueOutcome.RunStatus != string(model.RunDone) {
+		t.Errorf("outcome run status = %s, want done", res.IssueOutcome.RunStatus)
+	}
+	requireRunStatus(t, st, runID, model.RunDone)
+}
+
+func TestRunBudgetReadsAndSetsTheCap(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	read, err := verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunBudget read: %v", err)
+	}
+	if read.Budget.Run != run || read.Budget.Budget != 0 {
+		t.Errorf("read = %+v, want %s with no cap", read.Budget, run)
+	}
+
+	stale := read.Budget.RowVersion + 1
+	limit := 5.0
+	_, err = verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: run, Set: &limit, IfVersion: &stale})
+	requireVerbCode(t, err, output.ErrConflict, "version mismatch")
+
+	set, err := verb.RunBudget(ctx, env, verb.RunBudgetInput{
+		Run: run, Set: &limit, Reason: "more room", IfVersion: &read.Budget.RowVersion,
+	})
+	if err != nil {
+		t.Fatalf("RunBudget set: %v", err)
+	}
+	if set.Budget.Budget != 5 {
+		t.Errorf("set = %+v, want a cap of 5", set.Budget)
+	}
+	stored, err := st.GetRun(runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Budget != 5 {
+		t.Errorf("stored budget = %g, want 5", stored.Budget)
+	}
 }
