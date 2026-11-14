@@ -594,6 +594,7 @@ func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
 func TestDispatchVerbCommandsOwnTheirProject(t *testing.T) {
 	for _, cmd := range []*cobra.Command{
 		dispatchOpenCmd, dispatchExtendCmd, dispatchVerifyCmd, dispatchCloseCmd,
+		dispatchBackfillUsageCmd, dispatchAbandonCmd, dispatchWaiveTargetCmd,
 	} {
 		if !verbOwnsProject(cmd) {
 			t.Errorf("dispatch %s lacks the verbOwnsProject annotation", cmd.Name())
@@ -652,11 +653,36 @@ func TestDispatchCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 	err = runDispatchClose(withAnchoredIdentity(dispatchCloseCmdWithDB(conn, ref), "/repos/dispatch-close"), w)
 	testsupport.Must(t, err, "dispatch close: %v", err)
 
+	runID, _ := parseRunFlag(ref)
+	seatConductor(t, conn, runID)
+	backfill := withAnchoredIdentity(backfillCmdWithDB(conn, ref), "/repos/dispatch-backfill")
+	testsupport.Must(t, backfill.Flags().Set("step", model.FormatStepID(pendingStepID(t, conn, runID))),
+		"set --step")
+	testsupport.Must(t, backfill.Flags().Set("unit", "tokens"), "set --unit")
+	testsupport.Must(t, backfill.Flags().Set("quantity", "7"), "set --quantity")
+	err = runDispatchBackfillUsage(backfill, w)
+	testsupport.Must(t, err, "dispatch backfill-usage: %v", err)
+
+	// The close above left no dispatch open, so the abandon is refused after
+	// it registered its project.
+	abandon := withAnchoredIdentity(cmdWithDB(conn), "/repos/dispatch-abandon")
+	abandon.Flags().String("run", ref, "")
+	abandon.Flags().String("reason", "", "")
+	assertCmdCode(t, runDispatchAbandon(abandon, w), output.ErrConflict, "dispatch abandon with none open")
+
+	waive := withAnchoredIdentity(waiveTargetCmdWithDB(conn, ref, "cafe1234cafe", "", []string{"review@0#0"}),
+		"/repos/dispatch-waive")
+	err = runDispatchWaiveTarget(waive, w)
+	testsupport.Must(t, err, "dispatch waive-target: %v", err)
+
 	want := map[string]string{
 		"/repos/dispatch-open":      "dispatch open",
 		"/repos/dispatch-extend":    "dispatch extend",
 		"/repos/dispatch-reconcile": "dispatch close",
 		"/repos/dispatch-close":     "dispatch close",
+		"/repos/dispatch-backfill":  "dispatch backfill-usage",
+		"/repos/dispatch-abandon":   "dispatch abandon",
+		"/repos/dispatch-waive":     "dispatch waive-target",
 	}
 	if got := registrationEvents(t, conn); !maps.Equal(got, want) {
 		t.Errorf("registration events = %v, want %v", got, want)

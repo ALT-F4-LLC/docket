@@ -199,13 +199,9 @@ func DispatchClose(ctx context.Context, env Env, in DispatchCloseInput) (Dispatc
 		return res, err
 	}
 
-	// The binding look is advisory: the engine re-checks the capability
-	// inside its own transaction.
-	if (skip.Reason != "" || skip.Conditions.Reason != "") && in.ConductorToken != nil {
-		if hash, err := env.Store.RunConductorHash(runID); err == nil && hash != "" {
-			skip.Token = in.ConductorToken()
-			skip.Conditions.Token = skip.Token
-		}
+	if skip.Reason != "" || skip.Conditions.Reason != "" {
+		skip.Token = runConductorToken(env, runID, in.ConductorToken)
+		skip.Conditions.Token = skip.Token
 	}
 
 	e := engine.NewEngine()
@@ -219,4 +215,148 @@ func DispatchClose(ctx context.Context, env Env, in DispatchCloseInput) (Dispatc
 		return res, engineError(err)
 	}
 	return res, nil
+}
+
+// DispatchBackfillUsageInput is a batch of usage a relay measured for steps
+// whose claimant could not report it.
+type DispatchBackfillUsageInput struct {
+	Run  string
+	Rows []engine.BackfillRow
+	// Source is who measured the usage; empty records "backfilled".
+	Source string
+	// OnDuplicate is "refuse" (the default when empty) or "skip".
+	OnDuplicate string
+}
+
+// DispatchBackfillUsageResult is the recorded batch.
+type DispatchBackfillUsageResult struct {
+	Backfill *engine.BackfillOutcome
+	// Registered is as on DispatchOpenResult.
+	Registered *engine.ProjectRegistration
+}
+
+// DispatchBackfillUsage records the batch against each step's recorded
+// attempt, in one transaction.
+//
+// It takes its project from the run it is handed, so it is run-addressed.
+func DispatchBackfillUsage(ctx context.Context, env Env, in DispatchBackfillUsageInput) (DispatchBackfillUsageResult, error) {
+	runID, err := ParseRunRef(in.Run)
+	if err != nil {
+		return DispatchBackfillUsageResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "dispatch backfill-usage")
+	res := DispatchBackfillUsageResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	res.Backfill, err = engine.NewEngine().BackfillUsageStore(
+		env.Store, runID, in.Rows, in.Source, in.OnDuplicate, model.NowMS())
+	if err != nil {
+		return res, engineError(err)
+	}
+	return res, nil
+}
+
+// DispatchAbandonInput is a request to retire a run's open manifest.
+type DispatchAbandonInput struct {
+	Run string
+	// Reason is recorded on the abandon event.
+	Reason string
+	// ConductorToken returns the run's conductor capability. It is called
+	// only when the run is bound to one, so a transport whose token channel
+	// can block is never read for a run that needs no token.
+	ConductorToken func() string
+}
+
+// DispatchAbandonResult is the abandoned manifest.
+type DispatchAbandonResult struct {
+	Abandon *engine.CloseOutcome
+	// Registered is as on DispatchOpenResult.
+	Registered *engine.ProjectRegistration
+}
+
+// DispatchAbandon retires the run's open manifest whatever its
+// discrepancies, under the run's conductor capability.
+//
+// It takes its project from the run it is handed, so it is run-addressed.
+func DispatchAbandon(ctx context.Context, env Env, in DispatchAbandonInput) (DispatchAbandonResult, error) {
+	runID, err := ParseRunRef(in.Run)
+	if err != nil {
+		return DispatchAbandonResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "dispatch abandon")
+	res := DispatchAbandonResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	res.Abandon, err = engine.NewEngine().AbandonDispatchWithStore(env.Store, runID, engine.AbandonDispatchOptions{
+		Reason: in.Reason, Token: runConductorToken(env, runID, in.ConductorToken), NowMS: model.NowMS(),
+	})
+	if err != nil {
+		return res, engineError(err)
+	}
+	return res, nil
+}
+
+// DispatchWaiveTargetInput is a ruling that named stale-target warnings were
+// investigated and are acceptable.
+type DispatchWaiveTargetInput struct {
+	Run string
+	// Steps are the step instances the warning printed, e.g. "review@1#0".
+	Steps []string
+	// Target is the warned sha, or a prefix of at least 7 characters.
+	Target string
+	Note   string
+	// ConductorToken is as on DispatchAbandonInput.
+	ConductorToken func() string
+}
+
+// DispatchWaiveTargetResult is the waivers recorded, one per step instance.
+type DispatchWaiveTargetResult struct {
+	Waivers []engine.WaivedTarget
+	// Registered is as on DispatchOpenResult.
+	Registered *engine.ProjectRegistration
+}
+
+// DispatchWaiveTarget records one waiver per step instance for the target,
+// under the run's conductor capability, attributed to env.Author and env.Cwd.
+//
+// It takes its project from the run it is handed, so it is run-addressed.
+func DispatchWaiveTarget(ctx context.Context, env Env, in DispatchWaiveTargetInput) (DispatchWaiveTargetResult, error) {
+	runID, err := ParseRunRef(in.Run)
+	if err != nil {
+		return DispatchWaiveTargetResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "dispatch waive-target")
+	res := DispatchWaiveTargetResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	res.Waivers, err = engine.NewEngine().WaiveStaleTargetsStore(
+		env.Store, runID, in.Steps, in.Target, in.Note, rulingAttribution(env),
+		runConductorToken(env, runID, in.ConductorToken), model.NowMS())
+	if err != nil {
+		return res, engineError(err)
+	}
+	return res, nil
+}
+
+// runConductorToken returns source's token only when run runID is bound to a
+// conductor capability, and "" otherwise without calling source. The look is
+// advisory: the engine re-checks the capability inside its own transaction.
+func runConductorToken(env Env, runID int, source func() string) string {
+	if source == nil {
+		return ""
+	}
+	hash, err := env.Store.RunConductorHash(runID)
+	if err != nil || hash == "" {
+		return ""
+	}
+	return source()
 }

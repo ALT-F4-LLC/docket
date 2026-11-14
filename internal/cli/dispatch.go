@@ -776,6 +776,7 @@ the whole batch, whatever the step's status.
 ` + "`--source`" + ` defaults to "backfilled" and is free text. Core enumerates no
 sources, for the same reason it enumerates no units — who measured the work is
 not core's opinion to hold.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchBackfillUsage(cmd, getWriter(cmd))
 	},
@@ -807,24 +808,25 @@ type backfillOutcome struct {
 }
 
 func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
+	// The run is refused before the batch is read, as it always was.
 	runID, err := dispatchRunID(cmd)
 	if err != nil {
 		return err
 	}
-	rows, err := backfillRows(cmd)
-	if err != nil {
+	in := verb.DispatchBackfillUsageInput{}
+	in.Run, _ = cmd.Flags().GetString("run")
+	if in.Rows, err = backfillRows(cmd); err != nil {
 		return err
 	}
-	source, _ := cmd.Flags().GetString("source")
-	onDuplicate, _ := cmd.Flags().GetString("on-duplicate")
+	in.Source, _ = cmd.Flags().GetString("source")
+	in.OnDuplicate, _ = cmd.Flags().GetString("on-duplicate")
 
-	result, err := engine.NewEngine().BackfillUsage(
-		conn, runID, rows, source, onDuplicate, model.NowMS())
+	res, err := verb.DispatchBackfillUsage(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	result := res.Backfill
 
 	// Every skip is NAMED, not counted. A conductor that asked for skip is
 	// deciding whether a duplicate is the structural cross-wave kind or a real
@@ -977,26 +979,25 @@ wedges a run — exactly what the dispatch TTL and this verb exist to prevent.
 Nothing is lost. The steps in the manifest were never claimed by opening it, so
 they return to the ready set intact, and an executor that claimed one BEFORE the
 crash finishes normally.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchAbandon(cmd, getWriter(cmd))
 	},
 }
 
 func runDispatchAbandon(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	var in verb.DispatchAbandonInput
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.Reason, _ = cmd.Flags().GetString("reason")
+	stdin := cmd.InOrStdin()
+	in.ConductorToken = func() string { return optionalToken(stdin) }
 
-	runID, err := dispatchRunID(cmd)
+	res, err := verb.DispatchAbandon(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-	reason, _ := cmd.Flags().GetString("reason")
-
-	outcome, err := engine.NewEngine().AbandonDispatchWith(conn, runID, engine.AbandonDispatchOptions{
-		Reason: reason, Token: conductorToken(conn, runID, cmd.InOrStdin()), NowMS: model.NowMS(),
-	})
-	if err != nil {
-		return runErr(err)
-	}
+	outcome := res.Abandon
 
 	var message string
 	if !w.JSONMode {
@@ -1056,6 +1057,7 @@ minted and why.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchWaiveTarget(cmd, getWriter(cmd))
 	},
@@ -1068,33 +1070,35 @@ type waiveTargetOutcome struct {
 }
 
 func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
+	// The run, then the ruling's working directory, are refused before the
+	// verb runs, as they always were.
 	runID, err := dispatchRunID(cmd)
 	if err != nil {
 		return err
 	}
-	steps, _ := cmd.Flags().GetStringSlice("step")
-	target, _ := cmd.Flags().GetString("target")
-	note, _ := cmd.Flags().GetString("note")
+	in := verb.DispatchWaiveTargetInput{ConductorToken: stdinConductorToken}
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.Steps, _ = cmd.Flags().GetStringSlice("step")
+	in.Target, _ = cmd.Flags().GetString("target")
+	in.Note, _ = cmd.Flags().GetString("note")
 
-	by, err := rulingBy()
+	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	waivers, err := engine.NewEngine().WaiveStaleTargets(
-		conn, runID, steps, target, note, by, conductorToken(conn, runID, os.Stdin),
-		model.NowMS())
+	res, err := verb.DispatchWaiveTarget(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	waivers := res.Waivers
 
 	outcome := &waiveTargetOutcome{Run: model.FormatRunID(runID), Waivers: waivers}
 	var message string
 	if !w.JSONMode {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Waived the stale-target warning for %.12s on %d step(s):",
-			target, len(waivers))
+			in.Target, len(waivers))
 		for _, wv := range waivers {
 			fmt.Fprintf(&b, "\n  %s (waiver %d)", wv.Instance, wv.ID)
 		}

@@ -118,6 +118,18 @@ func TestDispatchVerbsRefuseBadInputBeforeTheStore(t *testing.T) {
 			_, err := verb.DispatchClose(ctx, env, verb.DispatchCloseInput{Run: "nope"})
 			return err
 		},
+		"backfill-usage malformed run": func() error {
+			_, err := verb.DispatchBackfillUsage(ctx, env, verb.DispatchBackfillUsageInput{Run: "nope"})
+			return err
+		},
+		"abandon malformed run": func() error {
+			_, err := verb.DispatchAbandon(ctx, env, verb.DispatchAbandonInput{Run: "nope"})
+			return err
+		},
+		"waive-target malformed run": func() error {
+			_, err := verb.DispatchWaiveTarget(ctx, env, verb.DispatchWaiveTargetInput{Run: "nope"})
+			return err
+		},
 	}
 	for name, call := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -174,6 +186,34 @@ func TestDispatchVerbsDeclareTheirProjectPolicy(t *testing.T) {
 	if closed.Registered == nil || closed.Registered.Verb != "dispatch close" {
 		t.Errorf("registered = %+v, want the close's registration", closed.Registered)
 	}
+
+	// Back-fill, abandon and waive-target are run-addressed too. Each
+	// registers before its engine call, so a refusal after registration still
+	// names the project for the caller's event.
+	backfilled, err := verb.DispatchBackfillUsage(ctx, projectEnv(st, "/repo/backfiller", true),
+		verb.DispatchBackfillUsageInput{Run: run})
+	requireCode(t, err, output.ErrValidation)
+	if backfilled.Registered == nil || backfilled.Registered.Verb != "dispatch backfill-usage" {
+		t.Errorf("registered = %+v, want the back-fill's registration", backfilled.Registered)
+	}
+	abandoned, err := verb.DispatchAbandon(ctx, projectEnv(st, "/repo/abandoner", true),
+		verb.DispatchAbandonInput{Run: run})
+	requireCode(t, err, output.ErrValidation)
+	if abandoned.Registered == nil || abandoned.Registered.Verb != "dispatch abandon" {
+		t.Errorf("registered = %+v, want the abandon's registration", abandoned.Registered)
+	}
+	waived, err := verb.DispatchWaiveTarget(ctx, projectEnv(st, "/repo/waiver", true),
+		verb.DispatchWaiveTargetInput{Run: run})
+	requireCode(t, err, output.ErrValidation)
+	if waived.Registered == nil || waived.Registered.Verb != "dispatch waive-target" {
+		t.Errorf("registered = %+v, want the waive-target's registration", waived.Registered)
+	}
+	unanchoredBackfill := projectEnv(st, "/scratch/backfill", false)
+	if _, err := verb.DispatchBackfillUsage(ctx, unanchoredBackfill,
+		verb.DispatchBackfillUsageInput{Run: run}); err == nil {
+		t.Fatal("an empty back-fill batch was accepted")
+	}
+	requireUnregistered(t, st, "/scratch/backfill")
 }
 
 // The conductor token is read only when an override needs it, so a plain
@@ -334,6 +374,115 @@ func TestDispatchCloseWithReconcileReconciles(t *testing.T) {
 					res.Reconcile, res.Close)
 			}
 		})
+	}
+}
+
+func TestDispatchBackfillAbandonAndWaiveThroughTheVerbs(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	env.Author = "tester"
+	run, stepID := dispatchRun(t, st)
+	const conductor = "the-conductor-token"
+	bindConductor(t, st, run, conductor)
+	token := func() string { return conductor }
+	ctx := context.Background()
+
+	backfilled, err := verb.DispatchBackfillUsage(ctx, env, verb.DispatchBackfillUsageInput{
+		Run:  run,
+		Rows: []engine.BackfillRow{{Step: stepID, Unit: "tokens", Quantity: 42}},
+	})
+	if err != nil {
+		t.Fatalf("DispatchBackfillUsage: %v", err)
+	}
+	if b := backfilled.Backfill; b == nil || b.Written != 1 || b.Source != engine.UsageSourceBackfilled ||
+		len(b.Unclaimed) != 1 {
+		t.Errorf("backfill = %+v, want one backfilled row on the never-claimed step", b)
+	}
+
+	waived, err := verb.DispatchWaiveTarget(ctx, env, verb.DispatchWaiveTargetInput{
+		Run: run, Steps: []string{"review@0#0"}, Target: "cafe1234cafe",
+		Note: "adjudicated", ConductorToken: token,
+	})
+	if err != nil {
+		t.Fatalf("DispatchWaiveTarget: %v", err)
+	}
+	if len(waived.Waivers) != 1 || waived.Waivers[0].Instance != "review@0#0" || waived.Waivers[0].ID == 0 {
+		t.Errorf("waivers = %+v, want one recorded waiver on review@0#0", waived.Waivers)
+	}
+
+	opened := openDispatch(t, env, run)
+	abandoned, err := verb.DispatchAbandon(ctx, env, verb.DispatchAbandonInput{
+		Run: run, Reason: "relay crashed", ConductorToken: token,
+	})
+	if err != nil {
+		t.Fatalf("DispatchAbandon: %v", err)
+	}
+	if a := abandoned.Abandon; a == nil || a.Dispatch != opened.Manifest.Dispatch || a.Status != "abandoned" {
+		t.Errorf("abandon = %+v, want %s abandoned", a, opened.Manifest.Dispatch)
+	}
+}
+
+// Abandon and waive-target are conductor rulings: on a bound run a wrong
+// token is refused AUTH, and on an unbound run the token channel is never
+// read, since a caller whose channel never closes would block.
+func TestDispatchConductorVerbsReadTheTokenOnlyOnABoundRun(t *testing.T) {
+	cases := map[string]func(env verb.Env, run string, token func() string) error{
+		"abandon": func(env verb.Env, run string, token func() string) error {
+			_, err := verb.DispatchAbandon(context.Background(), env, verb.DispatchAbandonInput{
+				Run: run, ConductorToken: token,
+			})
+			return err
+		},
+		"waive-target": func(env verb.Env, run string, token func() string) error {
+			_, err := verb.DispatchWaiveTarget(context.Background(), env, verb.DispatchWaiveTargetInput{
+				Run: run, Steps: []string{"review@0#0"}, Target: "cafe1234cafe", ConductorToken: token,
+			})
+			return err
+		},
+	}
+	for name, call := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			env := projectEnv(st, "", false)
+			env.Author = "tester"
+			run, _ := dispatchRun(t, st)
+			bindConductor(t, st, run, "the-conductor-token")
+			openDispatch(t, env, run)
+
+			reads := 0
+			wrong := func() string { reads++; return "not-the-conductor-token" }
+			requireCode(t, call(env, run, wrong), output.ErrAuth)
+			if reads != 1 {
+				t.Errorf("token reads = %d on a bound run, want 1", reads)
+			}
+
+			bindConductor(t, st, run, "")
+			reads = 0
+			if err := call(env, run, wrong); err != nil {
+				t.Fatalf("%s on an unbound run: %v", name, err)
+			}
+			if reads != 0 {
+				t.Errorf("token reads = %d on an unbound run, want 0", reads)
+			}
+		})
+	}
+}
+
+// A waiver is a ruling, so it is attributed to the Env's author and working
+// directory, and an Env with neither is refused before anything is written.
+func TestDispatchWaiveTargetRefusesAnUnattributedRuling(t *testing.T) {
+	st := openStore(t)
+	run, _ := dispatchRun(t, st)
+	bindConductor(t, st, run, "")
+
+	_, err := verb.DispatchWaiveTarget(context.Background(), verb.Env{Store: st},
+		verb.DispatchWaiveTargetInput{Run: run, Steps: []string{"review@0#0"}, Target: "cafe1234cafe"})
+	if err == nil {
+		t.Fatal("an unattributed waiver was accepted")
+	}
+	runID, _ := verb.ParseRunRef(run)
+	if waivers, err := st.StaleTargetWaiversForRun(runID); err != nil || len(waivers) != 0 {
+		t.Errorf("waivers after a refusal = %+v (err %v), want none", waivers, err)
 	}
 }
 
