@@ -769,12 +769,13 @@ func TestStepRulingVerbsValidateBeforeTheStore(t *testing.T) {
 func TestStepRulingInputsValidateTheRequest(t *testing.T) {
 	const ref = "STEP-1"
 	refused := map[string]error{
-		"reap with a malformed ref":    verb.StepReapInput{Step: "ISSUE-1"}.Validate(),
-		"hold with a malformed ref":    verb.StepHoldInput{Step: "ISSUE-1"}.Validate(),
-		"approve with a malformed ref": verb.StepApproveInput{Step: "ISSUE-1"}.Validate(),
-		"reject with a malformed ref":  verb.StepRejectInput{Step: "ISSUE-1"}.Validate(),
-		"resolve with a malformed ref": verb.StepResolveInput{Step: "ISSUE-1", As: engine.ResolveSkip}.Validate(),
-		"resolve without --as":         verb.StepResolveInput{Step: ref}.Validate(),
+		"reap with a malformed ref":     verb.StepReapInput{Step: "ISSUE-1"}.Validate(),
+		"hold with a malformed ref":     verb.StepHoldInput{Step: "ISSUE-1"}.Validate(),
+		"approve with a malformed ref":  verb.StepApproveInput{Step: "ISSUE-1"}.Validate(),
+		"reject with a malformed ref":   verb.StepRejectInput{Step: "ISSUE-1"}.Validate(),
+		"resolve with a malformed ref":  verb.StepResolveInput{Step: "ISSUE-1", As: engine.ResolveSkip}.Validate(),
+		"resolve without --as":          verb.StepResolveInput{Step: ref}.Validate(),
+		"annotate with a malformed ref": verb.StepAnnotateInput{Step: "ISSUE-1"}.Validate(),
 	}
 	for name, err := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -783,15 +784,230 @@ func TestStepRulingInputsValidateTheRequest(t *testing.T) {
 	}
 
 	accepted := map[string]error{
-		"reap":    verb.StepReapInput{Step: ref}.Validate(),
-		"hold":    verb.StepHoldInput{Step: ref}.Validate(),
-		"approve": verb.StepApproveInput{Step: ref}.Validate(),
-		"reject":  verb.StepRejectInput{Step: ref}.Validate(),
-		"resolve": verb.StepResolveInput{Step: ref, As: engine.ResolveSkip}.Validate(),
+		"reap":     verb.StepReapInput{Step: ref}.Validate(),
+		"hold":     verb.StepHoldInput{Step: ref}.Validate(),
+		"approve":  verb.StepApproveInput{Step: ref}.Validate(),
+		"reject":   verb.StepRejectInput{Step: ref}.Validate(),
+		"resolve":  verb.StepResolveInput{Step: ref, As: engine.ResolveSkip}.Validate(),
+		"annotate": verb.StepAnnotateInput{Step: ref}.Validate(),
 	}
 	for name, err := range accepted {
 		if err != nil {
 			t.Errorf("%s: Validate = %v, want nil for a well-formed request", name, err)
 		}
 	}
+}
+
+// finishedStep activates a one-step run and completes its step, so it is
+// done and accepts annotations.
+func finishedStep(t *testing.T, st store.Store) int {
+	t.Helper()
+	env := projectEnv(st, "", false)
+	id := activatedStep(t, st)
+	token := claimStep(t, env, id).Claim.Token
+	if _, err := verb.StepComplete(context.Background(), env, verb.StepCompleteInput{
+		Step: model.FormatStepID(id), Token: token, Artifact: []byte("result"),
+	}); err != nil {
+		t.Fatalf("StepComplete: %v", err)
+	}
+	return id
+}
+
+func TestStepAnnotateMergesMetadataOntoAFinishedStep(t *testing.T) {
+	st := openStore(t)
+	id := finishedStep(t, st)
+	ref := model.FormatStepID(id)
+
+	res, err := verb.StepAnnotate(context.Background(), projectEnv(st, "", false), verb.StepAnnotateInput{
+		Step: ref, Metadata: `{"reviewed_by":"panel"}`,
+	})
+	if err != nil {
+		t.Fatalf("StepAnnotate: %v", err)
+	}
+	if res.Step.Step != ref || res.Step.Metadata["reviewed_by"] != "panel" {
+		t.Errorf("annotated row = %+v, want %s carrying reviewed_by=panel", res.Step, ref)
+	}
+	if res.Repin != nil {
+		t.Errorf("Repin = %+v, want none for a metadata-only annotation", *res.Repin)
+	}
+}
+
+func TestStepAnnotateRefusesWhatTheEngineRefuses(t *testing.T) {
+	st := openStore(t)
+	live := model.FormatStepID(activatedStep(t, st))
+	done := model.FormatStepID(finishedStep(t, st))
+
+	cases := map[string]struct {
+		in   verb.StepAnnotateInput
+		want output.ErrorCode
+	}{
+		"malformed ref":   {verb.StepAnnotateInput{Step: "ISSUE-1", Metadata: `{"k":1}`}, output.ErrValidation},
+		"missing step":    {verb.StepAnnotateInput{Step: "STEP-999", Metadata: `{"k":1}`}, output.ErrNotFound},
+		"unfinished step": {verb.StepAnnotateInput{Step: live, Metadata: `{"k":1}`}, output.ErrConflict},
+		"no metadata":     {verb.StepAnnotateInput{Step: done}, output.ErrValidation},
+		"short sha":       {verb.StepAnnotateInput{Step: done, IntegratedSHA: "abc123"}, output.ErrValidation},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := verb.StepAnnotate(context.Background(), rulerEnv(st, "", false), tc.in)
+			requireCode(t, err, tc.want)
+		})
+	}
+}
+
+func TestStepAnnotateIsRunAddressed(t *testing.T) {
+	annotate := func(t *testing.T, st store.Store, identity string, anchored bool) verb.StepAnnotateResult {
+		t.Helper()
+		id := finishedStep(t, st)
+		res, err := verb.StepAnnotate(context.Background(), projectEnv(st, identity, anchored), verb.StepAnnotateInput{
+			Step: model.FormatStepID(id), Metadata: `{"k":1}`,
+		})
+		if err != nil {
+			t.Fatalf("StepAnnotate: %v", err)
+		}
+		return res
+	}
+
+	t.Run("registers an anchored identity", func(t *testing.T) {
+		st := openStore(t)
+		const identity = "/work/repo"
+		res := annotate(t, st, identity, true)
+		if res.Registered == nil || res.Registered.Identity != identity || res.Registered.Verb != "step annotate" {
+			t.Errorf("Registered = %+v, want %s attributed to step annotate", res.Registered, identity)
+		}
+	})
+	t.Run("runs for an unanchored identity without registering", func(t *testing.T) {
+		st := openStore(t)
+		const identity = "/work/scratch"
+		if res := annotate(t, st, identity, false); res.Registered != nil {
+			t.Errorf("Registered = %+v, want none for an unanchored identity", *res.Registered)
+		}
+		requireUnregistered(t, st, identity)
+	})
+}
+
+func TestStepShowReadsEachStepInOrder(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	refs := []string{
+		model.FormatStepID(activatedStep(t, st)), model.FormatStepID(activatedStep(t, st)),
+	}
+	ctx := context.Background()
+
+	res, err := verb.StepShow(ctx, env, verb.StepShowInput{Steps: refs})
+	if err != nil {
+		t.Fatalf("StepShow: %v", err)
+	}
+	if len(res.Views) != 2 || res.Views[0].Row.Step != refs[0] || res.Views[1].Row.Step != refs[1] {
+		t.Fatalf("views = %+v, want %v in order", res.Views, refs)
+	}
+
+	_, err = verb.StepShow(ctx, env, verb.StepShowInput{Steps: []string{"STEP-999", "ISSUE-1"}})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.StepShow(ctx, env, verb.StepShowInput{Steps: []string{refs[0], "ISSUE-1"}})
+	requireCode(t, err, output.ErrValidation)
+}
+
+func TestStepContextCarriesMetaOnlyWhenAsked(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	ref := model.FormatStepID(activatedStep(t, st))
+	ctx := context.Background()
+
+	plain, err := verb.StepContext(ctx, env, verb.StepContextInput{Step: ref})
+	if err != nil {
+		t.Fatalf("StepContext: %v", err)
+	}
+	if plain.Context == nil || plain.Context.Step.Step != ref || plain.Meta != nil {
+		t.Errorf("context = %+v, meta = %+v; want %s's bundle and no meta", plain.Context, plain.Meta, ref)
+	}
+
+	withMeta, err := verb.StepContext(ctx, env, verb.StepContextInput{Step: ref, Live: true, Meta: true})
+	if err != nil {
+		t.Fatalf("StepContext live with meta: %v", err)
+	}
+	if withMeta.Meta == nil || !withMeta.Meta.TemplatePinned {
+		t.Errorf("meta = %+v, want one reporting the shipped template pinned", withMeta.Meta)
+	}
+
+	_, err = verb.StepContext(ctx, env, verb.StepContextInput{Step: "STEP-999"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.StepContext(ctx, env, verb.StepContextInput{Step: "ISSUE-1"})
+	requireCode(t, err, output.ErrValidation)
+}
+
+func TestStepListScopesByRunIssueOrBoth(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := activatedStep(t, st)
+	activatedStep(t, st)
+	step, err := st.GetStep(id)
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	run, issue := model.FormatRunID(step.RunID), model.FormatID(step.IssueID)
+	ctx := context.Background()
+
+	cases := map[string]struct {
+		in    verb.StepListInput
+		scope string
+	}{
+		"run":   {verb.StepListInput{Run: run}, run},
+		"issue": {verb.StepListInput{Issue: issue}, issue},
+		"both":  {verb.StepListInput{Run: run, Issue: issue}, issue + " in " + run},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			res, err := verb.StepList(ctx, env, tc.in)
+			if err != nil {
+				t.Fatalf("StepList: %v", err)
+			}
+			if res.Scope != tc.scope || len(res.Steps) != 1 || res.Steps[0].Step != model.FormatStepID(id) {
+				t.Errorf("listing = %+v in %q, want only %s in %q",
+					res.Steps, res.Scope, model.FormatStepID(id), tc.scope)
+			}
+		})
+	}
+
+	refusals := map[string]struct {
+		in   verb.StepListInput
+		want output.ErrorCode
+	}{
+		"no scope":        {verb.StepListInput{}, output.ErrValidation},
+		"malformed run":   {verb.StepListInput{Run: "ISSUE-1"}, output.ErrValidation},
+		"malformed issue": {verb.StepListInput{Run: run, Issue: "RUN-1"}, output.ErrValidation},
+		"missing issue":   {verb.StepListInput{Issue: "DKT-999"}, output.ErrNotFound},
+	}
+	for name, tc := range refusals {
+		t.Run(name, func(t *testing.T) {
+			_, err := verb.StepList(ctx, env, tc.in)
+			requireCode(t, err, tc.want)
+		})
+	}
+}
+
+// The step read verbs are reads: an anchored identity no project holds is
+// never registered by them.
+func TestStepReadVerbsNeverRegisterAProject(t *testing.T) {
+	st := openStore(t)
+	id := activatedStep(t, st)
+	step, err := st.GetStep(id)
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	const identity = "/work/repo"
+	env := projectEnv(st, identity, true)
+	ctx := context.Background()
+	ref := model.FormatStepID(id)
+
+	if _, err := verb.StepShow(ctx, env, verb.StepShowInput{Steps: []string{ref}}); err != nil {
+		t.Fatalf("StepShow: %v", err)
+	}
+	if _, err := verb.StepContext(ctx, env, verb.StepContextInput{Step: ref}); err != nil {
+		t.Fatalf("StepContext: %v", err)
+	}
+	if _, err := verb.StepList(ctx, env, verb.StepListInput{Run: model.FormatRunID(step.RunID)}); err != nil {
+		t.Fatalf("StepList: %v", err)
+	}
+	requireUnregistered(t, st, identity)
 }

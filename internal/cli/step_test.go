@@ -533,6 +533,48 @@ func TestStepRulingCommandsOwnTheirProject(t *testing.T) {
 	}
 }
 
+// The step annotate and read commands resolve their project through
+// internal/verb too.
+func TestStepAnnotateAndReadCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{
+		stepAnnotateCmd, stepShowCmd, stepListCmd, stepContextCmd,
+	} {
+		if !verbOwnsProject(cmd) {
+			t.Errorf("step %s lacks the verbOwnsProject annotation", cmd.Name())
+		}
+	}
+}
+
+// TestStepAnnotateCommandRecordsTheProjectItRegisters keeps the
+// project-registered event the root hook wrote before step annotate resolved
+// its own project, and pins that the read commands register nothing.
+func TestStepAnnotateCommandRecordsTheProjectItRegisters(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedRunForNext(t, conn)
+	first := stepIDNamed(t, conn, "first@0")
+	ref := model.FormatStepID(first)
+	claim, err := engine.ClaimStep(conn, first, engine.ClaimOptions{Owner: "worker-1", NowMS: model.NowMS()})
+	testsupport.Must(t, err, "claim: %v", err)
+	testsupport.Must(t, engine.NewEngine().CompleteStep(conn, first, engine.CompleteOptions{
+		Token: claim.Token, Artifact: []byte("result"), NowMS: model.NowMS(),
+	}), "complete")
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+
+	runLeaseCommand(t, conn, anchored("/repos/step-show"), stepShowCmd, ref)
+	runLeaseCommand(t, conn, anchored("/repos/step-context"), stepContextCmd, ref)
+	testsupport.Must(t, stepListCmd.Flags().Set("run", model.FormatRunID(runID)), "set --run")
+	runLeaseCommand(t, conn, anchored("/repos/step-list"), stepListCmd)
+	testsupport.Must(t, stepAnnotateCmd.Flags().Set("metadata", `{"k":1}`), "set --metadata")
+	runLeaseCommand(t, conn, anchored("/repos/step-annotate"), stepAnnotateCmd, ref)
+
+	got := registrationEvents(t, conn)
+	if len(got) != 1 || got["/repos/step-annotate"] != "step annotate" {
+		t.Errorf("registration events = %v, want only /repos/step-annotate registered by step annotate", got)
+	}
+}
+
 // TestStepRulingCommandsRecordTheProjectsTheyRegister keeps the
 // project-registered event the root hook wrote before each step ruling
 // command resolved its own project.

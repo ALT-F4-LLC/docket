@@ -1274,41 +1274,41 @@ token via DOCKET_TOKEN or stdin (never argv); --metadata alone does not.
 
 A step that has not finished refuses: a live step's metadata lands with its
 record, under its holder's token.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepAnnotate(cmd, args, getWriter(cmd))
 	},
 }
 
 func runStepAnnotate(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
-	if err != nil {
-		return err
-	}
 	metadata, _ := cmd.Flags().GetString("metadata")
 	sha, _ := cmd.Flags().GetString("integrated-sha")
-
-	if sha == "" {
-		if _, err := engine.AnnotateStep(conn, id, metadata, model.NowMS()); err != nil {
-			return stepErr(err, stepLabel(id))
+	in := verb.StepAnnotateInput{
+		Step: args[0], Metadata: metadata, IntegratedSHA: sha, ConductorToken: stdinConductorToken,
+	}
+	if err := in.Validate(); err != nil {
+		return verbErr(err)
+	}
+	// Only an integration annotation is a ruling, so only it needs the
+	// working directory rulingEnv refuses without.
+	env := verbEnv(cmd)
+	if sha != "" {
+		var err error
+		if env, err = rulingEnv(cmd); err != nil {
+			return err
 		}
-		return emitStepState(w, conn, id, "Annotated")
 	}
-	by, err := rulingBy()
+	res, err := verb.StepAnnotate(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
-	}
-	token := stepConductorToken(conn, id, os.Stdin)
-	ann, err := engine.NewEngine().AnnotateIntegration(conn, id, sha, metadata, by, token, model.NowMS())
-	if err != nil {
-		return stepErr(err, stepLabel(id))
+		return verbErr(err)
 	}
 	// The re-record is a FACT the row does not carry, reported the way a
 	// resolution reports its re-pin: on the success line and as
 	// `issue_diff_repin` in the envelope.
-	return emitResolvedState(w, conn, id, "Annotated", nil, ann.Repin)
+	renderStepState(w, res.Step, "Annotated", nil, res.Repin)
+	return nil
 }
 
 var stepIntegrateCmd = &cobra.Command{
@@ -1522,7 +1522,8 @@ A step resolved by approve, reject, or resolve carries authority: operator,
 standing-grant, or conductor, the value its ruling was recorded under.
 authority_ref names the grant and appears only beside standing-grant. Both
 are absent on a step no ruling has resolved.`,
-	Args: cobra.MinimumNArgs(1),
+	Args:        cobra.MinimumNArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepShow(cmd, args, getWriter(cmd))
 	},
@@ -1531,18 +1532,13 @@ are absent on a step no ruling has resolved.`,
 // runStepShow is `step show`'s body, with the writer injected so tests read
 // the envelope rather than process stdout.
 func runStepShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	res, err := verb.StepShow(cmd.Context(), verbEnv(cmd), verb.StepShowInput{Steps: args})
+	if err != nil {
+		return verbErr(err)
+	}
 
-	if len(args) == 1 {
-		id, err := stepArg(args[0])
-		if err != nil {
-			return err
-		}
-		view, err := engine.LoadStepView(conn, id, model.NowMS())
-		if err != nil {
-			return stepErr(err, stepLabel(id))
-		}
-
+	if len(res.Views) == 1 {
+		view := res.Views[0]
 		var message string
 		if !w.JSONMode {
 			message = stepShowMessage(view)
@@ -1551,17 +1547,9 @@ func runStepShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return nil
 	}
 
-	rows := make([]any, 0, len(args))
+	rows := make([]any, 0, len(res.Views))
 	var messages []string
-	for _, arg := range args {
-		id, err := stepArg(arg)
-		if err != nil {
-			return err
-		}
-		view, err := engine.LoadStepView(conn, id, model.NowMS())
-		if err != nil {
-			return stepErr(err, stepLabel(id))
-		}
+	for _, view := range res.Views {
 		rows = append(rows, stepShowPayload(view))
 		if !w.JSONMode {
 			messages = append(messages, stepShowMessage(view))
@@ -1623,7 +1611,8 @@ did this step see" but "what would a claim made now hand over".
 
 --meta reports per-section byte counts alongside the bundle, and says whether
 the template a render would use is pinned.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepContext(cmd, args, getWriter(cmd))
 	},
@@ -1632,29 +1621,16 @@ the template a render would use is pinned.`,
 // runStepContext is `step context`'s body, taking its writer the way
 // runStepShow does so a test can read the envelope back.
 func runStepContext(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
+	live, _ := cmd.Flags().GetBool("live")
+	withMeta, _ := cmd.Flags().GetBool("meta")
+	res, err := verb.StepContext(cmd.Context(), verbEnv(cmd), verb.StepContextInput{
+		Step: args[0], Live: live, Meta: withMeta,
+	})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-	read := engine.ReadContext
-	if live, _ := cmd.Flags().GetBool("live"); live {
-		read = engine.ReadLiveContext
-	}
-	bundle, err := read(conn, id, model.NowMS())
-	if err != nil {
-		return stepErr(err, stepLabel(id))
-	}
-
-	result := stepContextResult{Context: bundle}
-	if withMeta, _ := cmd.Flags().GetBool("meta"); withMeta {
-		meta := bundle.Meta()
-		// The default template ships in the binary, so it is always pinned;
-		// a --template path is reported by `step render`.
-		meta.TemplatePinned = true
-		result.Meta = &meta
-	}
+	bundle := res.Context
+	result := stepContextResult{Context: bundle, Meta: res.Meta}
 
 	var message string
 	if !w.JSONMode {
@@ -1935,12 +1911,6 @@ func artifactArg(arg string) (int, error) {
 	return id, nil
 }
 
-// emitStepState re-reads a step after a mutation and reports its new effective
-// status, so every mutating verb answers in the same shape.
-func emitStepState(w *output.Writer, conn store.LegacyDB, id int, verb string) error {
-	return emitStepStateAdvised(w, conn, id, verb, nil)
-}
-
 // resolvedStepPayload is the resolution verbs' JSON shape when the resolution
 // established something the row does not carry: it un-blocked steps whose
 // packets render from a diverged recorded target (DKT-414), or it re-pinned
@@ -2163,73 +2133,28 @@ computes it: a lapsed lease reads as pending, a pending step whose
 predicate holds reads as ready — and a lapsed-but-unreaped claim is labeled
 lease_expired: true, since run repin still counts it as mid-flight until
 next/claim reaps it. Nothing is written, including no reap.`,
-	Args: cobra.NoArgs,
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runStepList)
 	},
 }
 
 func runStepList(cmd *cobra.Command, _ []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
 	runFlag, _ := cmd.Flags().GetString("run")
 	issueFlag, _ := cmd.Flags().GetString("issue")
-	if runFlag == "" && issueFlag == "" {
-		return cmdErr(
-			fmt.Errorf("--run RUN-N or --issue ISSUE-N is required"),
-			output.ErrValidation)
-	}
-
-	var (
-		rows  []engine.StepListEntry
-		scope string
-		err   error
-	)
-	switch {
-	case runFlag == "":
-		issueID, perr := model.ParseID(issueFlag)
-		if perr != nil {
-			return cmdErr(fmt.Errorf("invalid issue ID: %w", perr), output.ErrValidation)
-		}
-		if _, gerr := getIssueOrErr(conn, issueID, "issue"); gerr != nil {
-			return gerr
-		}
-		rows, err = engine.IssueStepList(conn, issueID, model.NowMS())
-		scope = model.FormatID(issueID)
-	default:
-		runID, perr := model.ParseRunID(runFlag)
-		if perr != nil {
-			return cmdErr(fmt.Errorf("invalid run ID: %w", perr), output.ErrValidation)
-		}
-		rows, err = engine.RunStepList(conn, runID, model.NowMS())
-		scope = model.FormatRunID(runID)
-		if err == nil && issueFlag != "" {
-			issueID, perr := model.ParseID(issueFlag)
-			if perr != nil {
-				return cmdErr(fmt.Errorf("invalid issue ID: %w", perr), output.ErrValidation)
-			}
-			if _, gerr := getIssueOrErr(conn, issueID, "issue"); gerr != nil {
-				return gerr
-			}
-			issue := model.FormatID(issueID)
-			kept := make([]engine.StepListEntry, 0, len(rows))
-			for _, row := range rows {
-				if row.Issue == issue {
-					kept = append(kept, row)
-				}
-			}
-			rows = kept
-			scope = issue + " in " + model.FormatRunID(runID)
-		}
-	}
+	res, err := verb.StepList(cmd.Context(), verbEnv(cmd), verb.StepListInput{
+		Run: runFlag, Issue: issueFlag,
+	})
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	rows := res.Steps
 
 	var message string
 	if !w.JSONMode {
 		var b strings.Builder
-		fmt.Fprintf(&b, "%d step(s) in %s\n", len(rows), scope)
+		fmt.Fprintf(&b, "%d step(s) in %s\n", len(rows), res.Scope)
 		for _, row := range rows {
 			fmt.Fprintf(&b, "%-9s %-7s %-8s %-24s %-10s %-13s %2d  %6.2f\n",
 				row.Step, row.Run, row.Issue, exec.Render(row.Instance), row.Kind,

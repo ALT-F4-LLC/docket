@@ -623,6 +623,227 @@ func StepResolve(ctx context.Context, env Env, in StepResolveInput) (StepResolve
 	return res, err
 }
 
+// StepAnnotateInput records facts about a finished step: opaque metadata, a
+// verified integration, or both.
+type StepAnnotateInput struct {
+	Step     string
+	Metadata string
+	// IntegratedSHA, when set, is the full commit id the shared branch carries
+	// for the step's landed work. It makes the annotation a ruling, attributed
+	// to env.Author and env.Cwd under the run's conductor capability.
+	IntegratedSHA string
+	// ConductorToken is as on StepReapInput, and is called only with
+	// IntegratedSHA set.
+	ConductorToken func() string
+}
+
+// Validate is as on StepReapInput.
+func (in StepAnnotateInput) Validate() error {
+	_, err := parseStepRef(in.Step)
+	return err
+}
+
+// StepAnnotateResult is the annotated step as the annotation left it.
+type StepAnnotateResult struct {
+	Step model.StepRow
+	// Repin is the issue.diff re-record an integration annotation performed,
+	// nil for a metadata-only one.
+	Repin *engine.IssueDiffRepin
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepAnnotate merges metadata onto a finished step, or records a verified
+// integration for it when in.IntegratedSHA is set.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepAnnotate(ctx context.Context, env Env, in StepAnnotateInput) (StepAnnotateResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepAnnotateResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "step annotate")
+	res := StepAnnotateResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	if in.IntegratedSHA == "" {
+		if _, err := engine.AnnotateStepStore(env.Store, id, in.Metadata, model.NowMS()); err != nil {
+			return res, stepError(err, id)
+		}
+	} else {
+		ann, err := engine.NewEngine().AnnotateIntegrationStore(
+			env.Store, id, in.IntegratedSHA, in.Metadata, rulingAttribution(env),
+			stepConductorToken(env, id, in.ConductorToken), model.NowMS())
+		if err != nil {
+			return res, stepError(err, id)
+		}
+		res.Repin = ann.Repin
+	}
+	res.Step, err = stepRow(env, id)
+	return res, err
+}
+
+// StepShowInput names the steps to show, in order.
+type StepShowInput struct {
+	Steps []string
+}
+
+// StepShowResult is each named step's view at its effective status, in the
+// order named.
+type StepShowResult struct {
+	Views []*engine.StepView
+}
+
+// StepShow reads steps at their effective status. It writes nothing, reaps no
+// lease, and never registers the caller's identity. Each reference is parsed
+// and read in turn, so the first bad one is the one reported.
+func StepShow(ctx context.Context, env Env, in StepShowInput) (StepShowResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepShowResult{}, err
+	}
+	views := make([]*engine.StepView, 0, len(in.Steps))
+	for _, ref := range in.Steps {
+		id, err := parseStepRef(ref)
+		if err != nil {
+			return StepShowResult{}, err
+		}
+		view, err := engine.LoadStepViewStore(env.Store, id, model.NowMS())
+		if err != nil {
+			return StepShowResult{}, stepError(err, id)
+		}
+		views = append(views, view)
+	}
+	return StepShowResult{Views: views}, nil
+}
+
+// StepContextInput names the step whose context bundle to re-emit.
+type StepContextInput struct {
+	Step string
+	// Live resolves inputs against the run's current artifacts rather than
+	// the bindings the step's claim recorded.
+	Live bool
+	// Meta adds per-section byte counts beside the bundle.
+	Meta bool
+}
+
+// StepContextResult is the bundle, with its meta only when asked for.
+type StepContextResult struct {
+	Context *engine.Context
+	Meta    *engine.ContextMeta
+}
+
+// StepContext re-emits a step's context bundle without a token. It is a
+// read: nothing is written and the caller's identity is never registered.
+func StepContext(ctx context.Context, env Env, in StepContextInput) (StepContextResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepContextResult{}, err
+	}
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepContextResult{}, err
+	}
+
+	read := engine.ReadContextStore
+	if in.Live {
+		read = engine.ReadLiveContextStore
+	}
+	bundle, err := read(env.Store, id, model.NowMS())
+	if err != nil {
+		return StepContextResult{}, stepError(err, id)
+	}
+
+	res := StepContextResult{Context: bundle}
+	if in.Meta {
+		meta := bundle.Meta()
+		// The default template ships in the binary, so it is always pinned;
+		// a caller-supplied template is reported by a render.
+		meta.TemplatePinned = true
+		res.Meta = &meta
+	}
+	return res, nil
+}
+
+// StepListInput scopes a step listing by run, by issue across every run that
+// holds one, or by both; at least one is required.
+type StepListInput struct {
+	Run   string
+	Issue string
+}
+
+// StepListResult is the listed steps in (issue, creation) order, and Scope,
+// the listing's scope as a reader names it ("RUN-3", "DKT-5", or
+// "DKT-5 in RUN-3").
+type StepListResult struct {
+	Steps []engine.StepListEntry
+	Scope string
+}
+
+// StepList lists a run's or an issue's steps at their effective status. It
+// is a read: nothing is written and the caller's identity is never
+// registered.
+func StepList(ctx context.Context, env Env, in StepListInput) (StepListResult, error) {
+	if in.Run == "" && in.Issue == "" {
+		return StepListResult{}, newError(
+			errors.New("--run RUN-N or --issue ISSUE-N is required"), output.ErrValidation)
+	}
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return StepListResult{}, err
+	}
+
+	if in.Run == "" {
+		issueID, err := existingIssue(env, in.Issue)
+		if err != nil {
+			return StepListResult{}, err
+		}
+		rows, err := engine.IssueStepListStore(env.Store, issueID, model.NowMS())
+		if err != nil {
+			return StepListResult{}, engineError(err)
+		}
+		return StepListResult{Steps: rows, Scope: model.FormatID(issueID)}, nil
+	}
+
+	runID, err := ParseRunRef(in.Run)
+	if err != nil {
+		return StepListResult{}, err
+	}
+	rows, err := engine.RunStepListStore(env.Store, runID, model.NowMS())
+	if err != nil {
+		return StepListResult{}, engineError(err)
+	}
+	if in.Issue == "" {
+		return StepListResult{Steps: rows, Scope: model.FormatRunID(runID)}, nil
+	}
+
+	issueID, err := existingIssue(env, in.Issue)
+	if err != nil {
+		return StepListResult{}, err
+	}
+	issue := model.FormatID(issueID)
+	kept := make([]engine.StepListEntry, 0, len(rows))
+	for _, row := range rows {
+		if row.Issue == issue {
+			kept = append(kept, row)
+		}
+	}
+	return StepListResult{Steps: kept, Scope: issue + " in " + model.FormatRunID(runID)}, nil
+}
+
+// existingIssue parses an issue reference and refuses one the store does not
+// hold.
+func existingIssue(env Env, ref string) (int, error) {
+	id, err := ParseIssueRef(ref)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := env.Store.GetIssue(id); err != nil {
+		return 0, issueFetchError(err, "issue")
+	}
+	return id, nil
+}
+
 // rulingAttribution is who rules and from where. The engine refuses either
 // field empty before it writes, so a transport that cannot supply both gets
 // that refusal rather than an unattributed ruling.
