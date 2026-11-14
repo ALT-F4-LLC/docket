@@ -446,3 +446,46 @@ func TestIssueListThroughTheRoot(t *testing.T) {
 		}
 	}
 }
+
+// An empty table listing through the real root says how many done issues the
+// default listing hid and names the flag that shows them (DKT-246), rather
+// than claiming the project holds no issues.
+func TestIssueListTableNamesTheDoneIssuesItHidThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	t.Setenv("NO_COLOR", "1")
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	createThroughRoot(t, "--title", "first done", "--status", "done")
+	createThroughRoot(t, "--title", "second done", "--status", "done")
+
+	out, err := runRootVerb(t, listCmd, "issue", "list")
+	testsupport.Must(t, err, "issue list: %v", err)
+	if strings.Contains(out, "No issues found.") {
+		t.Errorf("the table claims no issues while two done ones are hidden:\n%s", out)
+	}
+	if !strings.Contains(out, "2 done issues") || !strings.Contains(out, "--all") {
+		t.Errorf("the table does not say that 2 done issues are hidden or name --all:\n%s", out)
+	}
+}
+
+// A table listing through the real root whose filter leaves a listed issue's
+// parent out still groups it under that parent, with the parent's sub-issue
+// progress.
+func TestIssueListTableGroupsUnderAParentTheFilterLeftOutThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	t.Setenv("NO_COLOR", "1")
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	parent := createThroughRoot(t, "--title", "unlisted parent")
+	child := createThroughRoot(t, "--title", "labeled child", "--parent", parent, "--label", "area:list")
+	createThroughRoot(t, "--title", "done child", "--parent", parent, "--status", "done")
+
+	out, err := runRootVerb(t, listCmd, "issue", "list", "--label", "area:list")
+	testsupport.Must(t, err, "issue list --label area:list: %v", err)
+	if !strings.Contains(out, child) || !strings.Contains(out, parent) {
+		t.Errorf("the table does not name the child %s under its parent %s:\n%s", child, parent, out)
+	}
+	if !strings.Contains(out, "(1/2 done)") {
+		t.Errorf("the table does not show the parent's progress (1/2 done):\n%s", out)
+	}
+}
