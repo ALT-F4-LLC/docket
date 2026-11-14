@@ -2,11 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -45,50 +44,50 @@ kind carrying the reason, the actor, and the working directory.
 On a run bound to a conductor capability this requires that capability, via
 DOCKET_TOKEN or an owner-only file on stdin, never argv. A fact is an
 observation rather than a ruling, so it takes no --authority.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunFactAdd(cmd, args[0], getWriter(cmd))
 	},
 }
 
 func runRunFactAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
+	env, err := runRulingEnv(cmd, ref)
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-	kind, _ := cmd.Flags().GetString("kind")
-	reason, _ := cmd.Flags().GetString("reason")
-	voter, _ := cmd.Flags().GetString("voter")
-	cause, _ := cmd.Flags().GetString("cause")
-
-	opts := engine.RunFactOptions{
-		RunID: runID, Kind: kind, Reason: reason, Voter: voter, Cause: cause,
-		NowMS: model.NowMS(),
-	}
-	if p, _ := cmd.Flags().GetString("proposal"); p != "" {
-		if opts.ProposalID, err = model.ParseProposalID(p); err != nil {
-			return cmdErr(fmt.Errorf("invalid --proposal %q: %w", p, err), output.ErrValidation)
-		}
-	}
-	if s, _ := cmd.Flags().GetString("step"); s != "" {
-		if opts.StepID, err = model.ParseStepID(s); err != nil {
-			return cmdErr(fmt.Errorf("invalid --step %q: %w", s, err), output.ErrValidation)
-		}
-	}
-	if opts.By, err = rulingBy(); err != nil {
 		return err
 	}
-	opts.Token = conductorToken(conn, runID, os.Stdin)
+	in := verb.RunFactAddInput{Run: ref, ConductorToken: stdinConductorToken}
+	in.Kind, _ = cmd.Flags().GetString("kind")
+	in.Reason, _ = cmd.Flags().GetString("reason")
+	in.Proposal, _ = cmd.Flags().GetString("proposal")
+	in.Voter, _ = cmd.Flags().GetString("voter")
+	in.Step, _ = cmd.Flags().GetString("step")
+	in.Cause, _ = cmd.Flags().GetString("cause")
 
-	fact, err := engine.RecordRunFact(conn, opts)
+	res, err := verb.RunFactAdd(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	fact := res.Fact
 	w.Success(fact, fmt.Sprintf("Recorded %s on %s (seq %d): %s",
 		fact.Kind, fact.Run, fact.Seq, fact.Reason))
 	return nil
+}
+
+// runRulingEnv is rulingEnv for a verb addressed by RUN-N: a malformed run
+// reference outranks an unreadable working directory, as it did when the
+// command parsed the reference first. The verb refuses the reference too, but
+// only once the caller is attributed.
+func runRulingEnv(cmd *cobra.Command, ref string) (verb.Env, error) {
+	env, err := rulingEnv(cmd)
+	if err != nil {
+		if _, parseErr := model.ParseRunID(ref); parseErr != nil {
+			return verb.Env{}, cmdErr(parseErr, output.ErrValidation)
+		}
+		return verb.Env{}, err
+	}
+	return env, nil
 }
 
 func init() {

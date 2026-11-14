@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -88,16 +88,18 @@ and refused on a done or abandoned run, which renders no more packets. A note
 cannot be edited or removed: a packet is the record of what a worker was
 told, so a changed ruling is recorded as a second note, which renders after
 the first.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunNoteAdd(cmd, args[0], getWriter(cmd))
 	},
 }
 
 var runNoteListCmd = &cobra.Command{
-	Use:   "list RUN-N",
-	Short: "List a run's notes in the order they render",
-	Args:  cobra.ExactArgs(1),
+	Use:         "list RUN-N",
+	Short:       "List a run's notes in the order they render",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunNoteList(cmd, args[0], getWriter(cmd))
 	},
@@ -120,43 +122,33 @@ type runNoteListing struct {
 }
 
 func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-	// Parsed before the note or the token is read, so a refused authority
-	// leaves stdin unconsumed.
-	kind, _ := cmd.Flags().GetString("authority")
-	under, err := engine.ParseRunNoteAuthority(kind)
-	if err != nil {
-		return runErr(err)
-	}
-	by, err := rulingBy()
+	env, err := runRulingEnv(cmd, ref)
 	if err != nil {
 		return err
 	}
-	text, err := runNoteText(cmd)
-	if err != nil {
-		return err
+	in := verb.RunNoteAddInput{
+		Run: ref,
+		// The verb reads the note only after it accepts the run and the
+		// authority, so a refused authority leaves stdin unconsumed.
+		Text:           func() (string, error) { return runNoteText(cmd) },
+		ConductorToken: stdinConductorToken,
 	}
+	in.Authority, _ = cmd.Flags().GetString("authority")
 	// Under --file - stdin carries the note, so the capability comes only from
 	// the environment: a stdin read here would take the note as a token, and a
 	// piped token would be recorded as the note.
-	var token string
 	if path, _ := cmd.Flags().GetString("file"); path == "-" {
-		token = strings.TrimSpace(os.Getenv(TokenEnvVar))
-	} else {
-		token = conductorToken(conn, runID, os.Stdin)
+		in.ConductorToken = func() string { return strings.TrimSpace(os.Getenv(TokenEnvVar)) }
 	}
 
-	note, err := engine.AddRunNote(conn, runID, token, by, under, text, model.NowMS())
+	res, err := verb.RunNoteAdd(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	note := res.Note
 
-	outcome := runNoteOutcome{Run: model.FormatRunID(runID), Note: *note}
+	outcome := runNoteOutcome{Run: res.Run, Note: *note}
 	var message string
 	if !w.JSONMode {
 		message = fmt.Sprintf(
@@ -211,18 +203,12 @@ func runNoteText(cmd *cobra.Command) (string, error) {
 }
 
 func runRunNoteList(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
+	res, err := verb.RunNoteList(cmd.Context(), verbEnv(cmd), verb.RunNoteListInput{Run: ref})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-	notes, err := engine.ListRunNotes(conn, runID)
-	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
-	listing := runNoteListing{Run: model.FormatRunID(runID), Notes: notes}
+	listing := runNoteListing{Run: res.Run, Notes: res.Notes}
 	var message string
 	if !w.JSONMode {
 		message = renderRunNotes(listing)

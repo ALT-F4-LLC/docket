@@ -515,6 +515,153 @@ func RunBudget(ctx context.Context, env Env, in RunBudgetInput) (RunBudgetResult
 	return res, nil
 }
 
+// RunFactAddInput is one coordination fact only the conductor observes.
+type RunFactAddInput struct {
+	Run string
+	// Kind is engine.RunFactVoteReseated or engine.RunFactStepDeferred.
+	Kind   string
+	Reason string
+	// Proposal and Voter name the re-seated seat (vote-reseated).
+	Proposal string
+	Voter    string
+	// Step and Cause name the deferred step (step-deferred).
+	Step  string
+	Cause string
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// RunFactAddResult is the fact as recorded, or the engine's own record of a
+// chain deferral it already holds.
+type RunFactAddResult struct {
+	Fact *engine.RunFact
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunFactAdd records a conductor-observed fact against a run as an event
+// attributed to env.Author from env.Cwd, under the run's conductor
+// capability. Its project policy is RunPause's.
+func RunFactAdd(ctx context.Context, env Env, in RunFactAddInput) (RunFactAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run fact add")
+	res := RunFactAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+	opts := engine.RunFactOptions{
+		RunID: runID, Kind: in.Kind, Reason: in.Reason, Voter: in.Voter, Cause: in.Cause,
+		By: engine.Attribution{Actor: env.Author, Cwd: env.Cwd}, NowMS: model.NowMS(),
+	}
+	if in.Proposal != "" {
+		if opts.ProposalID, err = model.ParseProposalID(in.Proposal); err != nil {
+			return res, newError(fmt.Errorf("invalid --proposal %q: %w", in.Proposal, err), output.ErrValidation)
+		}
+	}
+	if in.Step != "" {
+		if opts.StepID, err = model.ParseStepID(in.Step); err != nil {
+			return res, newError(fmt.Errorf("invalid --step %q: %w", in.Step, err), output.ErrValidation)
+		}
+	}
+	opts.Token = runConductorToken(env, runID, in.ConductorToken)
+
+	res.Fact, err = engine.RecordRunFactStore(env.Store, opts)
+	if err != nil {
+		return res, engineError(err)
+	}
+	return res, nil
+}
+
+// RunNoteAddInput is one note for every later packet of a run.
+type RunNoteAddInput struct {
+	Run string
+	// Authority is whose ruling the note carries, as
+	// engine.ParseRunNoteAuthority reads it.
+	Authority string
+	// Text returns the note. It is called only once the run reference and the
+	// authority are accepted, so a refused note leaves a transport's stream
+	// unread, and an error it returns is returned unchanged. Nil reads as an
+	// empty note.
+	Text func() (string, error)
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// RunNoteAddResult is the note as recorded.
+type RunNoteAddResult struct {
+	// Run is the run's canonical reference.
+	Run  string
+	Note *engine.RunNote
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunNoteAdd records a note against a run, attributed to env.Author from
+// env.Cwd, under the run's conductor capability. Its project policy is
+// RunPause's.
+func RunNoteAdd(ctx context.Context, env Env, in RunNoteAddInput) (RunNoteAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run note add")
+	res := RunNoteAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+	under, err := engine.ParseRunNoteAuthority(in.Authority)
+	if err != nil {
+		return res, engineError(err)
+	}
+	var text string
+	if in.Text != nil {
+		if text, err = in.Text(); err != nil {
+			return res, err
+		}
+	}
+
+	res.Note, err = engine.AddRunNoteStore(env.Store, runID,
+		runConductorToken(env, runID, in.ConductorToken),
+		engine.Attribution{Actor: env.Author, Cwd: env.Cwd}, under, text, model.NowMS())
+	if err != nil {
+		return res, engineError(err)
+	}
+	res.Run = model.FormatRunID(runID)
+	return res, nil
+}
+
+// RunNoteListInput names the run whose notes to list.
+type RunNoteListInput struct {
+	Run string
+}
+
+// RunNoteListResult is a run's notes in the order they render.
+type RunNoteListResult struct {
+	// Run is the run's canonical reference.
+	Run   string
+	Notes []engine.RunNote
+}
+
+// RunNoteList lists a run's notes. It is a read, and an identity no project
+// holds is never registered.
+func RunNoteList(ctx context.Context, env Env, in RunNoteListInput) (RunNoteListResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return RunNoteListResult{}, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return RunNoteListResult{}, newError(err, output.ErrValidation)
+	}
+	notes, err := engine.ListRunNotesStore(env.Store, runID)
+	if err != nil {
+		return RunNoteListResult{}, engineError(err)
+	}
+	return RunNoteListResult{Run: model.FormatRunID(runID), Notes: notes}, nil
+}
+
 // RunStatusInput reads one run when Run is set, or lists the caller's runs
 // when it is empty.
 type RunStatusInput struct {

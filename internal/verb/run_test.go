@@ -291,8 +291,8 @@ func TestRunActivateDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// Activation, taking the conductor seat, the lifecycle moves and the budget
-// verb write into the caller's project, so each refuses an unanchored caller
+// Activation, taking the conductor seat, the lifecycle moves, the budget
+// verb, facts and notes write into the caller's project, so each refuses an unanchored caller
 // with no project rather than giving it one, and registers an anchored
 // caller's project on first contact.
 func TestRunWritesResolveTheCallersProject(t *testing.T) {
@@ -328,6 +328,19 @@ func TestRunWritesResolveTheCallersProject(t *testing.T) {
 		},
 		"run conduct": func(env verb.Env) (*engine.ProjectRegistration, error) {
 			res, err := verb.RunConduct(ctx, env, verb.RunConductInput{Run: "RUN-42"})
+			return res.Registered, err
+		},
+		"run fact add": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunFactAdd(ctx, env, verb.RunFactAddInput{
+				Run: "RUN-42", Kind: engine.RunFactStepDeferred, Step: "STEP-1",
+				Cause: engine.DeferralBudget, Reason: "r",
+			})
+			return res.Registered, err
+		},
+		"run note add": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{
+				Run: "RUN-42", Authority: engine.AuthorityOperator, Text: textOf("a ruling"),
+			})
 			return res.Registered, err
 		},
 	}
@@ -408,6 +421,12 @@ func TestRunVerbsRefuseAMalformedRunRef(t *testing.T) {
 	requireCode(t, err, output.ErrValidation)
 	_, err = verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: "RUN-x"})
 	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunFactAdd(ctx, env, verb.RunFactAddInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunNoteList(ctx, env, verb.RunNoteListInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
 }
 
 func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
@@ -434,6 +453,130 @@ func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
 	requireCode(t, err, output.ErrNotFound)
 	_, err = verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: "RUN-42"})
 	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunFactAdd(ctx, env, verb.RunFactAddInput{
+		Run: "RUN-42", Kind: engine.RunFactStepDeferred, Step: "STEP-1", Cause: engine.DeferralBudget, Reason: "r",
+	})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{
+		Run: "RUN-42", Authority: engine.AuthorityOperator, Text: textOf("a ruling"),
+	})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunNoteList(ctx, env, verb.RunNoteListInput{Run: "RUN-42"})
+	requireCode(t, err, output.ErrNotFound)
+}
+
+func textOf(text string) func() (string, error) { return func() (string, error) { return text, nil } }
+
+// A fact names the step it deferred and is recorded only under the bound
+// run's conductor capability.
+func TestRunFactAddRecordsAStepDeferralUnderTheCapability(t *testing.T) {
+	st := openStore(t)
+	run, runID, token := activeRun(t, st)
+	steps, err := st.ListRunSteps(runID)
+	if err != nil || len(steps) == 0 {
+		t.Fatalf("ListRunSteps = %v, %v; want the run's steps", steps, err)
+	}
+	step := model.FormatStepID(steps[0].ID)
+	env := projectEnv(st, "", false)
+	env.Author = "conductor"
+	ctx := context.Background()
+	in := verb.RunFactAddInput{
+		Run: run, Kind: engine.RunFactStepDeferred, Step: step, Cause: engine.DeferralChain,
+		Reason: "behind its predecessor",
+	}
+
+	_, err = verb.RunFactAdd(ctx, env, in)
+	requireVerbCode(t, err, output.ErrValidation, "run fact add requires it")
+	in.ConductorToken = tokenOf("not-the-token")
+	_, err = verb.RunFactAdd(ctx, env, in)
+	requireCode(t, err, output.ErrAuth)
+
+	in.ConductorToken = tokenOf(token)
+	res, err := verb.RunFactAdd(ctx, env, in)
+	if err != nil {
+		t.Fatalf("RunFactAdd: %v", err)
+	}
+	want := engine.RunFact{
+		Run: run, Kind: engine.RunFactStepDeferred, Seq: res.Fact.Seq, Step: step,
+		Cause: engine.DeferralChain, Reason: "behind its predecessor",
+	}
+	if *res.Fact != want || res.Fact.Seq == 0 {
+		t.Errorf("fact = %+v, want %+v with a recorded seq", *res.Fact, want)
+	}
+}
+
+func TestRunFactAddRefusesAMalformedStepOrProposal(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	_, err := verb.RunFactAdd(ctx, env, verb.RunFactAddInput{Run: "RUN-1", Step: "STEP-x"})
+	requireVerbCode(t, err, output.ErrValidation, `invalid --step "STEP-x"`)
+	_, err = verb.RunFactAdd(ctx, env, verb.RunFactAddInput{Run: "RUN-1", Proposal: "PROPOSAL-x"})
+	requireVerbCode(t, err, output.ErrValidation, `invalid --proposal "PROPOSAL-x"`)
+}
+
+// A note is recorded under the stated authority and the bound run's
+// capability, and the list reads it back in the shape the add returned.
+func TestRunNoteAddRecordsTheNoteTheListReadsBack(t *testing.T) {
+	st := openStore(t)
+	run, _, token := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	env.Author = "conductor"
+	ctx := context.Background()
+	in := verb.RunNoteAddInput{Run: run, Authority: engine.AuthorityConductor, Text: textOf("gate fails on clean HEAD\n")}
+
+	_, err := verb.RunNoteAdd(ctx, env, in)
+	requireVerbCode(t, err, output.ErrValidation, "run note add requires it")
+
+	in.ConductorToken = tokenOf(token)
+	added, err := verb.RunNoteAdd(ctx, env, in)
+	if err != nil {
+		t.Fatalf("RunNoteAdd: %v", err)
+	}
+	if added.Run != run || added.Note.Text != "gate fails on clean HEAD" ||
+		added.Note.Authority != engine.AuthorityConductor {
+		t.Errorf("added = %s %+v, want %s's conductor note without its trailing newline", added.Run, *added.Note, run)
+	}
+
+	listed, err := verb.RunNoteList(ctx, env, verb.RunNoteListInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunNoteList: %v", err)
+	}
+	if listed.Run != run || len(listed.Notes) != 1 || listed.Notes[0] != *added.Note {
+		t.Errorf("listed = %s %+v, want %s with the one added note %+v", listed.Run, listed.Notes, run, *added.Note)
+	}
+}
+
+// The text source is read only after the run reference and the authority are
+// accepted, so a refused note leaves a transport's stream unread; an error the
+// source returns is the verb's, unchanged.
+func TestRunNoteAddReadsTheTextOnlyAfterTheAuthority(t *testing.T) {
+	st := openStore(t)
+	run, _, token := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	env.Author = "conductor"
+	ctx := context.Background()
+	unread := func() (string, error) {
+		t.Error("the text source was read before the refusal")
+		return "", nil
+	}
+
+	_, err := verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{Run: "RUN-x", Authority: engine.AuthorityOperator, Text: unread})
+	requireCode(t, err, output.ErrValidation)
+	for _, authority := range []string{"", "standing-grant", "admin"} {
+		_, err = verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{Run: run, Authority: authority, Text: unread})
+		requireVerbCode(t, err, output.ErrValidation, "--authority")
+	}
+
+	sourceErr := errors.New("reading the note failed")
+	_, err = verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{
+		Run: run, Authority: engine.AuthorityOperator, ConductorToken: tokenOf(token),
+		Text: func() (string, error) { return "", sourceErr },
+	})
+	if err != sourceErr {
+		t.Errorf("error = %v, want the text source's error unchanged", err)
+	}
 }
 
 // activeRun activates a planned run, returning its reference, its id and
@@ -869,6 +1012,9 @@ func TestRunReadsNeverRegisterTheCallersProject(t *testing.T) {
 	}
 	if _, err := verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: run}); err != nil {
 		t.Fatalf("RunVerifyPins: %v", err)
+	}
+	if _, err := verb.RunNoteList(ctx, env, verb.RunNoteListInput{Run: run}); err != nil {
+		t.Fatalf("RunNoteList: %v", err)
 	}
 	requireUnregistered(t, st, "/repos/caller")
 }
