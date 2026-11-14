@@ -244,24 +244,8 @@ that audit event.`,
 		in.DecidingVote, _ = cmd.Flags().GetString("deciding-vote")
 		in.UsageJoin, _ = cmd.Flags().GetBool("usage-join")
 		in.AllProjects, _ = cmd.Flags().GetBool("all-projects")
-
-		// The rows are read only once the request is known to be well formed:
-		// --active refuses any --rows, and the --run path refuses a missing or
-		// malformed run or acknowledgment first. A missing file must not turn
-		// either refusal into NOT_FOUND, and stdin stays untouched.
-		if in.Active {
-			if path, _ := cmd.Flags().GetString("rows"); path != "" {
-				in.Rows = []byte{}
-			}
-		} else {
-			if _, err := verb.ParseGuardSpawnRun(in); err != nil {
-				return verbErr(err)
-			}
-			rows, err := readProposedRows(cmd)
-			if err != nil {
-				return err
-			}
-			in.Rows = rows
+		if path, _ := cmd.Flags().GetString("rows"); path != "" {
+			in.Rows = func() ([]byte, error) { return readProposedRows(cmd) }
 		}
 
 		decision, err := verb.GuardSpawn(cmd.Context(), verbEnv(cmd), in)

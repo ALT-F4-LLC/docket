@@ -104,10 +104,14 @@ type GuardSpawnInput struct {
 	Run string
 	// Active answers the reap half over every active run of the project.
 	Active bool
-	// Rows is the JSON array of rows about to be spawned. Nil means none was
-	// proposed, which differs from an empty array. Active refuses any
-	// non-nil Rows, so a transport need not read the batch to send it then.
-	Rows []byte
+	// Rows returns the JSON array of rows about to be spawned. A nil Rows
+	// proposes none, which differs from an empty array. GuardSpawn calls it
+	// at most once, after it has resolved the project and checked Run and
+	// AckReap, so a transport that reads a file or stdin reports an
+	// unreadable one only where it always did; Active refuses a non-nil Rows
+	// without calling it. Its error is returned unchanged, for the transport
+	// to word and code; the verb never opens a path.
+	Rows func() ([]byte, error)
 	// AckReap acknowledges write-class reaps by their lease-reaped event seq.
 	AckReap []int64
 	// DecidingVote names the OPEN proposal (PROPOSAL-N) this batch exists to
@@ -133,9 +137,28 @@ func GuardSpawn(ctx context.Context, env Env, in GuardSpawnInput) (GuardSpawnRes
 		return guardSpawnActive(env, in, projectID)
 	}
 
-	runID, err := ParseGuardSpawnRun(in)
+	if in.Run == "" {
+		return GuardSpawnResult{}, newError(
+			fmt.Errorf("--run is required: name the run whose batch is being spawned"),
+			output.ErrValidation)
+	}
+	runID, err := ParseRunRef(in.Run)
 	if err != nil {
 		return GuardSpawnResult{}, err
+	}
+	for _, seq := range in.AckReap {
+		if seq <= 0 {
+			return GuardSpawnResult{}, newError(fmt.Errorf(
+				"--ack-reap %d is not an event seq; pass the `seq` of the "+
+					"`lease-reaped` event being acknowledged", seq),
+				output.ErrValidation)
+		}
+	}
+	var rows []byte
+	if in.Rows != nil {
+		if rows, err = in.Rows(); err != nil {
+			return GuardSpawnResult{}, err
+		}
 	}
 	decidingVote, err := decidingVoteRef(in.DecidingVote)
 	if err != nil {
@@ -144,36 +167,10 @@ func GuardSpawn(ctx context.Context, env Env, in GuardSpawnInput) (GuardSpawnRes
 
 	return guardDecision(engine.NewEngine().GuardSpawnStore(
 		env.Store, runID, engine.SpawnOptions{
-			Rows: in.Rows, AckSeqs: in.AckReap, DecidingVote: decidingVote,
+			Rows: rows, AckSeqs: in.AckReap, DecidingVote: decidingVote,
 			UsageJoin: in.UsageJoin,
 			NowMS:     model.NowMS(),
 		}))
-}
-
-// ParseGuardSpawnRun validates the run GuardSpawn's non-Active path is
-// addressed to: Run is present and well formed, and every AckReap is an event
-// seq. It returns the run id. A transport that reads Rows from a file or
-// stdin calls it first, so a malformed request is refused before the batch is
-// read.
-func ParseGuardSpawnRun(in GuardSpawnInput) (int, error) {
-	if in.Run == "" {
-		return 0, newError(
-			fmt.Errorf("--run is required: name the run whose batch is being spawned"),
-			output.ErrValidation)
-	}
-	runID, err := ParseRunRef(in.Run)
-	if err != nil {
-		return 0, err
-	}
-	for _, seq := range in.AckReap {
-		if seq <= 0 {
-			return 0, newError(fmt.Errorf(
-				"--ack-reap %d is not an event seq; pass the `seq` of the "+
-					"`lease-reaped` event being acknowledged", seq),
-				output.ErrValidation)
-		}
-	}
-	return runID, nil
 }
 
 // guardSpawnActive is GuardSpawn under Active. Run, Rows and AckReap are each

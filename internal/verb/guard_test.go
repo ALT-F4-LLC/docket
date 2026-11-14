@@ -2,6 +2,7 @@ package verb_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -90,13 +91,17 @@ func TestGuardRefusesMalformedInput(t *testing.T) {
 			return verb.GuardRecord(ctx, env, verb.GuardRecordInput{Run: "RUN-999"})
 		}, output.ErrNotFound, "RUN-999 not found"},
 		{"spawn without a run", func() (verb.GuardDecision, error) {
-			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{})
+			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Rows: unreadableRows})
 		}, output.ErrValidation, "--run is required"},
+		{"spawn with a malformed run", func() (verb.GuardDecision, error) {
+			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: "nope", Rows: unreadableRows})
+		}, output.ErrValidation, "invalid run ID"},
 		{"spawn with a missing run", func() (verb.GuardDecision, error) {
 			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: "RUN-999"})
 		}, output.ErrNotFound, "RUN-999 not found"},
 		{"spawn acknowledging a non-seq", func() (verb.GuardDecision, error) {
-			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: "RUN-1", AckReap: []int64{0}})
+			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{
+				Run: "RUN-1", AckReap: []int64{0}, Rows: unreadableRows})
 		}, output.ErrValidation, "--ack-reap 0 is not an event seq"},
 		{"spawn with a malformed deciding vote", func() (verb.GuardDecision, error) {
 			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: "RUN-1", DecidingVote: "nope"})
@@ -105,7 +110,7 @@ func TestGuardRefusesMalformedInput(t *testing.T) {
 			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Active: true, Run: "RUN-1"})
 		}, output.ErrValidation, "--active and --run are mutually exclusive"},
 		{"spawn --active with rows", func() (verb.GuardDecision, error) {
-			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Active: true, Rows: []byte{}})
+			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Active: true, Rows: unreadableRows})
 		}, output.ErrValidation, "--active does not take --rows"},
 		{"spawn --active with acknowledgments", func() (verb.GuardDecision, error) {
 			return verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Active: true, AckReap: []int64{7}})
@@ -125,32 +130,65 @@ func TestGuardRefusesMalformedInput(t *testing.T) {
 	}
 }
 
-// ParseGuardSpawnRun is the check a transport runs before reading the rows,
-// so it refuses exactly what GuardSpawn's --run path refuses first.
-func TestParseGuardSpawnRunRefusesTheRunAndAcksGuardSpawnRefuses(t *testing.T) {
-	tests := []struct {
-		name string
-		in   verb.GuardSpawnInput
-		want string
-	}{
-		{"no run", verb.GuardSpawnInput{}, "--run is required"},
-		{"a malformed run", verb.GuardSpawnInput{Run: "nope"}, "invalid run ID"},
-		{"a non-seq acknowledgment", verb.GuardSpawnInput{Run: "RUN-1", AckReap: []int64{0}},
-			"--ack-reap 0 is not an event seq"},
+// errRowsUnreadable stands in for a transport's failed read of the proposed
+// rows; unreadableRows is a Rows source that always fails with it.
+var errRowsUnreadable = errors.New("rows unreadable")
+
+func unreadableRows() ([]byte, error) { return nil, errRowsUnreadable }
+
+// errLookupFailed is the store fault lookupFailingStore injects.
+var errLookupFailed = errors.New("projects table unreadable")
+
+// lookupFailingStore is a store whose project lookup fails, as a query
+// against a store that opened but cannot be read does.
+type lookupFailingStore struct{ store.Store }
+
+func (lookupFailingStore) LookupProject(string) (int, bool, error) {
+	return 0, false, errLookupFailed
+}
+
+// GuardSpawn resolves the project before it checks the request or reads the
+// rows, so a store it cannot consult is the error every malformed request
+// reports, and the rows source is never called.
+func TestGuardSpawnResolvesTheProjectBeforeTheRequest(t *testing.T) {
+	ctx := context.Background()
+	env := projectEnv(lookupFailingStore{openStore(t)}, "/repos/runs", true)
+	requests := map[string]verb.GuardSpawnInput{
+		"no run":                   {},
+		"a malformed run":          {Run: "nope"},
+		"a non-seq acknowledgment": {Run: "RUN-1", AckReap: []int64{0}},
+		"a well-formed run":        {Run: "RUN-1"},
+		"--active":                 {Active: true, Run: "RUN-1"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := verb.ParseGuardSpawnRun(tt.in)
-			requireCode(t, err, output.ErrValidation)
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("err = %q, want it to contain %q", err, tt.want)
+	for name, in := range requests {
+		t.Run(name, func(t *testing.T) {
+			in.Rows = unreadableRows
+			_, err := verb.GuardSpawn(ctx, env, in)
+			if !errors.Is(err, errLookupFailed) {
+				t.Errorf("err = %v, want the project lookup's failure", err)
 			}
 		})
 	}
+}
 
-	runID, err := verb.ParseGuardSpawnRun(verb.GuardSpawnInput{Run: "RUN-7", AckReap: []int64{3}})
-	if err != nil || runID != 7 {
-		t.Errorf("ParseGuardSpawnRun(RUN-7) = %d, %v; want 7, nil", runID, err)
+// Once the run and acknowledgments are well formed the rows are read, before
+// the engine looks the run up and before the deciding vote is parsed, and a
+// failed read comes back unchanged.
+func TestGuardSpawnReadsRowsBeforeTheRunLookupAndTheDecidingVote(t *testing.T) {
+	ctx := context.Background()
+	env := projectEnv(openStore(t), "", false)
+	requests := map[string]verb.GuardSpawnInput{
+		"a run nobody started":      {Run: "RUN-999"},
+		"a malformed deciding vote": {Run: "RUN-1", DecidingVote: "nope"},
+	}
+	for name, in := range requests {
+		t.Run(name, func(t *testing.T) {
+			in.Rows = unreadableRows
+			_, err := verb.GuardSpawn(ctx, env, in)
+			if !errors.Is(err, errRowsUnreadable) {
+				t.Errorf("err = %v, want the rows source's failure", err)
+			}
+		})
 	}
 }
 
@@ -391,6 +429,8 @@ func TestGuardSpawnComparesTheProposedRows(t *testing.T) {
 
 	got, err := verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: run})
 	requireAllowed(t, got, err, "a spawn proposing no rows")
-	got, err = verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: run, Rows: []byte("[]")})
+	got, err = verb.GuardSpawn(ctx, env, verb.GuardSpawnInput{Run: run, Rows: func() ([]byte, error) {
+		return []byte("[]"), nil
+	}})
 	requireDenied(t, got, err, "rows with no open dispatch", "dispatch")
 }
