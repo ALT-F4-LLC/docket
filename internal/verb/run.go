@@ -464,7 +464,9 @@ type RunBudgetInput struct {
 	// Set is the new cap; 0 means unlimited.
 	Set *float64
 	// Reason is recorded on the cap change's event, and IfVersion makes the
-	// change conditional on the run's row version. Both apply only with Set.
+	// change conditional on the run's row version; a version below 1 is
+	// refused after the project and the run reference. Both apply only with
+	// Set.
 	Reason    string
 	IfVersion *int
 }
@@ -497,6 +499,9 @@ func RunBudget(ctx context.Context, env Env, in RunBudgetInput) (RunBudgetResult
 			return res, engineError(err)
 		}
 		return res, nil
+	}
+	if err := checkIfVersion(in.IfVersion); err != nil {
+		return res, err
 	}
 
 	res.Budget, err = engine.SetRunBudgetStore(env.Store, runID, *in.Set, in.Reason, in.IfVersion, model.NowMS())

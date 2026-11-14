@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
@@ -304,6 +306,12 @@ func TestRunWritesResolveTheCallersProject(t *testing.T) {
 			})
 			return res.Registered, err
 		},
+		"run abandon --issue": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+				Run: "RUN-42", Issue: "1", Reason: "r", Authority: "operator",
+			})
+			return res.Registered, err
+		},
 		"run budget": func(env verb.Env) (*engine.ProjectRegistration, error) {
 			res, err := verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: "RUN-42"})
 			return res.Registered, err
@@ -330,8 +338,9 @@ func TestRunWritesResolveTheCallersProject(t *testing.T) {
 			anchored.Author = "someone"
 			registered, err := call(anchored)
 			requireCode(t, err, output.ErrNotFound)
-			if registered == nil || registered.Identity != "/repos/caller" || registered.Verb != name {
-				t.Errorf("Registered = %+v, want the caller's project as `%s` registered it", registered, name)
+			wantVerb := strings.TrimSuffix(name, " --issue")
+			if registered == nil || registered.Identity != "/repos/caller" || registered.Verb != wantVerb {
+				t.Errorf("Registered = %+v, want the caller's project as `%s` registered it", registered, wantVerb)
 			}
 		})
 	}
@@ -574,4 +583,234 @@ func TestRunBudgetReadsAndSetsTheCap(t *testing.T) {
 	if stored.Budget != 5 {
 		t.Errorf("stored budget = %g, want 5", stored.Budget)
 	}
+	want := runBudgetSet{From: 0, To: 5, Reason: "more room"}
+	if events := runBudgetSetEvents(t, st, runID); len(events) != 1 || events[0] != want {
+		t.Errorf("run-budget-set events = %+v, want one carrying %+v", events, want)
+	}
+}
+
+// runBudgetSet is the data a run-budget-set event carries.
+type runBudgetSet struct {
+	From   float64 `json:"from"`
+	To     float64 `json:"to"`
+	Reason string  `json:"reason"`
+}
+
+func runBudgetSetEvents(t *testing.T, st store.Store, runID int) []runBudgetSet {
+	t.Helper()
+	tx, err := st.BeginReadSnapshot()
+	if err != nil {
+		t.Fatalf("BeginReadSnapshot: %v", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.RunEventsTx(runID, engine.EventRunBudgetSet)
+	if err != nil {
+		t.Fatalf("RunEventsTx: %v", err)
+	}
+	out := make([]runBudgetSet, 0, len(rows))
+	for _, row := range rows {
+		var e runBudgetSet
+		if err := json.Unmarshal([]byte(row.Data), &e); err != nil {
+			t.Fatalf("decoding event data %q: %v", row.Data, err)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// A cap change checks its faults in the order the CLI always reported them:
+// the caller's project, then the run reference, then the --if-version
+// precondition. An anchored caller is registered even when its precondition
+// is refused.
+func TestRunBudgetChecksTheIfVersionAfterTheProjectAndTheRun(t *testing.T) {
+	ctx := context.Background()
+	limit, zero := 5.0, 0
+	setWithZero := func(run string) verb.RunBudgetInput {
+		return verb.RunBudgetInput{Run: run, Set: &limit, IfVersion: &zero}
+	}
+	st := openStore(t)
+
+	_, err := verb.RunBudget(ctx, projectEnv(st, "/tmp/scratch", false), setWithZero("RUN-42"))
+	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+	requireUnregistered(t, st, "/tmp/scratch")
+
+	_, err = verb.RunBudget(ctx, projectEnv(st, "", false), setWithZero("RUN-x"))
+	requireVerbCode(t, err, output.ErrValidation, `invalid run ID "RUN-x"`)
+
+	res, err := verb.RunBudget(ctx, projectEnv(st, "/repos/caller", true), setWithZero("RUN-42"))
+	requireVerbCode(t, err, output.ErrValidation, "--if-version must be >= 1, got 0 (versions start at 1)")
+	if res.Registered == nil || res.Registered.Identity != "/repos/caller" {
+		t.Errorf("Registered = %+v, want the caller's project registered before the precondition", res.Registered)
+	}
+}
+
+// runAt returns a run in status want, its id, and the conductor capability
+// its activation minted ("" for a planning run, which is bound to none).
+func runAt(t *testing.T, st store.Store, want model.RunStatus) (string, int, string) {
+	t.Helper()
+	if want == model.RunPlanning {
+		run := plannedRun(t, st)
+		runID, err := model.ParseRunID(run)
+		if err != nil {
+			t.Fatalf("ParseRunID: %v", err)
+		}
+		return run, runID, ""
+	}
+	run, runID, token := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+	var err error
+	switch want {
+	case model.RunActive:
+	case model.RunWaitingHuman:
+		_, err = verb.RunPause(ctx, env, verb.RunPauseInput{
+			Run: run, Authority: "operator", ConductorToken: tokenOf(token),
+		})
+	case model.RunAbandoned:
+		_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+			Run: run, Reason: "setup", Authority: "operator", ConductorToken: tokenOf(token),
+		})
+	case model.RunDone:
+		// The run's one issue is its last unfinished work, so abandoning that
+		// issue's work completes the run.
+		issues, listErr := st.ListRunIssues(runID)
+		if listErr != nil || len(issues) != 1 {
+			t.Fatalf("ListRunIssues = %+v, %v; want one issue", issues, listErr)
+		}
+		_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+			Run: run, Issue: model.FormatID(issues[0].IssueID), Reason: "setup", Authority: "operator", ConductorToken: tokenOf(token),
+		})
+	default:
+		t.Fatalf("runAt: no setup for status %s", want)
+	}
+	if err != nil {
+		t.Fatalf("moving the run to %s: %v", want, err)
+	}
+	requireRunStatus(t, st, runID, want)
+	return run, runID, token
+}
+
+// Each lifecycle verb takes the run status machine's edges and no others:
+//
+//	planning -> active <-> waiting-human -> done | abandoned
+//
+// pause leaves active, resume leaves waiting-human, and abandon leaves any
+// status that is not terminal. Every other start is CONFLICT and leaves the
+// run where it was.
+func TestRunLifecycleVerbsTakeOnlyTheirTransitions(t *testing.T) {
+	statuses := []model.RunStatus{
+		model.RunPlanning, model.RunActive, model.RunWaitingHuman, model.RunDone, model.RunAbandoned,
+	}
+	verbs := []struct {
+		name string
+		to   model.RunStatus
+		from []model.RunStatus
+		call func(env verb.Env, run, token string) error
+	}{
+		{"pause", model.RunWaitingHuman, []model.RunStatus{model.RunActive},
+			func(env verb.Env, run, token string) error {
+				_, err := verb.RunPause(context.Background(), env, verb.RunPauseInput{
+					Run: run, Authority: "operator", ConductorToken: tokenOf(token),
+				})
+				return err
+			}},
+		{"resume", model.RunActive, []model.RunStatus{model.RunWaitingHuman},
+			func(env verb.Env, run, token string) error {
+				_, err := verb.RunResume(context.Background(), env, verb.RunResumeInput{
+					Run: run, ConductorToken: tokenOf(token),
+				})
+				return err
+			}},
+		{"abandon", model.RunAbandoned,
+			[]model.RunStatus{model.RunPlanning, model.RunActive, model.RunWaitingHuman},
+			func(env verb.Env, run, token string) error {
+				_, err := verb.RunAbandon(context.Background(), env, verb.RunAbandonInput{
+					Run: run, Reason: "r", Authority: "operator", ConductorToken: tokenOf(token),
+				})
+				return err
+			}},
+	}
+	for _, v := range verbs {
+		for _, start := range statuses {
+			t.Run(v.name+" from "+string(start), func(t *testing.T) {
+				st := openStore(t)
+				run, runID, token := runAt(t, st, start)
+				err := v.call(projectEnv(st, "", false), run, token)
+				for _, allowed := range v.from {
+					if start == allowed {
+						if err != nil {
+							t.Fatalf("run %s from %s: %v, want the move", v.name, start, err)
+						}
+						requireRunStatus(t, st, runID, v.to)
+						return
+					}
+				}
+				requireCode(t, err, output.ErrConflict)
+				requireRunStatus(t, st, runID, start)
+			})
+		}
+	}
+}
+
+// A planning run is bound to no conductor capability, so no lifecycle verb
+// reads its token source, whether the move is taken or refused.
+func TestRunLifecycleVerbsReadNoTokenForAnUnboundRun(t *testing.T) {
+	st := openStore(t)
+	run, _, _ := runAt(t, st, model.RunPlanning)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+	reads := 0
+	counting := func() string { reads++; return "unused" }
+
+	_, err := verb.RunPause(ctx, env, verb.RunPauseInput{Run: run, Authority: "operator", ConductorToken: counting})
+	requireCode(t, err, output.ErrConflict)
+	_, err = verb.RunResume(ctx, env, verb.RunResumeInput{Run: run, ConductorToken: counting})
+	requireCode(t, err, output.ErrConflict)
+	if _, err := verb.RunAbandon(ctx, env, verb.RunAbandonInput{
+		Run: run, Reason: "r", Authority: "operator", ConductorToken: counting,
+	}); err != nil {
+		t.Fatalf("RunAbandon: %v", err)
+	}
+	if reads != 0 {
+		t.Errorf("token source read %d time(s) for an unbound run, want none", reads)
+	}
+}
+
+// A resume reports the pins that drifted while the run was parked, and the
+// drift does not stop the resume.
+func TestRunResumeReportsPinDrift(t *testing.T) {
+	st := openStore(t)
+	run, runID, token := runAt(t, st, model.RunWaitingHuman)
+
+	const ref = "contracts/drifted.md"
+	path := filepath.Join(os.Getenv("DOCKET_PATH"), "config", ref)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("AFTER\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	tx, err := st.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := tx.InsertPinTx(store.Pin{
+		RunID: runID, Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256([]byte("BEFORE\n")),
+	}); err != nil {
+		tx.Rollback()
+		t.Fatalf("InsertPinTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	res, err := verb.RunResume(context.Background(), projectEnv(st, "", false),
+		verb.RunResumeInput{Run: run, ConductorToken: tokenOf(token)})
+	if err != nil {
+		t.Fatalf("RunResume: %v", err)
+	}
+	if len(res.PinDrift) != 1 || res.PinDrift[0].Ref != ref || res.PinDrift[0].Status == engine.PinOK {
+		t.Errorf("PinDrift = %+v, want the one drifted pin %s", res.PinDrift, ref)
+	}
+	requireRunStatus(t, st, runID, model.RunActive)
 }

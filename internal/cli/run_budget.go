@@ -71,9 +71,7 @@ func runRunBudget(cmd *cobra.Command, ref string, w *output.Writer) error {
 		}
 		in.Set = &budget
 		in.Reason, _ = cmd.Flags().GetString("reason")
-		if in.IfVersion, err = ifVersionOf(cmd); err != nil {
-			return err
-		}
+		in.IfVersion = ifVersionFlagValue(cmd)
 	}
 
 	res, err := verb.RunBudget(cmd.Context(), verbEnv(cmd), in)
