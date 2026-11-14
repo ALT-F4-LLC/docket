@@ -7,7 +7,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +22,8 @@ can still act on. ` + "`--all`" + ` widens it to every run the project has recor
 READ-ONLY. This verb computes effective status and WRITES NOTHING — status
 never lies just because nobody ran a scheduling command, and a read that
 mutated would make "I only looked at it" untrue.`,
-	Args: cobra.MaximumNArgs(1),
+	Args:        cobra.MaximumNArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunStatus(cmd, args, getWriter(cmd))
 	},
@@ -123,105 +124,40 @@ func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
 	all, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
 
+	in := verb.RunStatusInput{All: all, Limit: limit}
 	if len(args) == 1 {
-		if all {
-			return cmdErr(
-				fmt.Errorf("--all widens a list; it does not apply to a single run"),
-				output.ErrValidation)
-		}
-		return showOneRun(cmd, args[0], w)
-	}
-
-	if err := validateLimit(cmd, limit); err != nil {
+		in.Run = args[0]
+	} else if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
 
-	runs, total, err := store.StoreOn(getDB(cmd)).ListRuns(store.RunListOptions{
-		ProjectID:  getProjectID(cmd),
-		ActiveOnly: !all, Limit: limit,
-	})
+	res, err := verb.RunStatus(cmd.Context(), verbEnv(cmd), in)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
-	result := newRunListResult(runs, total, limit)
-	var message string
-	if !w.JSONMode {
-		message = renderRunList(runs)
-	}
-	w.Success(result, message)
-	return nil
-}
-
-func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-	st := store.StoreOn(conn)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	run, err := st.GetRun(runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	runIssues, err := st.ListRunIssues(runID)
-	if err != nil {
-		return runErr(err)
-	}
-	// EFFECTIVE counts, exactly as this verb's contract states — the
-	// same computation `step show`/`step list` render, so the rollup and a
-	// step read taken at the same moment cannot disagree (DKT-468). The raw
-	// GROUP BY this replaced counted a lapsed-lease claim as `claimed` while
-	// `step show` reported the same step `ready`.
-	steps, err := engine.EffectiveStatusCounts(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
-	pins, err := st.ListPins(runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	head, err := engine.LatestActivationHead(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	unexpanded, retryEligible, err := engine.RunAdvisories(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	result := runStatusResult{
-		Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head,
-		Unexpanded:    unexpanded,
-		RetryEligible: retryEligible,
-	}
-	for _, p := range pins {
-		result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
-	}
-
-	// The drift check reads DISK on purpose, breaking this verb's usual
-	// database-only diet (DKT-408): a parked run whose pins a corpus install
-	// replaced must say so in the status a resuming conductor reads FIRST,
-	// not after a wave discovers it step by step. Still a read — VerifyPins
-	// writes nothing — and still cheap: it hashes the run's pinned files, the
-	// same work `verify-pins` does. Skipped for terminal runs, whose pins are
-	// history rather than an agreement anything will read again.
-	if run.Status == model.RunActive || run.Status == model.RunWaitingHuman {
-		drift, err := engine.PinDrift(conn, runID)
-		if err != nil {
-			return runErr(err)
+	if d := res.Detail; d != nil {
+		result := runStatusResult{
+			Run: d.Run, Issues: d.Issues, Steps: d.Steps, PinDrift: d.PinDrift,
+			ActivationHead: d.ActivationHead,
+			Unexpanded:     d.Unexpanded,
+			RetryEligible:  d.RetryEligible,
 		}
-		result.PinDrift = drift
+		for _, p := range d.Pins {
+			result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
+		}
+		var message string
+		if !w.JSONMode {
+			message = renderRunStatus(result)
+		}
+		w.Success(result, message)
+		return nil
 	}
 
+	result := newRunListResult(res.Runs, res.Total, limit)
 	var message string
 	if !w.JSONMode {
-		message = renderRunStatus(result)
+		message = renderRunList(res.Runs)
 	}
 	w.Success(result, message)
 	return nil

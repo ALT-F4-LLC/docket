@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -512,4 +513,220 @@ func RunBudget(ctx context.Context, env Env, in RunBudgetInput) (RunBudgetResult
 		return res, engineError(err)
 	}
 	return res, nil
+}
+
+// RunStatusInput reads one run when Run is set, or lists the caller's runs
+// when it is empty.
+type RunStatusInput struct {
+	Run string
+	// All widens a list to done and abandoned runs; it does not apply to one
+	// run.
+	All bool
+	// Limit caps a list; 0 means no limit.
+	Limit int
+}
+
+// RunStatusResult is a list (Runs and Total) or one run's Detail.
+type RunStatusResult struct {
+	Runs []*model.Run
+	// Total counts every run the list matched, ignoring Limit.
+	Total  int
+	Detail *RunStatusDetail
+}
+
+// RunStatusDetail is one run and its rollup.
+type RunStatusDetail struct {
+	Run    *model.Run
+	Issues int
+	// Steps counts the run's steps by effective status, the status `step
+	// show` reports.
+	Steps []model.StatusCount
+	Pins  []store.Pin
+	// PinDrift is the unsound subset of Pins, checked against disk only while
+	// the run is active or waiting-human; a terminal run's pins are history.
+	PinDrift       []engine.PinVerdict
+	ActivationHead *engine.ActivationHead
+	Unexpanded     []engine.UnexpandedIssue
+	RetryEligible  []engine.RetryEligible
+}
+
+// RunStatus lists the runs of the caller's project, or reads one run's status
+// and step rollup. It is a read: it writes nothing, not even a lease reap, and
+// an identity no project holds is never registered.
+func RunStatus(ctx context.Context, env Env, in RunStatusInput) (RunStatusResult, error) {
+	projectID, _, err := env.ResolveProject(ProjectReadOnly)
+	if err != nil {
+		return RunStatusResult{}, err
+	}
+	if in.Run == "" {
+		runs, total, err := env.Store.ListRuns(store.RunListOptions{
+			ProjectID: projectID, ActiveOnly: !in.All, Limit: in.Limit,
+		})
+		if err != nil {
+			return RunStatusResult{}, engineError(err)
+		}
+		return RunStatusResult{Runs: runs, Total: total}, nil
+	}
+	if in.All {
+		return RunStatusResult{}, newError(
+			errors.New("--all widens a list; it does not apply to a single run"), output.ErrValidation)
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return RunStatusResult{}, newError(err, output.ErrValidation)
+	}
+	detail, err := runStatusDetail(env.Store, runID)
+	if err != nil {
+		return RunStatusResult{}, engineError(err)
+	}
+	return RunStatusResult{Detail: detail}, nil
+}
+
+func runStatusDetail(st store.Store, runID int) (*RunStatusDetail, error) {
+	run, err := st.GetRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	issues, err := st.ListRunIssues(runID)
+	if err != nil {
+		return nil, err
+	}
+	steps, err := engine.EffectiveStatusCountsStore(st, runID, model.NowMS())
+	if err != nil {
+		return nil, err
+	}
+	pins, err := st.ListPins(runID)
+	if err != nil {
+		return nil, err
+	}
+	head, err := engine.LatestActivationHeadStore(st, runID)
+	if err != nil {
+		return nil, err
+	}
+	unexpanded, retryEligible, err := engine.RunAdvisoriesStore(st, runID)
+	if err != nil {
+		return nil, err
+	}
+	detail := &RunStatusDetail{
+		Run: run, Issues: len(issues), Steps: steps, Pins: pins, ActivationHead: head,
+		Unexpanded: unexpanded, RetryEligible: retryEligible,
+	}
+	// The drift check reads disk on purpose (DKT-408): a parked run whose pins
+	// a corpus install replaced must say so in the status a resuming conductor
+	// reads first. It still writes nothing.
+	if run.Status == model.RunActive || run.Status == model.RunWaitingHuman {
+		if detail.PinDrift, err = engine.PinDriftStore(st, runID); err != nil {
+			return nil, err
+		}
+	}
+	return detail, nil
+}
+
+// RunReportInput names the run to report on.
+type RunReportInput struct {
+	Run string
+}
+
+// RunReportResult is the run's ledger rollup.
+type RunReportResult struct {
+	Report *engine.RunReport
+}
+
+// RunReport rolls up a run's budget, steps, gates, actions, artifacts and
+// metadata, in any status. It is a read: it writes nothing, not even a lease
+// reap, and an identity no project holds is never registered.
+func RunReport(ctx context.Context, env Env, in RunReportInput) (RunReportResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return RunReportResult{}, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return RunReportResult{}, newError(err, output.ErrValidation)
+	}
+	report, err := engine.LoadRunReportStore(env.Store, runID, model.NowMS())
+	if err != nil {
+		return RunReportResult{}, engineError(err)
+	}
+	return RunReportResult{Report: report}, nil
+}
+
+// RunVerifyPinsInput names the run whose pin set to check.
+type RunVerifyPinsInput struct {
+	Run string
+}
+
+// RunVerifyPinsResult is the whole pin set's verdicts.
+type RunVerifyPinsResult struct {
+	Report *engine.PinReport
+}
+
+// RunVerifyPins checks every pin a run holds against what its ref resolves to
+// now, and the pin set for closure. It is a read and re-pins nothing. An
+// unsound report is refused with the code the blocked verbs themselves
+// return, and the report is returned beside the refusal.
+func RunVerifyPins(ctx context.Context, env Env, in RunVerifyPinsInput) (RunVerifyPinsResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return RunVerifyPinsResult{}, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return RunVerifyPinsResult{}, newError(err, output.ErrValidation)
+	}
+	report, err := engine.VerifyPinsStore(env.Store, runID)
+	if err != nil {
+		return RunVerifyPinsResult{}, engineError(err)
+	}
+	res := RunVerifyPinsResult{Report: report}
+	if !report.Sound() {
+		return res, unsoundPinsError(report)
+	}
+	return res, nil
+}
+
+// unsoundPinsError is the refusal for an unsound pin report. Its code and
+// remedy follow the first fault present, in the order changed, missing,
+// executed copy changed, then an open closure.
+func unsoundPinsError(report *engine.PinReport) error {
+	code := output.ErrConflict
+	remedy := fmt.Sprintf("; restore the file(s), or `docket run repin %s "+
+		"--reason ...` adopts current disk bytes for the remaining steps "+
+		"(DKT-408)", report.Run)
+	switch {
+	case report.Changed > 0:
+		// Drift wins the disposition: it is the half a repin can fix, and
+		// its remedy is the one to try first.
+	case report.Missing > 0:
+		code = output.ErrNotFound
+		// A missing ref has no current bytes to adopt; repin would refuse.
+		remedy = "; restore the file(s) or abandon the run"
+	case report.ExecutedCopyChanged > 0:
+		// A gate run from the invoking checkout would execute other bytes
+		// than the run pinned. The run's own pins are intact, so repin has
+		// nothing to adopt and a new run would pin the run's checkout
+		// again; the fix is the invoking copy or where the gate runs.
+		remedy = "; restore the gate script in the invoking checkout, " +
+			"or run the gate from the run's checkout"
+	default:
+		// Only the closure is open. Nothing drifted, so there is nothing on
+		// disk to restore and repin has no changed bytes to adopt. The pin
+		// set froze without the ref, and only a new activation pins one. The
+		// code is the one the blocked claims themselves return.
+		code = output.ErrValidation
+		remedy = "; the pin set froze without the ref(s), so the step(s) " +
+			"reading them refuse at claim (VALIDATION_ERROR) — start a new " +
+			"run to pin them, or take the reference back out of the " +
+			"referencing file"
+	}
+	// Unpinned gates are a separate report, but an unsound run must not hide
+	// them: name them beside the drift.
+	var names []string
+	for _, g := range report.Gates {
+		if g.Status == engine.GateUnpinned {
+			names = append(names, fmt.Sprintf("%q", g.Gate))
+		}
+	}
+	if len(names) > 0 {
+		remedy += "; gates with no pinned script: " + strings.Join(names, ", ")
+	}
+	return newError(fmt.Errorf("%s: %s%s", report.Run, engine.PinReportReason(report), remedy), code)
 }

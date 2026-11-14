@@ -396,6 +396,12 @@ func TestRunVerbsRefuseAMalformedRunRef(t *testing.T) {
 	requireCode(t, err, output.ErrValidation)
 	_, err = verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: "RUN-x"})
 	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunStatus(ctx, env, verb.RunStatusInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunReport(ctx, env, verb.RunReportInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: "RUN-x"})
+	requireCode(t, err, output.ErrValidation)
 }
 
 func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
@@ -415,6 +421,12 @@ func TestRunVerbsReportAMissingRunAsNotFound(t *testing.T) {
 	_, err = verb.RunAbandon(ctx, env, verb.RunAbandonInput{Run: "RUN-42", Reason: "r", Authority: "operator"})
 	requireCode(t, err, output.ErrNotFound)
 	_, err = verb.RunBudget(ctx, env, verb.RunBudgetInput{Run: "RUN-42"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunStatus(ctx, env, verb.RunStatusInput{Run: "RUN-42"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunReport(ctx, env, verb.RunReportInput{Run: "RUN-42"})
+	requireCode(t, err, output.ErrNotFound)
+	_, err = verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: "RUN-42"})
 	requireCode(t, err, output.ErrNotFound)
 }
 
@@ -781,8 +793,24 @@ func TestRunLifecycleVerbsReadNoTokenForAnUnboundRun(t *testing.T) {
 func TestRunResumeReportsPinDrift(t *testing.T) {
 	st := openStore(t)
 	run, runID, token := runAt(t, st, model.RunWaitingHuman)
-
 	const ref = "contracts/drifted.md"
+	pinDriftedFile(t, st, runID, ref)
+
+	res, err := verb.RunResume(context.Background(), projectEnv(st, "", false),
+		verb.RunResumeInput{Run: run, ConductorToken: tokenOf(token)})
+	if err != nil {
+		t.Fatalf("RunResume: %v", err)
+	}
+	if len(res.PinDrift) != 1 || res.PinDrift[0].Ref != ref || res.PinDrift[0].Status == engine.PinOK {
+		t.Errorf("PinDrift = %+v, want the one drifted pin %s", res.PinDrift, ref)
+	}
+	requireRunStatus(t, st, runID, model.RunActive)
+}
+
+// pinDriftedFile pins ref on runID at bytes other than the ones now on disk
+// under the store's config root.
+func pinDriftedFile(t *testing.T, st store.Store, runID int, ref string) {
+	t.Helper()
 	path := filepath.Join(os.Getenv("DOCKET_PATH"), "config", ref)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -803,14 +831,161 @@ func TestRunResumeReportsPinDrift(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+}
 
-	res, err := verb.RunResume(context.Background(), projectEnv(st, "", false),
-		verb.RunResumeInput{Run: run, ConductorToken: tokenOf(token)})
+// The run reads observe: an anchored identity no project holds is answered
+// as an empty project and never registered.
+func TestRunReadsNeverRegisterTheCallersProject(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	run, _, _ := activeRun(t, st)
+	env := projectEnv(st, "/repos/caller", true)
+
+	list, err := verb.RunStatus(ctx, env, verb.RunStatusInput{All: true})
 	if err != nil {
-		t.Fatalf("RunResume: %v", err)
+		t.Fatalf("RunStatus list: %v", err)
 	}
-	if len(res.PinDrift) != 1 || res.PinDrift[0].Ref != ref || res.PinDrift[0].Status == engine.PinOK {
-		t.Errorf("PinDrift = %+v, want the one drifted pin %s", res.PinDrift, ref)
+	if len(list.Runs) != 0 || list.Total != 0 {
+		t.Errorf("list = %+v, want no runs in an unregistered project", list)
 	}
-	requireRunStatus(t, st, runID, model.RunActive)
+	if _, err := verb.RunStatus(ctx, env, verb.RunStatusInput{Run: run}); err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+	if _, err := verb.RunReport(ctx, env, verb.RunReportInput{Run: run}); err != nil {
+		t.Fatalf("RunReport: %v", err)
+	}
+	if _, err := verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: run}); err != nil {
+		t.Fatalf("RunVerifyPins: %v", err)
+	}
+	requireUnregistered(t, st, "/repos/caller")
+}
+
+// A bare list hides done and abandoned runs, All shows them, and Limit pages
+// the list while Total still counts every match.
+func TestRunStatusListsTheCallersRuns(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	live, _, _ := runAt(t, st, model.RunActive)
+	ended, _, _ := runAt(t, st, model.RunAbandoned)
+	env := projectEnv(st, "", false)
+
+	refs := func(runs []*model.Run) []string {
+		out := make([]string, 0, len(runs))
+		for _, r := range runs {
+			out = append(out, r.Ref())
+		}
+		return out
+	}
+
+	bare, err := verb.RunStatus(ctx, env, verb.RunStatusInput{})
+	if err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+	if got := refs(bare.Runs); len(got) != 1 || got[0] != live || bare.Total != 1 || bare.Detail != nil {
+		t.Errorf("bare list = %v total %d detail %v, want %s alone", got, bare.Total, bare.Detail, live)
+	}
+
+	all, err := verb.RunStatus(ctx, env, verb.RunStatusInput{All: true})
+	if err != nil {
+		t.Fatalf("RunStatus --all: %v", err)
+	}
+	if got := strings.Join(refs(all.Runs), " "); all.Total != 2 ||
+		!strings.Contains(got, live) || !strings.Contains(got, ended) {
+		t.Errorf("--all list = %s total %d, want %s and %s", got, all.Total, live, ended)
+	}
+
+	page, err := verb.RunStatus(ctx, env, verb.RunStatusInput{All: true, Limit: 1})
+	if err != nil {
+		t.Fatalf("RunStatus --limit: %v", err)
+	}
+	if len(page.Runs) != 1 || page.Total != 2 {
+		t.Errorf("limited list = %d run(s) total %d, want 1 of 2", len(page.Runs), page.Total)
+	}
+}
+
+func TestRunStatusRefusesAllWithARun(t *testing.T) {
+	st := openStore(t)
+	_, err := verb.RunStatus(context.Background(), projectEnv(st, "", false),
+		verb.RunStatusInput{Run: "RUN-1", All: true})
+	requireVerbCode(t, err, output.ErrValidation, "--all widens a list")
+}
+
+// One run's status carries its issue count, its step rollup and its pins,
+// and the drift among those pins while the run is live.
+func TestRunStatusShowsOneRunsRollupAndDrift(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := activeRun(t, st)
+	const ref = "contracts/drifted.md"
+	pinDriftedFile(t, st, runID, ref)
+
+	res, err := verb.RunStatus(context.Background(), projectEnv(st, "", false), verb.RunStatusInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+	d := res.Detail
+	if d == nil || d.Run.Ref() != run || d.Issues != 1 || len(d.Steps) == 0 || res.Runs != nil {
+		t.Fatalf("result = %+v, want %s's rollup with one issue and its steps", res, run)
+	}
+	var pinned bool
+	for _, p := range d.Pins {
+		pinned = pinned || p.Ref == ref
+	}
+	if !pinned {
+		t.Errorf("pins = %+v, want %s among them", d.Pins, ref)
+	}
+	if len(d.PinDrift) != 1 || d.PinDrift[0].Ref != ref {
+		t.Errorf("PinDrift = %+v, want the one drifted pin %s", d.PinDrift, ref)
+	}
+}
+
+// A terminal run's pins are history, so its status reads no drift.
+func TestRunStatusChecksNoDriftOnATerminalRun(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := runAt(t, st, model.RunAbandoned)
+	pinDriftedFile(t, st, runID, "contracts/drifted.md")
+
+	res, err := verb.RunStatus(context.Background(), projectEnv(st, "", false), verb.RunStatusInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+	if res.Detail == nil || len(res.Detail.PinDrift) != 0 {
+		t.Errorf("result = %+v, want a terminal run's status with no drift", res.Detail)
+	}
+}
+
+func TestRunReportReportsARunInAnyStatus(t *testing.T) {
+	st := openStore(t)
+	run := plannedRun(t, st)
+
+	res, err := verb.RunReport(context.Background(), projectEnv(st, "", false), verb.RunReportInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunReport: %v", err)
+	}
+	if res.Report == nil || res.Report.Run.Ref() != run || res.Report.Run.Status != model.RunPlanning {
+		t.Errorf("report = %+v, want the planning run %s", res.Report, run)
+	}
+}
+
+// A sound pin set is a plain result; a drifted one is refused as CONFLICT
+// naming the repin remedy, with the report still returned beside the error.
+func TestRunVerifyPinsRefusesAnUnsoundPinSetWithItsReport(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := activeRun(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	sound, err := verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunVerifyPins on a sound run: %v", err)
+	}
+	if sound.Report == nil || !sound.Report.Sound() {
+		t.Fatalf("report = %+v, want a sound pin set", sound.Report)
+	}
+
+	pinDriftedFile(t, st, runID, "contracts/drifted.md")
+	drifted, err := verb.RunVerifyPins(ctx, env, verb.RunVerifyPinsInput{Run: run})
+	requireVerbCode(t, err, output.ErrConflict, "docket run repin "+run)
+	if drifted.Report == nil || drifted.Report.Changed != 1 {
+		t.Errorf("report = %+v, want the one changed pin beside the refusal", drifted.Report)
+	}
 }

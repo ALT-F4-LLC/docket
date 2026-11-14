@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -57,30 +58,24 @@ is the workflow's business. The report publishes the cap, where the cap came
 from, the declared-cost floor, reported usage per unit, max(reported, floor),
 and the burn rate — so a policy that wants to warn at some fraction of a cap
 computes it from these numbers rather than from an opinion shipped here.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunReport(cmd, args[0], getWriter(cmd))
 	},
 }
 
 func runRunReport(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
+	res, err := verb.RunReport(cmd.Context(), verbEnv(cmd), verb.RunReportInput{Run: ref})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	report, err := engine.LoadRunReport(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = renderRunReport(report)
+		message = renderRunReport(res.Report)
 	}
-	w.Success(runReportResult{report}, message)
+	w.Success(runReportResult{res.Report}, message)
 	return nil
 }
 
