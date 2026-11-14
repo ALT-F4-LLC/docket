@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
@@ -52,10 +51,6 @@ observation rather than a ruling, so it takes no --authority.`,
 }
 
 func runRunFactAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
-	env, err := runRulingEnv(cmd, ref)
-	if err != nil {
-		return err
-	}
 	in := verb.RunFactAddInput{Run: ref, ConductorToken: stdinConductorToken}
 	in.Kind, _ = cmd.Flags().GetString("kind")
 	in.Reason, _ = cmd.Flags().GetString("reason")
@@ -63,6 +58,10 @@ func runRunFactAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 	in.Voter, _ = cmd.Flags().GetString("voter")
 	in.Step, _ = cmd.Flags().GetString("step")
 	in.Cause, _ = cmd.Flags().GetString("cause")
+	env, err := runRulingEnv(cmd, in.Validate)
+	if err != nil {
+		return err
+	}
 
 	res, err := verb.RunFactAdd(cmd.Context(), env, in)
 	recordProjectRegistration(cmd, res.Registered)
@@ -75,15 +74,16 @@ func runRunFactAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 	return nil
 }
 
-// runRulingEnv is rulingEnv for a verb addressed by RUN-N: a malformed run
-// reference outranks an unreadable working directory, as it did when the
-// command parsed the reference first. The verb refuses the reference too, but
-// only once the caller is attributed.
-func runRulingEnv(cmd *cobra.Command, ref string) (verb.Env, error) {
+// runRulingEnv is rulingEnv for a run verb whose input checks outrank an
+// unreadable working directory, as they did when the command parsed its flags
+// before resolving the directory. validate is the input's Validate; it runs
+// only when the directory is unreadable, so a readable one leaves the verb's
+// own order, the project first, intact.
+func runRulingEnv(cmd *cobra.Command, validate func() error) (verb.Env, error) {
 	env, err := rulingEnv(cmd)
 	if err != nil {
-		if _, parseErr := model.ParseRunID(ref); parseErr != nil {
-			return verb.Env{}, cmdErr(parseErr, output.ErrValidation)
+		if inputErr := validate(); inputErr != nil {
+			return verb.Env{}, verbErr(inputErr)
 		}
 		return verb.Env{}, err
 	}

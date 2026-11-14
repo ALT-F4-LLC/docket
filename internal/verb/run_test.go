@@ -503,6 +503,60 @@ func TestRunFactAddRecordsAStepDeferralUnderTheCapability(t *testing.T) {
 	if *res.Fact != want || res.Fact.Seq == 0 {
 		t.Errorf("fact = %+v, want %+v with a recorded seq", *res.Fact, want)
 	}
+	requireFactAttribution(t, st, runID, engine.RunFactStepDeferred, "conductor", "/work/scratch")
+}
+
+// A re-seated vote seat is recorded with the proposal and the voter it names.
+func TestRunFactAddRecordsAVoteReseat(t *testing.T) {
+	st := openStore(t)
+	run, runID, token := activeRun(t, st)
+	steps, err := st.ListRunSteps(runID)
+	if err != nil || len(steps) == 0 {
+		t.Fatalf("ListRunSteps = %v, %v; want the run's steps", steps, err)
+	}
+	proposal := openProposal(t, st, 2, "")
+	pid, err := model.ParseProposalID(proposal)
+	if err != nil {
+		t.Fatalf("ParseProposalID: %v", err)
+	}
+	if err := st.LinkProposalIssue(pid, steps[0].IssueID); err != nil {
+		t.Fatalf("LinkProposalIssue: %v", err)
+	}
+	env := projectEnv(st, "", false)
+	env.Author = "conductor"
+
+	res, err := verb.RunFactAdd(context.Background(), env, verb.RunFactAddInput{
+		Run: run, Kind: engine.RunFactVoteReseated, Proposal: proposal, Voter: "seat-a",
+		Reason: "the seat died mid-cast", ConductorToken: tokenOf(token),
+	})
+	if err != nil {
+		t.Fatalf("RunFactAdd: %v", err)
+	}
+	want := engine.RunFact{
+		Run: run, Kind: engine.RunFactVoteReseated, Seq: res.Fact.Seq, Proposal: proposal,
+		Voter: "seat-a", Reason: "the seat died mid-cast",
+	}
+	if *res.Fact != want || res.Fact.Seq == 0 {
+		t.Errorf("fact = %+v, want %+v with a recorded seq", *res.Fact, want)
+	}
+	requireFactAttribution(t, st, runID, engine.RunFactVoteReseated, "conductor", "/work/scratch")
+}
+
+// requireFactAttribution asserts the run's newest fact event of kind names
+// actor and cwd.
+func requireFactAttribution(t *testing.T, st store.Store, runID int, kind, actor, cwd string) {
+	t.Helper()
+	page, err := engine.ListEventsStore(st, engine.EventQuery{RunID: runID, Kind: kind})
+	if err != nil || len(page.Events) == 0 {
+		t.Fatalf("ListEventsStore(%s) = %d events, %v; want the recorded fact", kind, len(page.Events), err)
+	}
+	var data struct{ Actor, Cwd string }
+	if err := json.Unmarshal(page.Events[len(page.Events)-1].Data, &data); err != nil {
+		t.Fatalf("decoding the %s event: %v", kind, err)
+	}
+	if data.Actor != actor || data.Cwd != cwd {
+		t.Errorf("%s event attributed to %q from %q, want %q from %q", kind, data.Actor, data.Cwd, actor, cwd)
+	}
 }
 
 func TestRunFactAddRefusesAMalformedStepOrProposal(t *testing.T) {
@@ -549,8 +603,9 @@ func TestRunNoteAddRecordsTheNoteTheListReadsBack(t *testing.T) {
 }
 
 // The text source is read only after the run reference and the authority are
-// accepted, so a refused note leaves a transport's stream unread; an error the
-// source returns is the verb's, unchanged.
+// accepted, so a refused note leaves a transport's stream unread. A
+// *verb.Error the source returns is the verb's unchanged; any other error is
+// coded GENERAL_ERROR.
 func TestRunNoteAddReadsTheTextOnlyAfterTheAuthority(t *testing.T) {
 	st := openStore(t)
 	run, _, token := activeRun(t, st)
@@ -569,13 +624,46 @@ func TestRunNoteAddReadsTheTextOnlyAfterTheAuthority(t *testing.T) {
 		requireVerbCode(t, err, output.ErrValidation, "--authority")
 	}
 
+	coded := &verb.Error{Code: output.ErrNotFound, Err: errors.New("note file n.md not found")}
+	_, err = verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{
+		Run: run, Authority: engine.AuthorityOperator, ConductorToken: tokenOf(token),
+		Text: func() (string, error) { return "", coded },
+	})
+	if err != coded {
+		t.Errorf("error = %v, want the text source's *verb.Error unchanged", err)
+	}
+
 	sourceErr := errors.New("reading the note failed")
 	_, err = verb.RunNoteAdd(ctx, env, verb.RunNoteAddInput{
 		Run: run, Authority: engine.AuthorityOperator, ConductorToken: tokenOf(token),
 		Text: func() (string, error) { return "", sourceErr },
 	})
-	if err != sourceErr {
-		t.Errorf("error = %v, want the text source's error unchanged", err)
+	requireCode(t, err, output.ErrGeneral)
+	if !errors.Is(err, sourceErr) {
+		t.Errorf("error = %v, want it to wrap the text source's error", err)
+	}
+}
+
+// Validate reports the faults of the input alone, as the verb does, for a
+// transport whose attribution failed first.
+func TestRunFactAndNoteAddValidateTheirInput(t *testing.T) {
+	for name, err := range map[string]error{
+		"fact run":       verb.RunFactAddInput{Run: "RUN-x"}.Validate(),
+		"fact step":      verb.RunFactAddInput{Run: "RUN-1", Step: "STEP-x"}.Validate(),
+		"fact proposal":  verb.RunFactAddInput{Run: "RUN-1", Proposal: "PROPOSAL-x"}.Validate(),
+		"note run":       verb.RunNoteAddInput{Run: "RUN-x", Authority: engine.AuthorityOperator}.Validate(),
+		"note authority": verb.RunNoteAddInput{Run: "RUN-1", Authority: "standing-grant"}.Validate(),
+	} {
+		var ve *verb.Error
+		if !errors.As(err, &ve) || ve.Code != output.ErrValidation {
+			t.Errorf("%s: Validate = %v, want a VALIDATION_ERROR *verb.Error", name, err)
+		}
+	}
+	if err := (verb.RunFactAddInput{Run: "RUN-1", Step: "STEP-2", Proposal: model.FormatProposalID(3)}).Validate(); err != nil {
+		t.Errorf("fact: Validate = %v on a well-formed input", err)
+	}
+	if err := (verb.RunNoteAddInput{Run: "RUN-1", Authority: engine.AuthorityConductor}).Validate(); err != nil {
+		t.Errorf("note: Validate = %v on a well-formed input", err)
 	}
 }
 

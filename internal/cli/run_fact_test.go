@@ -60,7 +60,8 @@ func TestRunFactAddCLIRecordsAStepDeferral(t *testing.T) {
 			"kind": engine.RunFactStepDeferred, "step": step,
 			"cause": engine.DeferralBudget, "reason": "over budget",
 		} {
-			testsupport.Must(t, cmd.Flags().Set(name, value), "setting --%s: %v", name, nil)
+			err := cmd.Flags().Set(name, value)
+			testsupport.Must(t, err, "setting --%s: %v", name, err)
 		}
 		w, buf := bufWriter(false)
 		err := runRunFactAdd(cmd, runRef, w)
@@ -90,5 +91,64 @@ func TestRunFactAddCLIRecordsAStepDeferral(t *testing.T) {
 	}
 	if n := stepDeferredEvents(t, conn, runID); n != 1 {
 		t.Errorf("step-deferred events = %d, want 1", n)
+	}
+}
+
+// With an unreadable working directory, a malformed request still reports its
+// own fault, as the commands did before the move: the run reference, --step
+// and --proposal for a fact, the run reference and --authority for a note.
+// Only a well-formed request reports the directory.
+func TestRunFactAndNoteAddReportTheRequestFaultBeforeTheDirectory(t *testing.T) {
+	conn := newTestDB(t)
+	runID, _ := seedRun(t, conn)
+	runRef := model.FormatRunID(runID)
+	stubGetwdFailure(t)
+
+	addFact := func(ref string, flags map[string]string) error {
+		cmd := runFactCmdWithDB(conn)
+		flags["kind"], flags["reason"] = engine.RunFactStepDeferred, "over budget"
+		for name, value := range flags {
+			err := cmd.Flags().Set(name, value)
+			testsupport.Must(t, err, "setting --%s: %v", name, err)
+		}
+		w, _ := bufWriter(false)
+		return runRunFactAdd(cmd, ref, w)
+	}
+	addNote := func(ref, authority string) error {
+		cmd := runNoteCmdNoAuthority(conn)
+		for name, value := range map[string]string{"authority": authority, "text": "a ruling"} {
+			err := cmd.Flags().Set(name, value)
+			testsupport.Must(t, err, "setting --%s: %v", name, err)
+		}
+		w, _ := bufWriter(false)
+		return runRunNoteAdd(cmd, ref, w)
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"fact add RUN-x", addFact("RUN-x", map[string]string{}), "RUN-x"},
+		{"fact add --step STEP-x", addFact(runRef, map[string]string{"step": "STEP-x"}), `invalid --step "STEP-x"`},
+		{"fact add --proposal PROPOSAL-x",
+			addFact(runRef, map[string]string{"proposal": "PROPOSAL-x"}), `invalid --proposal "PROPOSAL-x"`},
+		{"note add RUN-x", addNote("RUN-x", engine.AuthorityOperator), "RUN-x"},
+		{"note add --authority standing-grant", addNote(runRef, "standing-grant"), "--authority"},
+	} {
+		assertCmdCode(t, tc.err, output.ErrValidation, tc.name)
+		if !strings.Contains(tc.err.Error(), tc.want) {
+			t.Errorf("%s: refusal %q does not name %q", tc.name, tc.err, tc.want)
+		}
+	}
+
+	for name, err := range map[string]error{
+		"fact add": addFact(runRef, map[string]string{"step": "STEP-1", "cause": engine.DeferralBudget}),
+		"note add": addNote(runRef, engine.AuthorityOperator),
+	} {
+		assertCmdCode(t, err, output.ErrGeneral, name)
+		if !strings.Contains(err.Error(), "working directory could not be resolved") {
+			t.Errorf("%s: refusal %q does not name the working directory", name, err)
+		}
 	}
 }

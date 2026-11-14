@@ -122,10 +122,6 @@ type runNoteListing struct {
 }
 
 func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
-	env, err := runRulingEnv(cmd, ref)
-	if err != nil {
-		return err
-	}
 	in := verb.RunNoteAddInput{
 		Run: ref,
 		// The verb reads the note only after it accepts the run and the
@@ -139,6 +135,10 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 	// piped token would be recorded as the note.
 	if path, _ := cmd.Flags().GetString("file"); path == "-" {
 		in.ConductorToken = func() string { return strings.TrimSpace(os.Getenv(TokenEnvVar)) }
+	}
+	env, err := runRulingEnv(cmd, in.Validate)
+	if err != nil {
+		return err
 	}
 
 	res, err := verb.RunNoteAdd(cmd.Context(), env, in)
@@ -161,7 +161,8 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 
 // runNoteText resolves `--text` or `--file`, refusing both and neither: a
 // note has exactly one source, and a verb that silently preferred one flag
-// over the other would record something the caller did not write.
+// over the other would record something the caller did not write. It is
+// RunNoteAdd's text source, so each failure is a *verb.Error carrying its code.
 func runNoteText(cmd *cobra.Command) (string, error) {
 	text, _ := cmd.Flags().GetString("text")
 	path, _ := cmd.Flags().GetString("file")
@@ -170,11 +171,10 @@ func runNoteText(cmd *cobra.Command) (string, error) {
 
 	switch {
 	case hasText && hasFile:
-		return "", cmdErr(fmt.Errorf("pass --text or --file, not both"), output.ErrValidation)
+		return "", &verb.Error{Code: output.ErrValidation, Err: fmt.Errorf("pass --text or --file, not both")}
 	case !hasText && !hasFile:
-		return "", cmdErr(fmt.Errorf(
-			"a note needs its text: pass --text \"...\" or --file F (\"-\" reads stdin)"),
-			output.ErrValidation)
+		return "", &verb.Error{Code: output.ErrValidation, Err: fmt.Errorf(
+			"a note needs its text: pass --text \"...\" or --file F (\"-\" reads stdin)")}
 	case hasText:
 		return text, nil
 	}
@@ -186,17 +186,15 @@ func runNoteText(cmd *cobra.Command) (string, error) {
 	if path == "-" {
 		raw, err = io.ReadAll(io.LimitReader(os.Stdin, engine.RunNoteMaxBytes+1))
 		if err != nil {
-			return "", cmdErr(fmt.Errorf("reading the note from stdin: %w", err),
-				output.ErrGeneral)
+			return "", &verb.Error{Code: output.ErrGeneral, Err: fmt.Errorf("reading the note from stdin: %w", err)}
 		}
 	} else {
 		raw, err = os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return "", cmdErr(fmt.Errorf("note file %s not found", path), output.ErrNotFound)
+				return "", &verb.Error{Code: output.ErrNotFound, Err: fmt.Errorf("note file %s not found", path)}
 			}
-			return "", cmdErr(fmt.Errorf("reading the note file %s: %w", path, err),
-				output.ErrGeneral)
+			return "", &verb.Error{Code: output.ErrGeneral, Err: fmt.Errorf("reading the note file %s: %w", path, err)}
 		}
 	}
 	return string(raw), nil

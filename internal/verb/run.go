@@ -531,6 +531,35 @@ type RunFactAddInput struct {
 	ConductorToken func() string
 }
 
+// Validate refuses a malformed run, --proposal or --step reference, the
+// faults RunFactAdd reports after the project. A transport whose attribution
+// fails calls it before reporting that failure, so a request invalid both
+// ways reports the request's fault.
+func (in RunFactAddInput) Validate() error {
+	_, err := in.options()
+	return err
+}
+
+// options parses the input's references into the fact's options.
+func (in RunFactAddInput) options() (engine.RunFactOptions, error) {
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return engine.RunFactOptions{}, newError(err, output.ErrValidation)
+	}
+	opts := engine.RunFactOptions{RunID: runID, Kind: in.Kind, Reason: in.Reason, Voter: in.Voter, Cause: in.Cause}
+	if in.Proposal != "" {
+		if opts.ProposalID, err = model.ParseProposalID(in.Proposal); err != nil {
+			return opts, newError(fmt.Errorf("invalid --proposal %q: %w", in.Proposal, err), output.ErrValidation)
+		}
+	}
+	if in.Step != "" {
+		if opts.StepID, err = model.ParseStepID(in.Step); err != nil {
+			return opts, newError(fmt.Errorf("invalid --step %q: %w", in.Step, err), output.ErrValidation)
+		}
+	}
+	return opts, nil
+}
+
 // RunFactAddResult is the fact as recorded, or the engine's own record of a
 // chain deferral it already holds.
 type RunFactAddResult struct {
@@ -548,25 +577,12 @@ func RunFactAdd(ctx context.Context, env Env, in RunFactAddInput) (RunFactAddRes
 	if err != nil {
 		return res, err
 	}
-	runID, err := model.ParseRunID(in.Run)
+	opts, err := in.options()
 	if err != nil {
-		return res, newError(err, output.ErrValidation)
+		return res, err
 	}
-	opts := engine.RunFactOptions{
-		RunID: runID, Kind: in.Kind, Reason: in.Reason, Voter: in.Voter, Cause: in.Cause,
-		By: engine.Attribution{Actor: env.Author, Cwd: env.Cwd}, NowMS: model.NowMS(),
-	}
-	if in.Proposal != "" {
-		if opts.ProposalID, err = model.ParseProposalID(in.Proposal); err != nil {
-			return res, newError(fmt.Errorf("invalid --proposal %q: %w", in.Proposal, err), output.ErrValidation)
-		}
-	}
-	if in.Step != "" {
-		if opts.StepID, err = model.ParseStepID(in.Step); err != nil {
-			return res, newError(fmt.Errorf("invalid --step %q: %w", in.Step, err), output.ErrValidation)
-		}
-	}
-	opts.Token = runConductorToken(env, runID, in.ConductorToken)
+	opts.By, opts.NowMS = engine.Attribution{Actor: env.Author, Cwd: env.Cwd}, model.NowMS()
+	opts.Token = runConductorToken(env, opts.RunID, in.ConductorToken)
 
 	res.Fact, err = engine.RecordRunFactStore(env.Store, opts)
 	if err != nil {
@@ -583,11 +599,30 @@ type RunNoteAddInput struct {
 	Authority string
 	// Text returns the note. It is called only once the run reference and the
 	// authority are accepted, so a refused note leaves a transport's stream
-	// unread, and an error it returns is returned unchanged. Nil reads as an
-	// empty note.
+	// unread. A *Error it returns is returned unchanged and any other error
+	// is coded GENERAL_ERROR. Nil reads as an empty note.
 	Text func() (string, error)
 	// ConductorToken is as on RunPauseInput.
 	ConductorToken func() string
+}
+
+// Validate refuses a malformed run reference or authority, the faults
+// RunNoteAdd reports after the project, as on RunFactAddInput.
+func (in RunNoteAddInput) Validate() error {
+	_, _, err := in.parse()
+	return err
+}
+
+func (in RunNoteAddInput) parse() (int, engine.Authority, error) {
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return 0, engine.Authority{}, newError(err, output.ErrValidation)
+	}
+	under, err := engine.ParseRunNoteAuthority(in.Authority)
+	if err != nil {
+		return 0, engine.Authority{}, engineError(err)
+	}
+	return runID, under, nil
 }
 
 // RunNoteAddResult is the note as recorded.
@@ -608,18 +643,18 @@ func RunNoteAdd(ctx context.Context, env Env, in RunNoteAddInput) (RunNoteAddRes
 	if err != nil {
 		return res, err
 	}
-	runID, err := model.ParseRunID(in.Run)
+	runID, under, err := in.parse()
 	if err != nil {
-		return res, newError(err, output.ErrValidation)
-	}
-	under, err := engine.ParseRunNoteAuthority(in.Authority)
-	if err != nil {
-		return res, engineError(err)
+		return res, err
 	}
 	var text string
 	if in.Text != nil {
 		if text, err = in.Text(); err != nil {
-			return res, err
+			var coded *Error
+			if errors.As(err, &coded) {
+				return res, err
+			}
+			return res, newError(err, output.ErrGeneral)
 		}
 	}
 
