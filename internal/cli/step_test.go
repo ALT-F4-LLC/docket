@@ -693,7 +693,8 @@ func TestStepRulingCommandsReadTheCapabilityFromStdin(t *testing.T) {
 			t.Setenv(TokenEnvVar, "")
 			withStdin(t, token+"\n")
 
-			testsupport.Must(t, run(), "%s with the capability on stdin: %v", name, nil)
+			err := run()
+			testsupport.Must(t, err, "%s with the capability on stdin: %v", name, err)
 			if rulingEvent(t, conn, id, event) == nil {
 				t.Errorf("%s recorded no %s event", name, event)
 			}
