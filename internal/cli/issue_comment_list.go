@@ -6,36 +6,26 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
 var commentListCmd = &cobra.Command{
-	Use:   "list [id]",
-	Short: "List comments on an issue",
-	Args:  cobra.ExactArgs(1),
+	Use:         "list [id]",
+	Short:       "List comments on an issue",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueCommentList)
 	},
 }
 
 func runIssueCommentList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := issueArg(args[0])
+	listed, err := verb.IssueCommentList(cmd.Context(), verbEnv(cmd), verb.IssueCommentListInput{Issue: args[0]})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	// Verify the issue exists.
-	if _, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0])); err != nil {
-		return err
-	}
-
-	comments, err := store.StoreOn(conn).ListComments(id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
+	id, comments := listed.IssueID, listed.Comments
 
 	if w.JSONMode {
 		w.Success(comments, "")

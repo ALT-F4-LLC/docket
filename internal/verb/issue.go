@@ -878,6 +878,169 @@ func issueDetail(env Env, ref string) (IssueDetail, error) {
 	return d, nil
 }
 
+// IssueCommentTargetInput names the issue a comment would be added to.
+type IssueCommentTargetInput struct {
+	Issue string
+}
+
+// IssueCommentTargetResult is the issue a comment would be added to.
+// Registered is as on IssueClaimResult.
+type IssueCommentTargetResult struct {
+	Issue      *model.Issue
+	Registered *engine.ProjectRegistration
+}
+
+// IssueCommentTarget runs every check IssueCommentAdd makes before it writes:
+// the project, the issue reference and the issue's existence. A caller that
+// has to ask a person for the comment body calls it first, so a comment that
+// would be refused is refused before anyone types it. It resolves the project
+// as IssueCommentAdd does, so it may register the caller's project.
+func IssueCommentTarget(ctx context.Context, env Env, in IssueCommentTargetInput) (IssueCommentTargetResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue comment add")
+	res := IssueCommentTargetResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	_, res.Issue, err = issueByRef(env, in.Issue)
+	return res, err
+}
+
+// issueByRef parses ref and fetches the issue it names.
+func issueByRef(env Env, ref string) (int, *model.Issue, error) {
+	id, err := ParseIssueRef(ref)
+	if err != nil {
+		return 0, nil, err
+	}
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return 0, nil, issueFetchError(err, "issue "+ref)
+	}
+	return id, issue, nil
+}
+
+// IssueCommentAddInput is the comment to add to Issue. A replayed
+// IdempotencyKey returns the comment it first created.
+type IssueCommentAddInput struct {
+	Issue          string
+	Body           string
+	IdempotencyKey string
+}
+
+// IssueCommentAddResult is the commented issue and the stored comment.
+// Registered is as on IssueClaimResult.
+type IssueCommentAddResult struct {
+	Issue      *model.Issue
+	Comment    *model.Comment
+	Registered *engine.ProjectRegistration
+}
+
+// IssueCommentAdd adds a comment authored by env.Author to an issue. It writes
+// into the caller's project, so it may register it.
+func IssueCommentAdd(ctx context.Context, env Env, in IssueCommentAddInput) (IssueCommentAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue comment add")
+	res := IssueCommentAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	id, issue, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return res, err
+	}
+	res.Issue = issue
+
+	commentID, err := env.Store.CreateCommentIdempotent(&model.Comment{
+		IssueID: id,
+		Body:    in.Body,
+		Author:  env.Author,
+	}, in.IdempotencyKey)
+	if err != nil {
+		if e := notFound(err, "issue "+in.Issue); e != nil {
+			return res, e
+		}
+		if errors.Is(err, store.ErrConflict) {
+			return res, newError(err, output.ErrConflict)
+		}
+		return res, newError(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
+	}
+
+	if res.Comment, err = env.Store.GetComment(commentID); err != nil {
+		return res, newError(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
+	}
+	return res, nil
+}
+
+// IssueCommentListInput names the issue whose comments to list.
+type IssueCommentListInput struct {
+	Issue string
+}
+
+// IssueCommentListResult is an issue's comments, oldest first.
+type IssueCommentListResult struct {
+	IssueID  int
+	Comments []*model.Comment
+}
+
+// IssueCommentList lists the comments on one issue. Issue ids are store-wide,
+// so it is a read that names no project.
+func IssueCommentList(ctx context.Context, env Env, in IssueCommentListInput) (IssueCommentListResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return IssueCommentListResult{}, err
+	}
+	id, _, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return IssueCommentListResult{}, err
+	}
+	comments, err := env.Store.ListComments(id)
+	if err != nil {
+		return IssueCommentListResult{}, newError(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
+	}
+	return IssueCommentListResult{IssueID: id, Comments: comments}, nil
+}
+
+// IssueLogInput names the issue whose activity to read. Limit caps the
+// entries; a Limit of 0 reads one entry, as the CLI's v1 contract has always
+// clamped it, and a negative Limit is refused.
+type IssueLogInput struct {
+	Issue string
+	Limit int
+}
+
+// IssueLogResult is an issue's latest activity, newest first. Total counts
+// every entry before Limit applied, and Limit is the cap that applied.
+type IssueLogResult struct {
+	IssueID int
+	Entries []model.Activity
+	Total   int
+	Limit   int
+}
+
+// IssueLog reads an issue's activity history. Issue ids are store-wide, so it
+// is a read that names no project.
+func IssueLog(ctx context.Context, env Env, in IssueLogInput) (IssueLogResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return IssueLogResult{}, err
+	}
+	id, _, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return IssueLogResult{}, err
+	}
+	if in.Limit < 0 {
+		return IssueLogResult{}, newError(
+			fmt.Errorf("--limit must be >= 0, got %d (0 means no limit)", in.Limit), output.ErrValidation)
+	}
+	limit := max(in.Limit, 1)
+
+	entries, err := env.Store.GetActivity(id, limit)
+	if err != nil {
+		return IssueLogResult{}, newError(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
+	}
+	total, err := env.Store.CountActivity(id)
+	if err != nil {
+		return IssueLogResult{}, newError(fmt.Errorf("counting activity: %w", err), output.ErrGeneral)
+	}
+	return IssueLogResult{IssueID: id, Entries: entries, Total: total, Limit: limit}, nil
+}
+
 // IssueListInput filters an issue listing; every filter set must match.
 // Project lists the project it names instead of the caller's; Run lists the
 // issues a run's activation bound, done ones included. The two cannot be

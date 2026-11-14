@@ -1645,3 +1645,206 @@ func TestIssueListRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestIssueCommentAddStoresTheCommentAsTheAuthor(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	env := projectEnv(st, "", false)
+	env.Author = "reviewer"
+
+	res, err := verb.IssueCommentAdd(context.Background(), env, verb.IssueCommentAddInput{
+		Issue: model.FormatID(id), Body: "looks right",
+	})
+	if err != nil {
+		t.Fatalf("IssueCommentAdd: %v", err)
+	}
+	if res.Issue == nil || res.Issue.ID != id || res.Issue.Title != "lease subject" {
+		t.Errorf("Issue = %+v, want the commented issue %d", res.Issue, id)
+	}
+	if res.Comment == nil || res.Comment.Body != "looks right" || res.Comment.Author != "reviewer" {
+		t.Fatalf("Comment = %+v, want the stored comment by reviewer", res.Comment)
+	}
+	stored, err := st.ListComments(id)
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	if len(stored) != 1 || stored[0].ID != res.Comment.ID {
+		t.Errorf("stored comments = %+v, want only comment %d", stored, res.Comment.ID)
+	}
+}
+
+// A replayed idempotency key returns the comment it first created; reusing it
+// with another body is CONFLICT and adds nothing.
+func TestIssueCommentAddReplaysItsIdempotencyKey(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	add := func(body string) (verb.IssueCommentAddResult, error) {
+		return verb.IssueCommentAdd(ctx, env, verb.IssueCommentAddInput{
+			Issue: model.FormatID(id), Body: body, IdempotencyKey: "retry-key",
+		})
+	}
+
+	first, err := add("first body")
+	if err != nil {
+		t.Fatalf("first IssueCommentAdd: %v", err)
+	}
+	replayed, err := add("first body")
+	if err != nil {
+		t.Fatalf("replayed IssueCommentAdd: %v", err)
+	}
+	if replayed.Comment.ID != first.Comment.ID {
+		t.Errorf("replayed comment = %d, want the first, %d", replayed.Comment.ID, first.Comment.ID)
+	}
+	_, err = add("second body")
+	requireCode(t, err, output.ErrConflict)
+	if stored, _ := st.ListComments(id); len(stored) != 1 {
+		t.Errorf("issue has %d comments, want only the first", len(stored))
+	}
+}
+
+func TestIssueCommentAndLogRefusals(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+
+	_, err := verb.IssueCommentTarget(ctx, env, verb.IssueCommentTargetInput{Issue: "DKT-9999"})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueCommentAdd(ctx, env, verb.IssueCommentAddInput{Issue: "DKT-9999", Body: "b"})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueCommentList(ctx, env, verb.IssueCommentListInput{Issue: "DKT-9999"})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueLog(ctx, env, verb.IssueLogInput{Issue: "DKT-9999", Limit: 20})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+
+	_, err = verb.IssueCommentTarget(ctx, env, verb.IssueCommentTargetInput{Issue: "not-an-id"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueCommentAdd(ctx, env, verb.IssueCommentAddInput{Issue: "not-an-id", Body: "b"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueCommentList(ctx, env, verb.IssueCommentListInput{Issue: "not-an-id"})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueLog(ctx, env, verb.IssueLogInput{Issue: "not-an-id", Limit: 20})
+	requireCode(t, err, output.ErrValidation)
+}
+
+// Adding a comment writes, so it and its pre-write check register an anchored
+// caller's project and refuse an unanchored one.
+func TestIssueCommentAddMayRegisterTheCallersProject(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	ref := model.FormatID(id)
+
+	unanchored := projectEnv(st, "/work/scratch", false)
+	_, err := verb.IssueCommentTarget(ctx, unanchored, verb.IssueCommentTargetInput{Issue: ref})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueCommentAdd(ctx, unanchored, verb.IssueCommentAddInput{Issue: ref, Body: "b"})
+	requireCode(t, err, output.ErrValidation)
+	requireUnregistered(t, st, "/work/scratch")
+	if stored, _ := st.ListComments(id); len(stored) != 0 {
+		t.Errorf("issue has %d comments after unanchored adds, want none", len(stored))
+	}
+
+	target, err := verb.IssueCommentTarget(ctx, projectEnv(st, "/repos/fresh", true),
+		verb.IssueCommentTargetInput{Issue: ref})
+	if err != nil {
+		t.Fatalf("IssueCommentTarget: %v", err)
+	}
+	if target.Registered == nil || target.Registered.Identity != "/repos/fresh" ||
+		target.Registered.Verb != "issue comment add" {
+		t.Errorf("Registered = %+v, want /repos/fresh registered by issue comment add", target.Registered)
+	}
+	if target.Issue == nil || target.Issue.ID != id {
+		t.Errorf("target Issue = %+v, want issue %d", target.Issue, id)
+	}
+
+	res, err := verb.IssueCommentAdd(ctx, projectEnv(st, "/repos/other", true),
+		verb.IssueCommentAddInput{Issue: ref, Body: "b"})
+	if err != nil {
+		t.Fatalf("IssueCommentAdd: %v", err)
+	}
+	if res.Registered == nil || res.Registered.Identity != "/repos/other" ||
+		res.Registered.Verb != "issue comment add" {
+		t.Errorf("Registered = %+v, want /repos/other registered by issue comment add", res.Registered)
+	}
+}
+
+func TestIssueCommentListReadsTheCommentsOldestFirst(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	for _, body := range []string{"first", "second"} {
+		if _, err := st.CreateCommentIdempotent(&model.Comment{IssueID: id, Body: body, Author: "a"}, ""); err != nil {
+			t.Fatalf("CreateCommentIdempotent: %v", err)
+		}
+	}
+
+	res, err := verb.IssueCommentList(context.Background(), projectEnv(st, "", false),
+		verb.IssueCommentListInput{Issue: model.FormatID(id)})
+	if err != nil {
+		t.Fatalf("IssueCommentList: %v", err)
+	}
+	if res.IssueID != id {
+		t.Errorf("IssueID = %d, want %d", res.IssueID, id)
+	}
+	if len(res.Comments) != 2 || res.Comments[0].Body != "first" || res.Comments[1].Body != "second" {
+		t.Errorf("comments = %+v, want first then second", res.Comments)
+	}
+}
+
+// IssueLog caps the entries at Limit, reads one entry for a zero Limit as the
+// CLI always has, counts every entry, and refuses a negative Limit.
+func TestIssueLogCapsTheEntriesAndCountsThemAll(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	for i := range 4 {
+		if _, err := st.CreateCommentIdempotent(&model.Comment{
+			IssueID: id, Body: fmt.Sprintf("comment %d", i), Author: "a",
+		}, ""); err != nil {
+			t.Fatalf("CreateCommentIdempotent: %v", err)
+		}
+	}
+	all, err := st.CountActivity(id)
+	if err != nil {
+		t.Fatalf("CountActivity: %v", err)
+	}
+	if all < 4 {
+		t.Fatalf("activity count = %d, want at least 4 to exercise the cap", all)
+	}
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+
+	for _, tc := range []struct{ limit, entries, effective int }{
+		{limit: 3, entries: 3, effective: 3},
+		{limit: 0, entries: 1, effective: 1},
+	} {
+		res, err := verb.IssueLog(ctx, env, verb.IssueLogInput{Issue: model.FormatID(id), Limit: tc.limit})
+		if err != nil {
+			t.Fatalf("IssueLog(limit %d): %v", tc.limit, err)
+		}
+		if res.IssueID != id || len(res.Entries) != tc.entries || res.Total != all || res.Limit != tc.effective {
+			t.Errorf("IssueLog(limit %d) = issue %d, %d entries, total %d, limit %d; want issue %d, %d, %d, %d",
+				tc.limit, res.IssueID, len(res.Entries), res.Total, res.Limit, id, tc.entries, all, tc.effective)
+		}
+	}
+
+	_, err = verb.IssueLog(ctx, env, verb.IssueLogInput{Issue: model.FormatID(id), Limit: -1})
+	requireVerbError(t, err, output.ErrValidation, "--limit must be >= 0, got -1 (0 means no limit)")
+}
+
+// The comment list and the log are reads: an anchored identity no project
+// holds still reads an issue by id, and is not registered.
+func TestIssueCommentListAndLogRegisterNothing(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "/repos/fresh", true)
+
+	if _, err := verb.IssueCommentList(ctx, env, verb.IssueCommentListInput{Issue: model.FormatID(id)}); err != nil {
+		t.Fatalf("IssueCommentList: %v", err)
+	}
+	if _, err := verb.IssueLog(ctx, env, verb.IssueLogInput{Issue: model.FormatID(id), Limit: 20}); err != nil {
+		t.Fatalf("IssueLog: %v", err)
+	}
+	requireUnregistered(t, st, "/repos/fresh")
+}
