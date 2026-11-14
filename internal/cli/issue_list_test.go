@@ -405,7 +405,12 @@ func TestIssueListPrimaryKeyAlias(t *testing.T) {
 // create` reported, in both the JSON rows and the table.
 func TestIssueListThroughTheRoot(t *testing.T) {
 	clientConfigSandbox(t)
-	t.Cleanup(func() { model.SetDisplayPrefix("DKT") })
+	// The root hook leaves the owner resolver on this test's store, where
+	// issues read as ABC; a later test must not inherit it.
+	t.Cleanup(func() {
+		model.SetDisplayPrefix("DKT")
+		model.SetIssueOwnerPrefixResolver(nil)
+	})
 	_, err := runRootVerb(t, initCmd, "init")
 	testsupport.Must(t, err, "docket init: %v", err)
 	_, err = runRootVerb(t, projectSetPrefixCmd, "project", "set-prefix", "abc")
