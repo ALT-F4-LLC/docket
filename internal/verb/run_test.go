@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1341,5 +1342,235 @@ func TestRunVerifyPinsRefusesAnOpenClosureAsValidation(t *testing.T) {
 	}
 	if res.Report == nil || res.Report.Unpinned != 1 || res.Report.Changed != 0 || res.Report.Missing != 0 {
 		t.Errorf("report = %+v, want only the one unpinned reference", res.Report)
+	}
+}
+
+// runIssueIDs is the ids of the issues attached to runID, in attach order.
+func runIssueIDs(t *testing.T, st store.Store, runID int) []int {
+	t.Helper()
+	attached, err := st.ListRunIssues(runID)
+	if err != nil {
+		t.Fatalf("ListRunIssues: %v", err)
+	}
+	ids := make([]int, 0, len(attached))
+	for _, ri := range attached {
+		ids = append(ids, ri.IssueID)
+	}
+	return ids
+}
+
+func TestRunIssueAddAndRemoveChangeAPlanningRunsSet(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := runAt(t, st, model.RunPlanning)
+	first := runIssueIDs(t, st, runID)[0]
+	second := createIssue(t, st)
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	added, err := verb.RunIssueAdd(ctx, env, verb.RunIssueAddInput{Run: run, Issues: []string{model.FormatID(second)}})
+	if err != nil {
+		t.Fatalf("RunIssueAdd: %v", err)
+	}
+	if added.Run == nil || added.Run.ID != runID || !slices.Equal(added.Added, []int{second}) {
+		t.Errorf("added = %+v, want %s gaining issue %d", added, run, second)
+	}
+	if want := []int{first, second}; !slices.Equal(added.Issues, want) || !slices.Equal(runIssueIDs(t, st, runID), want) {
+		t.Errorf("issues = %v (stored %v), want %v", added.Issues, runIssueIDs(t, st, runID), want)
+	}
+
+	removed, err := verb.RunIssueRemove(ctx, env, verb.RunIssueRemoveInput{Run: run, Issues: []string{model.FormatID(first)}})
+	if err != nil {
+		t.Fatalf("RunIssueRemove: %v", err)
+	}
+	if !slices.Equal(removed.Removed, []int{first}) {
+		t.Errorf("removed = %+v, want issue %d removed", removed, first)
+	}
+	if want := []int{second}; !slices.Equal(removed.Issues, want) || !slices.Equal(runIssueIDs(t, st, runID), want) {
+		t.Errorf("issues = %v (stored %v), want %v", removed.Issues, runIssueIDs(t, st, runID), want)
+	}
+}
+
+// An add checks every issue before writing any, so one bad id in the set
+// leaves the run's issues as they were.
+func TestRunIssueAddRefusesTheWholeSetBeforeWriting(t *testing.T) {
+	st := openStore(t)
+	run, runID, _ := runAt(t, st, model.RunPlanning)
+	before := runIssueIDs(t, st, runID)
+	fresh := model.FormatID(createIssue(t, st))
+	// The first identity registered claims the default project's row.
+	if _, _, err := st.EnsureProjectCreated("/repos/default", "default", model.NowMS()); err != nil {
+		t.Fatalf("EnsureProjectCreated: %v", err)
+	}
+	otherProject, _, err := st.EnsureProjectCreated("/repos/other", "other", model.NowMS())
+	if err != nil || otherProject == store.DefaultProjectID {
+		t.Fatalf("EnsureProjectCreated = %d, %v; want a project other than the default", otherProject, err)
+	}
+	foreign, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: otherProject, Title: "elsewhere", Status: model.StatusTodo,
+		Priority: model.PriorityMedium, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent: %v", err)
+	}
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name   string
+		in     verb.RunIssueAddInput
+		code   output.ErrorCode
+		reason string
+	}{
+		{"run ref", verb.RunIssueAddInput{Run: "RUN-x", Issues: []string{fresh}}, output.ErrValidation, `invalid run ID "RUN-x"`},
+		{"unknown run", verb.RunIssueAddInput{Run: "RUN-42", Issues: []string{fresh}}, output.ErrNotFound, "run RUN-42 not found"},
+		{"issue ref", verb.RunIssueAddInput{Run: run, Issues: []string{fresh, "nope"}}, output.ErrValidation, `invalid issue ID "nope"`},
+		{"unknown issue", verb.RunIssueAddInput{Run: run, Issues: []string{fresh, "DKT-99"}}, output.ErrNotFound, "issue DKT-99 not found"},
+		{"other project", verb.RunIssueAddInput{Run: run, Issues: []string{fresh, model.FormatID(foreign)}},
+			output.ErrValidation, `belongs to project "other"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := verb.RunIssueAdd(ctx, env, tc.in)
+			requireVerbCode(t, err, tc.code, tc.reason)
+			if got := runIssueIDs(t, st, runID); !slices.Equal(got, before) {
+				t.Fatalf("issues = %v after a refused add, want %v", got, before)
+			}
+		})
+	}
+}
+
+func TestRunIssueAddTakesOnlyAPlanningOrActiveRun(t *testing.T) {
+	ctx := context.Background()
+	for _, status := range []model.RunStatus{model.RunActive, model.RunWaitingHuman, model.RunAbandoned} {
+		st := openStore(t)
+		run, runID, _ := runAt(t, st, status)
+		issue := createIssue(t, st)
+		_, err := verb.RunIssueAdd(ctx, projectEnv(st, "", false), verb.RunIssueAddInput{
+			Run: run, Issues: []string{model.FormatID(issue)},
+		})
+		attached := runIssueIDs(t, st, runID)
+		if status == model.RunActive {
+			if err != nil || attached[len(attached)-1] != issue {
+				t.Errorf("active: RunIssueAdd = %v, issues %v; want issue %d attached", err, attached, issue)
+			}
+			continue
+		}
+		requireVerbCode(t, err, output.ErrConflict, "issues can be added while a run is planning or active")
+		if len(attached) != 1 {
+			t.Errorf("%s: issues = %v, want the refused add to attach nothing", status, attached)
+		}
+	}
+}
+
+// A remove checks membership for the whole set first, so a typo'd second id
+// detaches nothing; a run past planning refuses outright.
+func TestRunIssueRemoveRefusesBeforeDetachingAny(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	run, runID, _ := runAt(t, st, model.RunPlanning)
+	before := runIssueIDs(t, st, runID)
+
+	_, err := verb.RunIssueRemove(ctx, projectEnv(st, "", false), verb.RunIssueRemoveInput{
+		Run: run, Issues: []string{model.FormatID(before[0]), "DKT-99"},
+	})
+	requireVerbCode(t, err, output.ErrNotFound, "issue DKT-99 is not attached to "+run)
+	if got := runIssueIDs(t, st, runID); !slices.Equal(got, before) {
+		t.Errorf("issues = %v after a refused remove, want %v", got, before)
+	}
+
+	st = openStore(t)
+	run, runID, _ = runAt(t, st, model.RunActive)
+	before = runIssueIDs(t, st, runID)
+	_, err = verb.RunIssueRemove(ctx, projectEnv(st, "", false), verb.RunIssueRemoveInput{
+		Run: run, Issues: []string{model.FormatID(before[0])},
+	})
+	requireVerbCode(t, err, output.ErrConflict, "issues can be removed only while a run is planning")
+	if got := runIssueIDs(t, st, runID); !slices.Equal(got, before) {
+		t.Errorf("issues = %v after a refused remove, want %v", got, before)
+	}
+}
+
+// The run issue verbs and repin write on the caller's behalf, so an
+// unanchored caller is refused before its run reference is read, and an
+// anchored one is registered.
+func TestRunIssueAndRepinVerbsMayRegisterTheCallersProject(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(env verb.Env) (*engine.ProjectRegistration, error){
+		"issue add": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunIssueAdd(ctx, env, verb.RunIssueAddInput{Run: "RUN-x", Issues: []string{"DKT-1"}})
+			return res.Registered, err
+		},
+		"issue remove": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunIssueRemove(ctx, env, verb.RunIssueRemoveInput{Run: "RUN-x", Issues: []string{"DKT-1"}})
+			return res.Registered, err
+		},
+		"repin": func(env verb.Env) (*engine.ProjectRegistration, error) {
+			res, err := verb.RunRepin(ctx, env, verb.RunRepinInput{Run: "RUN-x", Reason: "drift"})
+			return res.Registered, err
+		},
+	}
+	for name, call := range calls {
+		st := openStore(t)
+		_, err := call(projectEnv(st, "/tmp/scratch", false))
+		requireVerbCode(t, err, output.ErrValidation, "cannot tell which project this belongs to")
+		requireUnregistered(t, st, "/tmp/scratch")
+
+		registered, err := call(projectEnv(st, "/repos/caller", true))
+		requireVerbCode(t, err, output.ErrValidation, `invalid run ID "RUN-x"`)
+		if registered == nil || registered.Identity != "/repos/caller" || registered.Verb != "run "+name {
+			t.Errorf("%s: Registered = %+v, want the caller's project registered by run %s", name, registered, name)
+		}
+	}
+}
+
+// A repin of a drifted pin needs a reason and the run's conductor capability,
+// and adopts the bytes on disk once it has both.
+func TestRunRepinRequiresAReasonAndTheConductorToken(t *testing.T) {
+	st := openStore(t)
+	run := plannedRunOf(t, st, packetWorkflow)
+	contract := filepath.Join(os.Getenv("DOCKET_PATH"), "config", "contracts", "judge.md")
+	if err := os.MkdirAll(filepath.Dir(contract), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(contract, []byte("before\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	env := projectEnv(st, "", false)
+	ctx := context.Background()
+	activated, err := verb.RunActivate(ctx, env, verb.RunActivateInput{Run: run})
+	if err != nil {
+		t.Fatalf("RunActivate: %v", err)
+	}
+	token := activated.Activation.ConductorToken
+	if err := os.WriteFile(contract, []byte("after\n"), 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	_, err = verb.RunRepin(ctx, env, verb.RunRepinInput{Run: run, ConductorToken: tokenOf(token)})
+	requireVerbCode(t, err, output.ErrValidation, "--reason is required to repin a run")
+
+	// A wrong token is refused as AUTH_ERROR; a missing one asks for it.
+	for _, tc := range []struct {
+		name      string
+		presented func() string
+		code      output.ErrorCode
+	}{
+		{"wrong", tokenOf("wrong"), output.ErrAuth},
+		{"empty", tokenOf(""), output.ErrValidation},
+		{"absent", nil, output.ErrValidation},
+	} {
+		_, err = verb.RunRepin(ctx, env, verb.RunRepinInput{Run: run, Reason: "drift", ConductorToken: tc.presented})
+		if err == nil {
+			t.Fatalf("%s token: RunRepin accepted the repin", tc.name)
+		}
+		requireCode(t, err, tc.code)
+	}
+
+	res, err := verb.RunRepin(ctx, env, verb.RunRepinInput{Run: run, Reason: "drift", ConductorToken: tokenOf(token)})
+	if err != nil {
+		t.Fatalf("RunRepin: %v", err)
+	}
+	if res.Outcome == nil || res.Outcome.Run != run || len(res.Outcome.Repinned) != 1 ||
+		res.Outcome.Repinned[0].Ref != "contracts/judge.md" {
+		t.Errorf("outcome = %+v, want %s repinning contracts/judge.md", res.Outcome, run)
 	}
 }

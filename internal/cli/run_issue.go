@@ -1,13 +1,12 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -30,7 +29,8 @@ Legal while the run is in ` + "`planning`" + ` — the set is still being gather
 while it is ` + "`active`" + `, where the new issues are bound and snapshotted by the
 NEXT ` + "`docket run activate`" + ` (they join as their dependencies allow, exactly as
 a later phase does). A parked or terminal run refuses.`,
-	Args: cobra.MinimumNArgs(2),
+	Args:        cobra.MinimumNArgs(2),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunIssueAdd(cmd, args, getWriter(cmd))
 	},
@@ -44,39 +44,11 @@ var runIssueRemoveCmd = &cobra.Command{
 After activation an issue is bound, snapshotted, and possibly scheduled, so
 the set is immutable from there: removing would strand steps that already
 exist. Abandon the run instead if its shape is wrong.`,
-	Args: cobra.MinimumNArgs(2),
+	Args:        cobra.MinimumNArgs(2),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunIssueRemove(cmd, args, getWriter(cmd))
 	},
-}
-
-// resolveRunIssueArgs parses `RUN-N DKT-N...` and loads the run.
-func resolveRunIssueArgs(cmd *cobra.Command, args []string) (*model.Run, []int, error) {
-	st := store.StoreOn(getDB(cmd))
-
-	runID, err := model.ParseRunID(args[0])
-	if err != nil {
-		return nil, nil, cmdErr(err, output.ErrValidation)
-	}
-	run, err := st.GetRun(runID)
-	if errors.Is(err, store.ErrRunNotFound) {
-		return nil, nil, cmdErr(
-			fmt.Errorf("run %s not found", model.FormatRunID(runID)), output.ErrNotFound)
-	}
-	if err != nil {
-		return nil, nil, cmdErr(err, output.ErrGeneral)
-	}
-
-	issueIDs := make([]int, 0, len(args)-1)
-	for _, ref := range args[1:] {
-		id, err := model.ParseID(ref)
-		if err != nil {
-			return nil, nil, cmdErr(
-				fmt.Errorf("invalid issue ID %q: %w", ref, err), output.ErrValidation)
-		}
-		issueIDs = append(issueIDs, id)
-	}
-	return run, issueIDs, nil
 }
 
 // runIssueSet is the wire shape both verbs answer with: the run and its issue
@@ -88,131 +60,41 @@ type runIssueSet struct {
 	Issues []string `json:"issues"`
 }
 
-func runIssueAnswer(st store.Store, run *model.Run) (runIssueSet, error) {
-	attached, err := st.ListRunIssues(run.ID)
-	if err != nil {
-		return runIssueSet{}, err
+func runIssueAnswer(run *model.Run, issueIDs []int) runIssueSet {
+	refs := make([]string, 0, len(issueIDs))
+	for _, id := range issueIDs {
+		refs = append(refs, model.FormatID(id))
 	}
-	refs := make([]string, 0, len(attached))
-	for _, ri := range attached {
-		refs = append(refs, model.FormatID(ri.IssueID))
-	}
-	return runIssueSet{Run: run.Ref(), Status: string(run.Status), Issues: refs}, nil
+	return runIssueSet{Run: run.Ref(), Status: string(run.Status), Issues: refs}
 }
 
 func runRunIssueAdd(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-	st := store.StoreOn(conn)
-	run, issueIDs, err := resolveRunIssueArgs(cmd, args)
+	res, err := verb.RunIssueAdd(cmd.Context(), verbEnv(cmd), verb.RunIssueAddInput{
+		Run: args[0], Issues: args[1:],
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
 
-	// `planning` gathers; `active` feeds RA3 (issues added since activation are
-	// bound and snapshotted by the next activation). A parked run is a person's
-	// decision in progress, and a terminal run's issue set is history.
-	if run.Status != model.RunPlanning && run.Status != model.RunActive {
-		return cmdErr(
-			fmt.Errorf("run %s is %s; issues can be added while a run is "+
-				"planning or active", run.Ref(), run.Status),
-			output.ErrConflict)
-	}
-
-	// Existence AND homing are checked for the WHOLE set before anything is
-	// written, so a typo'd second id cannot leave a half-applied add behind.
-	//
-	// The homing half is DKT-21: issue ids are store-wide, so another
-	// project's issue parses from any cwd — but activation binds issues
-	// against the RUN's project workflow registry and books their snapshots,
-	// steps, and gaps there, so a cross-project attach mis-scopes everything
-	// downstream. `issue move --project` already refuses while a run holds an
-	// issue for exactly this reason; the invariant is enforced at both edges.
-	for _, id := range issueIDs {
-		issueProject, err := st.IssueProjectID(id)
-		if errors.Is(err, store.ErrNotFound) {
-			return cmdErr(
-				fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
-		}
-		if err != nil {
-			return cmdErr(fmt.Errorf("checking issue %s: %w", model.FormatID(id), err),
-				output.ErrGeneral)
-		}
-		if issueProject != run.ProjectID {
-			return cmdErr(fmt.Errorf(
-				"issue %s belongs to %s, run %s to %s — a run's issues live in the "+
-					"run's own project; migrate the issue first with `docket issue "+
-					"move %s --project <target>`, or start the run from the issue's "+
-					"own repository",
-				model.FormatID(id), projectLabel(conn, issueProject), run.Ref(),
-				projectLabel(conn, run.ProjectID), model.FormatID(id)),
-				output.ErrValidation)
-		}
-	}
-
-	for _, id := range issueIDs {
-		if err := st.AddRunIssue(run.ID, id); err != nil {
-			return runErr(err)
-		}
-	}
-
-	answer, err := runIssueAnswer(st, run)
-	if err != nil {
-		return cmdErr(err, output.ErrGeneral)
-	}
-
-	message := fmt.Sprintf("Added %s to %s", issueRefList(issueIDs), run.Ref())
-	if run.Status == model.RunActive {
+	message := fmt.Sprintf("Added %s to %s", issueRefList(res.Added), res.Run.Ref())
+	if res.Run.Status == model.RunActive {
 		message += " (bound and snapshotted at the next `docket run activate`)"
 	}
-	w.Success(answer, message)
+	w.Success(runIssueAnswer(res.Run, res.Issues), message)
 	return nil
 }
 
 func runRunIssueRemove(cmd *cobra.Command, args []string, w *output.Writer) error {
-	st := store.StoreOn(getDB(cmd))
-	run, issueIDs, err := resolveRunIssueArgs(cmd, args)
+	res, err := verb.RunIssueRemove(cmd.Context(), verbEnv(cmd), verb.RunIssueRemoveInput{
+		Run: args[0], Issues: args[1:],
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	if run.Status != model.RunPlanning {
-		return cmdErr(
-			fmt.Errorf("run %s is %s; the issue set is immutable once activation "+
-				"has bound it — issues can be removed only while a run is planning",
-				run.Ref(), run.Status),
-			output.ErrConflict)
-	}
-
-	// Membership is checked for the WHOLE set first, so `remove A TYPO` cannot
-	// detach A and then refuse.
-	attached, err := st.ListRunIssues(run.ID)
-	if err != nil {
-		return cmdErr(err, output.ErrGeneral)
-	}
-	member := make(map[int]bool, len(attached))
-	for _, ri := range attached {
-		member[ri.IssueID] = true
-	}
-	for _, id := range issueIDs {
-		if !member[id] {
-			return cmdErr(
-				fmt.Errorf("issue %s is not attached to %s", model.FormatID(id), run.Ref()),
-				output.ErrNotFound)
-		}
-	}
-
-	for _, id := range issueIDs {
-		if err := st.RemoveRunIssue(run.ID, id); err != nil {
-			return runErr(err)
-		}
-	}
-
-	answer, err := runIssueAnswer(st, run)
-	if err != nil {
-		return cmdErr(err, output.ErrGeneral)
-	}
-	w.Success(answer, fmt.Sprintf("Removed %s from %s",
-		issueRefList(issueIDs), run.Ref()))
+	w.Success(runIssueAnswer(res.Run, res.Issues), fmt.Sprintf("Removed %s from %s",
+		issueRefList(res.Removed), res.Run.Ref()))
 	return nil
 }
 

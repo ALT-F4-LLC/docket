@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -510,6 +511,239 @@ func RunBudget(ctx context.Context, env Env, in RunBudgetInput) (RunBudgetResult
 		if mapped := CASError(err, model.FormatRunID(runID)); mapped != nil {
 			return res, mapped
 		}
+		return res, engineError(err)
+	}
+	return res, nil
+}
+
+// RunIssueAddInput attaches issues to a run.
+type RunIssueAddInput struct {
+	Run string
+	// Issues are the references of the issues to attach.
+	Issues []string
+}
+
+// RunIssueAddResult is the run and its issue set after the add.
+type RunIssueAddResult struct {
+	Run *model.Run
+	// Added are the ids the input named, in its order.
+	Added []int
+	// Issues are the ids attached to the run after the add.
+	Issues []int
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunIssueAdd attaches issues to a planning run, or to an active one whose
+// next activation binds and snapshots them. A parked run is a person's
+// decision in progress and a terminal run's issue set is history, so both
+// refuse. Its project policy is RunPause's.
+func RunIssueAdd(ctx context.Context, env Env, in RunIssueAddInput) (RunIssueAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run issue add")
+	res := RunIssueAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	run, issueIDs, err := runIssueArgs(env.Store, in.Run, in.Issues)
+	if err != nil {
+		return res, err
+	}
+	if run.Status != model.RunPlanning && run.Status != model.RunActive {
+		return res, newError(
+			fmt.Errorf("run %s is %s; issues can be added while a run is "+
+				"planning or active", run.Ref(), run.Status),
+			output.ErrConflict)
+	}
+
+	// Existence and homing are checked for the whole set before anything is
+	// written, so a typo'd second id cannot leave a half-applied add behind.
+	// Activation binds a run's issues against its own project's registry, so
+	// an issue homed elsewhere is refused (DKT-21).
+	for _, id := range issueIDs {
+		issueProject, err := env.Store.IssueProjectID(id)
+		if errors.Is(err, store.ErrNotFound) {
+			return res, newError(
+				fmt.Errorf("issue %s not found", model.FormatID(id)), output.ErrNotFound)
+		}
+		if err != nil {
+			return res, newError(fmt.Errorf("checking issue %s: %w", model.FormatID(id), err),
+				output.ErrGeneral)
+		}
+		if issueProject != run.ProjectID {
+			return res, newError(fmt.Errorf(
+				"issue %s belongs to %s, run %s to %s — a run's issues live in the "+
+					"run's own project; migrate the issue first with `docket issue "+
+					"move %s --project <target>`, or start the run from the issue's "+
+					"own repository",
+				model.FormatID(id), projectLabel(env.Store, issueProject), run.Ref(),
+				projectLabel(env.Store, run.ProjectID), model.FormatID(id)),
+				output.ErrValidation)
+		}
+	}
+
+	for _, id := range issueIDs {
+		if err := env.Store.AddRunIssue(run.ID, id); err != nil {
+			return res, engineError(err)
+		}
+	}
+	if res.Issues, err = attachedIssueIDs(env.Store, run.ID); err != nil {
+		return res, err
+	}
+	res.Run, res.Added = run, issueIDs
+	return res, nil
+}
+
+// RunIssueRemoveInput detaches issues from a planning run.
+type RunIssueRemoveInput struct {
+	Run string
+	// Issues are the references of the issues to detach.
+	Issues []string
+}
+
+// RunIssueRemoveResult is the run and its issue set after the remove.
+type RunIssueRemoveResult struct {
+	Run *model.Run
+	// Removed are the ids the input named, in its order.
+	Removed []int
+	// Issues are the ids attached to the run after the remove.
+	Issues []int
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunIssueRemove detaches issues from a run still in planning. Activation
+// binds the set, so a run past planning refuses: removing would strand steps
+// that already exist. Its project policy is RunPause's.
+func RunIssueRemove(ctx context.Context, env Env, in RunIssueRemoveInput) (RunIssueRemoveResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run issue remove")
+	res := RunIssueRemoveResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	run, issueIDs, err := runIssueArgs(env.Store, in.Run, in.Issues)
+	if err != nil {
+		return res, err
+	}
+	if run.Status != model.RunPlanning {
+		return res, newError(
+			fmt.Errorf("run %s is %s; the issue set is immutable once activation "+
+				"has bound it — issues can be removed only while a run is planning",
+				run.Ref(), run.Status),
+			output.ErrConflict)
+	}
+
+	// Membership is checked for the whole set first, so `remove A TYPO` cannot
+	// detach A and then refuse.
+	attached, err := attachedIssueIDs(env.Store, run.ID)
+	if err != nil {
+		return res, err
+	}
+	for _, id := range issueIDs {
+		if !slices.Contains(attached, id) {
+			return res, newError(
+				fmt.Errorf("issue %s is not attached to %s", model.FormatID(id), run.Ref()),
+				output.ErrNotFound)
+		}
+	}
+
+	for _, id := range issueIDs {
+		if err := env.Store.RemoveRunIssue(run.ID, id); err != nil {
+			return res, engineError(err)
+		}
+	}
+	if res.Issues, err = attachedIssueIDs(env.Store, run.ID); err != nil {
+		return res, err
+	}
+	res.Run, res.Removed = run, issueIDs
+	return res, nil
+}
+
+// runIssueArgs loads the run ref names and parses the issue references, in
+// that order.
+func runIssueArgs(st store.Store, ref string, issues []string) (*model.Run, []int, error) {
+	runID, err := model.ParseRunID(ref)
+	if err != nil {
+		return nil, nil, newError(err, output.ErrValidation)
+	}
+	run, err := st.GetRun(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
+		return nil, nil, newError(
+			fmt.Errorf("run %s not found", model.FormatRunID(runID)), output.ErrNotFound)
+	}
+	if err != nil {
+		return nil, nil, newError(err, output.ErrGeneral)
+	}
+
+	issueIDs := make([]int, 0, len(issues))
+	for _, issue := range issues {
+		id, err := model.ParseID(issue)
+		if err != nil {
+			return nil, nil, newError(
+				fmt.Errorf("invalid issue ID %q: %w", issue, err), output.ErrValidation)
+		}
+		issueIDs = append(issueIDs, id)
+	}
+	return run, issueIDs, nil
+}
+
+// attachedIssueIDs is the ids of the issues attached to runID.
+func attachedIssueIDs(st store.Store, runID int) ([]int, error) {
+	attached, err := st.ListRunIssues(runID)
+	if err != nil {
+		return nil, newError(err, output.ErrGeneral)
+	}
+	ids := make([]int, 0, len(attached))
+	for _, ri := range attached {
+		ids = append(ids, ri.IssueID)
+	}
+	return ids, nil
+}
+
+// RunRepinInput adopts current disk bytes for a run's drifted pins.
+type RunRepinInput struct {
+	Run string
+	// Reason is required: it is recorded on every run-repinned event.
+	Reason string
+	// Drop and DropUnresolvable retire pins whose refs no longer resolve, as
+	// engine.RepinOptions reads them.
+	Drop             []string
+	DropUnresolvable bool
+	// ConductorToken is as on RunPauseInput.
+	ConductorToken func() string
+}
+
+// RunRepinResult is what the repin changed.
+type RunRepinResult struct {
+	Outcome *engine.RepinOutcome
+	// Registered is as on RunStartResult.
+	Registered *engine.ProjectRegistration
+}
+
+// RunRepin moves a run's current pin agreement to what each drifted ref
+// resolves to now, under the run's conductor capability. Completed steps'
+// provenance is never rewritten. Its project policy is RunPause's.
+func RunRepin(ctx context.Context, env Env, in RunRepinInput) (RunRepinResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "run repin")
+	res := RunRepinResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	runID, err := model.ParseRunID(in.Run)
+	if err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+	if in.Reason == "" {
+		return res, newError(
+			errors.New("--reason is required to repin a run; the event trail must "+
+				"say why the recorded agreement moved"),
+			output.ErrValidation)
+	}
+
+	res.Outcome, err = engine.RepinRunWithStore(env.Store, runID, engine.RepinOptions{
+		Reason: in.Reason, Drop: in.Drop, DropUnresolvable: in.DropUnresolvable,
+		Token: runConductorToken(env, runID, in.ConductorToken),
+	}, model.NowMS())
+	if err != nil {
 		return res, engineError(err)
 	}
 	return res, nil

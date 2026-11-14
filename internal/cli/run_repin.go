@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -88,43 +88,32 @@ record that rewrote itself.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args: cobra.ExactArgs(1),
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunRepin(cmd, args[0], getWriter(cmd))
 	},
 }
 
 func runRunRepin(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
 	reason, _ := cmd.Flags().GetString("reason")
-	if reason == "" {
-		return cmdErr(
-			fmt.Errorf("--reason is required to repin a run; the event trail must "+
-				"say why the recorded agreement moved"),
-			output.ErrValidation)
-	}
-
 	drop, _ := cmd.Flags().GetStringArray("drop")
 	dropUnresolvable, _ := cmd.Flags().GetBool("drop-unresolvable")
 
-	outcome, err := engine.RepinRunWith(conn, runID, engine.RepinOptions{
-		Reason: reason, Drop: drop, DropUnresolvable: dropUnresolvable,
-		Token: conductorToken(conn, runID, cmd.InOrStdin()),
-	}, model.NowMS())
+	res, err := verb.RunRepin(cmd.Context(), verbEnv(cmd), verb.RunRepinInput{
+		Run: ref, Reason: reason, Drop: drop, DropUnresolvable: dropUnresolvable,
+		ConductorToken: func() string { return optionalToken(cmd.InOrStdin()) },
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = renderRepinOutcome(outcome)
+		message = renderRepinOutcome(res.Outcome)
 	}
-	w.Success(outcome, message)
+	w.Success(res.Outcome, message)
 	return nil
 }
 

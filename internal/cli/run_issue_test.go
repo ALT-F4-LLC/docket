@@ -2,6 +2,9 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
 // `docket run issue add|remove` — DKT-53: the issue set is mutable while the
@@ -56,6 +60,54 @@ func TestRunIssueAddAndRemoveInPlanning(t *testing.T) {
 	testsupport.Must(t, err, "run issue remove: %v", err)
 	if got := attachedIssues(t, conn, run.ID); len(got) != 1 || got[0] != b {
 		t.Fatalf("attached = %v, want only the second issue", got)
+	}
+}
+
+// TestRunIssueCommandsOwnTheirProject: run issue add and remove resolve their
+// project through internal/verb, so the root hook must skip its eager
+// resolution.
+func TestRunIssueCommandsOwnTheirProject(t *testing.T) {
+	for _, cmd := range []*cobra.Command{runIssueAddCmd, runIssueRemoveCmd} {
+		if !verbOwnsProject(cmd) {
+			t.Errorf("%s lacks the verbOwnsProject annotation", cmd.CommandPath())
+		}
+	}
+}
+
+// TestRunIssueAnswersWithTheSetItNowHolds pins both verbs' output: the JSON
+// payload is the run and its issue list after the change, and the human line
+// names what was asked for.
+func TestRunIssueAnswersWithTheSetItNowHolds(t *testing.T) {
+	conn := newTestDB(t)
+	a := createIssue(t, conn, "first", model.StatusBacklog, model.PriorityNone)
+	b := createIssue(t, conn, "second", model.StatusBacklog, model.PriorityNone)
+	run := planningRun(t, conn, a)
+	cmd := cmdWithDB(conn)
+
+	w, buf := bufWriter(true)
+	testsupport.Must(t, runRunIssueAdd(cmd, []string{run.Ref(), model.FormatID(b)}, w), "run issue add")
+	var env struct {
+		Data runIssueSet `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "decoding %s", buf)
+	want := runIssueSet{Run: run.Ref(), Status: "planning", Issues: []string{model.FormatID(a), model.FormatID(b)}}
+	if env.Data.Run != want.Run || env.Data.Status != want.Status || !slices.Equal(env.Data.Issues, want.Issues) {
+		t.Errorf("payload = %+v, want %+v", env.Data, want)
+	}
+
+	w, buf = bufWriter(false)
+	testsupport.Must(t, runRunIssueRemove(cmd, []string{run.Ref(), model.FormatID(a)}, w), "run issue remove")
+	if got, want := buf.String(), fmt.Sprintf("Removed %s from %s", model.FormatID(a), run.Ref()); !strings.Contains(got, want) {
+		t.Errorf("remove output = %q, want it to say %q", got, want)
+	}
+
+	testsupport.Must(t, db.SetRunStatus(conn, run.ID, model.RunActive, "", model.NowMS()), "SetRunStatus")
+	w, buf = bufWriter(false)
+	testsupport.Must(t, runRunIssueAdd(cmd, []string{run.Ref(), model.FormatID(a)}, w), "run issue add")
+	wantLine := fmt.Sprintf("Added %s to %s (bound and snapshotted at the next `docket run activate`)",
+		model.FormatID(a), run.Ref())
+	if got := buf.String(); !strings.Contains(got, wantLine) {
+		t.Errorf("add output = %q, want it to say %q", got, wantLine)
 	}
 }
 
