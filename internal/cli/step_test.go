@@ -585,6 +585,122 @@ func TestStepRulingCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 	}
 }
 
+// TestStepRulingCommandsReportABadRequestBeforeAnUnreadableCwd: a malformed
+// STEP-N, or a resolve with no --as, is reported as the request's
+// VALIDATION_ERROR even when the working directory cannot be read.
+func TestStepRulingCommandsReportABadRequestBeforeAnUnreadableCwd(t *testing.T) {
+	cases := map[string]struct {
+		run  func(conn *sql.DB) error
+		want string
+	}{
+		"step hold": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runStepHold(reapCmdWithDB(conn), []string{"ISSUE-1"}, w)
+		}, want: "invalid step ID"},
+		"step reap": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runStepReap(reapCmdWithDB(conn), []string{"ISSUE-1"}, w)
+		}, want: "invalid step ID"},
+		"step approve": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runDecide(decideCmdWithDB(conn), []string{"ISSUE-1"}, true, w)
+		}, want: "invalid step ID"},
+		"step reject": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runDecide(decideCmdWithDB(conn), []string{"ISSUE-1"}, false, w)
+		}, want: "invalid step ID"},
+		"step resolve": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			cmd := resolveCmdWithDB(conn)
+			_ = cmd.Flags().Set("as", engine.ResolveSkip)
+			return runStepResolve(cmd, []string{"ISSUE-1"}, w)
+		}, want: "invalid step ID"},
+		"step resolve without --as": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runStepResolve(resolveCmdWithDB(conn), []string{"STEP-1"}, w)
+		}, want: "--as is required"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn := newTestDB(t)
+			stubGetwdFailure(t)
+
+			err := c.run(conn)
+			assertCmdCode(t, err, output.ErrValidation, name)
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: error = %v, want it to name %q", name, err, c.want)
+			}
+		})
+	}
+}
+
+// TestStepRulingCommandsReadTheCapabilityFromStdin: with DOCKET_TOKEN empty,
+// each ruling command on a bound run takes the conductor capability piped on
+// stdin and rules.
+func TestStepRulingCommandsReadTheCapabilityFromStdin(t *testing.T) {
+	cases := map[string]func(t *testing.T, conn *sql.DB) (run func() error, stepID int, event string){
+		"step hold": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			activatedRunForNext(t, conn)
+			first := stepIDNamed(t, conn, "first@0")
+			return func() error {
+				cmd := reapCmdWithDB(conn)
+				testsupport.Must(t, cmd.Flags().Set("reason", "for the operator"), "set --reason")
+				w, _ := bufWriter(true)
+				return runStepHold(cmd, []string{model.FormatStepID(first)}, w)
+			}, first, engine.EventStepHeld
+		},
+		"step reap": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			activatedRunForNext(t, conn)
+			first := stepIDNamed(t, conn, "first@0")
+			_, err := engine.ClaimStep(conn, first, engine.ClaimOptions{Owner: "doomed", NowMS: model.NowMS()})
+			testsupport.Must(t, err, "claim: %v", err)
+			return func() error {
+				cmd := reapCmdWithDB(conn)
+				testsupport.Must(t, cmd.Flags().Set("reason", "spawn died"), "set --reason")
+				w, _ := bufWriter(true)
+				return runStepReap(cmd, []string{model.FormatStepID(first)}, w)
+			}, first, engine.EventLeaseReaped
+		},
+		"step approve": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			gate := readyGate(t, conn)
+			return func() error {
+				w, _ := bufWriter(true)
+				return runDecide(decideCmdWithDB(conn), []string{model.FormatStepID(gate)}, true, w)
+			}, gate, engine.EventStepApproved
+		},
+		"step reject": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			gate := readyGate(t, conn)
+			return func() error {
+				w, _ := bufWriter(true)
+				return runDecide(decideCmdWithDB(conn), []string{model.FormatStepID(gate)}, false, w)
+			}, gate, engine.EventStepRejected
+		},
+		"step resolve": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			id := parkedStep(t, conn)
+			return func() error {
+				cmd := resolveCmdWithDB(conn)
+				testsupport.Must(t, cmd.Flags().Set("as", engine.ResolveSkip), "set --as")
+				w, _ := bufWriter(true)
+				return runStepResolve(cmd, []string{model.FormatStepID(id)}, w)
+			}, id, engine.EventStepResolved
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn := newTestDB(t)
+			run, id, event := setup(t, conn)
+			token := envToken(t)
+			t.Setenv(TokenEnvVar, "")
+			withStdin(t, token+"\n")
+
+			testsupport.Must(t, run(), "%s with the capability on stdin: %v", name, nil)
+			if rulingEvent(t, conn, id, event) == nil {
+				t.Errorf("%s recorded no %s event", name, event)
+			}
+		})
+	}
+}
+
 // TestStepClaimCommandWritesTheMetadataFlag drives the REAL `step claim` RunE
 // over its REAL flag set and reads the step back out of the store (DKT-592).
 //

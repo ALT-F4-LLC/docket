@@ -307,6 +307,14 @@ type StepReapInput struct {
 	ConductorToken func() string
 }
 
+// Validate refuses a malformed step reference, the fault StepReap reports
+// before any other. A transport whose attribution can fail calls it first, so
+// a request invalid both ways reports the request's fault.
+func (in StepReapInput) Validate() error {
+	_, err := parseStepRef(in.Step)
+	return err
+}
+
 // StepReapResult is the reaped step as the reap left it.
 type StepReapResult struct {
 	Step model.StepRow
@@ -347,6 +355,12 @@ type StepHoldInput struct {
 	Reason string
 	// ConductorToken is as on StepReapInput.
 	ConductorToken func() string
+}
+
+// Validate is as on StepReapInput.
+func (in StepHoldInput) Validate() error {
+	_, err := parseStepRef(in.Step)
+	return err
 }
 
 // StepHoldResult is the held step as the hold left it.
@@ -397,6 +411,13 @@ type StepApproveInput struct {
 	ConductorToken func() string
 }
 
+// Validate is as on StepReapInput. The authority is not part of it: a ruling
+// reports an invalid authority after its attribution.
+func (in StepApproveInput) Validate() error {
+	_, err := parseStepRef(in.Step)
+	return err
+}
+
 // StepApproveResult is the approved step as the decision left it.
 type StepApproveResult struct {
 	Step model.StepRow
@@ -428,6 +449,12 @@ type StepRejectInput struct {
 	AuthorityRef string
 	// ConductorToken is as on StepReapInput.
 	ConductorToken func() string
+}
+
+// Validate is as on StepApproveInput.
+func (in StepRejectInput) Validate() error {
+	_, err := parseStepRef(in.Step)
+	return err
 }
 
 // StepRejectResult is the rejected step as the decision left it.
@@ -501,13 +528,38 @@ type StepResolveInput struct {
 	Batch          bool
 	DropInterposed bool
 	// Worktree is the absolute path of the checkout to re-pin the step's
-	// recorded issue.diff to before resolving, or empty for no re-pin.
+	// recorded issue.diff to before resolving, or empty for no re-pin. A
+	// relative path is refused rather than resolved against the caller's
+	// process directory.
 	Worktree string
 	// Authority and AuthorityRef are as on StepApproveInput.
 	Authority    string
 	AuthorityRef string
 	// ConductorToken is as on StepReapInput.
 	ConductorToken func() string
+}
+
+// Validate refuses a malformed step reference or a missing As, the faults
+// StepResolve reports before any other. A transport whose attribution can
+// fail calls it first, so a request invalid both ways reports the request's
+// fault. The authority and Worktree are not part of it: StepResolve reports
+// those after the attribution.
+func (in StepResolveInput) Validate() error {
+	_, err := in.validate()
+	return err
+}
+
+func (in StepResolveInput) validate() (int, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return 0, err
+	}
+	if in.As == "" {
+		return 0, newError(errors.New(
+			"--as is required: one of retry, rerun-gates, skip, abandon-issue, override-pass, fix-round"),
+			output.ErrValidation)
+	}
+	return id, nil
 }
 
 // StepResolveResult is the resolved step and the facts the resolution
@@ -532,18 +584,17 @@ type StepResolveResult struct {
 //
 // It takes its project from the step it is handed, so it is run-addressed.
 func StepResolve(ctx context.Context, env Env, in StepResolveInput) (StepResolveResult, error) {
-	id, err := parseStepRef(in.Step)
+	id, err := in.validate()
 	if err != nil {
 		return StepResolveResult{}, err
-	}
-	if in.As == "" {
-		return StepResolveResult{}, newError(errors.New(
-			"--as is required: one of retry, rerun-gates, skip, abandon-issue, override-pass, fix-round"),
-			output.ErrValidation)
 	}
 	under, err := parseAuthority(in.Authority, in.AuthorityRef)
 	if err != nil {
 		return StepResolveResult{}, err
+	}
+	if in.Worktree != "" && !filepath.IsAbs(in.Worktree) {
+		return StepResolveResult{}, newError(fmt.Errorf(
+			"--worktree must be an absolute path, got %q", in.Worktree), output.ErrValidation)
 	}
 
 	registered, err := resolveRunAddressedProject(env, "step resolve")

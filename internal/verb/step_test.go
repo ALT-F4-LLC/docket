@@ -2,6 +2,7 @@ package verb_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -441,6 +442,8 @@ type rulingVerb struct {
 	call  func(env verb.Env, ref string, token func() string) (model.StepRow, *engine.ProjectRegistration, error)
 	// ruled is the status the step reads after the ruling.
 	ruled string
+	// event is the kind of the event the ruling records on the step.
+	event string
 }
 
 // readyGateOf completes first@0 so its human gate second@0 is ready.
@@ -469,6 +472,7 @@ var stepRulingVerbs = map[string]rulingVerb{
 			return res.Step, res.Registered, err
 		},
 		ruled: store.StepReady,
+		event: engine.EventLeaseReaped,
 	},
 	"step hold": {
 		setup: func(t *testing.T, st store.Store, steps map[string]int) int {
@@ -481,6 +485,7 @@ var stepRulingVerbs = map[string]rulingVerb{
 			return res.Step, res.Registered, err
 		},
 		ruled: store.StepWaitingHuman,
+		event: engine.EventStepHeld,
 	},
 	"step approve": {
 		setup: readyGateOf,
@@ -491,6 +496,7 @@ var stepRulingVerbs = map[string]rulingVerb{
 			return res.Step, res.Registered, err
 		},
 		ruled: store.StepDone,
+		event: engine.EventStepApproved,
 	},
 	"step reject": {
 		setup: readyGateOf,
@@ -501,6 +507,7 @@ var stepRulingVerbs = map[string]rulingVerb{
 			return res.Step, res.Registered, err
 		},
 		ruled: store.StepSkipped,
+		event: engine.EventStepRejected,
 	},
 	"step resolve": {
 		setup: func(t *testing.T, st store.Store, steps map[string]int) int {
@@ -521,6 +528,7 @@ var stepRulingVerbs = map[string]rulingVerb{
 			return res.Step, res.Registered, err
 		},
 		ruled: store.StepSkipped,
+		event: engine.EventStepResolved,
 	},
 }
 
@@ -623,19 +631,57 @@ func TestStepRulingVerbsReadNoTokenOnAnUnboundRun(t *testing.T) {
 }
 
 // TestStepRulingVerbsRefuseAnUnattributedRuling: a transport that supplies no
-// working directory gets a refusal, never a ruling recorded without one.
+// author or no working directory gets a refusal, never a ruling recorded
+// without one.
 func TestStepRulingVerbsRefuseAnUnattributedRuling(t *testing.T) {
+	unattributed := map[string]func(env *verb.Env){
+		"no working directory": func(env *verb.Env) { env.Cwd = "" },
+		"no author":            func(env *verb.Env) { env.Author = "" },
+	}
+	for name, v := range stepRulingVerbs {
+		for missing, strip := range unattributed {
+			t.Run(name+" with "+missing, func(t *testing.T) {
+				st := openStore(t)
+				id, before, conductor := readyRuling(t, st, v)
+				env := rulerEnv(st, "", false)
+				strip(&env)
+
+				if _, _, err := v.call(env, model.FormatStepID(id), func() string { return conductor }); err == nil {
+					t.Fatalf("a ruling with %s was accepted", missing)
+				}
+				requireStatus(t, st, id, before)
+			})
+		}
+	}
+}
+
+// TestStepRulingVerbsRecordWhoRuled: the event each ruling writes names
+// env.Author as its actor and env.Cwd as its working directory.
+func TestStepRulingVerbsRecordWhoRuled(t *testing.T) {
 	for name, v := range stepRulingVerbs {
 		t.Run(name, func(t *testing.T) {
 			st := openStore(t)
-			id, before, conductor := readyRuling(t, st, v)
+			id, _, conductor := readyRuling(t, st, v)
 			env := rulerEnv(st, "", false)
-			env.Cwd = ""
 
-			if _, _, err := v.call(env, model.FormatStepID(id), func() string { return conductor }); err == nil {
-				t.Fatal("a ruling with no working directory was accepted")
+			if _, _, err := v.call(env, model.FormatStepID(id), func() string { return conductor }); err != nil {
+				t.Fatalf("%s: %v", name, err)
 			}
-			requireStatus(t, st, id, before)
+			raw, found, err := st.FirstStepEventData(id, v.event)
+			if err != nil || !found {
+				t.Fatalf("reading the %s event: found=%v err=%v", v.event, found, err)
+			}
+			var data struct {
+				Actor string `json:"actor"`
+				Cwd   string `json:"cwd"`
+			}
+			if err := json.Unmarshal([]byte(raw), &data); err != nil {
+				t.Fatalf("decoding the %s event %s: %v", v.event, raw, err)
+			}
+			if data.Actor != env.Author || data.Cwd != env.Cwd {
+				t.Errorf("%s event actor=%q cwd=%q, want actor=%q cwd=%q",
+					v.event, data.Actor, data.Cwd, env.Author, env.Cwd)
+			}
 		})
 	}
 }
@@ -697,6 +743,10 @@ func TestStepRulingVerbsValidateBeforeTheStore(t *testing.T) {
 	_, unknownAuthorityErr := verb.StepResolve(ctx, env, verb.StepResolveInput{
 		Step: ref, As: engine.ResolveSkip, Authority: "someone",
 	})
+	_, relativeWorktreeErr := verb.StepResolve(ctx, env, verb.StepResolveInput{
+		Step: ref, As: engine.ResolveOverridePass, Authority: engine.AuthorityOperator,
+		Worktree: "relative/checkout",
+	})
 
 	for name, err := range map[string]error{
 		"malformed ref":                      malformedErr,
@@ -704,10 +754,44 @@ func TestStepRulingVerbsValidateBeforeTheStore(t *testing.T) {
 		"standing grant without its ref":     rejectErr,
 		"resolve without --as":               noAsErr,
 		"resolve under an unknown authority": unknownAuthorityErr,
+		"resolve with a relative worktree":   relativeWorktreeErr,
 	} {
 		t.Run(name, func(t *testing.T) {
 			requireCode(t, err, output.ErrValidation)
 		})
 	}
 	requireUnregistered(t, st, "/work/repo")
+}
+
+// TestStepRulingInputsValidateTheRequest pins what each ruling input's
+// Validate refuses, which a transport checks before resolving its
+// attribution, and that a well-formed request passes.
+func TestStepRulingInputsValidateTheRequest(t *testing.T) {
+	const ref = "STEP-1"
+	refused := map[string]error{
+		"reap with a malformed ref":    verb.StepReapInput{Step: "ISSUE-1"}.Validate(),
+		"hold with a malformed ref":    verb.StepHoldInput{Step: "ISSUE-1"}.Validate(),
+		"approve with a malformed ref": verb.StepApproveInput{Step: "ISSUE-1"}.Validate(),
+		"reject with a malformed ref":  verb.StepRejectInput{Step: "ISSUE-1"}.Validate(),
+		"resolve with a malformed ref": verb.StepResolveInput{Step: "ISSUE-1", As: engine.ResolveSkip}.Validate(),
+		"resolve without --as":         verb.StepResolveInput{Step: ref}.Validate(),
+	}
+	for name, err := range refused {
+		t.Run(name, func(t *testing.T) {
+			requireCode(t, err, output.ErrValidation)
+		})
+	}
+
+	accepted := map[string]error{
+		"reap":    verb.StepReapInput{Step: ref}.Validate(),
+		"hold":    verb.StepHoldInput{Step: ref}.Validate(),
+		"approve": verb.StepApproveInput{Step: ref}.Validate(),
+		"reject":  verb.StepRejectInput{Step: ref}.Validate(),
+		"resolve": verb.StepResolveInput{Step: ref, As: engine.ResolveSkip}.Validate(),
+	}
+	for name, err := range accepted {
+		if err != nil {
+			t.Errorf("%s: Validate = %v, want nil for a well-formed request", name, err)
+		}
+	}
 }

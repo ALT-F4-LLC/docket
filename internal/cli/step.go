@@ -458,13 +458,15 @@ a run activated before the capability existed asks for none.`,
 
 func runStepHold(cmd *cobra.Command, args []string, w *output.Writer) error {
 	reason, _ := cmd.Flags().GetString("reason")
+	in := verb.StepHoldInput{Step: args[0], Reason: reason, ConductorToken: stdinConductorToken}
+	if err := in.Validate(); err != nil {
+		return verbErr(err)
+	}
 	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	res, err := verb.StepHold(cmd.Context(), env, verb.StepHoldInput{
-		Step: args[0], Reason: reason, ConductorToken: stdinConductorToken,
-	})
+	res, err := verb.StepHold(cmd.Context(), env, in)
 	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
 		return verbErr(err)
@@ -475,13 +477,15 @@ func runStepHold(cmd *cobra.Command, args []string, w *output.Writer) error {
 
 func runStepReap(cmd *cobra.Command, args []string, w *output.Writer) error {
 	reason, _ := cmd.Flags().GetString("reason")
+	in := verb.StepReapInput{Step: args[0], Reason: reason, ConductorToken: stdinConductorToken}
+	if err := in.Validate(); err != nil {
+		return verbErr(err)
+	}
 	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	res, err := verb.StepReap(cmd.Context(), env, verb.StepReapInput{
-		Step: args[0], Reason: reason, ConductorToken: stdinConductorToken,
-	})
+	res, err := verb.StepReap(cmd.Context(), env, in)
 	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
 		return verbErr(err)
@@ -490,16 +494,16 @@ func runStepReap(cmd *cobra.Command, args []string, w *output.Writer) error {
 	return nil
 }
 
-// rulingEnv is the Env a step ruling runs under: verbEnv with the working
-// directory rulingBy resolved, so an unreadable one refuses the ruling with
-// rulingBy's message before the verb runs.
+// rulingEnv is the Env a step ruling runs under: verbEnv attributed to the
+// actor and working directory rulingBy resolved, so an unreadable directory
+// refuses the ruling with rulingBy's message before the verb runs.
 func rulingEnv(cmd *cobra.Command) (verb.Env, error) {
 	by, err := rulingBy()
 	if err != nil {
 		return verb.Env{}, err
 	}
 	env := verbEnv(cmd)
-	env.Cwd = by.Cwd
+	env.Author, env.Cwd = by.Actor, by.Cwd
 	return env, nil
 }
 
@@ -979,6 +983,24 @@ func runDecide(cmd *cobra.Command, args []string, approve bool, w *output.Writer
 	note, _ := cmd.Flags().GetString("note")
 	authority, _ := cmd.Flags().GetString("authority")
 	authorityRef, _ := cmd.Flags().GetString("authority-ref")
+	approveIn := verb.StepApproveInput{
+		Step: args[0], Note: note,
+		Authority: authority, AuthorityRef: authorityRef,
+		ConductorToken: stdinConductorToken,
+	}
+	rejectIn := verb.StepRejectInput{
+		Step: args[0], Note: note,
+		Authority: authority, AuthorityRef: authorityRef,
+		ConductorToken: stdinConductorToken,
+	}
+	validate := rejectIn.Validate
+	if approve {
+		approveIn.Value, _ = cmd.Flags().GetString("value")
+		validate = approveIn.Validate
+	}
+	if err := validate(); err != nil {
+		return verbErr(err)
+	}
 	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
@@ -991,21 +1013,12 @@ func runDecide(cmd *cobra.Command, args []string, approve bool, w *output.Writer
 		action     string
 	)
 	if approve {
-		value, _ := cmd.Flags().GetString("value")
 		var res verb.StepApproveResult
-		res, err = verb.StepApprove(cmd.Context(), env, verb.StepApproveInput{
-			Step: args[0], Note: note, Value: value,
-			Authority: authority, AuthorityRef: authorityRef,
-			ConductorToken: stdinConductorToken,
-		})
+		res, err = verb.StepApprove(cmd.Context(), env, approveIn)
 		row, stale, registered, action = res.Step, res.StaleTargets, res.Registered, "Approved"
 	} else {
 		var res verb.StepRejectResult
-		res, err = verb.StepReject(cmd.Context(), env, verb.StepRejectInput{
-			Step: args[0], Note: note,
-			Authority: authority, AuthorityRef: authorityRef,
-			ConductorToken: stdinConductorToken,
-		})
+		res, err = verb.StepReject(cmd.Context(), env, rejectIn)
 		row, stale, registered, action = res.Step, res.StaleTargets, res.Registered, "Rejected"
 	}
 	recordProjectRegistration(cmd, registered)
@@ -1163,29 +1176,33 @@ func runStepResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
 	dropInterposed, _ := cmd.Flags().GetBool("drop-interposed")
 	authority, _ := cmd.Flags().GetString("authority")
 	authorityRef, _ := cmd.Flags().GetString("authority-ref")
+	in := verb.StepResolveInput{
+		Step: args[0], As: as, Note: note,
+		Batch: batch, DropInterposed: dropInterposed,
+		Authority: authority, AuthorityRef: authorityRef,
+		ConductorToken: stdinConductorToken,
+	}
+	if err := in.Validate(); err != nil {
+		return verbErr(err)
+	}
 
 	// --worktree names the checkout the patched tree stands in (DKT-1034),
 	// normalized to absolute for `step record --worktree`'s reason: the path
 	// persists on the step and the round record, and a later invocation from
 	// another cwd must still resolve it.
-	worktree, _ := cmd.Flags().GetString("worktree")
-	if worktree != "" {
-		var err error
-		if worktree, err = filepath.Abs(worktree); err != nil {
+	if worktree, _ := cmd.Flags().GetString("worktree"); worktree != "" {
+		abs, err := filepath.Abs(worktree)
+		if err != nil {
 			return cmdErr(fmt.Errorf("resolving --worktree: %w", err), output.ErrValidation)
 		}
+		in.Worktree = abs
 	}
 
 	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	res, err := verb.StepResolve(cmd.Context(), env, verb.StepResolveInput{
-		Step: args[0], As: as, Note: note,
-		Batch: batch, DropInterposed: dropInterposed, Worktree: worktree,
-		Authority: authority, AuthorityRef: authorityRef,
-		ConductorToken: stdinConductorToken,
-	})
+	res, err := verb.StepResolve(cmd.Context(), env, in)
 	// DKT-470/DKT-861: override-pass records a generic "pass" and never
 	// evaluates the step's threshold, so an interposed step it names is
 	// skipped no matter what the (unevaluated) payload would have decided.
