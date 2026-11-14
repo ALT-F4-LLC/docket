@@ -2,15 +2,13 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -283,138 +281,57 @@ relations, linked_proposals, comments, activity, and — only when the issue
 has one — scope, resolution, size, run_disposition. A parse that expects a
 nested object under .data.issue and calls a field getter on what it finds
 is calling that getter on the id string.`,
-	Args: cobra.MinimumNArgs(1),
+	Args:        cobra.MinimumNArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueShow)
 	},
 }
 
-// fetchIssueDetail loads one issue's full show detail: the issue itself plus
-// every hydrated collection showResult carries. It is the single-id body
-// runIssueShow calls once per argument, so batch and single-id show stay
-// byte-identical per issue.
-func fetchIssueDetail(conn store.LegacyDB, source string) (*model.Issue, showResult, error) {
-	id, err := issueArg(source)
-	if err != nil {
-		return nil, showResult{}, err
+// showResultOf is the show payload for one verb.IssueDetail.
+func showResultOf(d verb.IssueDetail) showResult {
+	return showResult{
+		Issue:           d.Issue,
+		SubIssues:       d.SubIssues,
+		Relations:       d.Relations,
+		LinkedProposals: d.LinkedProposals,
+		Comments:        d.Comments,
+		Activity:        d.Activity,
+		RunDisposition:  d.RunDisposition,
+		Scope:           d.Scope,
+		ScopeDeclared:   d.ScopeDeclared,
 	}
+}
 
-	st := store.StoreOn(conn)
-
-	issue, err := st.GetIssue(id)
-	if err != nil {
-		if e := notFound(err, fmt.Sprintf("issue %s", source)); e != nil {
-			return nil, showResult{}, e
-		}
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
-	}
-
-	// Hydrate labels.
-	issue.Labels, err = st.GetIssueLabels(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-	}
-
-	// Hydrate files.
-	issue.Files, err = st.GetIssueFiles(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-	}
-
-	if err := st.HydrateDocs([]*model.Issue{issue}); err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
-	}
-
-	subIssues, err := st.GetSubIssues(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
-	}
-
-	relations, err := st.GetIssueRelations(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-	}
-
-	linkedProposals, err := st.GetIssueProposals(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
-	}
-
-	comments, err := st.ListComments(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
-
-	activity, err := st.GetActivity(id, 10)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
-	}
-
-	// The last run to give up on this issue, if any (DKT-404). Nil is the
-	// ordinary answer and costs one indexed read of the event log.
-	disposition, err := engine.LatestIssueDisposition(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching the run disposition: %w", err), output.ErrGeneral)
-	}
-
-	// Scope is stored as a JSON array in `issues.scope_globs`, or NULL when
-	// the issue declares none. The empty string is the NULL case.
-	scopeJSON, err := st.IssueScopeGlobs(id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching scope: %w", err), output.ErrGeneral)
-	}
-	var scope []string
-	scopeDeclared := scopeJSON != ""
-	if scopeDeclared {
-		if err := json.Unmarshal([]byte(scopeJSON), &scope); err != nil {
-			return nil, showResult{}, cmdErr(fmt.Errorf("decoding scope: %w", err), output.ErrGeneral)
-		}
-	}
-
-	result := showResult{
-		Issue:           issue,
-		SubIssues:       subIssues,
-		Relations:       relations,
-		LinkedProposals: linkedProposals,
-		Comments:        comments,
-		Activity:        activity,
-		RunDisposition:  disposition,
-		Scope:           scope,
-		ScopeDeclared:   scopeDeclared,
-	}
-	return issue, result, nil
+// renderShowDetail is the human rendering of one shown issue.
+func renderShowDetail(r showResult) string {
+	return render.RenderDetail(r.Issue, r.SubIssues, r.Relations,
+		r.LinkedProposals, r.Comments, r.Activity, r.RunDisposition)
 }
 
 func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	shown, err := verb.IssueShow(cmd.Context(), verbEnv(cmd), verb.IssueShowInput{Issues: args})
+	if err != nil {
+		return verbErr(err)
+	}
 
 	if len(args) == 1 {
-		issue, result, err := fetchIssueDetail(conn, args[0])
-		if err != nil {
-			return err
-		}
+		result := showResultOf(shown.Issues[0])
 		var message string
 		if !w.JSONMode {
-			message = render.RenderDetail(issue, result.SubIssues, result.Relations,
-				result.LinkedProposals, result.Comments, result.Activity,
-				result.RunDisposition)
+			message = renderShowDetail(result)
 		}
 		w.Success(result, message)
 		return nil
 	}
 
-	results := make([]showResult, 0, len(args))
+	results := make([]showResult, 0, len(shown.Issues))
 	var messages []string
-	for _, arg := range args {
-		issue, result, err := fetchIssueDetail(conn, arg)
-		if err != nil {
-			return err
-		}
+	for _, d := range shown.Issues {
+		result := showResultOf(d)
 		results = append(results, result)
 		if !w.JSONMode {
-			messages = append(messages, render.RenderDetail(issue, result.SubIssues,
-				result.Relations, result.LinkedProposals, result.Comments, result.Activity,
-				result.RunDisposition))
+			messages = append(messages, renderShowDetail(result))
 		}
 	}
 

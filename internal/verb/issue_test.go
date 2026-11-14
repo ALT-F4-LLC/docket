@@ -1136,3 +1136,345 @@ func TestIssueStatusVerbsMayRegisterTheCallersProject(t *testing.T) {
 		})
 	}
 }
+
+// createChild writes a sub-issue of parent, in parent's project.
+func createChild(t *testing.T, st store.Store, parent int, title string, status model.Status) int {
+	t.Helper()
+	p, err := st.GetIssue(parent)
+	if err != nil {
+		t.Fatalf("GetIssue(%d): %v", parent, err)
+	}
+	id, _, err := st.CreateIssueIdempotent(&model.Issue{
+		ProjectID: p.ProjectID,
+		ParentID:  &parent,
+		Title:     title,
+		Status:    status,
+		Priority:  model.PriorityMedium,
+		Kind:      model.IssueKindTask,
+	}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent(%q): %v", title, err)
+	}
+	return id
+}
+
+func requireIssueGone(t *testing.T, st store.Store, id int) {
+	t.Helper()
+	if _, err := st.GetIssue(id); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetIssue(%d) error = %v, want ErrNotFound: the issue should be deleted", id, err)
+	}
+}
+
+func TestIssueDeleteDeletesAnIssueWithoutSubIssues(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+
+	res, err := verb.IssueDelete(context.Background(), projectEnv(st, "", false),
+		verb.IssueDeleteInput{Issue: model.FormatID(id)})
+	if err != nil {
+		t.Fatalf("IssueDelete: %v", err)
+	}
+	if res.Issue != model.FormatID(id) || res.Title != "lease subject" || res.SubIssues != 0 {
+		t.Errorf("result = %+v, want %s titled \"lease subject\" with no sub-issues", res, model.FormatID(id))
+	}
+	requireIssueGone(t, st, id)
+}
+
+// An issue with sub-issues is never deleted on a guess: the caller must choose
+// cascade or orphan, and the refusal carries the count its prompt needs.
+func TestIssueDeleteRefusesSubIssuesWithoutAChoice(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	child := createChild(t, st, parent, "child", model.StatusTodo)
+
+	res, err := verb.IssueDelete(context.Background(), projectEnv(st, "", false),
+		verb.IssueDeleteInput{Issue: model.FormatID(parent)})
+	requireVerbError(t, err, output.ErrValidation,
+		fmt.Sprintf("issue %s has 1 sub-issue(s): use --force", model.FormatID(parent)))
+	if !errors.Is(err, verb.ErrIssueHasSubIssues) {
+		t.Errorf("error = %v, want it to match ErrIssueHasSubIssues", err)
+	}
+	if res.SubIssues != 1 || res.Issue != model.FormatID(parent) {
+		t.Errorf("result = %+v, want the parent with 1 sub-issue", res)
+	}
+	for _, id := range []int{parent, child} {
+		if _, err := st.GetIssue(id); err != nil {
+			t.Errorf("GetIssue(%d) after a refused delete: %v", id, err)
+		}
+	}
+}
+
+func TestIssueDeleteCascadesToSubIssues(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	child := createChild(t, st, parent, "child", model.StatusTodo)
+
+	res, err := verb.IssueDelete(context.Background(), projectEnv(st, "", false),
+		verb.IssueDeleteInput{Issue: model.FormatID(parent), Cascade: true})
+	if err != nil {
+		t.Fatalf("IssueDelete --cascade: %v", err)
+	}
+	if res.SubIssues != 1 {
+		t.Errorf("SubIssues = %d, want 1", res.SubIssues)
+	}
+	requireIssueGone(t, st, parent)
+	requireIssueGone(t, st, child)
+}
+
+func TestIssueDeleteOrphansSubIssues(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	child := createChild(t, st, parent, "child", model.StatusTodo)
+
+	if _, err := verb.IssueDelete(context.Background(), projectEnv(st, "", false),
+		verb.IssueDeleteInput{Issue: model.FormatID(parent), Orphan: true}); err != nil {
+		t.Fatalf("IssueDelete --orphan: %v", err)
+	}
+	requireIssueGone(t, st, parent)
+	orphan, err := st.GetIssue(child)
+	if err != nil {
+		t.Fatalf("GetIssue(child): %v", err)
+	}
+	if orphan.ParentID != nil {
+		t.Errorf("child parent = %d, want a root issue", *orphan.ParentID)
+	}
+}
+
+func TestIssueDeleteRefusals(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	createChild(t, st, parent, "child", model.StatusTodo)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+
+	_, err := verb.IssueDelete(ctx, env, verb.IssueDeleteInput{
+		Issue: model.FormatID(parent), Cascade: true, Orphan: true})
+	requireVerbError(t, err, output.ErrValidation, "--force and --orphan are mutually exclusive")
+
+	_, err = verb.IssueDelete(ctx, env, verb.IssueDeleteInput{Issue: "DKT-9999"})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+
+	_, err = verb.IssueDelete(ctx, env, verb.IssueDeleteInput{Issue: "not-an-id"})
+	requireCode(t, err, output.ErrValidation)
+
+	if _, err := st.GetIssue(parent); err != nil {
+		t.Errorf("GetIssue(parent) after refusals: %v", err)
+	}
+}
+
+// IssueDelete writes, so it registers an anchored caller's project and refuses
+// an unanchored one it would otherwise have to guess.
+func TestIssueDeleteMayRegisterTheCallersProject(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+
+	_, err := verb.IssueDelete(ctx, projectEnv(st, "/work/scratch", false),
+		verb.IssueDeleteInput{Issue: model.FormatID(id)})
+	requireCode(t, err, output.ErrValidation)
+	requireUnregistered(t, st, "/work/scratch")
+	if _, err := st.GetIssue(id); err != nil {
+		t.Errorf("GetIssue after an unanchored delete: %v", err)
+	}
+
+	res, err := verb.IssueDelete(ctx, projectEnv(st, "/repos/fresh", true),
+		verb.IssueDeleteInput{Issue: model.FormatID(id)})
+	if err != nil {
+		t.Fatalf("IssueDelete: %v", err)
+	}
+	if res.Registered == nil || res.Registered.Identity != "/repos/fresh" || res.Registered.Verb != "issue delete" {
+		t.Errorf("Registered = %+v, want /repos/fresh registered by issue delete", res.Registered)
+	}
+}
+
+func TestIssueShowReadsEachIssueAtFullDetailInOrder(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	child := createChild(t, st, parent, "child", model.StatusTodo)
+	if err := st.SetIssueScopeGlobs(child, "[]"); err != nil {
+		t.Fatalf("SetIssueScopeGlobs: %v", err)
+	}
+
+	res, err := verb.IssueShow(context.Background(), projectEnv(st, "", false),
+		verb.IssueShowInput{Issues: []string{model.FormatID(child), model.FormatID(parent)}})
+	if err != nil {
+		t.Fatalf("IssueShow: %v", err)
+	}
+	if len(res.Issues) != 2 || res.Issues[0].Issue.ID != child || res.Issues[1].Issue.ID != parent {
+		t.Fatalf("shown = %+v, want child then parent", res.Issues)
+	}
+	shownChild, shownParent := res.Issues[0], res.Issues[1]
+	if !shownChild.ScopeDeclared || len(shownChild.Scope) != 0 {
+		t.Errorf("child scope = %v (declared %v), want a declared empty scope",
+			shownChild.Scope, shownChild.ScopeDeclared)
+	}
+	if shownParent.ScopeDeclared {
+		t.Errorf("parent scope declared = true, want no declared scope")
+	}
+	if len(shownParent.SubIssues) != 1 || shownParent.SubIssues[0].ID != child {
+		t.Errorf("parent sub-issues = %v, want [%d]", shownParent.SubIssues, child)
+	}
+	if shownParent.RunDisposition != nil {
+		t.Errorf("RunDisposition = %+v, want nil for an issue no run abandoned", shownParent.RunDisposition)
+	}
+}
+
+func TestIssueShowStopsAtTheFirstMissingIssue(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+
+	res, err := verb.IssueShow(context.Background(), projectEnv(st, "", false),
+		verb.IssueShowInput{Issues: []string{model.FormatID(id), "DKT-9999"}})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	if len(res.Issues) != 0 {
+		t.Errorf("result = %+v, want none on a failed show", res.Issues)
+	}
+}
+
+// IssueShow is a read: an anchored identity no project holds still shows an
+// issue by id, and is not registered.
+func TestIssueShowRegistersNothing(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+
+	if _, err := verb.IssueShow(context.Background(), projectEnv(st, "/repos/fresh", true),
+		verb.IssueShowInput{Issues: []string{model.FormatID(id)}}); err != nil {
+		t.Fatalf("IssueShow: %v", err)
+	}
+	requireUnregistered(t, st, "/repos/fresh")
+}
+
+func TestIssueListReadsTheCallersProjectOrTheNamedOne(t *testing.T) {
+	st := openStore(t)
+	register := func(identity, name string) int {
+		t.Helper()
+		id, _, err := st.EnsureProjectCreated(identity, name, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("EnsureProjectCreated(%q): %v", identity, err)
+		}
+		return id
+	}
+	// The first identity registered claims the default project's row.
+	createExportIssue(t, st, register("/repos/beta", "beta"), "in beta", model.StatusTodo, "")
+	createExportIssue(t, st, register("/repos/alpha", "alpha"), "in alpha", model.StatusTodo, "")
+	ctx := context.Background()
+	alpha := projectEnv(st, "/repos/alpha", true)
+
+	own, err := verb.IssueList(ctx, alpha, verb.IssueListInput{})
+	if err != nil {
+		t.Fatalf("IssueList: %v", err)
+	}
+	if got := issueTitles(own.Issues); len(got) != 1 || got[0] != "in alpha" || own.Total != 1 || own.Project != nil {
+		t.Errorf("own listing = %v (total %d, project %v), want [in alpha] of the caller's project",
+			got, own.Total, own.Project)
+	}
+
+	named, err := verb.IssueList(ctx, alpha, verb.IssueListInput{Project: "/repos/beta"})
+	if err != nil {
+		t.Fatalf("IssueList --project /repos/beta: %v", err)
+	}
+	if got := issueTitles(named.Issues); len(got) != 1 || got[0] != "in beta" {
+		t.Errorf("named listing = %v, want [in beta]", got)
+	}
+	if named.Project == nil || named.Project.Identity != "/repos/beta" {
+		t.Errorf("Project = %+v, want /repos/beta", named.Project)
+	}
+}
+
+func TestIssueListOfAnUnregisteredProjectIsEmptyAndRegistersNothing(t *testing.T) {
+	st := openStore(t)
+	createExportIssue(t, st, store.DefaultProjectID, "in the default project", model.StatusTodo, "")
+
+	res, err := verb.IssueList(context.Background(), projectEnv(st, "/repos/fresh", true), verb.IssueListInput{})
+	if err != nil {
+		t.Fatalf("IssueList: %v", err)
+	}
+	if len(res.Issues) != 0 {
+		t.Errorf("listed %v, want nothing for an unregistered project", issueTitles(res.Issues))
+	}
+	requireUnregistered(t, st, "/repos/fresh")
+}
+
+// An empty default listing counts the done issues it hid, so its hint can say
+// so instead of claiming the store is empty; a listing that included them
+// counts none.
+func TestIssueListCountsTheDoneIssuesAnEmptyListingHid(t *testing.T) {
+	st := openStore(t)
+	for _, title := range []string{"first", "second"} {
+		createExportIssue(t, st, store.DefaultProjectID, title, model.StatusDone, "")
+	}
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+
+	open, err := verb.IssueList(ctx, env, verb.IssueListInput{})
+	if err != nil {
+		t.Fatalf("IssueList: %v", err)
+	}
+	if len(open.Issues) != 0 || open.HiddenDone != 2 {
+		t.Errorf("listing = %v, hidden %d; want none listed and 2 hidden", issueTitles(open.Issues), open.HiddenDone)
+	}
+
+	all, err := verb.IssueList(ctx, env, verb.IssueListInput{All: true})
+	if err != nil {
+		t.Fatalf("IssueList --all: %v", err)
+	}
+	if len(all.Issues) != 2 || all.HiddenDone != 0 {
+		t.Errorf("--all listing = %v, hidden %d; want both listed and none hidden", issueTitles(all.Issues), all.HiddenDone)
+	}
+}
+
+// WithParents reads the parent a filter left out and the sub-issue progress
+// a grouped rendering shows under it.
+func TestIssueListWithParentsReadsFilteredOutParentsAndProgress(t *testing.T) {
+	st := openStore(t)
+	parent := createIssue(t, st)
+	createChild(t, st, parent, "open child", model.StatusBacklog)
+	createChild(t, st, parent, "done child", model.StatusDone)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	backlog := []string{string(model.StatusBacklog)}
+
+	res, err := verb.IssueList(ctx, env, verb.IssueListInput{Statuses: backlog, WithParents: true})
+	if err != nil {
+		t.Fatalf("IssueList: %v", err)
+	}
+	if got := issueTitles(res.Issues); len(got) != 1 || got[0] != "open child" {
+		t.Fatalf("listed %v, want [open child]", got)
+	}
+	if res.Parents[parent] == nil {
+		t.Errorf("Parents = %v, want the filtered-out parent %d", res.Parents, parent)
+	}
+	if got := res.Progress[parent]; got != [2]int{1, 2} {
+		t.Errorf("progress = %v, want 1 of 2 done", got)
+	}
+
+	flat, err := verb.IssueList(ctx, env, verb.IssueListInput{Statuses: backlog})
+	if err != nil {
+		t.Fatalf("IssueList without parents: %v", err)
+	}
+	if flat.Parents != nil || flat.Progress != nil {
+		t.Errorf("without WithParents: parents %v, progress %v; want neither read", flat.Parents, flat.Progress)
+	}
+}
+
+func TestIssueListRefusals(t *testing.T) {
+	env := projectEnv(openStore(t), "", false)
+
+	for name, tc := range map[string]struct {
+		in     verb.IssueListInput
+		code   output.ErrorCode
+		prefix string
+	}{
+		"run and project": {verb.IssueListInput{Run: "RUN-1", Project: "beta"},
+			output.ErrValidation, "--run and --project cannot be combined"},
+		"status": {verb.IssueListInput{Statuses: []string{"shipped"}},
+			output.ErrValidation, `invalid status "shipped"`},
+		"unknown run": {verb.IssueListInput{Run: "RUN-404"}, output.ErrNotFound, "run RUN-404 not found"},
+		"parent":      {verb.IssueListInput{Parent: "nope"}, output.ErrValidation, "invalid parent ID: "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := verb.IssueList(context.Background(), env, tc.in)
+			requireVerbError(t, err, tc.code, tc.prefix)
+		})
+	}
+}

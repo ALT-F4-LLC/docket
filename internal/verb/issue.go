@@ -710,6 +710,406 @@ func migrateIssue(env Env, projectID, id int, target string) (*IssueMigration, e
 	return &IssueMigration{Root: id, Project: project, Migrated: ids}, nil
 }
 
+// ErrIssueHasSubIssues is the refusal IssueDelete wraps when the issue has
+// sub-issues and the input chose neither Cascade nor Orphan.
+var ErrIssueHasSubIssues = errors.New(
+	"use --force to cascade-delete or --orphan to make them root issues")
+
+// IssueDeleteInput is an issue delete request. Cascade deletes the issue's
+// sub-issues with it; Orphan makes them root issues first. Either is needed
+// only when the issue has sub-issues.
+type IssueDeleteInput struct {
+	Issue   string
+	Cascade bool
+	Orphan  bool
+}
+
+// IssueDeleteResult describes the issue IssueDelete was asked to delete.
+// Issue is its display id, rendered before the delete while its owning
+// project can still be read. SubIssues counts its sub-issues; with
+// ErrIssueHasSubIssues the result is set and nothing was deleted, so read it
+// before checking the error. Registered is as on IssueClaimResult.
+type IssueDeleteResult struct {
+	Issue      string
+	Title      string
+	SubIssues  int
+	Registered *engine.ProjectRegistration
+}
+
+// IssueDelete deletes an issue, cascading to or orphaning its sub-issues as
+// the input chooses. It writes into the caller's project, so it may register
+// it.
+func IssueDelete(ctx context.Context, env Env, in IssueDeleteInput) (IssueDeleteResult, error) {
+	projectID, registered, err := resolveRegisteringProject(env, "issue delete")
+	res := IssueDeleteResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	if in.Cascade && in.Orphan {
+		return res, newError(errors.New("--force and --orphan are mutually exclusive"), output.ErrValidation)
+	}
+	id, err := model.ParseID(in.Issue)
+	if err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return res, issueFetchError(err, "issue "+issueDisplayID(env, projectID, id))
+	}
+	res.Issue, res.Title = issueDisplayID(env, projectID, id), issue.Title
+
+	subIssues, err := env.Store.GetSubIssues(id)
+	if err != nil {
+		return res, newError(fmt.Errorf("checking sub-issues: %w", err), output.ErrGeneral)
+	}
+	res.SubIssues = len(subIssues)
+
+	switch {
+	case res.SubIssues == 0:
+	case in.Cascade:
+		if err := env.Store.CascadeDeleteIssue(id); err != nil {
+			return res, newError(fmt.Errorf("cascade deleting issue: %w", err), output.ErrGeneral)
+		}
+		return res, nil
+	case in.Orphan:
+		if err := env.Store.OrphanSubIssues(id, env.Author); err != nil {
+			return res, newError(fmt.Errorf("orphaning sub-issues: %w", err), output.ErrGeneral)
+		}
+	default:
+		return res, newError(fmt.Errorf("issue %s has %d sub-issue(s): %w",
+			res.Issue, res.SubIssues, ErrIssueHasSubIssues), output.ErrValidation)
+	}
+	if err := env.Store.DeleteIssue(id); err != nil {
+		return res, newError(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
+	}
+	return res, nil
+}
+
+// IssueShowInput names the issues to show, each by reference.
+type IssueShowInput struct {
+	Issues []string
+}
+
+// IssueDetail is one issue at full detail: the issue with its labels, files
+// and docs, and the collections around it. Activity holds the latest ten
+// entries. RunDisposition is the last terminal ruling a run made about the
+// issue, nil when no run abandoned it. ScopeDeclared distinguishes an issue
+// that declares no scope from one whose declared scope is empty.
+type IssueDetail struct {
+	Issue           *model.Issue
+	SubIssues       []*model.Issue
+	Relations       []model.Relation
+	LinkedProposals []model.Proposal
+	Comments        []*model.Comment
+	Activity        []model.Activity
+	RunDisposition  *model.IssueRunDisposition
+	Scope           []string
+	ScopeDeclared   bool
+}
+
+// IssueShowResult holds one detail per requested issue, in request order.
+type IssueShowResult struct {
+	Issues []IssueDetail
+}
+
+// IssueShow reads each requested issue at full detail, stopping at the first
+// that fails. Issue ids are store-wide, so it is a read that names no project.
+func IssueShow(ctx context.Context, env Env, in IssueShowInput) (IssueShowResult, error) {
+	if _, _, err := env.ResolveProject(ProjectReadOnly); err != nil {
+		return IssueShowResult{}, err
+	}
+	res := IssueShowResult{Issues: make([]IssueDetail, 0, len(in.Issues))}
+	for _, ref := range in.Issues {
+		detail, err := issueDetail(env, ref)
+		if err != nil {
+			return IssueShowResult{}, err
+		}
+		res.Issues = append(res.Issues, detail)
+	}
+	return res, nil
+}
+
+func issueDetail(env Env, ref string) (IssueDetail, error) {
+	id, err := ParseIssueRef(ref)
+	if err != nil {
+		return IssueDetail{}, err
+	}
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return IssueDetail{}, issueFetchError(err, "issue "+ref)
+	}
+	if issue.Labels, err = env.Store.GetIssueLabels(id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
+	}
+	if issue.Files, err = env.Store.GetIssueFiles(id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
+	}
+	if err := env.Store.HydrateDocs([]*model.Issue{issue}); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	}
+
+	d := IssueDetail{Issue: issue}
+	if d.SubIssues, err = env.Store.GetSubIssues(id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
+	}
+	if d.Relations, err = env.Store.GetIssueRelations(id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+	}
+	if d.LinkedProposals, err = env.Store.GetIssueProposals(id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
+	}
+	if d.Comments, err = env.Store.ListComments(id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
+	}
+	if d.Activity, err = env.Store.GetActivity(id, 10); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
+	}
+	if d.RunDisposition, err = engine.LatestIssueDispositionStore(env.Store, id); err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching the run disposition: %w", err), output.ErrGeneral)
+	}
+
+	// scope_globs holds a JSON array, or NULL, read as "", when none is declared.
+	scopeJSON, err := env.Store.IssueScopeGlobs(id)
+	if err != nil {
+		return IssueDetail{}, newError(fmt.Errorf("fetching scope: %w", err), output.ErrGeneral)
+	}
+	d.ScopeDeclared = scopeJSON != ""
+	if d.ScopeDeclared {
+		if err := json.Unmarshal([]byte(scopeJSON), &d.Scope); err != nil {
+			return IssueDetail{}, newError(fmt.Errorf("decoding scope: %w", err), output.ErrGeneral)
+		}
+	}
+	return d, nil
+}
+
+// IssueListInput filters an issue listing; every filter set must match.
+// Project lists the project it names instead of the caller's; Run lists the
+// issues a run's activation bound, done ones included. The two cannot be
+// combined. Sort is field[:direction]. Limit caps the rows; 0 means no limit.
+// WithParents also reads what a grouped rendering needs: the parents of
+// listed issues that the listing itself leaves out, and sub-issue progress.
+type IssueListInput struct {
+	Statuses    []string
+	Priorities  []string
+	Sizes       []string
+	Labels      []string
+	Types       []string
+	Assignee    string
+	Parent      string
+	RootsOnly   bool
+	All         bool
+	Sort        string
+	Limit       int
+	Run         string
+	Project     string
+	WithParents bool
+}
+
+// IssueListResult is the listing. Total counts every match before Limit.
+// Project is the listed project when it is not the caller's: the one
+// IssueListInput.Project names, or the run's. RunID is the listed run, 0
+// without one. HiddenDone counts the done issues an empty listing left out,
+// and is 0 for a run's roster or when done issues were included. Parents and
+// Progress are set under WithParents; Progress maps a parent id to its done
+// and total sub-issue counts.
+type IssueListResult struct {
+	Issues     []*model.Issue
+	Total      int
+	Project    *model.Project
+	RunID      int
+	HiddenDone int
+	Parents    map[int]*model.Issue
+	Progress   map[int][2]int
+}
+
+// IssueList lists issues. It is a read: an identity no project holds lists no
+// issues, and nothing is registered.
+func IssueList(ctx context.Context, env Env, in IssueListInput) (IssueListResult, error) {
+	projectID, _, err := env.ResolveProject(ProjectReadOnly)
+	if err != nil {
+		return IssueListResult{}, err
+	}
+
+	// Refused before either scope is resolved, so a conflicting request
+	// resolves neither.
+	if in.Run != "" && in.Project != "" {
+		return IssueListResult{}, newError(errors.New(
+			"--run and --project cannot be combined: a run belongs to one "+
+				"project and --run already lists it"), output.ErrValidation)
+	}
+	if err := validateIssueFilters(in); err != nil {
+		return IssueListResult{}, err
+	}
+
+	var res IssueListResult
+	if in.Project != "" {
+		project, err := ResolveProjectRef(env.Store, in.Project)
+		if err != nil {
+			return IssueListResult{}, err
+		}
+		projectID, res.Project = project.ID, project
+	}
+
+	all := in.All
+	if in.Run != "" {
+		runID, err := model.ParseRunID(in.Run)
+		if err != nil {
+			return IssueListResult{}, newError(err, output.ErrValidation)
+		}
+		run, err := env.Store.GetRun(runID)
+		if errors.Is(err, store.ErrRunNotFound) {
+			return IssueListResult{}, newError(
+				fmt.Errorf("run %s not found", model.FormatRunID(runID)), output.ErrNotFound)
+		}
+		if err != nil {
+			return IssueListResult{}, newError(fmt.Errorf("reading run: %w", err), output.ErrGeneral)
+		}
+		res.RunID = run.ID
+		if run.ProjectID != 0 && run.ProjectID != projectID {
+			project, err := env.Store.GetProject(run.ProjectID)
+			if err != nil {
+				return IssueListResult{}, newError(
+					fmt.Errorf("reading the run's project: %w", err), output.ErrGeneral)
+			}
+			projectID, res.Project = project.ID, project
+		}
+		// A roster is a closed set, and a finished run's is mostly done issues.
+		all = true
+	}
+
+	opts := store.ListOptions{
+		ProjectID:   projectID,
+		RunID:       res.RunID,
+		Statuses:    in.Statuses,
+		Priorities:  in.Priorities,
+		Sizes:       in.Sizes,
+		Labels:      in.Labels,
+		Types:       in.Types,
+		Assignee:    in.Assignee,
+		RootsOnly:   in.RootsOnly,
+		IncludeDone: all,
+		Limit:       in.Limit,
+	}
+	if in.Parent != "" {
+		pid, err := model.ParseID(in.Parent)
+		if err != nil {
+			return IssueListResult{}, newError(fmt.Errorf("invalid parent ID: %w", err), output.ErrValidation)
+		}
+		opts.ParentID = &pid
+	}
+	if in.Sort != "" {
+		parts := strings.SplitN(in.Sort, ":", 2)
+		opts.Sort = parts[0]
+		if len(parts) > 1 {
+			opts.SortDir = parts[1]
+		}
+	}
+
+	res.Issues, res.Total, err = env.Store.ListIssues(opts)
+	if err != nil {
+		return IssueListResult{}, newError(fmt.Errorf("listing issues: %w", err), output.ErrGeneral)
+	}
+	if err := env.Store.HydrateDocs(res.Issues); err != nil {
+		return IssueListResult{}, newError(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
+	}
+
+	if len(res.Issues) == 0 && res.RunID == 0 && !all {
+		withDone := opts
+		withDone.IncludeDone, withDone.Limit = true, 1
+		// The count only refines an empty listing's hint, so a failed read
+		// leaves it at 0 rather than failing the listing.
+		if _, total, err := env.Store.ListIssues(withDone); err == nil {
+			res.HiddenDone = total
+		}
+	}
+
+	if in.WithParents {
+		if err := listParents(env, &res); err != nil {
+			return IssueListResult{}, err
+		}
+	}
+	return res, nil
+}
+
+// validateIssueFilters checks each filter value against its enum.
+func validateIssueFilters(in IssueListInput) error {
+	for _, s := range in.Statuses {
+		if err := model.ValidateStatus(model.Status(s)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	for _, p := range in.Priorities {
+		if err := model.ValidatePriority(model.Priority(p)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	for _, sz := range in.Sizes {
+		if err := model.ValidateSize(model.Size(sz)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	for _, t := range in.Types {
+		if err := model.ValidateIssueKind(model.IssueKind(t)); err != nil {
+			return newError(err, output.ErrValidation)
+		}
+	}
+	return nil
+}
+
+// listParents fills res.Parents with the parents of listed issues that the
+// listing left out, and res.Progress with the sub-issue counts of every
+// parent of a listed issue, listed or not.
+func listParents(env Env, res *IssueListResult) error {
+	listed := make(map[int]bool, len(res.Issues))
+	for _, issue := range res.Issues {
+		listed[issue.ID] = true
+	}
+
+	var missing []int
+	seen := make(map[int]bool)
+	for _, issue := range res.Issues {
+		if issue.ParentID != nil && !listed[*issue.ParentID] && !seen[*issue.ParentID] {
+			seen[*issue.ParentID] = true
+			missing = append(missing, *issue.ParentID)
+		}
+	}
+	if len(missing) > 0 {
+		parents, err := env.Store.GetIssuesByIDs(missing)
+		if err != nil {
+			return newError(fmt.Errorf("fetching parent issues: %w", err), output.ErrGeneral)
+		}
+		res.Parents = parents
+	}
+
+	parentIDs := make(map[int]bool)
+	for id := range res.Parents {
+		parentIDs[id] = true
+	}
+	for _, issue := range res.Issues {
+		if issue.ParentID == nil {
+			continue
+		}
+		if pid := *issue.ParentID; listed[pid] || res.Parents[pid] != nil {
+			parentIDs[pid] = true
+		}
+	}
+	if len(parentIDs) == 0 {
+		return nil
+	}
+	ids := make([]int, 0, len(parentIDs))
+	for id := range parentIDs {
+		ids = append(ids, id)
+	}
+	progress, err := env.Store.GetBatchSubIssueProgress(ids)
+	if err != nil {
+		return newError(fmt.Errorf("fetching sub-issue progress: %w", err), output.ErrGeneral)
+	}
+	res.Progress = progress
+	return nil
+}
+
 // refetchIssue reads issue id back after a write, with its labels, files and
 // docs.
 func refetchIssue(env Env, id int) (*model.Issue, error) {
