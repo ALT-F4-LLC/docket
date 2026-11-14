@@ -54,14 +54,9 @@ type voteBackfillOutcome struct {
 }
 
 func runVoteBackfillUsage(cmd *cobra.Command, args []string, w *output.Writer) error {
-	// The proposal is refused before the batch is read, as it always was.
-	if _, err := fromVerb(verb.ParseProposalRef(args[0])); err != nil {
-		return err
-	}
-	in := verb.VoteBackfillUsageInput{Proposal: args[0]}
-	var err error
-	if in.Rows, err = voteBackfillRows(cmd); err != nil {
-		return err
+	in := verb.VoteBackfillUsageInput{
+		Proposal: args[0],
+		Rows:     func() ([]engine.VoteBackfillRow, error) { return voteBackfillRows(cmd) },
 	}
 	in.Source, _ = cmd.Flags().GetString("source")
 

@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -12,6 +15,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // TestVoteLinkCommandsOwnTheirProject: vote link and vote unlink resolve
@@ -118,21 +122,72 @@ func TestVoteLinkCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 	}
 }
 
-// TestVoteLinkCommandsRefuseAnUnanchoredCaller: a link is a write into the
-// caller's project, so an identity that names none is refused and nothing is
-// linked.
+// TestVoteLinkCommandsRefuseAnUnanchoredCaller: link and unlink are writes
+// into the caller's project, so an identity that names none is refused and
+// the links stay as they were.
 func TestVoteLinkCommandsRefuseAnUnanchoredCaller(t *testing.T) {
 	conn := newTestDB(t)
 	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
 	testsupport.Must(t, err, "claiming the default project: %v", err)
+	unanchored := &config.Config{Identity: "/work/scratch"}
+	requireLinks := func(pid int, want []int) {
+		t.Helper()
+		linked, err := db.GetProposalIssues(conn, pid)
+		testsupport.Must(t, err, "GetProposalIssues: %v", err)
+		if !slices.Equal(linked, want) {
+			t.Errorf("after a refused write the links are %v, want %v", linked, want)
+		}
+	}
+
 	pid := listedProposal(t, conn, "linked", model.ProposalStatusOpen, 2)
+	issueID := createIssue(t, conn, "linked issue", model.StatusTodo, model.PriorityNone)
+	proposal, issue := model.FormatProposalID(pid), model.FormatID(issueID)
+
+	_, err = runVoteLinkCmd(t, conn, voteLinkCmd, unanchored, proposal, issue)
+	requireCmdErrCode(t, err, output.ErrValidation, "cannot tell which project")
+	requireLinks(pid, nil)
+
+	_, err = runVoteLinkCmd(t, conn, voteLinkCmd, nil, proposal, issue)
+	testsupport.Must(t, err, "vote link: %v", err)
+	_, err = runVoteLinkCmd(t, conn, voteUnlinkCmd, unanchored, proposal, issue)
+	requireCmdErrCode(t, err, output.ErrValidation, "cannot tell which project")
+	requireLinks(pid, []int{issueID})
+}
+
+// runVoteHuman runs cmd with args in human mode and returns its stdout.
+func runVoteHuman(t *testing.T, conn *sql.DB, cmd *cobra.Command, args ...string) (string, error) {
+	t.Helper()
+	t.Cleanup(func() {
+		cmd.Flags().Visit(func(f *pflag.Flag) {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		})
+	})
+	cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
+	stdout := captureStdout(t)
+	err := cmd.RunE(cmd, args)
+	return stdout(), err
+}
+
+// TestVoteLinkCommandsReportThePairToAHuman: link and unlink each name the
+// issue and the proposal on their human line.
+func TestVoteLinkCommandsReportThePairToAHuman(t *testing.T) {
+	conn := newTestDB(t)
+	proposal := model.FormatProposalID(listedProposal(t, conn, "linked", model.ProposalStatusOpen, 2))
 	issue := model.FormatID(createIssue(t, conn, "linked issue", model.StatusTodo, model.PriorityNone))
 
-	_, err = runVoteLinkCmd(t, conn, voteLinkCmd, &config.Config{Identity: "/work/scratch"}, model.FormatProposalID(pid), issue)
-	requireCmdErrCode(t, err, output.ErrValidation, "cannot tell which project")
-	linked, err := db.GetProposalIssues(conn, pid)
-	testsupport.Must(t, err, "GetProposalIssues: %v", err)
-	if len(linked) != 0 {
-		t.Errorf("a refused link wrote %v", linked)
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		want string
+	}{
+		{voteLinkCmd, "Linked " + issue + " to proposal " + proposal},
+		{voteUnlinkCmd, "Unlinked " + issue + " from proposal " + proposal},
+	} {
+		testsupport.Must(t, tc.cmd.Flags().Set("issue", issue), "set --issue")
+		out, err := runVoteHuman(t, conn, tc.cmd, proposal)
+		testsupport.Must(t, err, "vote %s: %v", tc.cmd.Name(), err)
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("vote %s printed %q, want it to contain %q", tc.cmd.Name(), out, tc.want)
+		}
 	}
 }

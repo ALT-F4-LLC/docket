@@ -33,7 +33,8 @@ var voteListCmd = &cobra.Command{
 	},
 }
 
-// runVoteList contains the query + render + output logic for vote list.
+// runVoteList parses vote list's flags, calls verb.VoteList and renders the
+// listing.
 func runVoteList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	in := verb.VoteListInput{VoteCounts: !w.JSONMode}
 	in.Status, _ = cmd.Flags().GetString("status")

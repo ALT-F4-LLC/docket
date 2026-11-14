@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
@@ -43,6 +44,22 @@ func castProposal(t *testing.T, conn *sql.DB, voters ...string) int {
 // flags set, returning the decoded outcome.
 func runVoteBackfill(t *testing.T, conn *sql.DB, cfg *config.Config, proposal string, flags ...string) (voteBackfillOutcome, error) {
 	t.Helper()
+	setVoteBackfillFlags(t, flags...)
+	out, err := runLeaseCommandOutput(t, conn, cfg, voteBackfillUsageCmd, proposal)
+	if err != nil {
+		return voteBackfillOutcome{}, err
+	}
+	var envelope struct {
+		Data voteBackfillOutcome `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(out), &envelope), "payload is not JSON: %q", out)
+	return envelope.Data, nil
+}
+
+// setVoteBackfillFlags resets vote backfill-usage's flags to their defaults,
+// then sets flags as name, value pairs.
+func setVoteBackfillFlags(t *testing.T, flags ...string) {
+	t.Helper()
 	reset := func() {
 		voteBackfillUsageCmd.Flags().VisitAll(func(f *pflag.Flag) {
 			if sv, ok := f.Value.(pflag.SliceValue); ok {
@@ -61,15 +78,6 @@ func runVoteBackfill(t *testing.T, conn *sql.DB, cfg *config.Config, proposal st
 	for i := 0; i < len(flags); i += 2 {
 		testsupport.Must(t, voteBackfillUsageCmd.Flags().Set(flags[i], flags[i+1]), "set --%s", flags[i])
 	}
-	out, err := runLeaseCommandOutput(t, conn, cfg, voteBackfillUsageCmd, proposal)
-	if err != nil {
-		return voteBackfillOutcome{}, err
-	}
-	var envelope struct {
-		Data voteBackfillOutcome `json:"data"`
-	}
-	testsupport.Must(t, json.Unmarshal([]byte(out), &envelope), "payload is not JSON: %q", out)
-	return envelope.Data, nil
 }
 
 // backfillBatch writes a --from-json batch file and returns its path.
@@ -147,6 +155,55 @@ func TestVoteBackfillUsageRefusals(t *testing.T) {
 		"voter", "seat-never", "unit", "tokens", "quantity", "1")
 	if code := codeOf(t, err); code != output.ErrValidation {
 		t.Errorf("a seat that never cast returned %s (%v), want %s", code, err, output.ErrValidation)
+	}
+}
+
+// TestVoteBackfillUsageReportsTheBatchToAHuman: the human line counts the
+// rows and seats under the source they carry.
+func TestVoteBackfillUsageReportsTheBatchToAHuman(t *testing.T) {
+	conn := newTestDB(t)
+	ref := model.FormatProposalID(castProposal(t, conn, "seat-a", "seat-b"))
+	setVoteBackfillFlags(t, "source", "relay",
+		"voter", "seat-a", "unit", "tokens", "quantity", "1",
+		"voter", "seat-b", "unit", "tokens", "quantity", "2")
+
+	out, err := runVoteHuman(t, conn, voteBackfillUsageCmd, ref)
+	testsupport.Must(t, err, "vote backfill-usage: %v", err)
+	if want := `Back-filled 2 usage row(s) across 2 seat(s) of ` + ref + ` as "relay"`; !strings.Contains(out, want) {
+		t.Errorf("vote backfill-usage printed %q, want it to contain %q", out, want)
+	}
+}
+
+// TestVoteBackfillUsageResolvesTheProjectFirst: the project is settled
+// before the proposal and the batch, as when the root hook resolved it. An
+// unanchored caller is refused whatever else is wrong and nothing is
+// written; an anchored caller's project registers even when its batch
+// cannot be read.
+func TestVoteBackfillUsageResolvesTheProjectFirst(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	pid := castProposal(t, conn, "seat-a")
+	ref := model.FormatProposalID(pid)
+	unanchored := &config.Config{Identity: "/work/scratch"}
+	missing := filepath.Join(t.TempDir(), "absent.json")
+
+	_, err = runVoteBackfill(t, conn, unanchored, ref, "voter", "seat-a", "unit", "tokens", "quantity", "1")
+	requireCmdErrCode(t, err, output.ErrValidation, "cannot tell which project")
+	if got := usageSources(t, conn, pid); len(got["seat-a"]) != 0 {
+		t.Errorf("a refused back-fill wrote usage %v", got)
+	}
+	_, err = runVoteBackfill(t, conn, unanchored, ref, "from-json", missing)
+	requireCmdErrCode(t, err, output.ErrValidation, "cannot tell which project")
+	_, err = runVoteBackfill(t, conn, unanchored, "nope", "from-json", missing)
+	requireCmdErrCode(t, err, output.ErrValidation, "cannot tell which project")
+
+	_, err = runVoteBackfill(t, conn, &config.Config{Identity: "/repos/backfill", Anchored: true}, ref,
+		"from-json", backfillBatch(t, "not a batch"))
+	requireCmdErrCode(t, err, output.ErrValidation, "reading the back-fill batch")
+	want := map[string]string{"/repos/backfill": "vote backfill-usage"}
+	if got := registrationEvents(t, conn); !reflect.DeepEqual(got, want) {
+		t.Errorf("registration events = %v, want %v", got, want)
 	}
 }
 

@@ -732,8 +732,13 @@ func parseProposalLink(proposal, issue string) (proposalID, issueID int, err err
 // An empty Source records the rows as engine.UsageSourceBackfilled.
 type VoteBackfillUsageInput struct {
 	Proposal string
-	Rows     []engine.VoteBackfillRow
-	Source   string
+	// Rows returns the batch. VoteBackfillUsage calls it at most once, after
+	// it has resolved the project and parsed Proposal, so a transport that
+	// reads a file or stdin reports an unreadable batch only after those
+	// refusals. Its error is returned unchanged; a nil Rows is an empty
+	// batch.
+	Rows   func() ([]engine.VoteBackfillRow, error)
+	Source string
 }
 
 // VoteBackfillUsageResult counts what was recorded: the rows, the distinct
@@ -764,17 +769,23 @@ func VoteBackfillUsage(ctx context.Context, env Env, in VoteBackfillUsageInput) 
 	if err != nil {
 		return result, err
 	}
+	var rows []engine.VoteBackfillRow
+	if in.Rows != nil {
+		if rows, err = in.Rows(); err != nil {
+			return result, err
+		}
+	}
 
 	if err := engine.NewEngine().BackfillVoteUsageStore(
-		env.Store, proposalID, in.Rows, in.Source, model.NowMS()); err != nil {
+		env.Store, proposalID, rows, in.Source, model.NowMS()); err != nil {
 		return result, engineError(err)
 	}
 
-	seats := make(map[string]bool, len(in.Rows))
-	for _, r := range in.Rows {
+	seats := make(map[string]bool, len(rows))
+	for _, r := range rows {
 		seats[r.Voter] = true
 	}
-	result.ProposalID, result.Rows, result.Seats = proposalID, len(in.Rows), len(seats)
+	result.ProposalID, result.Rows, result.Seats = proposalID, len(rows), len(seats)
 	result.Source = in.Source
 	if result.Source == "" {
 		result.Source = engine.UsageSourceBackfilled

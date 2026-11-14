@@ -2,8 +2,10 @@ package verb_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -895,6 +897,63 @@ func TestVoteListRefusesAnUnknownFilter(t *testing.T) {
 	}
 }
 
+// TestVoteListFiltersByCriticalityDomainTagAndLimit: each filter keeps only
+// its matches, and the limit caps the listing while Total still counts
+// every match.
+func TestVoteListFiltersByCriticalityDomainTagAndLimit(t *testing.T) {
+	st := openStore(t)
+	propose := func(criticality model.Criticality, tags ...string) string {
+		t.Helper()
+		id, err := st.CreateProposalIdempotent(&model.Proposal{
+			Description: "a ballot", Criticality: criticality, DomainTags: tags,
+			Status: model.ProposalStatusOpen, RequiredVoters: 2, Threshold: 0.5,
+		}, "")
+		if err != nil {
+			t.Fatalf("CreateProposalIdempotent: %v", err)
+		}
+		return model.FormatProposalID(id)
+	}
+	highSecurity := propose(model.CriticalityHigh, "security")
+	highStorage := propose(model.CriticalityHigh, "storage")
+	lowSecurity := propose(model.CriticalityLow, "security")
+	env := projectEnv(st, "", false)
+
+	cases := []struct {
+		name  string
+		in    verb.VoteListInput
+		total int
+		among []string
+	}{
+		{"criticality", verb.VoteListInput{Criticality: "high"}, 2, []string{highSecurity, highStorage}},
+		{"domain tag", verb.VoteListInput{DomainTag: "security"}, 2, []string{highSecurity, lowSecurity}},
+		{"both", verb.VoteListInput{Criticality: "high", DomainTag: "security"}, 1, []string{highSecurity}},
+		{"limit", verb.VoteListInput{Limit: 1}, 3, []string{highSecurity, highStorage, lowSecurity}},
+		{"limited criticality", verb.VoteListInput{Criticality: "high", Limit: 1}, 2, []string{highSecurity, highStorage}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := verb.VoteList(context.Background(), env, tc.in)
+			if err != nil {
+				t.Fatalf("VoteList: %v", err)
+			}
+			got := listedRefs(res)
+			wantListed := tc.total
+			if tc.in.Limit > 0 && tc.in.Limit < wantListed {
+				wantListed = tc.in.Limit
+			}
+			if res.Total != tc.total || len(got) != wantListed {
+				t.Fatalf("VoteList(%+v) = %v (total %d), want %d listed of total %d among %v",
+					tc.in, got, res.Total, wantListed, tc.total, tc.among)
+			}
+			for _, ref := range got {
+				if !slices.Contains(tc.among, ref) {
+					t.Errorf("VoteList(%+v) listed %s, want only %v", tc.in, ref, tc.among)
+				}
+			}
+		})
+	}
+}
+
 // TestVoteListNeverRegistersAProject: the listing is a read, so an anchored
 // unregistered identity is not registered and sees none of the default
 // project's proposals, and an unanchored one is not refused.
@@ -976,6 +1035,51 @@ func TestVoteLinkRefusals(t *testing.T) {
 	requireVerbCode(t, link("DKT-V999", issue), output.ErrNotFound, "proposal or issue not found")
 }
 
+// TestVoteLinkOpensThePanelOnTheRunItJoins: linking a step-less proposal to
+// the issue a run binds records the panel's vote-opened on that run, once.
+func TestVoteLinkOpensThePanelOnTheRunItJoins(t *testing.T) {
+	st := openStore(t)
+	step, err := st.GetStep(activatedStep(t, st))
+	if err != nil {
+		t.Fatalf("GetStep: %v", err)
+	}
+	ref := openProposal(t, st, 2, "")
+	env := projectEnv(st, "", false)
+
+	if _, err := verb.VoteLink(context.Background(), env,
+		verb.VoteLinkInput{Proposal: ref, Issue: model.FormatID(step.IssueID)}); err != nil {
+		t.Fatalf("VoteLink: %v", err)
+	}
+	page, err := engine.ListEventsStore(st, engine.EventQuery{RunID: step.RunID, Kind: engine.EventVoteOpened})
+	if err != nil {
+		t.Fatalf("ListEventsStore: %v", err)
+	}
+	if len(page.Events) != 1 || !strings.Contains(string(page.Events[0].Data), ref) {
+		t.Errorf("vote-opened events on the run = %d (%v), want one naming %s", len(page.Events), page.Events, ref)
+	}
+}
+
+// notSQLiteStore hides the SQLite store behind its interface, so the
+// engine's panel-event write, which needs the *sql.DB, fails while every
+// store.Store call still succeeds.
+type notSQLiteStore struct{ store.Store }
+
+// TestVoteLinkReportsALinkWhoseRunEventsFailed: the link is written before
+// the run events, so a failed event write keeps the link and says so.
+func TestVoteLinkReportsALinkWhoseRunEventsFailed(t *testing.T) {
+	st := openStore(t)
+	ref := openProposal(t, st, 2, "")
+	pid, _ := model.ParseProposalID(ref)
+	issue := createIssue(t, st)
+
+	_, err := verb.VoteLink(context.Background(), projectEnv(notSQLiteStore{st}, "", false),
+		verb.VoteLinkInput{Proposal: ref, Issue: model.FormatID(issue)})
+	requireVerbCode(t, err, output.ErrGeneral, "the link recorded, but recording "+ref+"'s run events failed")
+	if linked, err := st.GetProposalIssues(pid); err != nil || !reflect.DeepEqual(linked, []int{issue}) {
+		t.Errorf("GetProposalIssues = (%v, %v), want the link kept as [%d]", linked, err, issue)
+	}
+}
+
 // TestVoteBackfillUsageRecordsTheBatch: the batch lands on each seat's cast,
 // and the result counts its rows and distinct seats under the source the
 // rows carry, "backfilled" by default.
@@ -992,11 +1096,11 @@ func TestVoteBackfillUsageRecordsTheBatch(t *testing.T) {
 
 	res, err := verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{
 		Proposal: ref,
-		Rows: []engine.VoteBackfillRow{
-			{Voter: "seat-a", Unit: "input_tokens", Quantity: 10},
-			{Voter: "seat-a", Unit: "output_tokens", Quantity: 20},
-			{Voter: "seat-b", Unit: "input_tokens", Quantity: 30},
-		},
+		Rows: backfillRows(
+			engine.VoteBackfillRow{Voter: "seat-a", Unit: "input_tokens", Quantity: 10},
+			engine.VoteBackfillRow{Voter: "seat-a", Unit: "output_tokens", Quantity: 20},
+			engine.VoteBackfillRow{Voter: "seat-b", Unit: "input_tokens", Quantity: 30},
+		),
 	})
 	if err != nil {
 		t.Fatalf("VoteBackfillUsage: %v", err)
@@ -1011,7 +1115,7 @@ func TestVoteBackfillUsageRecordsTheBatch(t *testing.T) {
 
 	res, err = verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{
 		Proposal: ref, Source: "relay",
-		Rows: []engine.VoteBackfillRow{{Voter: "seat-b", Unit: "output_tokens", Quantity: 40}},
+		Rows: backfillRows(engine.VoteBackfillRow{Voter: "seat-b", Unit: "output_tokens", Quantity: 40}),
 	})
 	if err != nil {
 		t.Fatalf("VoteBackfillUsage with a source: %v", err)
@@ -1028,8 +1132,8 @@ func TestVoteBackfillUsageRefusals(t *testing.T) {
 	if _, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat")); err != nil {
 		t.Fatalf("VoteCast: %v", err)
 	}
-	row := []engine.VoteBackfillRow{{Voter: "seat", Unit: "tokens", Quantity: 1}}
-	backfill := func(proposal string, rows []engine.VoteBackfillRow) error {
+	row := backfillRows(engine.VoteBackfillRow{Voter: "seat", Unit: "tokens", Quantity: 1})
+	backfill := func(proposal string, rows func() ([]engine.VoteBackfillRow, error)) error {
 		_, err := verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{Proposal: proposal, Rows: rows})
 		return err
 	}
@@ -1037,8 +1141,55 @@ func TestVoteBackfillUsageRefusals(t *testing.T) {
 	requireVerbCode(t, backfill("nope", row), output.ErrValidation, "invalid proposal ID")
 	requireVerbCode(t, backfill("DKT-V999", row), output.ErrNotFound, "proposal DKT-V999 not found")
 	requireVerbCode(t, backfill(ref, nil), output.ErrValidation, "no usage rows")
-	requireVerbCode(t, backfill(ref, []engine.VoteBackfillRow{{Voter: "absent", Unit: "tokens", Quantity: 1}}),
+	requireVerbCode(t, backfill(ref, backfillRows()), output.ErrValidation, "no usage rows")
+	requireVerbCode(t, backfill(ref, backfillRows(engine.VoteBackfillRow{Voter: "absent", Unit: "tokens", Quantity: 1})),
 		output.ErrValidation, "absent")
+}
+
+// backfillRows is a VoteBackfillUsageInput.Rows that returns rows.
+func backfillRows(rows ...engine.VoteBackfillRow) func() ([]engine.VoteBackfillRow, error) {
+	return func() ([]engine.VoteBackfillRow, error) { return rows, nil }
+}
+
+// TestVoteBackfillUsageReadsTheBatchLast: the project and the proposal are
+// settled before Rows is called, so an unanchored caller or a malformed id
+// is refused without reading the batch, and a batch that cannot be read is
+// reported unchanged after the anchored caller's project is registered.
+func TestVoteBackfillUsageReadsTheBatchLast(t *testing.T) {
+	st := openStore(t)
+	ensureProject(t, st, "/repos/first", "first")
+	ref := openProposal(t, st, 2, "")
+	unreadable := errors.New("the batch cannot be read")
+	reads := 0
+	rows := func() ([]engine.VoteBackfillRow, error) {
+		reads++
+		return nil, unreadable
+	}
+
+	_, err := verb.VoteBackfillUsage(context.Background(), projectEnv(st, "/work/scratch", false),
+		verb.VoteBackfillUsageInput{Proposal: ref, Rows: rows})
+	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project")
+	_, err = verb.VoteBackfillUsage(context.Background(), projectEnv(st, "/work/scratch", false),
+		verb.VoteBackfillUsageInput{Proposal: "nope", Rows: rows})
+	requireVerbCode(t, err, output.ErrValidation, "cannot tell which project")
+	_, err = verb.VoteBackfillUsage(context.Background(), projectEnv(st, "", false),
+		verb.VoteBackfillUsageInput{Proposal: "nope", Rows: rows})
+	requireVerbCode(t, err, output.ErrValidation, "invalid proposal ID")
+	if reads != 0 {
+		t.Fatalf("Rows was called %d times before the project and proposal were settled", reads)
+	}
+
+	res, err := verb.VoteBackfillUsage(context.Background(), projectEnv(st, "/repos/vote", true),
+		verb.VoteBackfillUsageInput{Proposal: ref, Rows: rows})
+	if !errors.Is(err, unreadable) {
+		t.Errorf("VoteBackfillUsage error = %v, want the batch reader's error unchanged", err)
+	}
+	if reads != 1 {
+		t.Errorf("Rows was called %d times, want once", reads)
+	}
+	if res.Registered == nil || res.Registered.Identity != "/repos/vote" {
+		t.Errorf("Registered = %+v, want the anchored identity registered before the batch was read", res.Registered)
+	}
 }
 
 // TestVoteLinkWritesRegisterAnAnchoredCallersProject: link, unlink and the
@@ -1064,7 +1215,7 @@ func TestVoteLinkWritesRegisterAnAnchoredCallersProject(t *testing.T) {
 				return nil, err
 			}
 			res, err := verb.VoteBackfillUsage(context.Background(), env, verb.VoteBackfillUsageInput{
-				Proposal: ref, Rows: []engine.VoteBackfillRow{{Voter: "seat", Unit: "tokens", Quantity: 1}},
+				Proposal: ref, Rows: backfillRows(engine.VoteBackfillRow{Voter: "seat", Unit: "tokens", Quantity: 1}),
 			})
 			return res.Registered, err
 		},
