@@ -687,3 +687,375 @@ func TestIssueLeaseRefusalsNameTheIssueByItsOwningProject(t *testing.T) {
 		requireVerbError(t, err, output.ErrNotFound, "issue CALL-999 not found")
 	})
 }
+
+func issueStatus(t *testing.T, st store.Store, id int) model.Status {
+	t.Helper()
+	issue, err := st.GetIssue(id)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	return issue.Status
+}
+
+func issueVersion(t *testing.T, st store.Store, id int) int {
+	t.Helper()
+	version, err := st.GetVersion("issues", id)
+	if err != nil {
+		t.Fatalf("GetVersion: %v", err)
+	}
+	return version
+}
+
+// TestIssueCloseReadsTheTokenOnlyUnderALiveLease pins the DKT-124 fix:
+// closing an issue no one holds must not read the token at all, since the
+// CLI's stdin fallback drains its reader to EOF and would hang under a parent
+// that keeps the pipe open. Under a live lease the token is still required.
+func TestIssueCloseReadsTheTokenOnlyUnderALiveLease(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	tripwire := func() string {
+		t.Error("the token was read; this path must not read it")
+		return ""
+	}
+
+	t.Run("unclaimed", func(t *testing.T) {
+		id := createIssue(t, st)
+		res, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: model.FormatID(id), Token: tripwire})
+		if err != nil {
+			t.Fatalf("IssueClose: %v", err)
+		}
+		if !res.Changed || res.Issue.Status != model.StatusDone {
+			t.Errorf("result = %+v, want the closed issue", res)
+		}
+	})
+
+	t.Run("lapsed lease", func(t *testing.T) {
+		id := createIssue(t, st)
+		if _, _, err := st.ClaimIssue(id, "owner", -1, model.NowMS()); err != nil {
+			t.Fatalf("ClaimIssue: %v", err)
+		}
+		if _, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: model.FormatID(id), Token: tripwire}); err != nil {
+			t.Fatalf("IssueClose: %v", err)
+		}
+		if got := issueStatus(t, st, id); got != model.StatusDone {
+			t.Errorf("status = %q, want done", got)
+		}
+	})
+
+	t.Run("live lease without the token", func(t *testing.T) {
+		id := createIssue(t, st)
+		if _, _, err := st.ClaimIssue(id, "owner", 60_000, model.NowMS()); err != nil {
+			t.Fatalf("ClaimIssue: %v", err)
+		}
+		_, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: model.FormatID(id)})
+		requireCode(t, err, output.ErrAuth)
+		if got := issueStatus(t, st, id); got == model.StatusDone {
+			t.Error("a close without the token closed a claimed issue")
+		}
+	})
+
+	t.Run("live lease with the token", func(t *testing.T) {
+		id := createIssue(t, st)
+		token, _, err := st.ClaimIssue(id, "owner", 60_000, model.NowMS())
+		if err != nil {
+			t.Fatalf("ClaimIssue: %v", err)
+		}
+		read := 0
+		_, err = verb.IssueClose(ctx, env, verb.IssueCloseInput{
+			Issue: model.FormatID(id), Token: func() string { read++; return token },
+		})
+		if err != nil {
+			t.Fatalf("IssueClose: %v", err)
+		}
+		if got := issueStatus(t, st, id); read != 1 || got != model.StatusDone {
+			t.Errorf("token read %d times, status %q; want one read and done", read, got)
+		}
+	})
+}
+
+func TestIssueCloseOfADoneIssueWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+	in := verb.IssueCloseInput{Issue: model.FormatID(id)}
+	if _, err := verb.IssueClose(ctx, env, in); err != nil {
+		t.Fatalf("IssueClose: %v", err)
+	}
+	before := issueVersion(t, st, id)
+
+	// An unsatisfiable precondition is not checked on a close that writes
+	// nothing.
+	zero := 0
+	in.IfVersion = &zero
+	res, err := verb.IssueClose(ctx, env, in)
+	if err != nil {
+		t.Fatalf("second IssueClose: %v", err)
+	}
+	if res.Changed || res.Issue == nil || res.Issue.ID != id {
+		t.Errorf("result = %+v, want the unchanged issue", res)
+	}
+	if after := issueVersion(t, st, id); after != before {
+		t.Errorf("version %d -> %d, want a close of a done issue to write nothing", before, after)
+	}
+}
+
+func TestIssueCloseAndReopenRefusals(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	open := createIssue(t, st)
+	closed := createIssue(t, st)
+	if _, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: model.FormatID(closed)}); err != nil {
+		t.Fatalf("IssueClose: %v", err)
+	}
+	stale, zero := 99, 0
+
+	cases := []struct {
+		name string
+		call func() error
+		code output.ErrorCode
+		text string
+	}{
+		{"close unknown issue", func() error {
+			_, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: "DKT-999"})
+			return err
+		}, output.ErrNotFound, "issue DKT-999 not found"},
+		{"close stale version", func() error {
+			_, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: model.FormatID(open), IfVersion: &stale})
+			return err
+		}, output.ErrConflict, "version mismatch"},
+		{"close zero version", func() error {
+			_, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: model.FormatID(open), IfVersion: &zero})
+			return err
+		}, output.ErrValidation, "--if-version must be >= 1"},
+		{"reopen unknown issue", func() error {
+			_, err := verb.IssueReopen(ctx, env, verb.IssueReopenInput{Issue: "DKT-999"})
+			return err
+		}, output.ErrNotFound, "issue DKT-999 not found"},
+		{"reopen stale version", func() error {
+			_, err := verb.IssueReopen(ctx, env, verb.IssueReopenInput{Issue: model.FormatID(closed), IfVersion: &stale})
+			return err
+		}, output.ErrConflict, "version mismatch"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			requireVerbCode(t, c.call(), c.code, c.text)
+		})
+	}
+	if got := issueStatus(t, st, open); got != model.StatusTodo {
+		t.Errorf("open issue status = %q, want the refused closes to leave todo", got)
+	}
+	if got := issueStatus(t, st, closed); got != model.StatusDone {
+		t.Errorf("closed issue status = %q, want the refused reopen to leave done", got)
+	}
+}
+
+func TestIssueReopenReturnsAClosedIssueToBacklog(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	env.Author = "reopener-1"
+	id := createIssue(t, st)
+	ref := model.FormatID(id)
+
+	res, err := verb.IssueReopen(ctx, env, verb.IssueReopenInput{Issue: ref})
+	if err != nil {
+		t.Fatalf("IssueReopen of an open issue: %v", err)
+	}
+	if res.Changed || res.Issue.Status != model.StatusTodo {
+		t.Errorf("result = %+v, want the open issue unchanged", res)
+	}
+
+	if _, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: ref}); err != nil {
+		t.Fatalf("IssueClose: %v", err)
+	}
+	res, err = verb.IssueReopen(ctx, env, verb.IssueReopenInput{Issue: ref})
+	if err != nil {
+		t.Fatalf("IssueReopen: %v", err)
+	}
+	if !res.Changed || res.Issue.Status != model.StatusBacklog {
+		t.Errorf("result = %+v, want the issue back in backlog", res)
+	}
+	activity, err := st.GetActivity(id, 0)
+	if err != nil {
+		t.Fatalf("GetActivity: %v", err)
+	}
+	attributed := false
+	for _, a := range activity {
+		if a.FieldChanged == "status" && a.NewValue == string(model.StatusBacklog) {
+			attributed = a.ChangedBy == "reopener-1"
+		}
+	}
+	if !attributed {
+		t.Errorf("activity %+v has no reopen attributed to env.Author", activity)
+	}
+}
+
+func TestIssueMoveChangesTheStatus(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+
+	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: model.FormatID(id), Status: "review"})
+	if err != nil {
+		t.Fatalf("IssueMove: %v", err)
+	}
+	if !res.Changed || res.From != model.StatusTodo || res.Issue.Status != model.StatusReview || res.Migration != nil {
+		t.Errorf("result = %+v, want a todo -> review move", res)
+	}
+}
+
+func TestIssueMoveToTheSameStatusRecordsTheNoteOnly(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+
+	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{
+		Issue: model.FormatID(id), Status: string(model.StatusTodo), Note: "still todo",
+	})
+	if err != nil {
+		t.Fatalf("IssueMove: %v", err)
+	}
+	if res.Changed || res.Issue.Status != model.StatusTodo {
+		t.Errorf("result = %+v, want the unchanged issue", res)
+	}
+	comments, err := st.ListComments(id)
+	if err != nil {
+		t.Fatalf("ListComments: %v", err)
+	}
+	if len(comments) != 1 || comments[0].Body != "still todo" {
+		t.Errorf("comments = %d, want the one note", len(comments))
+	}
+}
+
+func TestIssueMoveRefusals(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+	ref := model.FormatID(id)
+	stale, zero := 99, 0
+
+	cases := []struct {
+		name string
+		in   verb.IssueMoveInput
+		code output.ErrorCode
+		text string
+	}{
+		{"status and project", verb.IssueMoveInput{Issue: ref, Status: "done", Project: "elsewhere"}, output.ErrValidation, "separate operations"},
+		{"if-version on migration", verb.IssueMoveInput{Issue: ref, Project: "elsewhere", IfVersion: &stale}, output.ErrValidation, "--if-version applies to status moves only"},
+		{"note on migration", verb.IssueMoveInput{Issue: ref, Project: "elsewhere", Note: "x"}, output.ErrValidation, "--note applies to status moves only"},
+		{"neither", verb.IssueMoveInput{Issue: ref}, output.ErrValidation, "usage: docket issue move"},
+		{"bad status", verb.IssueMoveInput{Issue: ref, Status: "nope"}, output.ErrValidation, ""},
+		{"unknown issue", verb.IssueMoveInput{Issue: "DKT-999", Status: "done"}, output.ErrNotFound, "issue DKT-999 not found"},
+		{"stale version", verb.IssueMoveInput{Issue: ref, Status: "done", IfVersion: &stale}, output.ErrConflict, "version mismatch"},
+		{"zero version on a no-op", verb.IssueMoveInput{Issue: ref, Status: "todo", IfVersion: &zero}, output.ErrValidation, "--if-version must be >= 1"},
+		{"unknown project", verb.IssueMoveInput{Issue: ref, Project: "elsewhere"}, output.ErrNotFound, ""},
+		{"unknown issue on migration", verb.IssueMoveInput{Issue: "DKT-999", Project: "1"}, output.ErrNotFound, "issue DKT-999 not found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := verb.IssueMove(ctx, env, c.in)
+			requireVerbCode(t, err, c.code, c.text)
+		})
+	}
+	if got := issueStatus(t, st, id); got != model.StatusTodo {
+		t.Errorf("status = %q, want the refused moves to leave todo", got)
+	}
+	if comments, _ := st.ListComments(id); len(comments) != 0 {
+		t.Errorf("the refused moves recorded %d comment(s)", len(comments))
+	}
+}
+
+func TestIssueMoveMigratesARootWithItsSubtree(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	root := createIssue(t, st)
+	child := createIssue(t, st)
+	rootRef, childRef := model.FormatID(root), model.FormatID(child)
+	if _, err := verb.IssueEdit(ctx, env, verb.IssueEditInput{Issue: childRef, Parent: &rootRef}); err != nil {
+		t.Fatalf("reparenting: %v", err)
+	}
+	target, err := st.EnsureProject("/repos/elsewhere", "elsewhere", model.NowMS())
+	if err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	_, err = verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: childRef, Project: "/repos/elsewhere"})
+	requireVerbCode(t, err, output.ErrValidation, "has a parent")
+
+	res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: rootRef, Project: "/repos/elsewhere"})
+	if err != nil {
+		t.Fatalf("IssueMove --project: %v", err)
+	}
+	m := res.Migration
+	if m == nil || m.Root != root || m.Project.ID != target || len(m.Migrated) != 2 || res.Issue != nil {
+		t.Fatalf("result = %+v, want root %d and its child migrated to project %d", res, root, target)
+	}
+	for _, id := range []int{root, child} {
+		issue, err := st.GetIssue(id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if issue.ProjectID != target {
+			t.Errorf("issue %d project = %d, want %d", id, issue.ProjectID, target)
+		}
+	}
+}
+
+// TestIssueStatusVerbsMayRegisterTheCallersProject: close, reopen and move
+// write into the caller's project, so an anchored identity is registered and
+// reported, and an unanchored one is refused before the write.
+func TestIssueStatusVerbsMayRegisterTheCallersProject(t *testing.T) {
+	ctx := context.Background()
+	verbs := []struct {
+		path string
+		from model.Status
+		call func(env verb.Env, ref string) (*engine.ProjectRegistration, error)
+	}{
+		{"issue close", model.StatusTodo, func(env verb.Env, ref string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueClose(ctx, env, verb.IssueCloseInput{Issue: ref})
+			return res.Registered, err
+		}},
+		{"issue reopen", model.StatusDone, func(env verb.Env, ref string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueReopen(ctx, env, verb.IssueReopenInput{Issue: ref})
+			return res.Registered, err
+		}},
+		{"issue move", model.StatusTodo, func(env verb.Env, ref string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueMove(ctx, env, verb.IssueMoveInput{Issue: ref, Status: "review"})
+			return res.Registered, err
+		}},
+	}
+	for _, v := range verbs {
+		t.Run(v.path, func(t *testing.T) {
+			st := openStore(t)
+			id := createIssue(t, st)
+			ref := model.FormatID(id)
+			if v.from == model.StatusDone {
+				if _, err := verb.IssueClose(ctx, projectEnv(st, "", false), verb.IssueCloseInput{Issue: ref}); err != nil {
+					t.Fatalf("IssueClose: %v", err)
+				}
+			}
+
+			_, err := v.call(projectEnv(st, "/tmp/scratch", false), ref)
+			requireCode(t, err, output.ErrValidation)
+			requireUnregistered(t, st, "/tmp/scratch")
+			if got := issueStatus(t, st, id); got != v.from {
+				t.Errorf("status = %q, want the unanchored call refused before the write", got)
+			}
+
+			registered, err := v.call(projectEnv(st, "/repos/fresh", true), ref)
+			if err != nil {
+				t.Fatalf("%s: %v", v.path, err)
+			}
+			if registered == nil || registered.Identity != "/repos/fresh" || registered.Verb != v.path {
+				t.Errorf("Registered = %+v, want /repos/fresh registered by %s", registered, v.path)
+			}
+		})
+	}
+}

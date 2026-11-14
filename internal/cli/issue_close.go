@@ -2,98 +2,60 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
 var closeCmd = &cobra.Command{
-	Use:   "close [id]",
-	Short: "Close an issue (shorthand for move <id> done)",
-	Args:  cobra.ExactArgs(1),
+	Use:         "close [id]",
+	Short:       "Close an issue (shorthand for move <id> done)",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-		st := store.StoreOn(conn)
 
-		id, err := issueArg(args[0])
+		// Closing ends any live lease, so it is lease-mediated. The token is
+		// OPTIONAL: the verb reads it only while a live lease is held, since
+		// the stdin fallback drains its reader to EOF and an agent whose
+		// inherited stdin pipe never closes would hang on an unclaimed issue,
+		// which needs no token at all.
+		res, err := verb.IssueClose(cmd.Context(), verbEnv(cmd), verb.IssueCloseInput{
+			Issue:     args[0],
+			IfVersion: ifVersionFlagValue(cmd),
+			Token:     func() string { return optionalToken(os.Stdin) },
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-		if err != nil {
-			return err
-		}
-
-		if issue.Status == model.StatusDone {
+		issue := res.Issue
+		if !res.Changed {
 			if w.JSONMode {
-				if err := hydrateIssueAssociations(conn, issue); err != nil {
-					return err
-				}
 				w.Success(withIssueVersion(issue), "")
 			} else {
-				w.Info("Issue %s is already closed", model.FormatID(id))
+				w.Info("Issue %s is already closed", model.FormatID(issue.ID))
 			}
 			return nil
 		}
 
-		ifVersion, err := ifVersionOf(cmd)
-		if err != nil {
-			return err
-		}
-
-		// Closing ends any live lease, so it is lease-mediated: a holder may
-		// always close, and a non-holder is refused rather than silently
-		// evicting a working holder. The token is OPTIONAL — an unclaimed
-		// issue closes exactly as it did before leases existed, which is what
-		// keeps this verb byte-compatible for a repo that never claims.
-		token := tokenForClose(conn, id, os.Stdin)
-
-		err = st.UpdateIssueCASLease(id, map[string]interface{}{"status": "done"}, config.DefaultAuthor(), ifVersion, token)
-		if err != nil {
-			label := fmt.Sprintf("issue %s", model.FormatID(id))
-			if e := leaseError(err, label); e != nil {
-				return e
-			}
-			if e := casError(err, label); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("closing issue: %w", err), output.ErrGeneral)
-		}
-
-		issue, err = st.GetIssue(id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
-		}
-
-		if err := hydrateIssueAssociations(conn, issue); err != nil {
-			return err
-		}
-
-		w.Success(withIssueVersion(issue), fmt.Sprintf("Closed %s: %s", model.FormatID(id), issue.Title))
+		w.Success(withIssueVersion(issue), fmt.Sprintf("Closed %s: %s", model.FormatID(issue.ID), issue.Title))
 		return nil
 	},
 }
 
-// tokenForClose returns the token to present when closing id. Nothing is
-// read unless the issue holds a LIVE lease: the stdin token fallback drains
-// its reader to EOF, and an agent whose inherited stdin pipe never closes
-// would hang forever on the unclaimed-issue path — which needs no token at
-// all. The look here is advisory: the authoritative lease check runs inside
-// the update transaction, where a lease claimed after this read still
-// refuses the empty token instead of being evicted.
-func tokenForClose(conn store.LegacyDB, id int, stdin io.Reader) string {
-	lease, err := store.StoreOn(conn).GetIssueLease(id)
-	if err != nil || !lease.Live(model.NowMS()) {
-		return ""
+// ifVersionFlagValue returns --if-version as given, or nil when it was not
+// supplied. The verb validates it, after the checks that precede it, so a
+// close or reopen that writes nothing does not refuse it.
+func ifVersionFlagValue(cmd *cobra.Command) *int {
+	if !cmd.Flags().Changed(ifVersionFlag) {
+		return nil
 	}
-	return optionalToken(stdin)
+	v, _ := cmd.Flags().GetInt(ifVersionFlag)
+	return &v
 }
 
 func init() {

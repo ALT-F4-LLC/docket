@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -22,44 +24,82 @@ func (r tripwireReader) Read([]byte) (int, error) {
 	return 0, nil
 }
 
-// TestTokenForCloseSkipsStdinWithoutLiveLease pins the DKT-124 fix: closing
-// an issue that no one holds must not read stdin at all. The token fallback
-// drains its reader to EOF, so an unconditional read turns `issue close` into
-// an indefinite hang under any parent that keeps the stdin pipe open — the
-// default in agent harnesses — for a verb whose happy path needs no token.
-func TestTokenForCloseSkipsStdinWithoutLiveLease(t *testing.T) {
-	t.Setenv(TokenEnvVar, "")
-	conn := newTestDB(t)
-
-	t.Run("unclaimed", func(t *testing.T) {
-		id := createIssue(t, conn, "unclaimed", model.StatusTodo, model.PriorityNone)
-		if tok := tokenForClose(conn, id, tripwireReader{t}); tok != "" {
-			t.Errorf("token = %q, want empty for an unclaimed issue", tok)
-		}
-	})
-
-	t.Run("lapsed lease", func(t *testing.T) {
-		id := createIssue(t, conn, "lapsed", model.StatusTodo, model.PriorityNone)
-		_, _, err := db.ClaimIssue(conn, id, "owner", -1, model.NowMS())
-		testsupport.Must(t, err, "ClaimIssue: %v", err)
-		if tok := tokenForClose(conn, id, tripwireReader{t}); tok != "" {
-			t.Errorf("token = %q, want empty for a lapsed lease", tok)
-		}
-	})
+// TestIssueCloseOwnsItsProject: issue close resolves its project through
+// internal/verb, so the root hook must skip its eager resolution.
+func TestIssueCloseOwnsItsProject(t *testing.T) {
+	if !verbOwnsProject(closeCmd) {
+		t.Errorf("%s lacks the verbOwnsProject annotation", closeCmd.CommandPath())
+	}
 }
 
-// TestTokenForCloseReadsStdinUnderLiveLease is the control: with a live lease
-// the token IS required, so the stdin channel must still work.
-func TestTokenForCloseReadsStdinUnderLiveLease(t *testing.T) {
-	t.Setenv(TokenEnvVar, "")
-	conn := newTestDB(t)
+// issueStatusEchoed reads the status out of an issue command's JSON payload.
+func issueStatusEchoed(t *testing.T, out string) model.Status {
+	t.Helper()
+	var env struct {
+		Data struct {
+			Status model.Status `json:"status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("payload is not JSON: %v\n%s", err, out)
+	}
+	return env.Data.Status
+}
 
+// TestIssueCloseThroughRootReportsTheClose: a close run the way an operator
+// runs it reports the close, and a second close echoes the done issue without
+// writing.
+func TestIssueCloseThroughRootReportsTheClose(t *testing.T) {
+	t.Setenv(TokenEnvVar, "")
+	conn := newVoteCreateStore(t)
+	id := createIssue(t, conn, "finished", model.StatusTodo, model.PriorityNone)
+	ref := model.FormatID(id)
+
+	out, err := runThroughRoot(t, closeCmd, "issue", "close", ref)
+	testsupport.Must(t, err, "issue close: %v", err)
+	if want := "Closed " + ref + ": finished"; !strings.Contains(out, want) {
+		t.Errorf("output %q does not report %q", out, want)
+	}
+	if got := issueState(t, conn, id).Status; got != model.StatusDone {
+		t.Errorf("status = %q, want done", got)
+	}
+
+	before, err := db.GetVersion(conn, "issues", id)
+	testsupport.Must(t, err, "GetVersion: %v", err)
+	out, err = runThroughRoot(t, closeCmd, "issue", "close", ref, "--json")
+	testsupport.Must(t, err, "second issue close: %v", err)
+	if got := issueStatusEchoed(t, out); got != model.StatusDone {
+		t.Errorf("echoed status = %q, want done", got)
+	}
+	if after, _ := db.GetVersion(conn, "issues", id); after != before {
+		t.Errorf("version %d -> %d, want a close of a done issue to write nothing", before, after)
+	}
+}
+
+// TestIssueCloseThroughRootPresentsTheTokenUnderALiveLease: the CLI's token
+// channel reaches the verb, so the holder closes a claimed issue and a caller
+// without the token is refused and evicts nobody.
+func TestIssueCloseThroughRootPresentsTheTokenUnderALiveLease(t *testing.T) {
+	conn := newVoteCreateStore(t)
 	id := createIssue(t, conn, "claimed", model.StatusTodo, model.PriorityNone)
-	_, _, err := db.ClaimIssue(conn, id, "owner", 60_000, model.NowMS())
+	ref := model.FormatID(id)
+	token, _, err := db.ClaimIssue(conn, id, "owner", 60_000, model.NowMS())
 	testsupport.Must(t, err, "ClaimIssue: %v", err)
 
-	if tok := tokenForClose(conn, id, strings.NewReader("piped-token\n")); tok != "piped-token" {
-		t.Errorf("token = %q, want piped-token", tok)
+	t.Setenv(TokenEnvVar, "")
+	_, err = runThroughRoot(t, closeCmd, "issue", "close", ref)
+	if got := codeOf(t, err); got != output.ErrAuth {
+		t.Errorf("code = %s, want %s for a close without the holder's token", got, output.ErrAuth)
+	}
+	if got := issueState(t, conn, id).Status; got == model.StatusDone {
+		t.Error("a close without the token closed a claimed issue")
+	}
+
+	t.Setenv(TokenEnvVar, token)
+	_, err = runThroughRoot(t, closeCmd, "issue", "close", ref)
+	testsupport.Must(t, err, "issue close with the holder's token: %v", err)
+	if got := issueState(t, conn, id).Status; got != model.StatusDone {
+		t.Errorf("status = %q, want done after the holder closed it", got)
 	}
 }
 

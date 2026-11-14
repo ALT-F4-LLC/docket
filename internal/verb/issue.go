@@ -430,6 +430,299 @@ func IssueEdit(ctx context.Context, env Env, in IssueEditInput) (IssueEditResult
 	return res, nil
 }
 
+// IssueCloseInput is an issue close request. Token returns the capability
+// token; IssueClose calls it only while the issue holds a live lease, so a
+// transport whose token channel can block is never read for an unclaimed
+// issue. A nil Token presents no token.
+type IssueCloseInput struct {
+	Issue     string
+	IfVersion *int
+	Token     func() string
+}
+
+// IssueCloseResult is the issue after the close, with its labels, files and
+// docs. Changed is false when the issue was already done and nothing was
+// written. Registered is as on IssueClaimResult.
+type IssueCloseResult struct {
+	Issue      *model.Issue
+	Changed    bool
+	Registered *engine.ProjectRegistration
+}
+
+// IssueClose moves an issue to done, ending any live lease on it. A holder
+// may always close; a non-holder is refused rather than evicting a working
+// holder. It writes into the caller's project, so it may register it.
+func IssueClose(ctx context.Context, env Env, in IssueCloseInput) (IssueCloseResult, error) {
+	projectID, registered, err := resolveRegisteringProject(env, "issue close")
+	res := IssueCloseResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	id, err := ParseIssueRef(in.Issue)
+	if err != nil {
+		return res, err
+	}
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return res, issueFetchError(err, "issue "+in.Issue)
+	}
+
+	if issue.Status == model.StatusDone {
+		if err := hydrateIssue(env, issue); err != nil {
+			return res, err
+		}
+		res.Issue = issue
+		return res, nil
+	}
+
+	if err := checkIfVersion(in.IfVersion); err != nil {
+		return res, err
+	}
+
+	// The lease look is advisory: the authoritative check runs inside the
+	// update transaction, where a lease claimed after this read still refuses
+	// the empty token instead of being evicted.
+	token := ""
+	if lease, err := env.Store.GetIssueLease(id); err == nil && lease.Live(model.NowMS()) && in.Token != nil {
+		token = in.Token()
+	}
+
+	err = env.Store.UpdateIssueCASLease(id, map[string]interface{}{"status": "done"}, env.Author, in.IfVersion, token)
+	if err != nil {
+		label := "issue " + issueDisplayID(env, projectID, id)
+		if e := LeaseError(err, label); e != nil {
+			return res, e
+		}
+		if e := CASError(err, label); e != nil {
+			return res, e
+		}
+		return res, newError(fmt.Errorf("closing issue: %w", err), output.ErrGeneral)
+	}
+
+	res.Changed = true
+	res.Issue, err = refetchIssue(env, id)
+	return res, err
+}
+
+// IssueReopenInput is an issue reopen request.
+type IssueReopenInput struct {
+	Issue     string
+	IfVersion *int
+}
+
+// IssueReopenResult is the issue after the reopen, with its labels, files and
+// docs. Changed is false when the issue was not closed and nothing was
+// written. Registered is as on IssueClaimResult.
+type IssueReopenResult struct {
+	Issue      *model.Issue
+	Changed    bool
+	Registered *engine.ProjectRegistration
+}
+
+// IssueReopen moves a closed issue back to backlog and clears its resolution:
+// the issue is back on the board, so a recorded abandonment no longer
+// describes it. It writes into the caller's project, so it may register it.
+func IssueReopen(ctx context.Context, env Env, in IssueReopenInput) (IssueReopenResult, error) {
+	projectID, registered, err := resolveRegisteringProject(env, "issue reopen")
+	res := IssueReopenResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	id, err := ParseIssueRef(in.Issue)
+	if err != nil {
+		return res, err
+	}
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return res, issueFetchError(err, "issue "+in.Issue)
+	}
+
+	if issue.Status != model.StatusDone {
+		if err := hydrateIssue(env, issue); err != nil {
+			return res, err
+		}
+		res.Issue = issue
+		return res, nil
+	}
+
+	if err := checkIfVersion(in.IfVersion); err != nil {
+		return res, err
+	}
+
+	fields := map[string]interface{}{"status": "backlog", "resolution": ""}
+	if err := env.Store.UpdateIssueCAS(id, fields, env.Author, in.IfVersion); err != nil {
+		if e := CASError(err, "issue "+issueDisplayID(env, projectID, id)); e != nil {
+			return res, e
+		}
+		return res, newError(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
+	}
+
+	res.Changed = true
+	res.Issue, err = refetchIssue(env, id)
+	return res, err
+}
+
+// IssueMoveInput is an issue move request: a status move when Status is set,
+// a project migration when Project is set, never both. Note records the
+// reason for a status move as a comment in the move's own transaction.
+// IfVersion and Note apply to status moves only.
+type IssueMoveInput struct {
+	Issue     string
+	Status    string
+	Project   string
+	Note      string
+	IfVersion *int
+}
+
+// IssueMoveResult is the outcome of a move. A status move sets Issue, with its
+// labels, files and docs, and From, its status before the move; Changed is
+// false when the issue was already at the status, and Issue is then the issue
+// as read before any --if-version or --note write. A project migration sets
+// Migration instead. Registered is as on IssueClaimResult.
+type IssueMoveResult struct {
+	Issue      *model.Issue
+	From       model.Status
+	Changed    bool
+	Migration  *IssueMigration
+	Registered *engine.ProjectRegistration
+}
+
+// IssueMigration is a migrated subtree: its root, the project it now lives in,
+// and every issue that moved with it.
+type IssueMigration struct {
+	Root     int
+	Project  *model.Project
+	Migrated []int
+}
+
+// IssueMove moves an issue to a new status, or migrates a root issue and its
+// whole sub-issue tree to another project. It writes into the caller's
+// project, so it may register it.
+func IssueMove(ctx context.Context, env Env, in IssueMoveInput) (IssueMoveResult, error) {
+	projectID, registered, err := resolveRegisteringProject(env, "issue move")
+	res := IssueMoveResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	id, err := ParseIssueRef(in.Issue)
+	if err != nil {
+		return res, err
+	}
+
+	if in.Project != "" {
+		switch {
+		case in.Status != "":
+			return res, newError(errors.New(
+				"a status move and a project migration are separate operations; "+
+					"pass a status or --project, not both"), output.ErrValidation)
+		case in.IfVersion != nil:
+			return res, newError(errors.New(
+				"--if-version applies to status moves only"), output.ErrValidation)
+		// Refused rather than dropped: a migration records no note, and a
+		// note silently discarded is worse than one that never landed.
+		case in.Note != "":
+			return res, newError(errors.New(
+				"--note applies to status moves only"), output.ErrValidation)
+		}
+		res.Migration, err = migrateIssue(env, projectID, id, in.Project)
+		return res, err
+	}
+	if in.Status == "" {
+		return res, newError(errors.New(
+			"usage: docket issue move <id> <status>, or docket issue move <id> --project <target>"),
+			output.ErrValidation)
+	}
+
+	newStatus := model.Status(in.Status)
+	if err := model.ValidateStatus(newStatus); err != nil {
+		return res, newError(err, output.ErrValidation)
+	}
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return res, issueFetchError(err, "issue "+in.Issue)
+	}
+	if err := checkIfVersion(in.IfVersion); err != nil {
+		return res, err
+	}
+	res.From = issue.Status
+	label := "issue " + issueDisplayID(env, projectID, id)
+
+	if issue.Status == newStatus {
+		// A no-op move still honors IfVersion, so a caller cannot read a stale
+		// version and conclude its precondition held, and still records Note,
+		// as the comment-then-move pair it replaces would have.
+		if in.IfVersion != nil || in.Note != "" {
+			if err := env.Store.UpdateIssueCASNote(id, nil, env.Author, in.IfVersion, in.Note); err != nil {
+				if e := CASError(err, label); e != nil {
+					return res, e
+				}
+				return res, newError(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
+			}
+		}
+		if err := hydrateIssue(env, issue); err != nil {
+			return res, err
+		}
+		res.Issue = issue
+		return res, nil
+	}
+
+	fields := map[string]interface{}{"status": string(newStatus)}
+	if err := env.Store.UpdateIssueCASNote(id, fields, env.Author, in.IfVersion, in.Note); err != nil {
+		if e := CASError(err, label); e != nil {
+			return res, e
+		}
+		return res, newError(fmt.Errorf("updating issue: %w", err), output.ErrGeneral)
+	}
+
+	res.Changed = true
+	res.Issue, err = refetchIssue(env, id)
+	return res, err
+}
+
+// migrateIssue re-homes root issue id and its sub-issue tree to the project
+// target names.
+func migrateIssue(env Env, projectID, id int, target string) (*IssueMigration, error) {
+	project, err := ResolveProjectRef(env.Store, target)
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := env.Store.MoveIssueProject(id, project.ID, env.Author, time.Now().UnixMilli())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, newError(fmt.Errorf("issue %s not found", issueDisplayID(env, projectID, id)), output.ErrNotFound)
+	case errors.Is(err, store.ErrIssueHasParent):
+		return nil, newError(fmt.Errorf(
+			"issue %s has a parent; a sub-issue migrates with its root — migrate "+
+				"the root, or reparent with `issue edit --parent none` first",
+			issueDisplayID(env, projectID, id)), output.ErrValidation)
+	case errors.Is(err, store.ErrIssueInRun):
+		return nil, newError(fmt.Errorf(
+			"issue %s (or one of its sub-issues) belongs to a run; a run's records "+
+				"are project-scoped and would be stranded", issueDisplayID(env, projectID, id)),
+			output.ErrConflict)
+	case err != nil:
+		return nil, newError(fmt.Errorf("migrating issue: %w", err), output.ErrGeneral)
+	}
+	return &IssueMigration{Root: id, Project: project, Migrated: ids}, nil
+}
+
+// refetchIssue reads issue id back after a write, with its labels, files and
+// docs.
+func refetchIssue(env Env, id int) (*model.Issue, error) {
+	issue, err := env.Store.GetIssue(id)
+	if err != nil {
+		return nil, newError(fmt.Errorf("fetching updated issue: %w", err), output.ErrGeneral)
+	}
+	if err := hydrateIssue(env, issue); err != nil {
+		return nil, err
+	}
+	return issue, nil
+}
+
 // reparentTarget is the parent_id an edit of issue id in projectID to parent
 // ref writes: nil for "0" or "none", else the parent's id, refusing a parent
 // that is the issue itself or one of its descendants.
@@ -550,6 +843,16 @@ func checkToken(token string) error {
 	return nil
 }
 
+// checkIfVersion refuses a version precondition below 1, which no row can
+// satisfy since versions start at 1.
+func checkIfVersion(v *int) error {
+	if v != nil && *v < 1 {
+		return newError(fmt.Errorf("--if-version must be >= 1, got %d (versions start at 1)", *v),
+			output.ErrValidation)
+	}
+	return nil
+}
+
 func checkTTL(ttl *time.Duration) error {
 	if ttl != nil && *ttl <= 0 {
 		return newError(fmt.Errorf("--ttl must be positive, got %s", *ttl), output.ErrValidation)
@@ -590,15 +893,21 @@ func leaseTTL(env Env, projectID int, ttl *time.Duration, class string) (time.Du
 }
 
 // leaseRefusal translates a failed lease call on issue id, naming the issue
-// by its owning project's prefix, or the caller's project's for an id no
-// project owns. An error the lease matrix does not cover is wrapped as action.
+// as issueDisplayID does. An error the lease matrix does not cover is wrapped
+// as action.
 func leaseRefusal(env Env, projectID, id int, err error, action string) error {
+	if e := LeaseError(err, "issue "+issueDisplayID(env, projectID, id)); e != nil {
+		return e
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
+// issueDisplayID renders issue id under its owning project's prefix, or the
+// caller's project's (projectID) for an id no project owns.
+func issueDisplayID(env Env, projectID, id int) string {
 	prefix, _ := env.Store.IssueOwnerPrefix(id)
 	if prefix == "" {
 		prefix, _ = env.Store.ProjectPrefix(projectID)
 	}
-	if e := LeaseError(err, "issue "+model.FormatIDWithPrefix(id, prefix)); e != nil {
-		return e
-	}
-	return fmt.Errorf("%s: %w", action, err)
+	return model.FormatIDWithPrefix(id, prefix)
 }
