@@ -126,6 +126,42 @@ func (f *stepFixture) pinSHA(t *testing.T, target runTarget, ref string) (string
 	return "", false
 }
 
+// recordUsage has runID's project count tokens against the declared-cost cap
+// and seconds against the measured cap, and records each quantity on the
+// run's first step.
+func (f *stepFixture) recordUsage(t *testing.T, runID int, tokens, seconds float64) {
+	t.Helper()
+	run, err := f.st.GetRun(runID)
+	if err != nil {
+		t.Fatalf("GetRun(%d): %v", runID, err)
+	}
+	if err := f.st.SetConfig(run.ProjectID, store.KeyBudgetUnit, "tokens"); err != nil {
+		t.Fatalf("SetConfig(%s): %v", store.KeyBudgetUnit, err)
+	}
+	if err := f.st.SetConfig(run.ProjectID, store.KeyUsageBudgetUnit, "seconds"); err != nil {
+		t.Fatalf("SetConfig(%s): %v", store.KeyUsageBudgetUnit, err)
+	}
+	steps, err := f.st.ListRunSteps(runID)
+	if err != nil || len(steps) == 0 {
+		t.Fatalf("ListRunSteps = %v, %v; want the run's steps", steps, err)
+	}
+	tx, err := f.st.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	for unit, quantity := range map[string]float64{"tokens": tokens, "seconds": seconds} {
+		if err := tx.InsertUsageRowTx(store.UsageRow{
+			RunID: runID, StepID: steps[0].ID, Attempt: 1, Unit: unit, Quantity: quantity,
+		}, model.NowMS()); err != nil {
+			tx.Rollback()
+			t.Fatalf("InsertUsageRowTx(%s): %v", unit, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
 // runRulingRPCs are the conductor-token run RPCs whose request carries every
 // input the verb requires. setup readies a fresh bound run, call sends the
 // RPC with token, and event is the event kind the ruling records.
@@ -349,10 +385,16 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		t.Errorf("RunStatus = %v, want %s with its step counts", status.Msg, run)
 	}
 
+	// One ledger row in the unit each cap counts, at different quantities, so
+	// the declared-cost spend and the measured usage read back apart.
+	const spentTokens, measuredSeconds = 7.0, 3.0
+	f.recordUsage(t, runID, spentTokens, measuredSeconds)
+
 	read, err := f.c.RunBudget(ctx, connect.NewRequest(&docketv1.RunBudgetRequest{Run: run}))
 	requireServed(t, "RunBudget", err)
-	if got := read.Msg; got.GetRun() != run || got.GetBudget() != budget || got.GetUsageBudget() != usage {
-		t.Errorf("RunBudget = %v, want %s capped at %g and %g", got, run, budget, usage)
+	if got := read.Msg; got.GetRun() != run || got.GetBudget() != budget || got.GetUsageBudget() != usage ||
+		got.GetAccrued() != spentTokens {
+		t.Errorf("RunBudget = %v, want %s capped at %g and %g with %g accrued", got, run, budget, usage, spentTokens)
 	}
 	raised := 20.0
 	set, err := f.c.RunBudget(ctx, connect.NewRequest(&docketv1.RunBudgetRequest{Run: run, Set: &raised, Reason: "more room"}))
@@ -372,8 +414,10 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 
 	report, err := f.c.RunReport(ctx, connect.NewRequest(&docketv1.RunReportRequest{Run: run}))
 	requireServed(t, "RunReport", err)
-	if got := report.Msg; got.GetRun().GetId() != run || len(got.GetSteps()) != 2 {
-		t.Errorf("RunReport = %v, want %s with its two steps' attempts", got, run)
+	if got := report.Msg; got.GetRun().GetId() != run || len(got.GetSteps()) != 2 ||
+		got.GetAccruedCost() != spentTokens || got.GetMeasuredUsage() != measuredSeconds {
+		t.Errorf("RunReport = %v, want %s with its two steps' attempts, %g accrued and %g measured",
+			got, run, spentTokens, measuredSeconds)
 	}
 
 	pins, err := f.c.RunVerifyPins(ctx, connect.NewRequest(&docketv1.RunVerifyPinsRequest{Run: run}))
@@ -493,6 +537,83 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		}
 		if _, ok := f.pinSHA(t, other, "contracts/gone.md"); ok {
 			t.Error("after RunRepin, contracts/gone.md is still pinned, want it retired")
+		}
+
+		// A plain repin retires nothing it was not asked to: an unresolvable
+		// pin refuses the whole repin and stays held.
+		kept := f.boundRunTarget(t)
+		f.pinFile(t, kept, "contracts/gone.md")
+		before := f.runState(t, kept)
+		_, err = f.c.RunRepin(ctx, connect.NewRequest(&docketv1.RunRepinRequest{
+			Run: kept.run, Reason: "adopt the edit", Token: kept.conductor,
+		}))
+		requireRefusal(t, "RunRepin over an unresolvable pin", err, connect.CodeNotFound, output.ErrNotFound)
+		if sha, ok := f.pinSHA(t, kept, "contracts/gone.md"); !ok || sha != workflow.SHA256(pinnedBytes) {
+			t.Errorf("after a refused RunRepin, contracts/gone.md is pinned at %q (held %v), want the pinned bytes", sha, ok)
+		}
+		if after := f.runState(t, kept); after != before {
+			t.Errorf("a refused RunRepin changed the run %+v -> %+v", before, after)
+		}
+	})
+
+	// RunReport carries each step's attempt status and the artifacts the run
+	// recorded.
+	t.Run("RunReport ledger", func(t *testing.T) {
+		target := f.boundRunTarget(t)
+		steps, err := f.st.ListRunSteps(target.runID)
+		if err != nil {
+			t.Fatalf("ListRunSteps: %v", err)
+		}
+		var first int
+		for _, s := range steps {
+			if s.Instance == "first@0" {
+				first = s.ID
+			}
+		}
+		f.complete(t, first, f.claim(t, first))
+
+		report, err := f.c.RunReport(ctx, connect.NewRequest(&docketv1.RunReportRequest{Run: target.run}))
+		requireServed(t, "RunReport", err)
+		got := report.Msg
+		if len(got.GetSteps()) != len(steps) {
+			t.Fatalf("RunReport steps = %v, want one per step of %s", got.GetSteps(), target.run)
+		}
+		for _, s := range got.GetSteps() {
+			if s.GetRow().GetInstance() == "first@0" && s.GetStatus() != store.StepDone {
+				t.Errorf("RunReport first@0 status = %q, want %q after its complete", s.GetStatus(), store.StepDone)
+			}
+			if s.GetStatus() == "" {
+				t.Errorf("RunReport step %s carries no status", s.GetRow().GetInstance())
+			}
+		}
+		var result *docketv1.Artifact
+		for _, a := range got.GetArtifacts() {
+			if a.GetKind() == "result" {
+				result = a
+			}
+		}
+		if result == nil || result.GetId() == "" || result.GetStep() != "first@0" {
+			t.Errorf("RunReport artifacts = %v, want first@0's result", got.GetArtifacts())
+		}
+	})
+
+	// RunResume records the reason it was sent on the run it returns to active.
+	t.Run("RunResume reason", func(t *testing.T) {
+		target := f.boundRunTarget(t)
+		if _, err := verb.RunPause(ctx, verb.Env{Store: f.st}, verb.RunPauseInput{
+			Run: target.run, Authority: engine.AuthorityOperator, ConductorToken: conductorToken(target.conductor),
+		}); err != nil {
+			t.Fatalf("pausing %s: %v", target.run, err)
+		}
+		resumed, err := f.c.RunResume(ctx, connect.NewRequest(&docketv1.RunResumeRequest{
+			Run: target.run, Reason: "the operator answered", Token: target.conductor,
+		}))
+		requireServed(t, "RunResume", err)
+		if got := resumed.Msg.GetRun(); got.GetStatus() != string(model.RunActive) || got.GetReason() != "the operator answered" {
+			t.Errorf("RunResume run = %v, want %s active for the reason sent", got, target.run)
+		}
+		if row, err := f.st.GetRun(target.runID); err != nil || row.Reason != "the operator answered" {
+			t.Errorf("after RunResume, %s = %+v, %v; want the reason sent stored", target.run, row, err)
 		}
 	})
 
