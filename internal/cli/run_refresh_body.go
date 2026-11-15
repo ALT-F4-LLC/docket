@@ -50,8 +50,7 @@ changed what they ask for.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunRefreshBody(cmd, args[0], getWriter(cmd))
 	},

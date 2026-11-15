@@ -70,10 +70,9 @@ func summarizeDoc(d *model.Doc) docListRow {
 }
 
 var docListCmd = &cobra.Command{
-	Use:         "list",
-	Short:       "List documents",
-	Aliases:     []string{"ls"},
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:     "list",
+	Short:   "List documents",
+	Aliases: []string{"ls"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runDocList)
 	},
@@ -82,7 +81,7 @@ var docListCmd = &cobra.Command{
 // verbEnv is the Env a verb call runs under: this invocation's store, author,
 // working directory and project identity. A command built outside the root
 // hook carries no config, and its empty identity resolves to the default
-// project, as getProjectID's fallback does.
+// project.
 func verbEnv(cmd *cobra.Command) verb.Env {
 	cwd, _ := os.Getwd()
 	env := verb.Env{

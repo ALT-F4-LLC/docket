@@ -52,8 +52,7 @@ computed from what the run actually claimed.
 The change is recorded as an event, so a run whose cap moved has a trail that
 says so. The cap is a bare number: what it counts is the workflow author's
 business, and core attaches no denomination to it.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunBudget(cmd, args[0], getWriter(cmd))
 	},

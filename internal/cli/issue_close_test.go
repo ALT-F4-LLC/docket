@@ -24,14 +24,6 @@ func (r tripwireReader) Read([]byte) (int, error) {
 	return 0, nil
 }
 
-// TestIssueCloseOwnsItsProject: issue close resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueCloseOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(closeCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", closeCmd.CommandPath())
-	}
-}
-
 // issueStatusEchoed reads the status out of an issue command's JSON payload.
 func issueStatusEchoed(t *testing.T, out string) model.Status {
 	t.Helper()

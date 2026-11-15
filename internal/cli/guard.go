@@ -85,8 +85,7 @@ it.
 per-user store every project's runs live in one database, and a stop in one
 repository does not interfere with another repository's work. --all-projects
 asks the store-wide question instead.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		allProjects, _ := cmd.Flags().GetBool("all-projects")
 		decision, err := verb.GuardStop(cmd.Context(), verbEnv(cmd), verb.GuardStopInput{
@@ -129,8 +128,7 @@ still undecided. It exists for callers with no run context, such as an operator
 session's hook; a hook that has a run should pass it. An approval is a decision
 about one project's gate, so a same-named gate elsewhere in the store never
 answers; --all-projects widens the search to the whole store.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		stepName, _ := cmd.Flags().GetString("step")
 		runRef, _ := cmd.Flags().GetString("run")
@@ -163,8 +161,7 @@ of project, because naming a run is naming intent.
 
 It writes nothing, and it neither reaps nor abandons anything: a guard that
 mutated scheduling state would make a hook's mere presence change a run.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		runRef, _ := cmd.Flags().GetString("run")
 		allProjects, _ := cmd.Flags().GetBool("all-projects")
@@ -234,8 +231,7 @@ is the caller's claim, and the event makes every such claim findable.
 
 It writes nothing except that acknowledgment and, when a carve-out is used,
 that audit event.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		in := verb.GuardSpawnInput{}
 		in.Run, _ = cmd.Flags().GetString("run")

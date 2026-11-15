@@ -35,8 +35,7 @@ touched — a heartbeat is not a new claim.
 Refusals: a token that does not hold this lease is AUTH_ERROR (exit 5); a
 correct token on a lease that has already expired is STALE_LEASE (exit 6),
 which tells the holder to claim again rather than that it was never trusted.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

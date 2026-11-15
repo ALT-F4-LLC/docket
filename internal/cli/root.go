@@ -38,7 +38,6 @@ type contextKey string
 const (
 	dbKey       contextKey = "db"
 	cfgKey      contextKey = "cfg"
-	projectKey  contextKey = "project"
 	readerDBKey contextKey = "readerDB"
 )
 
@@ -577,39 +576,6 @@ func getDB(cmd *cobra.Command) store.LegacyDB {
 		panic("bug: getDB called on a command with no database connection (missing PersistentPreRunE guard?)")
 	}
 	return conn
-}
-
-// verbOwnedProjectError is getProjectID's panic value when it is reached from
-// a command annotated verbOwnsProject.
-type verbOwnedProjectError struct{ command string }
-
-func (e *verbOwnedProjectError) Error() string {
-	return fmt.Sprintf(
-		"bug: getProjectID called from %q, which is annotated verbOwnsProject and must resolve its project through verb.ResolveProject",
-		e.command)
-}
-
-// verbOwnsProject reports whether cmd resolves its own project through
-// internal/verb rather than taking the one the root hook resolves.
-func verbOwnsProject(cmd *cobra.Command) bool {
-	_, ok := cmd.Annotations["verbOwnsProject"]
-	return ok
-}
-
-// getProjectID returns the project stored under projectKey in cmd's context.
-// The root hook stores none, so without one it falls back to the default
-// project, the pre-v12 single-tenant behavior. A command annotated
-// verbOwnsProject must resolve its project through verb.ResolveProject, and
-// the fallback would silently anchor it to the default one, so reaching here
-// from it panics with *verbOwnedProjectError.
-func getProjectID(cmd *cobra.Command) int {
-	if verbOwnsProject(cmd) {
-		panic(&verbOwnedProjectError{command: cmd.CommandPath()})
-	}
-	if id, ok := cmd.Context().Value(projectKey).(int); ok && id != 0 {
-		return id
-	}
-	return store.DefaultProjectID
 }
 
 // Execute runs the root command and returns an exit code.

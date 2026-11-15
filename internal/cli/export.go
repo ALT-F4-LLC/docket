@@ -12,9 +12,8 @@ import (
 )
 
 var exportCmd = &cobra.Command{
-	Use:         "export",
-	Short:       "Export issues to JSON, CSV, or Markdown",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "export",
+	Short: "Export issues to JSON, CSV, or Markdown",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		format, _ := cmd.Flags().GetString("format")
 		filePath, _ := cmd.Flags().GetString("file")

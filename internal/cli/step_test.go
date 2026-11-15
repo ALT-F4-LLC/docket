@@ -15,7 +15,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
-	"github.com/spf13/cobra"
 )
 
 // The step refusal matrix AT THE CLI BOUNDARY.
@@ -509,41 +508,6 @@ func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
-
-// The step lease commands resolve their project through internal/verb, so the
-// root hook must skip its own resolution for them.
-func TestStepLeaseCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{
-		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
-	} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("step %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
-// The step ruling commands resolve their project through internal/verb too.
-func TestStepRulingCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{
-		stepReapCmd, stepHoldCmd, stepApproveCmd, stepRejectCmd, stepResolveCmd,
-	} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("step %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
-// The step annotate and read commands resolve their project through
-// internal/verb too.
-func TestStepAnnotateAndReadCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{
-		stepAnnotateCmd, stepShowCmd, stepListCmd, stepContextCmd,
-	} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("step %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
 
 // TestStepAnnotateCommandRecordsTheProjectItRegisters keeps the
 // project-registered event the root hook wrote before step annotate resolved

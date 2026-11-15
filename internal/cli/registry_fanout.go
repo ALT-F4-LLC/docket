@@ -15,7 +15,7 @@ import (
 //
 // `workflow register`, `workflow deprecate`, and `schema register` write rows
 // that are project-scoped — UNIQUE(project_id, name, version) — but each of
-// them picked its project from getProjectID(cmd) and nowhere else. So
+// them picked its project from the working directory and nowhere else. So
 // "retire this orphaned name" and "register the current corpus" meant one
 // invocation per project, run from inside that project's checkout, with no
 // verb anywhere that would say whether the other twelve had been done. A
@@ -135,23 +135,6 @@ func addProjectReadFlag(cmd *cobra.Command, action string) {
 	cmd.Flags().String("project", "", fmt.Sprintf(
 		"%s in this project instead of the one the working directory resolves to "+
 			"(its PREFIX, NAME, IDENTITY, or row id)", action))
-}
-
-// resolveReadProject answers which ONE project a reading verb consults: the
-// --project ref when given, else the working directory's. The ref resolves
-// through resolveProjectRef, the same function the writing verbs use, so an
-// unknown ref fails with the same error here as there — and a project whose
-// checkout is missing from this machine can still be read by prefix.
-func resolveReadProject(cmd *cobra.Command, conn store.LegacyDB) (int, error) {
-	ref, _ := cmd.Flags().GetString("project")
-	if ref = strings.TrimSpace(ref); ref == "" {
-		return getProjectID(cmd), nil
-	}
-	target, err := resolveProjectRef(conn, ref)
-	if err != nil {
-		return 0, err
-	}
-	return target.ID, nil
 }
 
 // resolveRegistryTargets answers which projects this invocation writes to.

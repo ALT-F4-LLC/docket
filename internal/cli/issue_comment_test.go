@@ -69,14 +69,6 @@ func TestIssueCommentAddReportsKeyMismatchAsConflict(t *testing.T) {
 	}
 }
 
-// TestIssueCommentAddOwnsItsProject: issue comment add resolves its project
-// through internal/verb, so the root hook must skip its eager resolution.
-func TestIssueCommentAddOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(commentAddCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", commentAddCmd.CommandPath())
-	}
-}
-
 // TestIssueCommentAddRefusesBeforeAskingForTheBody: a comment that cannot be
 // added is refused before the body is read. A JSON-mode run with no message
 // shows the order: each refusal is reported, never the missing message.

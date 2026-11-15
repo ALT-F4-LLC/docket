@@ -52,7 +52,6 @@ carry. A listing is for picking; read the issue you picked with
 docket issue show. Pass --with-body to have every row carry its full
 description instead. next, plan and board emit the same rows and take the
 same flag.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueList)
 	},

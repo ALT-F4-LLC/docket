@@ -9,14 +9,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestIssueReopenOwnsItsProject: issue reopen resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueReopenOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(reopenCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", reopenCmd.CommandPath())
-	}
-}
-
 // TestIssueReopenThroughRootReportsTheReopen: a reopen run the way an
 // operator runs it returns a closed issue to backlog without its abandonment,
 // and a reopen of an open issue echoes it without writing.

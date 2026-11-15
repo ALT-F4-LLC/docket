@@ -7,12 +7,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-func TestWorkflowRegisterOwnsItsProject(t *testing.T) {
-	if _, ok := workflowRegisterCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("workflow register lacks the verbOwnsProject annotation")
-	}
-}
-
 // The verb, not the root hook, decides which registry the definition lands
 // in: the command carries only the config's identity.
 func TestWorkflowRegisterWritesTheConfiguredProject(t *testing.T) {

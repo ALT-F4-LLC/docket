@@ -20,10 +20,9 @@ type voteCommitResult struct {
 }
 
 var voteCommitCmd = &cobra.Command{
-	Use:         "commit <id>",
-	Short:       "Commit an approved proposal",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "commit <id>",
+	Short: "Commit an approved proposal",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

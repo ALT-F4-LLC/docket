@@ -8,12 +8,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-func TestBoardCmdOwnsItsProject(t *testing.T) {
-	if _, ok := boardCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("board lacks the verbOwnsProject annotation")
-	}
-}
-
 func TestBoardTextShowsSubIssueProgressOnRolledUpParent(t *testing.T) {
 	conn := newTestDB(t)
 	parent := createIssue(t, conn, "parent", model.StatusInProgress, model.PriorityHigh)

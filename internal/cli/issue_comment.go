@@ -18,10 +18,9 @@ var commentCmd = &cobra.Command{
 }
 
 var commentAddCmd = &cobra.Command{
-	Use:         "add [id]",
-	Short:       "Add a comment to an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "add [id]",
+	Short: "Add a comment to an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

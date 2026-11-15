@@ -35,8 +35,7 @@ a conflict in one project neither cancels nor hides another project's
 registration. Registering schemas store-wide is the step that comes BEFORE
 sweeping a workflow corpus, since a workflow's 'payload' references resolve
 against the registry of the project it is being registered into.`,
-	Args:        cobra.ExactArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaRegister(cmd, args, getWriter(cmd))
 	},

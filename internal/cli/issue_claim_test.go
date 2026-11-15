@@ -16,16 +16,6 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// TestIssueLeaseCommandsOwnTheirProject pins that the root hook leaves
-// project resolution to internal/verb for the issue lease commands.
-func TestIssueLeaseCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{claimCmd, releaseCmd, heartbeatCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("issue %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
 // runLeaseCommand runs one issue lease command's RunE against conn under cfg
 // with --json=v2 and returns its decoded data payload.
 func runLeaseCommand(t *testing.T, conn *sql.DB, cfg *config.Config, cmd *cobra.Command, args ...string) map[string]any {

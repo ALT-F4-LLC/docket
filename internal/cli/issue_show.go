@@ -281,8 +281,7 @@ relations, linked_proposals, comments, activity, and — only when the issue
 has one — scope, resolution, size, run_disposition. A parse that expects a
 nested object under .data.issue and calls a field getter on what it finds
 is calling that getter on the id string.`,
-	Args:        cobra.MinimumNArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueShow)
 	},

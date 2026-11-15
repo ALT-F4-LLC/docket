@@ -25,9 +25,8 @@ type boardResult struct {
 }
 
 var boardCmd = &cobra.Command{
-	Use:         "board",
-	Short:       "Show Kanban board",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "board",
+	Short: "Show Kanban board",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runBoard)
 	},

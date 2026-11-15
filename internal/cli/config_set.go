@@ -69,8 +69,7 @@ naming the classes that ARE declared. It is a warning and not a refusal — a
 workflow registered after its config is an ordinary order of operations — but
 a TTL that binds nothing is otherwise discovered when a healthy step is reaped
 mid-run.`,
-	Args:        cobra.ExactArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -114,8 +113,7 @@ distinguishable from "somebody configured this to the same value".
 
 An unset lease.ttl.<class> falls back to lease.ttl.default rather than to
 nothing.`,
-	Args:        cobra.MaximumNArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

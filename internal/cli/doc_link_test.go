@@ -148,14 +148,3 @@ func TestDocLinkCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 		}
 	}
 }
-
-// TestDocLinkCommandsOwnTheirProject: doc link add and remove resolve their
-// project through internal/verb, so the root hook must skip its eager
-// resolution for them.
-func TestDocLinkCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{docLinkAddCmd, docLinkRemoveCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
-}

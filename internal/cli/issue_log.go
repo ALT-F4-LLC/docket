@@ -36,10 +36,9 @@ func (r logResult) CollectionTruncated() bool {
 }
 
 var logCmd = &cobra.Command{
-	Use:         "log [id]",
-	Short:       "Show activity history for an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "log [id]",
+	Short: "Show activity history for an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueLog)
 	},

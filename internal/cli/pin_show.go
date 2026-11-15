@@ -39,8 +39,7 @@ A run that has not been activated has no pin set and is refused
 (VALIDATION_ERROR) as such.
 
 READ-ONLY: no lease, no lock, no event.`,
-	Args:        cobra.ExactArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPinShow(cmd, args[0], args[1], getWriter(cmd))
 	},

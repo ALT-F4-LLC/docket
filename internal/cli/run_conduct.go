@@ -38,8 +38,7 @@ verb, and the engine keeps them off the verbs that require the capability.
 A run activated before the capability existed asks for no token until it is
 conducted; conducting it binds it. A terminal run is refused: there is
 nothing left to conduct.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunConduct(cmd, args, getWriter(cmd))
 	},

@@ -45,12 +45,6 @@ func doImport(conn store.LegacyDB, export *model.ExportData, replace bool, proje
 	return verb.RestoreExport(store.StoreOn(conn), export, replace, projectID)
 }
 
-func TestImportCommandOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(newImportCmd()) {
-		t.Error("import is not annotated verbOwnsProject, so the root hook would resolve its project too")
-	}
-}
-
 func TestDoImportRoundTripPreservesDocs(t *testing.T) {
 	src := newTestDB(t)
 

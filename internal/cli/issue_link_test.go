@@ -13,14 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestIssueLinkCommandsLetTheVerbOwnTheProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{linkAddCmd, linkRemoveCmd, linkListCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("issue link %s is not annotated verbOwnsProject", cmd.Name())
-		}
-	}
-}
-
 // TestIssueLinkAddListAndRemoveAnswerAsBefore drives the three commands'
 // JSON payloads, the related_to typo courtesy included, through one
 // relation's life.

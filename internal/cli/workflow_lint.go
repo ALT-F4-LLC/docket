@@ -43,8 +43,7 @@ project's verdict as its outcome: new, unchanged, conflict, or invalid (a
 vote_rule or payload reference that does not resolve there). The grammar is
 checked once, before any project, since a definition that does not parse is
 wrong everywhere. The command exits non-zero when any project would refuse.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowLint(cmd, args, getWriter(cmd))
 	},

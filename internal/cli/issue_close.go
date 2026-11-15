@@ -10,10 +10,9 @@ import (
 )
 
 var closeCmd = &cobra.Command{
-	Use:         "close [id]",
-	Short:       "Close an issue (shorthand for move <id> done)",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "close [id]",
+	Short: "Close an issue (shorthand for move <id> done)",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

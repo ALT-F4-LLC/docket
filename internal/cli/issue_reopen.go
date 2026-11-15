@@ -9,10 +9,9 @@ import (
 )
 
 var reopenCmd = &cobra.Command{
-	Use:         "reopen [id]",
-	Short:       "Reopen a closed issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "reopen [id]",
+	Short: "Reopen a closed issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

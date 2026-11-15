@@ -40,8 +40,7 @@ under way finishes rather than being abandoned mid-step.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return moveRun(cmd, args[0], runMove{
 			to:   model.RunWaitingHuman,
@@ -59,8 +58,7 @@ var runResumeCmd = &cobra.Command{
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return moveRun(cmd, args[0], runMove{
 			to:   model.RunActive,
@@ -88,8 +86,7 @@ answer the question.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin, with or without --issue; a run activated before the
 capability existed asks for none.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if issueRef, _ := cmd.Flags().GetString("issue"); issueRef != "" {
 			return abandonIssueInRun(cmd, args[0], issueRef)

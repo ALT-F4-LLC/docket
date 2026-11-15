@@ -108,10 +108,9 @@ func (r voteShowResult) MarshalJSON() ([]byte, error) {
 }
 
 var voteShowCmd = &cobra.Command{
-	Use:         "show [id]",
-	Short:       "Show proposal details",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "show [id]",
+	Short: "Show proposal details",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runVoteShow)
 	},

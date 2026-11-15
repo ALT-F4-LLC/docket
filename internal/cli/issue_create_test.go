@@ -40,14 +40,6 @@ func runThroughRoot(t *testing.T, cmd *cobra.Command, args ...string) (string, e
 	return stdout(), err
 }
 
-// TestIssueCreateOwnsItsProject: issue create resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueCreateOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(createCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", createCmd.CommandPath())
-	}
-}
-
 // TestIssueCreateThroughRootEchoesTheStoredIssue: a create run the way an
 // operator runs it lands in the caller's project and echoes the stored row,
 // its labels and its declared scope.

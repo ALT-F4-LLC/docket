@@ -9,10 +9,9 @@ import (
 )
 
 var docEditCmd = &cobra.Command{
-	Use:         "edit <id>",
-	Short:       "Edit an existing document",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "edit <id>",
+	Short: "Edit an existing document",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

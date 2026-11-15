@@ -76,8 +76,7 @@ A lease that expires without release returns the issue to the unclaimed pool:
 the next claim wins, and the attempt counter records that a claim was made. No
 reaper runs and no read verb ever writes — expiry is resolved by the claim
 itself.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

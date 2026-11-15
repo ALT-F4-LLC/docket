@@ -18,10 +18,9 @@ var fileCmd = &cobra.Command{
 }
 
 var fileAddCmd = &cobra.Command{
-	Use:         "add <id> <file-path>...",
-	Short:       "Add files to an issue",
-	Args:        cobra.MinimumNArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "add <id> <file-path>...",
+	Short: "Add files to an issue",
+	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -40,10 +39,9 @@ var fileAddCmd = &cobra.Command{
 }
 
 var fileRemoveCmd = &cobra.Command{
-	Use:         "remove <id> <file-path>...",
-	Short:       "Remove files from an issue",
-	Args:        cobra.MinimumNArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "remove <id> <file-path>...",
+	Short: "Remove files from an issue",
+	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -62,10 +60,9 @@ var fileRemoveCmd = &cobra.Command{
 }
 
 var fileListCmd = &cobra.Command{
-	Use:         "list <id>",
-	Short:       "List files attached to an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "list <id>",
+	Short: "List files attached to an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

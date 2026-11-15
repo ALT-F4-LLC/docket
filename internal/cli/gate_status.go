@@ -85,8 +85,7 @@ gate:tally and gate:outcome probes performed, each a relayed round trip.
 
 STEP-N must be a ` + "`type=\"human\"`" + ` or ` + "`type=\"vote\"`" + ` step; any other kind has no
 decision to report status for and is a VALIDATION_ERROR.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runGateStatus(cmd, args, getWriter(cmd))
 	},

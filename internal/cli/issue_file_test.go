@@ -14,17 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestIssueFileCommandsOwnTheirProject: the file commands resolve their
-// project through internal/verb, so the root hook must skip its eager
-// resolution.
-func TestIssueFileCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{fileAddCmd, fileRemoveCmd, fileListCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("%s lacks the verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
-}
-
 // TestIssueFileRemoveEchoesTheRemainingFiles: file remove answers with the
 // files still attached.
 func TestIssueFileRemoveEchoesTheRemainingFiles(t *testing.T) {

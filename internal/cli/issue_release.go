@@ -32,8 +32,7 @@ record of how many times the issue has been claimed survives.
 
 Releasing is the orderly counterpart to letting a lease expire. Both return the
 issue to the pool; releasing does it now and without waiting out the TTL.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

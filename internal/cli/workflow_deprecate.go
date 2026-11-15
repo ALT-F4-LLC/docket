@@ -57,8 +57,7 @@ still what an older repo will show. It is worth knowing because it explains
 the mechanism: binding reduces to the highest version per name BEFORE [match]
 runs, so a non-matching highest version takes the whole name out of contention.
 This verb records the same intent as a fact rather than as a puzzle.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowDeprecate(cmd, args, getWriter(cmd))
 	},

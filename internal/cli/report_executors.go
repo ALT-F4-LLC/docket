@@ -47,8 +47,7 @@ log, so a ruling ` + "`events prune`" + ` removed leaves all three together.
 The window is this project's runs, or the whole store with --all-projects;
 --since RUN-N keeps runs from that id on, --since DATE (2026-09-01, or an
 RFC 3339 timestamp) keeps runs created from that instant on.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runReportExecutors(cmd, getWriter(cmd))
 	},

@@ -40,8 +40,7 @@ run's remaining steps, refresh that snapshot as the same kind of second act —
 ` + "`docket run refresh-body RUN-N --issue DKT-M --reason R`" + `. This command
 warns, naming the run and that verb, when a --description edit lands on an
 issue with live steps in a live run.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runIssueEdit(cmd, args, getWriter(cmd))
 	},

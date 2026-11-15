@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -106,7 +105,6 @@ func TestIssueListProjectFlagScopesToTheNamedProject(t *testing.T) {
 	cmd.Flags().String("project", "", "")
 	testsupport.Must(t, cmd.Flags().Set("project", "there.git"),
 		"setting --project: %v", err)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, here))
 
 	w, buf := bufWriter(true)
 	w.JSONVersion = output.JSONV2

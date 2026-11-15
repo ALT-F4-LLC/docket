@@ -34,10 +34,9 @@ type voteCastResult struct {
 // of silently dropping every caster's value.
 func newVoteCastCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:         "cast <id>",
-		Short:       "Cast a vote on a proposal",
-		Args:        cobra.ExactArgs(1),
-		Annotations: map[string]string{"verbOwnsProject": ""},
+		Use:   "cast <id>",
+		Short: "Cast a vote on a proposal",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := getWriter(cmd)
 			env := verbEnv(cmd)

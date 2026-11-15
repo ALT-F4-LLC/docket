@@ -49,8 +49,7 @@ would read as having caught up. Pruning a step's claim event also makes
 ` + "`docket step context`" + ` and ` + "`docket step render`" + ` for that step return ` + "`GONE`" + `
 (exit 9): the recorded issue body and scope are read back from that event, so
 there is no seq to resume from.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runEventsPrune(cmd, getWriter(cmd))
 	},

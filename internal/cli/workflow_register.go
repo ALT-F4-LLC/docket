@@ -37,8 +37,7 @@ schema that does not exist in the next. The project that cannot resolve them is
 refused there and reported as invalid; the rest still register. Register the
 schemas first — 'docket schema register <ref> <file> --all-projects' — when
 sweeping a corpus into a store that has not seen it.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowRegister(cmd, args, getWriter(cmd))
 	},

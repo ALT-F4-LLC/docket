@@ -18,17 +18,6 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// TestVoteLinkCommandsOwnTheirProject: vote link and vote unlink resolve
-// their project through internal/verb, so the root hook must skip its eager
-// resolution for them.
-func TestVoteLinkCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{voteLinkCmd, voteUnlinkCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("%s lacks the verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
-}
-
 // runVoteLinkCmd runs cmd for proposal with --issue issue under --json=v2,
 // returning the envelope's proposal and issue ids.
 func runVoteLinkCmd(t *testing.T, conn *sql.DB, cmd *cobra.Command, cfg *config.Config, proposal, issue string) (voteLinkResult, error) {

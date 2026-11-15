@@ -293,17 +293,6 @@ func TestDocShowJSON_StillCarriesTheBody(t *testing.T) {
 	}
 }
 
-// TestDocReadCommandsOwnTheirProject: doc list, doc show and doc comment list
-// resolve their project through internal/verb, so the root hook must skip its
-// eager resolution for them.
-func TestDocReadCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{docListCmd, docShowCmd, docCommentListCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
-}
-
 // TestDocListScopesToTheConfiguredProject: with the root hook's resolution
 // skipped, the listing's project comes from the invocation's config identity.
 func TestDocListScopesToTheConfiguredProject(t *testing.T) {

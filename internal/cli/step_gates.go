@@ -129,8 +129,7 @@ gate that ran, so a typo shows up as a body that did not appear next to the
 A step whose gates have not run lists nothing and exits 0. A step that does
 not EXIST is NOT_FOUND, because "no gate results" would otherwise read as a
 fact about a step that is not there.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepGates(cmd, args, getWriter(cmd))
 	},

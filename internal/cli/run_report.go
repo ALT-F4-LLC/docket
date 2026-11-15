@@ -58,8 +58,7 @@ is the workflow's business. The report publishes the cap, where the cap came
 from, the declared-cost floor, reported usage per unit, max(reported, floor),
 and the burn rate — so a policy that wants to warn at some fraction of a cap
 computes it from these numbers rather than from an opinion shipped here.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunReport(cmd, args[0], getWriter(cmd))
 	},

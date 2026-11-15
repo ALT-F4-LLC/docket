@@ -30,7 +30,6 @@ The cap is read from the run row for the life of the run: a ` + "`budget.default
 set after ` + "`run start`" + ` does not re-cap a run already started. ` + "`docket run report`" + `
 prints the effective cap AND where it came from, so the question that follows
 from that ("why didn't it stop?") is answered by a read verb.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunStart(cmd, getWriter(cmd))
 	},

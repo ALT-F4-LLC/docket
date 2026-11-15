@@ -54,8 +54,7 @@ correct for them, and it means none of them answers the whole-run question — a
 step render can return a clean packet and exit 0 while a contract another step
 depends on has already drifted, which is a run that is structurally blocked and
 does not say so yet.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunVerifyPins(cmd, args[0], getWriter(cmd))
 	},

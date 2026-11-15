@@ -29,8 +29,7 @@ Legal while the run is in ` + "`planning`" + ` — the set is still being gather
 while it is ` + "`active`" + `, where the new issues are bound and snapshotted by the
 NEXT ` + "`docket run activate`" + ` (they join as their dependencies allow, exactly as
 a later phase does). A parked or terminal run refuses.`,
-	Args:        cobra.MinimumNArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunIssueAdd(cmd, args, getWriter(cmd))
 	},
@@ -44,8 +43,7 @@ var runIssueRemoveCmd = &cobra.Command{
 After activation an issue is bound, snapshotted, and possibly scheduled, so
 the set is immutable from there: removing would strand steps that already
 exist. Abandon the run instead if its shape is wrong.`,
-	Args:        cobra.MinimumNArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunIssueRemove(cmd, args, getWriter(cmd))
 	},

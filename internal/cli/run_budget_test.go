@@ -18,14 +18,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestRunBudgetOwnsItsProject pins `run budget` to the verb layer: the root
-// hook leaves project resolution to internal/verb.
-func TestRunBudgetOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(runBudgetCmd) {
-		t.Error("`run budget` lacks the verbOwnsProject annotation")
-	}
-}
-
 // runBudgetFlagsCmd is a command carrying `run budget`'s flags over conn, set
 // from flags, for a caller with configuration cfg (nil for the default
 // project).

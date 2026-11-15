@@ -30,12 +30,6 @@ func inCallerProject(t *testing.T, conn *sql.DB, cmd *cobra.Command, identity st
 	return caller
 }
 
-func TestSchemaListOwnsItsProject(t *testing.T) {
-	if _, ok := schemaListCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("schema list lacks the verbOwnsProject annotation")
-	}
-}
-
 func TestSchemaListReadsTheConfiguredProject(t *testing.T) {
 	conn := newTestDB(t)
 	cmd := schemaListCmdWithDB(conn, 50)

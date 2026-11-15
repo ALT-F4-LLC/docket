@@ -16,9 +16,8 @@ import (
 )
 
 var voteCreateCmd = &cobra.Command{
-	Use:         "create",
-	Short:       "Create a new consensus proposal",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "create",
+	Short: "Create a new consensus proposal",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		env := verbEnv(cmd)

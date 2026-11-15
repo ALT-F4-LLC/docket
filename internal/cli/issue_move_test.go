@@ -11,14 +11,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestIssueMoveOwnsItsProject: issue move resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueMoveOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(moveCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", moveCmd.CommandPath())
-	}
-}
-
 // TestIssueMoveThroughRootReportsTheMove: a status move run the way an
 // operator runs it reports both statuses, and a move to the status the issue
 // already has echoes the issue without writing.

@@ -57,8 +57,7 @@ omitted does the same to the install-drift check alone.
 The stragglers (7) and postgres (8) checks never move ` + "`clean`" + ` — they are
 reports, not verdicts; reclaiming a straggler worktree is ` + "`git worktree prune`" + `'s job, not
 this verb's.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDoctor(cmd, getWriter(cmd))
 	},

@@ -60,8 +60,7 @@ store. Both report each project's own outcome: a project where the version was
 never registered is reported as not-registered, one where it was already
 retired as already-deprecated, and one where a live workflow still references
 it as in-use, while every project that did retire it still did.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaDeprecate(cmd, args, getWriter(cmd))
 	},

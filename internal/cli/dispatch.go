@@ -68,7 +68,6 @@ event. It is the entry point a NEW relay uses when taking over from a crashed
 one: core knows the database lease lapsed but cannot check a process it did not
 start, so it holds the class's headroom until somebody confirms the writer is
 gone.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchOpen(cmd, getWriter(cmd))
 	},
@@ -259,7 +258,6 @@ exactly ONE open manifest and ` + "`next --run`" + ` still refuses while it is o
 Rows already on the manifest are dropped, so extending twice with nothing new
 appends nothing and succeeds. An appended row nobody launches stays pending and
 is not a discrepancy at close.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchExtend(cmd, getWriter(cmd))
 	},
@@ -329,7 +327,6 @@ THIS VERB WRITES NOTHING, including no lease reap. It is the one
 scheduling-shaped verb that must not reap: reaping would change the very ready
 set it was asked to compare against, and a verify that mutated its own subject
 could never fail.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchVerify(cmd, getWriter(cmd))
 	},
@@ -546,7 +543,6 @@ a linked issue labelled tribunal (file the condition with
 refuses CONFLICT naming each vote and its seats. --no-conditions REASON waives
 the check: the votes and REASON ride on the close event and REASON is recorded
 as a run note. It takes the same conductor token as --skip-integration-check.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchClose(cmd, getWriter(cmd))
 	},
@@ -776,7 +772,6 @@ the whole batch, whatever the step's status.
 ` + "`--source`" + ` defaults to "backfilled" and is free text. Core enumerates no
 sources, for the same reason it enumerates no units — who measured the work is
 not core's opinion to hold.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchBackfillUsage(cmd, getWriter(cmd))
 	},
@@ -979,7 +974,6 @@ wedges a run — exactly what the dispatch TTL and this verb exist to prevent.
 Nothing is lost. The steps in the manifest were never claimed by opening it, so
 they return to the ready set intact, and an executor that claimed one BEFORE the
 crash finishes normally.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchAbandon(cmd, getWriter(cmd))
 	},
@@ -1057,7 +1051,6 @@ minted and why.
 Requires the run's conductor capability (see ` + "`docket run conduct --help`" + `)
 via DOCKET_TOKEN or stdin; a run activated before the capability existed asks
 for none.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDispatchWaiveTarget(cmd, getWriter(cmd))
 	},

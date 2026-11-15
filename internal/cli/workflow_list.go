@@ -51,10 +51,9 @@ func (p workflowListPayload) VersionedPayload() any {
 }
 
 var workflowListCmd = &cobra.Command{
-	Use:         "list",
-	Short:       "List registered workflows",
-	Aliases:     []string{"ls"},
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:     "list",
+	Short:   "List registered workflows",
+	Aliases: []string{"ls"},
 	Long: `List registered workflows.
 
 --orphans narrows the list to ORPHANED REGISTRATIONS: registered names that no

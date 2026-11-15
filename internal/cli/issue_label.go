@@ -28,10 +28,9 @@ var labelCmd = &cobra.Command{
 }
 
 var labelAddCmd = &cobra.Command{
-	Use:         "add <id> <label>...",
-	Short:       "Add labels to an issue",
-	Args:        cobra.MinimumNArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "add <id> <label>...",
+	Short: "Add labels to an issue",
+	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		color, _ := cmd.Flags().GetString("color")
@@ -52,10 +51,9 @@ var labelAddCmd = &cobra.Command{
 }
 
 var labelRmCmd = &cobra.Command{
-	Use:         "rm <id> <label>...",
-	Short:       "Remove labels from an issue",
-	Args:        cobra.MinimumNArgs(2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "rm <id> <label>...",
+	Short: "Remove labels from an issue",
+	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -74,10 +72,9 @@ var labelRmCmd = &cobra.Command{
 }
 
 var labelListCmd = &cobra.Command{
-	Use:         "list",
-	Short:       "List all labels",
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "list",
+	Short: "List all labels",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -151,10 +148,9 @@ var labelListCmd = &cobra.Command{
 }
 
 var labelDeleteCmd = &cobra.Command{
-	Use:         "delete <label>",
-	Short:       "Delete a label",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "delete <label>",
+	Short: "Delete a label",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

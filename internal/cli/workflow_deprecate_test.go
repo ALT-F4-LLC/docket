@@ -7,12 +7,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-func TestWorkflowDeprecateOwnsItsProject(t *testing.T) {
-	if _, ok := workflowDeprecateCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("workflow deprecate lacks the verbOwnsProject annotation")
-	}
-}
-
 // The verb retires the version in the configured project and leaves the same
 // name@version in another project binding.
 func TestWorkflowDeprecateRetiresInTheConfiguredProject(t *testing.T) {

@@ -37,14 +37,6 @@ func setForce(t *testing.T) {
 	})
 }
 
-func TestIssueLabelCommandsLetTheVerbOwnTheProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{labelAddCmd, labelRmCmd, labelListCmd, labelDeleteCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("issue label %s is not annotated verbOwnsProject", cmd.Name())
-		}
-	}
-}
-
 // TestIssueLabelRmEchoesTheRemainingLabels: label rm answers with the labels
 // still attached.
 func TestIssueLabelRmEchoesTheRemainingLabels(t *testing.T) {

@@ -21,8 +21,7 @@ retired is reported as not found. An explicit @version still resolves a retired
 version, because retirement never deletes. --body emits the stored document
 verbatim — the exact bytes that were registered and hashed, and the exact bytes
 a run validates its payloads against.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaShow(cmd, args, getWriter(cmd))
 	},

@@ -48,10 +48,9 @@ func (r projectListResult) CollectionTruncated() bool { return false }
 var _ output.Collection = projectListResult{}
 
 var projectListCmd = &cobra.Command{
-	Use:         "list",
-	Short:       "List the store's projects",
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "list",
+	Short: "List the store's projects",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		result, err := verb.ProjectList(cmd.Context(), projectVerbEnv(cmd), verb.ProjectListInput{})
@@ -100,8 +99,7 @@ the prefix, and a bare number always works — references in old commit
 messages and other projects' run records never go stale.
 
 1-8 letters; DOC, RUN, and STEP are reserved for their own entities.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		env := projectVerbEnv(cmd)
@@ -150,8 +148,7 @@ It REFUSES a project that any issue, run, document, proposal, workflow, schema,
 or label still references, and refuses the default project outright. So it can
 remove junk and cannot remove history. To empty a project first, re-home its
 issues with 'docket issue move --project'.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		env := projectVerbEnv(cmd)

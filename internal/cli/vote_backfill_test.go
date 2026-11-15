@@ -17,15 +17,6 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// TestVoteBackfillUsageOwnsItsProject: vote backfill-usage resolves its
-// project through internal/verb, so the root hook must skip its eager
-// resolution for it.
-func TestVoteBackfillUsageOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(voteBackfillUsageCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", voteBackfillUsageCmd.CommandPath())
-	}
-}
-
 // castProposal opens a proposal and casts one ballot per voter on it.
 func castProposal(t *testing.T, conn *sql.DB, voters ...string) int {
 	t.Helper()

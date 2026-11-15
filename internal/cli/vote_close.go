@@ -33,8 +33,7 @@ is a record, and records do not move. A proposal opened by an engine vote
 step is refused too: the run is moved past an uncast vote with
 'docket step resolve', not by closing the step's own machinery underneath
 it.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

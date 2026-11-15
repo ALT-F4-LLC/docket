@@ -115,14 +115,6 @@ func TestSchemaRegisterSucceeds(t *testing.T) {
 	}
 }
 
-func TestSchemaWritesOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{schemaRegisterCmd, schemaDeprecateCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("schema %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
 // TestSchemaRegisterLandsInTheCallersProject pins DKT-20: the register verb
 // resolves the INVOKING project the same way the read verbs do, rather than
 // letting the insert fall through to the schemas column's DEFAULT 1. Before

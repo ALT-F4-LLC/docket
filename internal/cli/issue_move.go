@@ -37,8 +37,7 @@ by name into the target project; comments, relations, and activity ride
 along — ids are store-wide, so nothing referencing the issue goes stale.
 An issue a run holds cannot migrate, and a sub-issue migrates with its
 root, not alone.`,
-	Args:        cobra.RangeArgs(1, 2),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		in := verb.IssueMoveInput{Issue: args[0], IfVersion: ifVersionFlagValue(cmd)}
 		if len(args) == 2 {

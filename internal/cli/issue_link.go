@@ -58,10 +58,9 @@ func relationArg(arg string) string {
 }
 
 var linkAddCmd = &cobra.Command{
-	Use:         "add <id> <relation> <target_id>",
-	Short:       "Create a relation between two issues",
-	Args:        cobra.ExactArgs(3),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "add <id> <relation> <target_id>",
+	Short: "Create a relation between two issues",
+	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -83,10 +82,9 @@ var linkAddCmd = &cobra.Command{
 }
 
 var linkRemoveCmd = &cobra.Command{
-	Use:         "remove <id> <relation> <target_id>",
-	Short:       "Remove a relation between two issues",
-	Args:        cobra.ExactArgs(3),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "remove <id> <relation> <target_id>",
+	Short: "Remove a relation between two issues",
+	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -114,10 +112,9 @@ var linkRemoveCmd = &cobra.Command{
 }
 
 var linkListCmd = &cobra.Command{
-	Use:         "list <id>",
-	Short:       "Show all relations for an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "list <id>",
+	Short: "Show all relations for an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

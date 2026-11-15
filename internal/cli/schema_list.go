@@ -60,7 +60,6 @@ without it, only versions still in service — the ones a workflow's payload may
 newly reference — are shown. A retired version is never deleted: it stays
 readable by explicit @version and keeps serving the runs that pinned it. See
 ` + "`docket schema deprecate --help`" + `.`,
-	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runSchemaList(cmd, args, getWriter(cmd))
 	},

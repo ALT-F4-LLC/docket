@@ -37,8 +37,7 @@ spend on a decision that did not happen.
 ` + "`--source`" + ` defaults to "backfilled" and is free text — recorded on every
 row, so a relay's reconstruction stays distinguishable from the seats' own
 cast-time reports forever.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runVoteBackfillUsage(cmd, args, getWriter(cmd))
 	},

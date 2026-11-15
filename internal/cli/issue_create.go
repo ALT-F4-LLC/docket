@@ -16,9 +16,8 @@ import (
 )
 
 var createCmd = &cobra.Command{
-	Use:         "create",
-	Short:       "Create a new issue",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "create",
+	Short: "Create a new issue",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

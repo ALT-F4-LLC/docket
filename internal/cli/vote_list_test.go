@@ -13,14 +13,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestVoteListOwnsItsProject: vote list resolves its project through
-// internal/verb, so the root hook must skip its eager resolution for it.
-func TestVoteListOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(voteListCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", voteListCmd.CommandPath())
-	}
-}
-
 // listedProposal opens a proposal in the default project with the given
 // status and seat count, and returns its id.
 func listedProposal(t *testing.T, conn *sql.DB, description string, status model.ProposalStatus, voters int) int {

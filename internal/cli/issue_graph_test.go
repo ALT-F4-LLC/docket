@@ -15,14 +15,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestIssueGraphOwnsItsProject: issue graph resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueGraphOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(graphCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", graphCmd.CommandPath())
-	}
-}
-
 // graphChain seeds blocker -> focal -> blocked and returns the three ids.
 func graphChain(t *testing.T) (conn *sql.DB, blocker, focal, blocked int) {
 	t.Helper()

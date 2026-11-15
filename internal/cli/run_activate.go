@@ -103,8 +103,7 @@ the newly-expanded phase's cost alone on a re-activation. A skipped step
 still counts toward both sums. The human summary line prints the added
 figure before the total, for the same reason: reading the total as the
 increment is how a budget cap once got raised against the wrong number.`,
-		Args:        cobra.ExactArgs(1),
-		Annotations: map[string]string{"verbOwnsProject": ""},
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRunActivate(cmd, args, getWriter(cmd))
 		},

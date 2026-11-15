@@ -84,14 +84,6 @@ func TestDocCommentAddReturnsTheStoredComment(t *testing.T) {
 	}
 }
 
-// TestDocCommentAddOwnsItsProject: doc comment add resolves its project
-// through internal/verb, so the root hook must skip its eager resolution.
-func TestDocCommentAddOwnsItsProject(t *testing.T) {
-	if _, ok := docCommentAddCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Errorf("%s has no verbOwnsProject annotation", docCommentAddCmd.CommandPath())
-	}
-}
-
 // TestDocCommentAddUnknownDocIsNotFound: adding a comment to a doc that does
 // not exist is NOT_FOUND naming the doc, and stores nothing.
 func TestDocCommentAddUnknownDocIsNotFound(t *testing.T) {

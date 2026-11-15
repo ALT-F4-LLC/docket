@@ -25,11 +25,10 @@ type importResult struct {
 // rather than a hand-rolled stand-in that can drift from them.
 func newImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:         "import <file>",
-		Short:       "Import issues from a JSON export file",
-		Args:        cobra.ExactArgs(1),
-		Annotations: map[string]string{"verbOwnsProject": ""},
-		RunE:        runImport,
+		Use:   "import <file>",
+		Short: "Import issues from a JSON export file",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runImport,
 	}
 	cmd.Flags().Bool("merge", false,
 		"Import into a non-empty project; this project's own rows are skipped, ids colliding with another project's rows are remapped, nothing is dropped")

@@ -88,18 +88,16 @@ and refused on a done or abandoned run, which renders no more packets. A note
 cannot be edited or removed: a packet is the record of what a worker was
 told, so a changed ruling is recorded as a second note, which renders after
 the first.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunNoteAdd(cmd, args[0], getWriter(cmd))
 	},
 }
 
 var runNoteListCmd = &cobra.Command{
-	Use:         "list RUN-N",
-	Short:       "List a run's notes in the order they render",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "list RUN-N",
+	Short: "List a run's notes in the order they render",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunNoteList(cmd, args[0], getWriter(cmd))
 	},

@@ -13,17 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestVoteWriteCommandsOwnTheirProject: vote create, vote cast and vote close
-// resolve their project through internal/verb, so the root hook must skip its
-// eager resolution for them.
-func TestVoteWriteCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{voteCreateCmd, voteCastCmd, voteCloseCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
-}
-
 // TestVoteWriteCommandsRecordTheProjectsTheyRegister keeps the
 // project-registered event the root hook wrote before the vote writes
 // resolved their own project, including for a write refused after it

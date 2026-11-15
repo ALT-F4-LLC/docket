@@ -29,8 +29,7 @@ source_path still hashes to source_sha256 (matches), holds different bytes
 can resolve — no path recorded, or a relative one (unchecked). Drift is reported,
 never repaired: a registered name@version is frozen, and registering an edited
 file is the install path's job.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkflowShow(cmd, args, getWriter(cmd))
 	},

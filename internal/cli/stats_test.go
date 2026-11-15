@@ -84,9 +84,3 @@ func TestStatsHumanOutputListsEverySection(t *testing.T) {
 		t.Errorf("output =\n%q\nwant\n%q", buf.String(), want)
 	}
 }
-
-func TestStatsCommandResolvesItsOwnProject(t *testing.T) {
-	if !verbOwnsProject(statsCmd) {
-		t.Error("statsCmd lacks the verbOwnsProject annotation")
-	}
-}

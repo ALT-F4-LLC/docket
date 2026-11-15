@@ -35,9 +35,8 @@ func (r nextResult) CollectionTruncated() bool {
 }
 
 var nextCmd = &cobra.Command{
-	Use:         "next",
-	Short:       "Show work-ready issues",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "next",
+	Short: "Show work-ready issues",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runNext)
 	},

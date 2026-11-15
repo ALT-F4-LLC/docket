@@ -19,10 +19,9 @@ var docLinkCmd = &cobra.Command{
 }
 
 var docLinkAddCmd = &cobra.Command{
-	Use:         "add <id> --issue <issue_id>",
-	Short:       "Link a document to an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "add <id> --issue <issue_id>",
+	Short: "Link a document to an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		issueFlag, _ := cmd.Flags().GetString("issue")
@@ -48,10 +47,9 @@ var docLinkAddCmd = &cobra.Command{
 }
 
 var docLinkRemoveCmd = &cobra.Command{
-	Use:         "remove <id> --issue <issue_id>",
-	Short:       "Remove a link between a document and an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "remove <id> --issue <issue_id>",
+	Short: "Remove a link between a document and an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		issueFlag, _ := cmd.Flags().GetString("issue")

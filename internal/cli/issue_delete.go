@@ -17,10 +17,9 @@ type deleteResult struct {
 }
 
 var deleteCmd = &cobra.Command{
-	Use:         "delete <id>",
-	Short:       "Delete an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "delete <id>",
+	Short: "Delete an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

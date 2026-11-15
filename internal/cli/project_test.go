@@ -17,16 +17,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestProjectCommandsOwnTheirProject pins the project commands to the verb
-// layer: the root hook leaves project resolution to internal/verb for each.
-func TestProjectCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{projectListCmd, projectSetPrefixCmd, projectDeleteCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("`project %s` lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
 // TestProjectSetPrefixThenListThroughTheRoot drives both commands through the
 // real root hook, which no longer resolves their project: set-prefix must
 // still change the caller's own project, and list must still mark it current.

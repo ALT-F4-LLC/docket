@@ -130,9 +130,8 @@ type planResult struct {
 }
 
 var planCmd = &cobra.Command{
-	Use:         "plan",
-	Short:       "Show execution plan with phased grouping",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "plan",
+	Short: "Show execution plan with phased grouping",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runPlan)
 	},

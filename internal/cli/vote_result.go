@@ -26,10 +26,9 @@ type voteResultData struct {
 }
 
 var voteResultCmd = &cobra.Command{
-	Use:         "result <id>",
-	Short:       "Show consensus result for a proposal",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "result <id>",
+	Short: "Show consensus result for a proposal",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runVoteResult)
 	},

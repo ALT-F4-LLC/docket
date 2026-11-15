@@ -18,17 +18,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestRunVerbCommandsOwnTheirProject pins `run start`, `run activate` and
-// `run conduct` to the verb layer: the root hook leaves project resolution to
-// internal/verb for each.
-func TestRunVerbCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{runStartCmd, runActivateCmd, runConductCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("`run %s` lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
 // withFreshAnchoredProject claims the default project for another checkout
 // and gives cmd an anchored identity no project holds yet, so the command's
 // project resolution registers one.

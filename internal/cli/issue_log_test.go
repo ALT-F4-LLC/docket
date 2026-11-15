@@ -45,14 +45,6 @@ func issueWithActivity(t *testing.T, conn *sql.DB) int {
 	return id
 }
 
-// TestIssueLogOwnsItsProject: issue log resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueLogOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(logCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", logCmd.CommandPath())
-	}
-}
-
 // TestIssueLogV2ReportsThePreLimitTotal: under --json=v2 the envelope carries
 // the capped entries, the full activity count and whether the cap dropped any.
 func TestIssueLogV2ReportsThePreLimitTotal(t *testing.T) {

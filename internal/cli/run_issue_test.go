@@ -12,7 +12,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
-	"github.com/spf13/cobra"
 )
 
 // `docket run issue add|remove` — DKT-53: the issue set is mutable while the
@@ -60,17 +59,6 @@ func TestRunIssueAddAndRemoveInPlanning(t *testing.T) {
 	testsupport.Must(t, err, "run issue remove: %v", err)
 	if got := attachedIssues(t, conn, run.ID); len(got) != 1 || got[0] != b {
 		t.Fatalf("attached = %v, want only the second issue", got)
-	}
-}
-
-// TestRunIssueCommandsOwnTheirProject: run issue add and remove resolve their
-// project through internal/verb, so the root hook must skip its eager
-// resolution.
-func TestRunIssueCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{runIssueAddCmd, runIssueRemoveCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("%s lacks the verbOwnsProject annotation", cmd.CommandPath())
-		}
 	}
 }
 

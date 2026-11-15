@@ -137,8 +137,7 @@ scaled cost before the claim commits. It is the dispatcher's declaration that
 it resolved the step to a variant priced differently from what the definition
 guessed — an escalated retry costs what it costs, at the cap, the moment it is
 claimed.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -422,8 +421,7 @@ Unlike an expiry, a forced reap does not consume the step's attempt budget: a
 holder asserted dead is not an executor that failed, so the reaped attempt
 does not count against max_attempts. The attempt number itself stands, and the
 dead attempt's usage remains back-fillable against it.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepReap(cmd, args, getWriter(cmd))
 	},
@@ -448,8 +446,7 @@ carrying the reason, the actor, and the working directory.
 
 Like reap, it requires the RUN'S CONDUCTOR CAPABILITY via DOCKET_TOKEN or stdin;
 a run activated before the capability existed asks for none.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepHold(cmd, args, getWriter(cmd))
 	},
@@ -590,8 +587,7 @@ DOCKET_TOKEN or on stdin. Tokens are never accepted in argv.
 The attempt counter is untouched — a heartbeat is not a new claim. Note that
 heartbeating does NOT extend a step past its class's max_step_duration, which
 is measured from the claim: a runaway holder cannot renew forever.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w, token, err := tokenedStep(cmd, args)
 		if err != nil {
@@ -697,8 +693,7 @@ like ` + "`Home: THIS repository`" + ` on line two composes with a ` + "`Severit
 on line three. An unrecognized value for a recognized key is ignored rather
 than refused. A gap file with no header block files exactly what it always
 did: priority none, kind task, no labels.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w, token, err := tokenedStep(cmd, args)
 		if err != nil {
@@ -904,8 +899,7 @@ row like any other, so the next attempt's completion or failure overlays on
 top of it.
 
 Requires the capability token.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w, token, err := tokenedStep(cmd, args)
 		if err != nil {
@@ -950,8 +944,7 @@ re-mints — supplied via DOCKET_TOKEN or stdin, never argv. A caller without
 it is refused: a gate is the conductor's to answer, not any executor's. A run
 activated before the capability existed asks for none.
 Approving a step that is neither is a VALIDATION_ERROR.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDecide(cmd, args, true, getWriter(cmd))
 	},
@@ -971,8 +964,7 @@ Rejecting a held cluster is the ESCALATING answer: the aggregate it gates routes
 per its own on_fail, and the cluster is recorded as unresolved.
 
 Requires the run's conductor capability, exactly as approve does.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDecide(cmd, args, false, getWriter(cmd))
 	},
@@ -1161,8 +1153,7 @@ renders in the same step's next packet as its == RESOLUTION section; a note on
 you authorized the round for renders in each of its packets. Steering left as
 an issue comment NEVER reaches a packet, and a mid-run description edit does
 not either — packets read the description snapshot frozen at activation.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepResolve(cmd, args, getWriter(cmd))
 	},
@@ -1273,8 +1264,7 @@ token via DOCKET_TOKEN or stdin (never argv); --metadata alone does not.
 
 A step that has not finished refuses: a live step's metadata lands with its
 record, under its holder's token.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepAnnotate(cmd, args, getWriter(cmd))
 	},
@@ -1521,8 +1511,7 @@ A step resolved by approve, reject, or resolve carries authority: operator,
 standing-grant, or conductor, the value its ruling was recorded under.
 authority_ref names the grant and appears only beside standing-grant. Both
 are absent on a step no ruling has resolved.`,
-	Args:        cobra.MinimumNArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepShow(cmd, args, getWriter(cmd))
 	},
@@ -1610,8 +1599,7 @@ did this step see" but "what would a claim made now hand over".
 
 --meta reports per-section byte counts alongside the bundle, and says whether
 the template a render would use is pinned.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStepContext(cmd, args, getWriter(cmd))
 	},
@@ -1678,8 +1666,7 @@ THIS step declares. It is not a whole-run pin check and a clean exit here does
 not mean the run's pin state is sound: a contract another step depends on can
 have drifted already, blocking that step, while this one renders and exits 0.
 Use ` + "`docket run verify-pins RUN-N`" + ` for the whole-run question.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 		templatePath, _ := cmd.Flags().GetString("template")
@@ -1741,8 +1728,7 @@ there.
 A MATERIALIZED HELD STEP produces nothing by construction, and its empty
 listing names where its payload does live: the cluster index it decides, out
 of how many, and the routing step's artifact carrying it (DKT-239).`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -1812,8 +1798,7 @@ report's artifact index; both print the same ` + "`ARTIFACT-N`" + ` form.
 
 --payload prints ONLY the structured payload, so a verdict can be piped
 straight into jq without slicing the body out of the envelope first.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -2096,8 +2081,7 @@ computes it: a lapsed lease reads as pending, a pending step whose
 predicate holds reads as ready — and a lapsed-but-unreaped claim is labeled
 lease_expired: true, since run repin still counts it as mid-flight until
 next/claim reaps it. Nothing is written, including no reap.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runStepList)
 	},

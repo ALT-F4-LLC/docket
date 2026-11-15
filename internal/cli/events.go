@@ -79,8 +79,7 @@ store, not the output.
 
 Human mode escapes stored strings on their way to the terminal; --json carries
 the raw bytes, because the consumer there is a program.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if follow, _ := cmd.Flags().GetBool("follow"); follow {
 			return runEventsFollow(cmd)

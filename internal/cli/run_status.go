@@ -22,8 +22,7 @@ can still act on. ` + "`--all`" + ` widens it to every run the project has recor
 READ-ONLY. This verb computes effective status and WRITES NOTHING — status
 never lies just because nobody ran a scheduling command, and a read that
 mutated would make "I only looked at it" untrue.`,
-	Args:        cobra.MaximumNArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunStatus(cmd, args, getWriter(cmd))
 	},

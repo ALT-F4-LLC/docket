@@ -11,14 +11,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestIssueEditOwnsItsProject: issue edit resolves its project through
-// internal/verb, so the root hook must skip its eager resolution.
-func TestIssueEditOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(editCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", editCmd.CommandPath())
-	}
-}
-
 // TestIssueEditThroughRootReportsTheEdit: an edit run the way an operator
 // runs it writes the change and reports it in human mode, and an empty edit
 // echoes the issue without writing.

@@ -57,8 +57,7 @@ EVERY SEAT RESOLVES OR THE CALL FAILS with NOT_FOUND naming the seat. A panel
 needs its whole roster, and a partial answer would seat a panel nobody chose.
 A run with no pinned policy.toml is NOT_FOUND for the same reason: there is
 nothing to look the seats up in.`,
-	Args:        cobra.MinimumNArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPolicyResolve(cmd, args, getWriter(cmd))
 	},

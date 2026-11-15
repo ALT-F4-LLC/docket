@@ -11,17 +11,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestRunLifecycleCommandsOwnTheirProject pins `run pause`, `run resume` and
-// `run abandon` to the verb layer: the root hook leaves project resolution to
-// internal/verb for each.
-func TestRunLifecycleCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{runPauseCmd, runResumeCmd, runAbandonCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("`run %s` lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
 // The root hook resolves no project for these commands, so each command's own
 // RunE refuses an unanchored caller, before any flag check, and moves nothing.
 func TestRunLifecycleCommandsRefuseAnUnanchoredCaller(t *testing.T) {

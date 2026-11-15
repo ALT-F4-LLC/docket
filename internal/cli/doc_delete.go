@@ -22,10 +22,9 @@ type docDeleteResult struct {
 // parses.
 func newDocDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:         "delete <id>",
-		Short:       "Delete a document",
-		Args:        cobra.ExactArgs(1),
-		Annotations: map[string]string{"verbOwnsProject": ""},
+		Use:   "delete <id>",
+		Short: "Delete a document",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := getWriter(cmd)
 

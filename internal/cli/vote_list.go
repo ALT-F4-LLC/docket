@@ -24,10 +24,9 @@ func (r voteListResult) CollectionTruncated() bool {
 }
 
 var voteListCmd = &cobra.Command{
-	Use:         "list",
-	Short:       "List proposals",
-	Aliases:     []string{"ls"},
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:     "list",
+	Short:   "List proposals",
+	Aliases: []string{"ls"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runVoteList)
 	},

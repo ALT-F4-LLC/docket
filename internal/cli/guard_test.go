@@ -38,14 +38,6 @@ func requireCmdErrCode(t *testing.T, err error, code output.ErrorCode, want stri
 	}
 }
 
-func TestGuardCommandsResolveTheirOwnProject(t *testing.T) {
-	for _, cmd := range guardCmd.Commands() {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("guard %s is not annotated verbOwnsProject", cmd.Name())
-		}
-	}
-}
-
 func TestGuardAllowRendersAllowedTrue(t *testing.T) {
 	conn := newTestDB(t)
 	out, err := runLeaseCommandOutput(t, conn, guardCfg(t), guardStopCmd)

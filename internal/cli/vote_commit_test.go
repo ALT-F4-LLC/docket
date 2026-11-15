@@ -11,7 +11,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
-	"github.com/spf13/cobra"
 )
 
 // runVoteCommit drives the registered `vote commit` RunE on a fresh command
@@ -21,17 +20,6 @@ func runVoteCommit(conn *sql.DB, proposalID int) error {
 	cmd.Flags().String("outcome", "Committed", "")
 	cmd.Flags().String("escalation-reason", "", "")
 	return voteCommitCmd.RunE(cmd, []string{model.FormatProposalID(proposalID)})
-}
-
-// TestVoteCommitResultShowOwnTheirProject: vote commit, vote result and vote
-// show resolve their project through internal/verb, so the root hook must
-// skip its eager resolution for them.
-func TestVoteCommitResultShowOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{voteCommitCmd, voteResultCmd, voteShowCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("%s has no verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
 }
 
 // TestVoteCommitRecordsTheProjectItRegisters keeps the project-registered

@@ -7,23 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
-
-// TestIssueReadAndDeleteCommandsOwnTheirProject pins `issue delete`, `issue
-// show` and `issue list` to the verb layer: the root hook leaves project
-// resolution to internal/verb for each.
-func TestIssueReadAndDeleteCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{deleteCmd, showCmd, listCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Errorf("`issue %s` lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
 
 // createThroughRoot runs `docket issue create` with args and returns the new
 // issue's id.

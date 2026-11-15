@@ -186,16 +186,9 @@ func TestConfigSetDefaultProfileNeedsNoProject(t *testing.T) {
 }
 
 // TestConfigGetAndSetOwnTheirProject pins `config get` and `config set` to the
-// verb layer: the root hook leaves project resolution to verb.ConfigGet and
-// verb.ConfigSet, and get must still read the override set wrote for the
-// same project.
+// verb layer: verb.ConfigGet and verb.ConfigSet resolve the project, and get
+// must still read the override set wrote for the same project.
 func TestConfigGetAndSetOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{configGetCmd, configSetCmd} {
-		if _, ok := cmd.Annotations["verbOwnsProject"]; !ok {
-			t.Fatalf("config %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-
 	clientConfigSandbox(t)
 	_, err := runRootVerb(t, initCmd, "init")
 	testsupport.Must(t, err, "docket init: %v", err)

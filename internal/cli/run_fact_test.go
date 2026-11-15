@@ -22,16 +22,6 @@ func runFactCmdWithDB(conn *sql.DB) *cobra.Command {
 	return cmd
 }
 
-// The run fact and note commands resolve their project through the verb, so
-// the root hook must not resolve it for them as well.
-func TestRunFactAndNoteCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{runFactAddCmd, runNoteAddCmd, runNoteListCmd} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("%s lacks the verbOwnsProject annotation", cmd.CommandPath())
-		}
-	}
-}
-
 func stepDeferredEvents(t *testing.T, conn *sql.DB, runID int) int {
 	t.Helper()
 	var n int

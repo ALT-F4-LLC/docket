@@ -11,14 +11,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestIssueCommentListOwnsItsProject: issue comment list resolves its project
-// through internal/verb, so the root hook must skip its eager resolution.
-func TestIssueCommentListOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(commentListCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", commentListCmd.CommandPath())
-	}
-}
-
 // TestIssueCommentListReturnsTheIssuesComments: `issue comment list` emits
 // every comment on the issue, oldest first, and none from another issue.
 func TestIssueCommentListReturnsTheIssuesComments(t *testing.T) {

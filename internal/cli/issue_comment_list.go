@@ -11,10 +11,9 @@ import (
 )
 
 var commentListCmd = &cobra.Command{
-	Use:         "list [id]",
-	Short:       "List comments on an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "list [id]",
+	Short: "List comments on an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueCommentList)
 	},

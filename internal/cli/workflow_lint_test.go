@@ -96,12 +96,6 @@ func TestWorkflowLintReportsRegistrationOutcome(t *testing.T) {
 	}
 }
 
-func TestWorkflowLintOwnsItsProject(t *testing.T) {
-	if _, ok := workflowLintCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("workflow lint lacks the verbOwnsProject annotation")
-	}
-}
-
 // The verb, not the root hook, decides which registry judges the file: the
 // command carries only the config's identity, and the verdict is that
 // project's.

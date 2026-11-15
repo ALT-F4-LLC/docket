@@ -15,10 +15,9 @@ type voteLinkResult struct {
 }
 
 var voteLinkCmd = &cobra.Command{
-	Use:         "link <proposal-id>",
-	Short:       "Link a proposal to an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "link <proposal-id>",
+	Short: "Link a proposal to an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 
@@ -42,10 +41,9 @@ var voteLinkCmd = &cobra.Command{
 }
 
 var voteUnlinkCmd = &cobra.Command{
-	Use:         "unlink <proposal-id>",
-	Short:       "Remove a proposal-issue link",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "unlink <proposal-id>",
+	Short: "Remove a proposal-issue link",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
 

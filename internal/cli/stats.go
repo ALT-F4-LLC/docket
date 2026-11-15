@@ -27,9 +27,8 @@ type statsResult struct {
 }
 
 var statsCmd = &cobra.Command{
-	Use:         "stats",
-	Short:       "Show summary statistics for the issue database",
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "stats",
+	Short: "Show summary statistics for the issue database",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runStats)
 	},

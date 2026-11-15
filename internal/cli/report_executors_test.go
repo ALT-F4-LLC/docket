@@ -20,13 +20,6 @@ import (
 // (DKT-2453). The grouping itself is the engine's to prove; what these pin is
 // the window flag, the document shape, and the rendered page.
 
-// The verb resolves the project, so the root hook must not resolve it first.
-func TestReportExecutorsOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(reportExecutorsCmd) {
-		t.Error("report executors lacks the verbOwnsProject annotation")
-	}
-}
-
 // TestReportExecutorsOnAnEmptyStore: the verb answers on a store with no
 // runs — zero runs, empty arrays rather than nulls, the project scope by
 // default — and refuses a malformed window as VALIDATION_ERROR.

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strconv"
@@ -204,7 +203,6 @@ func TestIssueListProjectFlagAcceptsThePrefix(t *testing.T) {
 	if err := cmd.Flags().Set("project", there.Prefix); err != nil {
 		t.Fatalf("setting --project: %v", err)
 	}
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, here.ID))
 
 	w, buf := bufWriter(true)
 	w.JSONVersion = output.JSONV2

@@ -35,10 +35,9 @@ type graphResult struct {
 }
 
 var graphCmd = &cobra.Command{
-	Use:         "graph [id]",
-	Short:       "Show dependency graph for an issue",
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Use:   "graph [id]",
+	Short: "Show dependency graph for an issue",
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return watchable(cmd, args, runIssueGraph)
 	},

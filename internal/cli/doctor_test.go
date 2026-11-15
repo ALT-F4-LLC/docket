@@ -181,14 +181,6 @@ func TestDoctorReportsAnUnsetPostgresDSN(t *testing.T) {
 	}
 }
 
-// TestDoctorOwnsItsProject pins the annotation that makes the root hook leave
-// project resolution to verb.Doctor.
-func TestDoctorOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(doctorCmd) {
-		t.Error("doctor lacks the verbOwnsProject annotation")
-	}
-}
-
 // TestDoctorReportsAnUnboundCwdWithoutRegistering is the measured defect: from
 // a git worktree whose identity has no project row, `docket doctor` once
 // claimed the store's default row for that identity and logged a

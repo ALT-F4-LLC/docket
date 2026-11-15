@@ -5,12 +5,6 @@ import (
 	"testing"
 )
 
-func TestWorkflowListOwnsItsProject(t *testing.T) {
-	if _, ok := workflowListCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("workflow list lacks the verbOwnsProject annotation")
-	}
-}
-
 // The verb, not the root hook, decides which registry is read: the command
 // carries only the config's identity, and lists that project's rows.
 func TestWorkflowListReadsTheConfiguredProject(t *testing.T) {

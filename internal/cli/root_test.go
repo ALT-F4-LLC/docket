@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -388,8 +387,8 @@ func TestPersistentPostRunClosesHandles(t *testing.T) {
 // TestRootResolvesNoProject: every verb resolves its own project through
 // verb.ResolveProject, so the root hook opens the store but resolves none.
 // From a directory that is not a repository, against the global store, a
-// command runs with or without the verbOwnsProject annotation and carries no
-// project in its context.
+// command that names no project still runs instead of failing in the root
+// hook.
 func TestRootResolvesNoProject(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -408,71 +407,23 @@ func TestRootResolvesNoProject(t *testing.T) {
 	}
 	conn.Close()
 
-	run := func(t *testing.T, annotations map[string]string) (ran, hasProject bool, err error) {
-		t.Helper()
-		probe := &cobra.Command{
-			Use:         "verb-owned-project-probe",
-			Annotations: annotations,
-			RunE: func(cmd *cobra.Command, _ []string) error {
-				ran = true
-				getDB(cmd)
-				_, hasProject = cmd.Context().Value(projectKey).(int)
-				return nil
-			},
-		}
-		rootCmd.AddCommand(probe)
-		defer rootCmd.RemoveCommand(probe)
-		rootCmd.SetArgs([]string{"verb-owned-project-probe"})
-		defer rootCmd.SetArgs(nil)
-		err = rootCmd.Execute()
-		return ran, hasProject, err
+	ran := false
+	probe := &cobra.Command{
+		Use: "project-free-probe",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ran = true
+			getDB(cmd)
+			return nil
+		},
 	}
-
-	for name, annotations := range map[string]map[string]string{
-		"unannotated": nil,
-		"annotated":   {"verbOwnsProject": ""},
-	} {
-		ran, hasProject, err := run(t, annotations)
-		if err != nil {
-			t.Fatalf("%s probe: %v, want no project-resolution error from the root hook", name, err)
-		}
-		if !ran {
-			t.Fatalf("%s probe did not run", name)
-		}
-		if hasProject {
-			t.Errorf("%s probe carries a project the root hook resolved", name)
-		}
+	rootCmd.AddCommand(probe)
+	defer rootCmd.RemoveCommand(probe)
+	rootCmd.SetArgs([]string{"project-free-probe"})
+	defer rootCmd.SetArgs(nil)
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("probe: %v, want no project-resolution error from the root hook", err)
 	}
-}
-
-// TestGetProjectIDPanicsForVerbOwnedProject: a command annotated
-// verbOwnsProject has no eagerly resolved project, so reaching getProjectID
-// from one panics with a typed error instead of falling back to the default
-// project. An unannotated command still reads the project the root hook
-// resolved.
-func TestGetProjectIDPanicsForVerbOwnedProject(t *testing.T) {
-	const configured = 7
-	plain := &cobra.Command{Use: "plain-probe"}
-	plain.SetContext(context.WithValue(context.Background(), projectKey, configured))
-	if got := getProjectID(plain); got != configured {
-		t.Errorf("getProjectID(unannotated) = %d, want the configured project %d", got, configured)
-	}
-
-	annotated := &cobra.Command{
-		Use:         "verb-owned-probe",
-		Annotations: map[string]string{"verbOwnsProject": ""},
-	}
-	annotated.SetContext(context.Background())
-	got, recovered := func() (id int, recovered any) {
-		defer func() { recovered = recover() }()
-		return getProjectID(annotated), nil
-	}()
-	err, _ := recovered.(error)
-	var typed *verbOwnedProjectError
-	if !errors.As(err, &typed) {
-		t.Fatalf("getProjectID(annotated) = %d, panic %v; want a panic with *verbOwnedProjectError", got, recovered)
-	}
-	if !strings.Contains(typed.Error(), "verb-owned-probe") {
-		t.Errorf("panic error %q does not name the command", typed)
+	if !ran {
+		t.Fatal("probe did not run")
 	}
 }

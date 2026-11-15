@@ -19,14 +19,6 @@ import (
 // verb refuses a missing --issue or --reason before reaching the engine, passes
 // an engine refusal through with its code, and prints both lists on success.
 
-// TestRunRefreshFilesOwnsItsProject: run refresh-files resolves its project
-// through internal/verb, so the root hook must skip its eager resolution.
-func TestRunRefreshFilesOwnsItsProject(t *testing.T) {
-	if !verbOwnsProject(runRefreshFilesCmd) {
-		t.Errorf("%s lacks the verbOwnsProject annotation", runRefreshFilesCmd.CommandPath())
-	}
-}
-
 // filesFrozenIssueInLiveRun is scopedIssueInLiveRun with docs/a.md and
 // docs/b.md frozen into the snapshot's files key, as activation would have
 // written it, and `attached` as the issue's live attachment list.

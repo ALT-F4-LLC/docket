@@ -5,12 +5,6 @@ import (
 	"testing"
 )
 
-func TestWorkflowShowOwnsItsProject(t *testing.T) {
-	if _, ok := workflowShowCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("workflow show lacks the verbOwnsProject annotation")
-	}
-}
-
 // The verb, not the root hook, decides which registry is read: the command
 // carries only the config's identity, and shows that project's row.
 func TestWorkflowShowReadsTheConfiguredProject(t *testing.T) {

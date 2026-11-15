@@ -589,19 +589,6 @@ func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
 	}
 }
 
-// The verb-backed dispatch commands resolve their project through
-// internal/verb, so the root hook must not resolve one for them.
-func TestDispatchVerbCommandsOwnTheirProject(t *testing.T) {
-	for _, cmd := range []*cobra.Command{
-		dispatchOpenCmd, dispatchExtendCmd, dispatchVerifyCmd, dispatchCloseCmd,
-		dispatchBackfillUsageCmd, dispatchAbandonCmd, dispatchWaiveTargetCmd,
-	} {
-		if !verbOwnsProject(cmd) {
-			t.Errorf("dispatch %s lacks the verbOwnsProject annotation", cmd.Name())
-		}
-	}
-}
-
 func TestDispatchOpenRefusesANonPositiveAckSeq(t *testing.T) {
 	conn := newTestDB(t)
 	runID := activatedDispatchRunForCLI(t, conn)

@@ -43,8 +43,7 @@ kind carrying the reason, the actor, and the working directory.
 On a run bound to a conductor capability this requires that capability, via
 DOCKET_TOKEN or an owner-only file on stdin, never argv. A fact is an
 observation rather than a ruling, so it takes no --authority.`,
-	Args:        cobra.ExactArgs(1),
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRunFactAdd(cmd, args[0], getWriter(cmd))
 	},

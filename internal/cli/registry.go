@@ -79,8 +79,7 @@ from.
 
 It REPAIRS NOTHING. Adopting a bumped definition is what activation does,
 inside a transaction, with the validation and collision rules that go with it.`,
-	Args:        cobra.NoArgs,
-	Annotations: map[string]string{"verbOwnsProject": ""},
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRegistryAudit(cmd, args, getWriter(cmd))
 	},

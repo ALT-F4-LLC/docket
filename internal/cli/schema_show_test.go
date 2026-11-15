@@ -9,12 +9,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-func TestSchemaShowOwnsItsProject(t *testing.T) {
-	if _, ok := schemaShowCmd.Annotations["verbOwnsProject"]; !ok {
-		t.Error("schema show lacks the verbOwnsProject annotation")
-	}
-}
-
 func TestSchemaShowReadsTheConfiguredProject(t *testing.T) {
 	conn := newTestDB(t)
 	cmd := schemaShowCmdWithDB(conn, false)
