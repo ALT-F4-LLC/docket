@@ -10,11 +10,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
-	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -29,114 +28,64 @@ var labelCmd = &cobra.Command{
 }
 
 var labelAddCmd = &cobra.Command{
-	Use:   "add <id> <label>...",
-	Short: "Add labels to an issue",
-	Args:  cobra.MinimumNArgs(2),
+	Use:         "add <id> <label>...",
+	Short:       "Add labels to an issue",
+	Args:        cobra.MinimumNArgs(2),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		id, err := issueArg(args[0])
-		if err != nil {
-			return err
-		}
-
-		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-		if err != nil {
-			return err
-		}
-
 		color, _ := cmd.Flags().GetString("color")
-		author := config.DefaultAuthor()
 
-		labelNames := args[1:]
-		for _, label := range labelNames {
-			if err := validateLabelName(label); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-		}
-
-		st := store.StoreOn(conn)
-		if err := st.AddLabelsToIssue(id, labelNames, color, author); err != nil {
-			if e := notFound(err, fmt.Sprintf("issue %s", args[0])); e != nil {
-				return e
-			}
-			if errors.Is(err, store.ErrLabelColorConflict) {
-				return cmdErr(fmt.Errorf("label already exists with a different color"), output.ErrValidation)
-			}
-			return cmdErr(fmt.Errorf("adding labels: %w", err), output.ErrGeneral)
-		}
-
-		labels, err := st.GetIssueLabelObjects(id)
+		res, err := verb.IssueLabelAdd(cmd.Context(), verbEnv(cmd), verb.IssueLabelAddInput{
+			Issue:  args[0],
+			Labels: args[1:],
+			Color:  color,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		w.Success(labels, fmt.Sprintf("Added label(s) to %s: %s", model.FormatID(id), issue.Title))
+		w.Success(res.Labels, fmt.Sprintf("Added label(s) to %s: %s", model.FormatID(res.Issue.ID), res.Issue.Title))
 		return nil
 	},
 }
 
 var labelRmCmd = &cobra.Command{
-	Use:   "rm <id> <label>...",
-	Short: "Remove labels from an issue",
-	Args:  cobra.MinimumNArgs(2),
+	Use:         "rm <id> <label>...",
+	Short:       "Remove labels from an issue",
+	Args:        cobra.MinimumNArgs(2),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
+		res, err := verb.IssueLabelRm(cmd.Context(), verbEnv(cmd), verb.IssueLabelRmInput{
+			Issue:  args[0],
+			Labels: args[1:],
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-		if err != nil {
-			return err
-		}
-
-		author := config.DefaultAuthor()
-
-		labelNames := args[1:]
-		for _, label := range labelNames {
-			if err := validateLabelName(label); err != nil {
-				return cmdErr(err, output.ErrValidation)
-			}
-		}
-
-		st := store.StoreOn(conn)
-		if err := st.RemoveLabelsFromIssue(id, labelNames, author); err != nil {
-			if e := notFound(err, "issue or label"); e != nil {
-				return e
-			}
-			if errors.Is(err, store.ErrNotAttached) {
-				return cmdErr(fmt.Errorf("label is not attached to %s", model.FormatID(id)), output.ErrValidation)
-			}
-			return cmdErr(fmt.Errorf("removing labels: %w", err), output.ErrGeneral)
-		}
-
-		labels, err := st.GetIssueLabelObjects(id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(labels, fmt.Sprintf("Removed label(s) from %s: %s", model.FormatID(id), issue.Title))
+		w.Success(res.Labels, fmt.Sprintf("Removed label(s) from %s: %s", model.FormatID(res.Issue.ID), res.Issue.Title))
 		return nil
 	},
 }
 
 var labelListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all labels",
-	Args:  cobra.NoArgs,
+	Use:         "list",
+	Short:       "List all labels",
+	Args:        cobra.NoArgs,
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		labels, err := store.StoreOn(conn).ListAllLabels(getProjectID(cmd))
+		listed, err := verb.IssueLabelList(cmd.Context(), verbEnv(cmd), verb.IssueLabelListInput{})
 		if err != nil {
-			return cmdErr(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
+		labels := listed.Labels
 
 		if len(labels) == 0 {
 			quiet, _ := cmd.Flags().GetBool("quiet")
@@ -202,26 +151,25 @@ var labelListCmd = &cobra.Command{
 }
 
 var labelDeleteCmd = &cobra.Command{
-	Use:   "delete <label>",
-	Short: "Delete a label",
-	Args:  cobra.ExactArgs(1),
+	Use:         "delete <label>",
+	Short:       "Delete a label",
+	Args:        cobra.ExactArgs(1),
+	Annotations: map[string]string{"verbOwnsProject": ""},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
 		name := args[0]
 		force, _ := cmd.Flags().GetBool("force")
 
-		st := store.StoreOn(conn)
-		label, err := st.GetLabelByName(getProjectID(cmd), name)
-		if err != nil {
-			if e := notFound(err, fmt.Sprintf("label %q", name)); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("fetching label: %w", err), output.ErrGeneral)
-		}
+		in := verb.IssueLabelDeleteInput{Label: name, Force: force}
+		env := verbEnv(cmd)
+		res, err := verb.IssueLabelDelete(cmd.Context(), env, in)
+		recordProjectRegistration(cmd, res.Registered)
 
-		if !force && label.IssueCount > 0 {
+		// Without --force the verb deletes nothing from a label still in use
+		// and returns the label with its refusal; only a real terminal may
+		// then confirm.
+		if label := res.Label; err != nil && !force && label != nil && label.IssueCount > 0 {
 			if w.JSONMode {
 				return cmdErr(fmt.Errorf("cannot delete label %q without --force in JSON mode (attached to %d issue(s))", name, label.IssueCount), output.ErrValidation)
 			}
@@ -253,29 +201,23 @@ var labelDeleteCmd = &cobra.Command{
 				w.Info("Cancelled.")
 				return nil
 			}
-		}
 
-		author := config.DefaultAuthor()
-		affectedIDs, err := st.DeleteLabel(label.ID, name, author)
+			in.Force = true
+			res, err = verb.IssueLabelDelete(cmd.Context(), env, in)
+			recordProjectRegistration(cmd, res.Registered)
+		}
 		if err != nil {
-			return cmdErr(fmt.Errorf("deleting label: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
 		msg := fmt.Sprintf("Deleted label %q", name)
-		if len(affectedIDs) > 0 {
-			msg = fmt.Sprintf("Deleted label %q (removed from %d issue(s))", name, len(affectedIDs))
+		if res.Detached > 0 {
+			msg = fmt.Sprintf("Deleted label %q (removed from %d issue(s))", name, res.Detached)
 		}
 
 		w.Success(labelDeleteResult{Name: name}, msg)
 		return nil
 	},
-}
-
-func validateLabelName(name string) error {
-	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("label name cannot be empty")
-	}
-	return nil
 }
 
 func init() {

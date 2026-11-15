@@ -2118,3 +2118,350 @@ func TestIssueGraphRefusals(t *testing.T) {
 	_, err = verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: ref, Direction: "both", Depth: -1})
 	requireVerbError(t, err, output.ErrValidation, "depth must be non-negative")
 }
+
+func labelNames(labels []*model.Label) []string {
+	names := make([]string, 0, len(labels))
+	for _, l := range labels {
+		names = append(names, l.Name)
+	}
+	return names
+}
+
+func TestIssueLabelAddAndRmEchoTheStoredLabelsAsTheAuthor(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	env.Author = "label-author"
+	ref := model.FormatID(id)
+
+	added, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{
+		Issue: ref, Labels: []string{"alpha", "beta"}, Color: "#ff0000",
+	})
+	if err != nil {
+		t.Fatalf("IssueLabelAdd: %v", err)
+	}
+	if added.Issue == nil || added.Issue.ID != id {
+		t.Errorf("added Issue = %+v, want issue %d", added.Issue, id)
+	}
+	if got := fmt.Sprint(labelNames(added.Labels)); got != "[alpha beta]" {
+		t.Errorf("added Labels = %s, want [alpha beta]", got)
+	}
+	for _, l := range added.Labels {
+		if l.Color != "#ff0000" {
+			t.Errorf("label %s color = %q, want #ff0000", l.Name, l.Color)
+		}
+	}
+	requireChangedBy(t, st, id, "label_added", "alpha", "label-author")
+	requireChangedBy(t, st, id, "label_added", "beta", "label-author")
+
+	removed, err := verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: ref, Labels: []string{"alpha"}})
+	if err != nil {
+		t.Fatalf("IssueLabelRm: %v", err)
+	}
+	if removed.Issue == nil || removed.Issue.ID != id {
+		t.Errorf("removed Issue = %+v, want issue %d", removed.Issue, id)
+	}
+	if got := fmt.Sprint(labelNames(removed.Labels)); got != "[beta]" {
+		t.Errorf("removed Labels = %s, want [beta]", got)
+	}
+	activity, err := st.GetActivity(id, 0)
+	if err != nil {
+		t.Fatalf("GetActivity: %v", err)
+	}
+	detached := false
+	for _, a := range activity {
+		detached = detached || (a.FieldChanged == "label_removed" && a.OldValue == "alpha" && a.ChangedBy == "label-author")
+	}
+	if !detached {
+		t.Errorf("activity %+v has no removal of alpha attributed to label-author", activity)
+	}
+}
+
+func TestIssueLabelVerbRefusals(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	ref := model.FormatID(id)
+	labels := []string{"alpha"}
+
+	_, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: "DKT-9999", Labels: labels})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: "DKT-9999", Labels: labels})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: "not-an-id", Labels: labels})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: "not-an-id", Labels: labels})
+	requireCode(t, err, output.ErrValidation)
+
+	_, err = verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: ref, Labels: []string{"alpha", " "}})
+	requireVerbError(t, err, output.ErrValidation, "label name cannot be empty")
+	if got, _ := st.GetIssueLabelObjects(id); len(got) != 0 {
+		t.Errorf("a refused add attached %v, want nothing", labelNames(got))
+	}
+	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: ref, Labels: []string{""}})
+	requireVerbError(t, err, output.ErrValidation, "label name cannot be empty")
+
+	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: ref, Labels: []string{"never-made"}})
+	requireVerbError(t, err, output.ErrNotFound, "issue or label not found")
+
+	if _, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: ref, Labels: labels, Color: "#ff0000"}); err != nil {
+		t.Fatalf("IssueLabelAdd: %v", err)
+	}
+	_, err = verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: ref, Labels: labels, Color: "#00ff00"})
+	requireVerbError(t, err, output.ErrValidation, "label already exists with a different color")
+
+	other := createIssue(t, st)
+	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: model.FormatID(other), Labels: labels})
+	requireVerbError(t, err, output.ErrValidation, "label is not attached to "+model.FormatID(other))
+}
+
+func TestIssueLabelListCountsTheIssuesOfTheCallersProject(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	if _, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{
+		Issue: model.FormatID(id), Labels: []string{"alpha"},
+	}); err != nil {
+		t.Fatalf("IssueLabelAdd: %v", err)
+	}
+
+	listed, err := verb.IssueLabelList(ctx, env, verb.IssueLabelListInput{})
+	if err != nil {
+		t.Fatalf("IssueLabelList: %v", err)
+	}
+	if len(listed.Labels) != 1 || listed.Labels[0].Name != "alpha" || listed.Labels[0].IssueCount != 1 {
+		t.Errorf("IssueLabelList = %+v, want alpha on one issue", listed.Labels)
+	}
+
+	reader, err := verb.IssueLabelList(ctx, projectEnv(st, "/repos/reader", true), verb.IssueLabelListInput{})
+	if err != nil {
+		t.Fatalf("IssueLabelList from an unregistered project: %v", err)
+	}
+	if len(reader.Labels) != 0 {
+		t.Errorf("an unregistered project listed %+v, want no labels", reader.Labels)
+	}
+	requireUnregistered(t, st, "/repos/reader")
+}
+
+func TestIssueLabelDeleteRefusesALabelInUseWithoutForce(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	if _, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{
+		Issue: model.FormatID(id), Labels: []string{"alpha"},
+	}); err != nil {
+		t.Fatalf("IssueLabelAdd: %v", err)
+	}
+
+	refused, err := verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha"})
+	requireVerbError(t, err, output.ErrValidation, `label "alpha" is attached to 1 issue(s)`)
+	if refused.Label == nil || refused.Label.Name != "alpha" || refused.Label.IssueCount != 1 {
+		t.Errorf("refused Label = %+v, want alpha on one issue", refused.Label)
+	}
+	if got, _ := st.GetIssueLabelObjects(id); len(got) != 1 {
+		t.Fatalf("a refused delete left labels %v, want alpha still attached", labelNames(got))
+	}
+
+	deleted, err := verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha", Force: true})
+	if err != nil {
+		t.Fatalf("IssueLabelDelete --force: %v", err)
+	}
+	if deleted.Detached != 1 {
+		t.Errorf("Detached = %d, want 1", deleted.Detached)
+	}
+	if got, _ := st.GetIssueLabelObjects(id); len(got) != 0 {
+		t.Errorf("issue still carries %v after the delete", labelNames(got))
+	}
+
+	_, err = verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha", Force: true})
+	requireVerbError(t, err, output.ErrNotFound, `label "alpha" not found`)
+}
+
+func TestIssueLabelDeleteOfAnUnusedLabelNeedsNoForce(t *testing.T) {
+	st := openStore(t)
+	id := createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	ref := model.FormatID(id)
+	if _, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: ref, Labels: []string{"alpha"}}); err != nil {
+		t.Fatalf("IssueLabelAdd: %v", err)
+	}
+	if _, err := verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: ref, Labels: []string{"alpha"}}); err != nil {
+		t.Fatalf("IssueLabelRm: %v", err)
+	}
+
+	deleted, err := verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha"})
+	if err != nil {
+		t.Fatalf("IssueLabelDelete: %v", err)
+	}
+	if deleted.Detached != 0 {
+		t.Errorf("Detached = %d, want 0", deleted.Detached)
+	}
+	listed, err := verb.IssueLabelList(ctx, env, verb.IssueLabelListInput{})
+	if err != nil {
+		t.Fatalf("IssueLabelList: %v", err)
+	}
+	if len(listed.Labels) != 0 {
+		t.Errorf("labels %+v remain after the delete", listed.Labels)
+	}
+}
+
+func TestIssueLinkAddListAndRemove(t *testing.T) {
+	st := openStore(t)
+	source, target := createIssue(t, st), createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	src, dst := model.FormatID(source), model.FormatID(target)
+
+	added, err := verb.IssueLinkAdd(ctx, env, verb.IssueLinkAddInput{Issue: src, Relation: "blocks", Target: dst})
+	if err != nil {
+		t.Fatalf("IssueLinkAdd: %v", err)
+	}
+	rel := added.Relation
+	if rel == nil || rel.ID == 0 || rel.SourceIssueID != source || rel.TargetIssueID != target ||
+		rel.RelationType != model.RelationBlocks {
+		t.Fatalf("added Relation = %+v, want a stored %d blocks %d", rel, source, target)
+	}
+
+	for _, issue := range []int{source, target} {
+		listed, err := verb.IssueLinkList(ctx, env, verb.IssueLinkListInput{Issue: model.FormatID(issue)})
+		if err != nil {
+			t.Fatalf("IssueLinkList %d: %v", issue, err)
+		}
+		if listed.IssueID != issue || len(listed.Relations) != 1 || listed.Relations[0].ID != rel.ID {
+			t.Errorf("IssueLinkList %d = %+v, want relation %d", issue, listed, rel.ID)
+		}
+	}
+
+	removed, err := verb.IssueLinkRemove(ctx, env, verb.IssueLinkRemoveInput{Issue: src, Relation: "blocks", Target: dst})
+	if err != nil {
+		t.Fatalf("IssueLinkRemove: %v", err)
+	}
+	if r := removed.Relation; r == nil || r.SourceIssueID != source || r.TargetIssueID != target ||
+		r.RelationType != model.RelationBlocks {
+		t.Errorf("removed Relation = %+v, want %d blocks %d", r, source, target)
+	}
+	listed, err := verb.IssueLinkList(ctx, env, verb.IssueLinkListInput{Issue: src})
+	if err != nil {
+		t.Fatalf("IssueLinkList: %v", err)
+	}
+	if len(listed.Relations) != 0 {
+		t.Errorf("relations %+v remain after the remove", listed.Relations)
+	}
+}
+
+func TestIssueLinkVerbRefusals(t *testing.T) {
+	st := openStore(t)
+	a, b := createIssue(t, st), createIssue(t, st)
+	ctx := context.Background()
+	env := projectEnv(st, "", false)
+	ra, rb := model.FormatID(a), model.FormatID(b)
+	add := func(issue, relation, target string) error {
+		_, err := verb.IssueLinkAdd(ctx, env, verb.IssueLinkAddInput{Issue: issue, Relation: relation, Target: target})
+		return err
+	}
+
+	// Arguments are checked in order: source, relation, target.
+	requireCode(t, add("not-an-id", "nonsense", "not-an-id"), output.ErrValidation)
+	requireVerbError(t, add(ra, "nonsense", "not-an-id"), output.ErrValidation, "invalid relation type")
+	requireVerbError(t, add(ra, "blocks", "not-an-id"), output.ErrValidation, "invalid target ID")
+	_, err := verb.IssueLinkRemove(ctx, env, verb.IssueLinkRemoveInput{Issue: ra, Relation: "blocks", Target: "not-an-id"})
+	requireVerbError(t, err, output.ErrValidation, "invalid target ID")
+
+	requireVerbError(t, add(ra, "blocks", "DKT-9999"), output.ErrNotFound, "issue not found")
+	requireVerbError(t, add(ra, "blocks", ra), output.ErrValidation, "cannot link an issue to itself")
+	if err := add(ra, "blocks", rb); err != nil {
+		t.Fatalf("IssueLinkAdd: %v", err)
+	}
+	requireVerbError(t, add(ra, "blocks", rb), output.ErrConflict, "relation already exists")
+	requireCode(t, add(rb, "blocks", ra), output.ErrConflict)
+
+	_, err = verb.IssueLinkRemove(ctx, env, verb.IssueLinkRemoveInput{Issue: rb, Relation: "blocks", Target: ra})
+	requireVerbError(t, err, output.ErrNotFound, "relation not found")
+
+	_, err = verb.IssueLinkList(ctx, env, verb.IssueLinkListInput{Issue: "DKT-9999"})
+	requireVerbError(t, err, output.ErrNotFound, "issue not found: DKT-9999")
+	_, err = verb.IssueLinkList(ctx, env, verb.IssueLinkListInput{Issue: "not-an-id"})
+	requireCode(t, err, output.ErrValidation)
+}
+
+// Attaching, detaching and deleting labels and adding and removing links
+// write, so they register an anchored caller's project and refuse an
+// unanchored one before anything else; listing labels or links is a read.
+func TestIssueLabelAndLinkVerbsDeclareTheirProjectPolicy(t *testing.T) {
+	st := openStore(t)
+	a, b := createIssue(t, st), createIssue(t, st)
+	ctx := context.Background()
+	ra, rb := model.FormatID(a), model.FormatID(b)
+	labels := []string{"alpha"}
+
+	writes := []struct {
+		verb string
+		call func(env verb.Env, issue string) (*engine.ProjectRegistration, error)
+	}{
+		{"issue label add", func(env verb.Env, issue string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: issue, Labels: labels})
+			return res.Registered, err
+		}},
+		{"issue label rm", func(env verb.Env, issue string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: issue, Labels: labels})
+			return res.Registered, err
+		}},
+		{"issue label delete", func(env verb.Env, _ string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha", Force: true})
+			return res.Registered, err
+		}},
+		{"issue link add", func(env verb.Env, issue string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueLinkAdd(ctx, env, verb.IssueLinkAddInput{Issue: issue, Relation: "blocks", Target: rb})
+			return res.Registered, err
+		}},
+		{"issue link remove", func(env verb.Env, issue string) (*engine.ProjectRegistration, error) {
+			res, err := verb.IssueLinkRemove(ctx, env, verb.IssueLinkRemoveInput{Issue: issue, Relation: "blocks", Target: rb})
+			return res.Registered, err
+		}},
+	}
+
+	unanchored := projectEnv(st, "/work/scratch", false)
+	for _, w := range writes {
+		// The project refusal comes before the issue lookup.
+		for _, issue := range []string{ra, "DKT-9999"} {
+			_, err := w.call(unanchored, issue)
+			requireCode(t, err, output.ErrValidation)
+		}
+	}
+	requireUnregistered(t, st, "/work/scratch")
+	if got, _ := st.GetIssueLabelObjects(a); len(got) != 0 {
+		t.Errorf("issue has labels %v after unanchored writes, want none", labelNames(got))
+	}
+	if got, _ := st.GetIssueRelations(a); len(got) != 0 {
+		t.Errorf("issue has relations %+v after unanchored writes, want none", got)
+	}
+
+	if _, err := verb.IssueLabelList(ctx, projectEnv(st, "/repos/reader", true), verb.IssueLabelListInput{}); err != nil {
+		t.Fatalf("IssueLabelList: %v", err)
+	}
+	if _, err := verb.IssueLinkList(ctx, projectEnv(st, "/repos/reader", true), verb.IssueLinkListInput{Issue: ra}); err != nil {
+		t.Fatalf("IssueLinkList: %v", err)
+	}
+	requireUnregistered(t, st, "/repos/reader")
+
+	// In this order each write succeeds, except that label delete looks the
+	// label up in the project it just registered, which has none: it still
+	// reports the registration it made before the lookup failed.
+	for i, w := range writes {
+		identity := fmt.Sprintf("/repos/fresh-%d", i)
+		registered, err := w.call(projectEnv(st, identity, true), ra)
+		if w.verb == "issue label delete" {
+			requireVerbError(t, err, output.ErrNotFound, `label "alpha" not found`)
+		} else if err != nil {
+			t.Fatalf("%s: %v", w.verb, err)
+		}
+		if registered == nil || registered.Identity != identity || registered.Verb != w.verb {
+			t.Errorf("%s Registered = %+v, want %s registered by %s", w.verb, registered, identity, w.verb)
+		}
+	}
+}

@@ -1147,6 +1147,328 @@ func issueFiles(env Env, id int) ([]string, error) {
 	return files, nil
 }
 
+// IssueLabelAddInput names the issue and the labels to attach to it. Color
+// applies to labels this call creates.
+type IssueLabelAddInput struct {
+	Issue  string
+	Labels []string
+	Color  string
+}
+
+// IssueLabelAddResult is the issue and its full label set after the attach.
+// Registered is as on IssueClaimResult.
+type IssueLabelAddResult struct {
+	Issue      *model.Issue
+	Labels     []*model.Label
+	Registered *engine.ProjectRegistration
+}
+
+// IssueLabelAdd attaches labels to an issue as env.Author, creating any label
+// that does not exist yet. It writes into the caller's project, so it may
+// register it.
+func IssueLabelAdd(ctx context.Context, env Env, in IssueLabelAddInput) (IssueLabelAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue label add")
+	res := IssueLabelAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	id, issue, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return res, err
+	}
+	res.Issue = issue
+	if err := checkLabelNames(in.Labels); err != nil {
+		return res, err
+	}
+
+	if err := env.Store.AddLabelsToIssue(id, in.Labels, in.Color, env.Author); err != nil {
+		if e := notFound(err, "issue "+in.Issue); e != nil {
+			return res, e
+		}
+		if errors.Is(err, store.ErrLabelColorConflict) {
+			return res, newError(errors.New("label already exists with a different color"), output.ErrValidation)
+		}
+		return res, newError(fmt.Errorf("adding labels: %w", err), output.ErrGeneral)
+	}
+	res.Labels, err = issueLabels(env, id)
+	return res, err
+}
+
+// IssueLabelRmInput names the issue and the labels to detach from it.
+type IssueLabelRmInput struct {
+	Issue  string
+	Labels []string
+}
+
+// IssueLabelRmResult is the issue and its full label set after the detach.
+// Registered is as on IssueClaimResult.
+type IssueLabelRmResult struct {
+	Issue      *model.Issue
+	Labels     []*model.Label
+	Registered *engine.ProjectRegistration
+}
+
+// IssueLabelRm detaches labels from an issue as env.Author. It writes into
+// the caller's project, so it may register it.
+func IssueLabelRm(ctx context.Context, env Env, in IssueLabelRmInput) (IssueLabelRmResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue label rm")
+	res := IssueLabelRmResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	id, issue, err := issueByRef(env, in.Issue)
+	if err != nil {
+		return res, err
+	}
+	res.Issue = issue
+	if err := checkLabelNames(in.Labels); err != nil {
+		return res, err
+	}
+
+	if err := env.Store.RemoveLabelsFromIssue(id, in.Labels, env.Author); err != nil {
+		if e := notFound(err, "issue or label"); e != nil {
+			return res, e
+		}
+		if errors.Is(err, store.ErrNotAttached) {
+			return res, newError(fmt.Errorf("label is not attached to %s", model.FormatID(id)), output.ErrValidation)
+		}
+		return res, newError(fmt.Errorf("removing labels: %w", err), output.ErrGeneral)
+	}
+	res.Labels, err = issueLabels(env, id)
+	return res, err
+}
+
+func checkLabelNames(names []string) error {
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return newError(errors.New("label name cannot be empty"), output.ErrValidation)
+		}
+	}
+	return nil
+}
+
+func issueLabels(env Env, id int) ([]*model.Label, error) {
+	labels, err := env.Store.GetIssueLabelObjects(id)
+	if err != nil {
+		return nil, newError(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
+	}
+	return labels, nil
+}
+
+// IssueLabelListInput is a request for the caller's project's labels.
+type IssueLabelListInput struct{}
+
+// IssueLabelListResult is every label in the caller's project, each with the
+// number of issues it is attached to.
+type IssueLabelListResult struct {
+	Labels []*model.LabelWithCount
+}
+
+// IssueLabelList lists the caller's project's labels. It is a read, so an
+// unregistered project lists none and registers nothing.
+func IssueLabelList(ctx context.Context, env Env, in IssueLabelListInput) (IssueLabelListResult, error) {
+	projectID, _, err := env.ResolveProject(ProjectReadOnly)
+	if err != nil {
+		return IssueLabelListResult{}, err
+	}
+	labels, err := env.Store.ListAllLabels(projectID)
+	if err != nil {
+		return IssueLabelListResult{}, newError(fmt.Errorf("listing labels: %w", err), output.ErrGeneral)
+	}
+	return IssueLabelListResult{Labels: labels}, nil
+}
+
+// IssueLabelDeleteInput names the caller's project's label to delete. Force
+// consents to deleting a label still attached to issues.
+type IssueLabelDeleteInput struct {
+	Label string
+	Force bool
+}
+
+// IssueLabelDeleteResult is the label the call looked up and how many issues
+// the delete detached it from. Label is set whenever the lookup succeeded,
+// including when the delete was refused for want of Force. Registered is as
+// on IssueClaimResult.
+type IssueLabelDeleteResult struct {
+	Label      *model.LabelWithCount
+	Detached   int
+	Registered *engine.ProjectRegistration
+}
+
+// IssueLabelDelete deletes a label from the caller's project as env.Author,
+// detaching it from every issue. A label still attached to an issue is
+// refused unless Force is set. It writes into the caller's project, so it may
+// register it.
+func IssueLabelDelete(ctx context.Context, env Env, in IssueLabelDeleteInput) (IssueLabelDeleteResult, error) {
+	projectID, registered, err := resolveRegisteringProject(env, "issue label delete")
+	res := IssueLabelDeleteResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	label, err := env.Store.GetLabelByName(projectID, in.Label)
+	if err != nil {
+		if e := notFound(err, fmt.Sprintf("label %q", in.Label)); e != nil {
+			return res, e
+		}
+		return res, newError(fmt.Errorf("fetching label: %w", err), output.ErrGeneral)
+	}
+	res.Label = label
+
+	if !in.Force && label.IssueCount > 0 {
+		return res, newError(fmt.Errorf("label %q is attached to %d issue(s): use --force to delete it",
+			in.Label, label.IssueCount), output.ErrValidation)
+	}
+
+	affected, err := env.Store.DeleteLabel(label.ID, in.Label, env.Author)
+	if err != nil {
+		return res, newError(fmt.Errorf("deleting label: %w", err), output.ErrGeneral)
+	}
+	res.Detached = len(affected)
+	return res, nil
+}
+
+// IssueLinkAddInput is a relation to create: Issue Relation Target, such as
+// DKT-1 blocks DKT-2.
+type IssueLinkAddInput struct {
+	Issue    string
+	Relation string
+	Target   string
+}
+
+// IssueLinkAddResult is the stored relation. Registered is as on
+// IssueClaimResult.
+type IssueLinkAddResult struct {
+	Relation   *model.Relation
+	Registered *engine.ProjectRegistration
+}
+
+// IssueLinkAdd creates a relation between two issues. It writes into the
+// caller's project, so it may register it.
+func IssueLinkAdd(ctx context.Context, env Env, in IssueLinkAddInput) (IssueLinkAddResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue link add")
+	res := IssueLinkAddResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	rel, err := parseRelation(in.Issue, in.Relation, in.Target)
+	if err != nil {
+		return res, err
+	}
+
+	relID, err := env.Store.CreateRelation(rel)
+	if err != nil {
+		if e := notFound(err, "issue"); e != nil {
+			return res, e
+		}
+		switch {
+		case errors.Is(err, store.ErrSelfRelation):
+			return res, newError(errors.New("cannot link an issue to itself"), output.ErrValidation)
+		case errors.Is(err, store.ErrDuplicateRelation):
+			return res, newError(errors.New("relation already exists"), output.ErrConflict)
+		case errors.Is(err, store.ErrCycleDetected):
+			return res, newError(err, output.ErrConflict)
+		}
+		return res, newError(fmt.Errorf("creating relation: %w", err), output.ErrGeneral)
+	}
+	rel.ID = relID
+	res.Relation = rel
+	return res, nil
+}
+
+// IssueLinkRemoveInput is the relation to remove, spelled as on
+// IssueLinkAddInput.
+type IssueLinkRemoveInput struct {
+	Issue    string
+	Relation string
+	Target   string
+}
+
+// IssueLinkRemoveResult is the removed relation, without its row id.
+// Registered is as on IssueClaimResult.
+type IssueLinkRemoveResult struct {
+	Relation   *model.Relation
+	Registered *engine.ProjectRegistration
+}
+
+// IssueLinkRemove removes a relation between two issues. It writes into the
+// caller's project, so it may register it.
+func IssueLinkRemove(ctx context.Context, env Env, in IssueLinkRemoveInput) (IssueLinkRemoveResult, error) {
+	_, registered, err := resolveRegisteringProject(env, "issue link remove")
+	res := IssueLinkRemoveResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+	rel, err := parseRelation(in.Issue, in.Relation, in.Target)
+	if err != nil {
+		return res, err
+	}
+
+	if err := env.Store.DeleteRelation(rel.SourceIssueID, rel.TargetIssueID, string(rel.RelationType)); err != nil {
+		if e := notFound(err, "relation"); e != nil {
+			return res, e
+		}
+		return res, newError(fmt.Errorf("deleting relation: %w", err), output.ErrGeneral)
+	}
+	res.Relation = rel
+	return res, nil
+}
+
+// parseRelation parses a relation's source issue, type and target issue, in
+// that order, so the first malformed one is the one reported.
+func parseRelation(issue, relation, target string) (*model.Relation, error) {
+	sourceID, err := ParseIssueRef(issue)
+	if err != nil {
+		return nil, err
+	}
+	relType, err := model.ParseRelationType(relation)
+	if err != nil {
+		return nil, newError(err, output.ErrValidation)
+	}
+	targetID, err := model.ParseID(target)
+	if err != nil {
+		return nil, newError(fmt.Errorf("invalid target ID: %w", err), output.ErrValidation)
+	}
+	return &model.Relation{SourceIssueID: sourceID, TargetIssueID: targetID, RelationType: relType}, nil
+}
+
+// IssueLinkListInput names the issue whose relations to list.
+type IssueLinkListInput struct {
+	Issue string
+}
+
+// IssueLinkListResult is every relation the issue takes part in, as source or
+// as target.
+type IssueLinkListResult struct {
+	IssueID   int
+	Relations []model.Relation
+}
+
+// IssueLinkList lists one issue's relations. Issue ids are store-wide, so it
+// is a read that names no project.
+func IssueLinkList(ctx context.Context, env Env, in IssueLinkListInput) (IssueLinkListResult, error) {
+	projectID, _, err := env.ResolveProject(ProjectReadOnly)
+	if err != nil {
+		return IssueLinkListResult{}, err
+	}
+	id, err := ParseIssueRef(in.Issue)
+	if err != nil {
+		return IssueLinkListResult{}, err
+	}
+	exists, err := env.Store.IssueExists(id)
+	if err != nil {
+		return IssueLinkListResult{}, newError(fmt.Errorf("checking issue: %w", err), output.ErrGeneral)
+	}
+	if !exists {
+		return IssueLinkListResult{}, newError(
+			fmt.Errorf("issue not found: %s", issueDisplayID(env, projectID, id)), output.ErrNotFound)
+	}
+	relations, err := env.Store.GetIssueRelations(id)
+	if err != nil {
+		return IssueLinkListResult{}, newError(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
+	}
+	return IssueLinkListResult{IssueID: id, Relations: relations}, nil
+}
+
 // IssueGraphInput names the focal issue of a dependency graph. Direction is
 // up (its blockers), down (what it blocks) or both; Depth caps the hops from
 // the focal issue, and 0 means unlimited.
