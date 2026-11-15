@@ -385,12 +385,12 @@ func TestPersistentPostRunClosesHandles(t *testing.T) {
 	}
 }
 
-// TestRootSkipsProjectResolutionForVerbOwnedProject: a command annotated
-// verbOwnsProject resolves its own project, so the root hook opens the store
-// but does not resolve one. From a directory that is not a repository, against
-// the global store, the same command unannotated is refused by eager
-// resolution; annotated, it runs.
-func TestRootSkipsProjectResolutionForVerbOwnedProject(t *testing.T) {
+// TestRootResolvesNoProject: every verb resolves its own project through
+// verb.ResolveProject, so the root hook opens the store but resolves none.
+// From a directory that is not a repository, against the global store, a
+// command runs with or without the verbOwnsProject annotation and carries no
+// project in its context.
+func TestRootResolvesNoProject(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -428,23 +428,20 @@ func TestRootSkipsProjectResolutionForVerbOwnedProject(t *testing.T) {
 		return ran, hasProject, err
 	}
 
-	ran, _, err := run(t, nil)
-	if err == nil || !strings.Contains(err.Error(), "not a git worktree") {
-		t.Fatalf("unannotated probe: err = %v, want the eager-resolution refusal", err)
-	}
-	if ran {
-		t.Fatal("unannotated probe ran despite the eager-resolution refusal")
-	}
-
-	ran, hasProject, err := run(t, map[string]string{"verbOwnsProject": ""})
-	if err != nil {
-		t.Fatalf("annotated probe: %v, want no eager-resolution error", err)
-	}
-	if !ran {
-		t.Fatal("annotated probe did not run")
-	}
-	if hasProject {
-		t.Error("annotated probe carries an eagerly resolved project")
+	for name, annotations := range map[string]map[string]string{
+		"unannotated": nil,
+		"annotated":   {"verbOwnsProject": ""},
+	} {
+		ran, hasProject, err := run(t, annotations)
+		if err != nil {
+			t.Fatalf("%s probe: %v, want no project-resolution error from the root hook", name, err)
+		}
+		if !ran {
+			t.Fatalf("%s probe did not run", name)
+		}
+		if hasProject {
+			t.Errorf("%s probe carries a project the root hook resolved", name)
+		}
 	}
 }
 

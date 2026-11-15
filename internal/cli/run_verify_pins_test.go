@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -166,15 +167,10 @@ func TestVerifyPinsRunsFromAnUnanchoredCwd(t *testing.T) {
 	}
 	projectsBefore := projectCount(t, conn)
 
-	id, err := resolveInvocationProject(commandAt(t, "run verify-pins"), conn, cfg)
-	testsupport.Must(t, err, "resolving `docket run verify-pins` from a non-repo cwd: %v", err)
-	if id != db.UnregisteredProjectID {
-		t.Errorf("resolved project %d, want the unregistered sentinel %d",
-			id, db.UnregisteredProjectID)
-	}
-
+	cmd := cmdWithDB(conn)
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey, cfg))
 	w, buf := bufWriter(true)
-	if err := runRunVerifyPins(cmdWithDB(conn), run.Ref(), w); err != nil {
+	if err := runRunVerifyPins(cmd, run.Ref(), w); err != nil {
 		t.Fatalf("verify-pins refuses a sound run from a non-repo cwd: %v", err)
 	}
 	var envelope struct {

@@ -278,28 +278,6 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("failed to migrate database: %w", err)
 		}
 
-		// Resolve this invocation's project (v12): the store is shared, and
-		// which rows this command reads and writes is decided ONCE, here, from
-		// the identity config.Resolve derived — never re-derived downstream.
-		// A command annotated verbOwnsProject resolves its own project through
-		// internal/verb, so it gets neither a project nor its display prefix
-		// from here.
-		if !verbOwnsProject(cmd) {
-			projectID, err := resolveInvocationProject(cmd, conn, cfg)
-			if err != nil {
-				return err
-			}
-
-			// The project's display prefix, installed process-wide before any
-			// command formats an id: `VOR-42` and `DKT-42` are the same issue —
-			// the number is the global identity — but the board reads in the
-			// project's own voice.
-			if prefix, err := st.ProjectPrefix(projectID); err == nil {
-				model.SetDisplayPrefix(prefix)
-			}
-			ctx = context.WithValue(ctx, projectKey, projectID)
-		}
-
 		// The store's whole prefix roster, so id PARSING accepts exactly the
 		// prefixes some project holds (DKT-110): `AMS-2` round-trips from a
 		// cross-project listing, while `ANSI-16` — an id-shaped term no
@@ -618,12 +596,12 @@ func verbOwnsProject(cmd *cobra.Command) bool {
 	return ok
 }
 
-// getProjectID returns the invocation's resolved project (v12). Commands built
-// outside the root hook — tests wiring a bare command — fall back to the
-// default project, which is the pre-v12 single-tenant behavior exactly. A
-// command annotated verbOwnsProject has no resolved project, and the fallback
-// would silently anchor it to the default one, so reaching here from it panics
-// with *verbOwnedProjectError.
+// getProjectID returns the project stored under projectKey in cmd's context.
+// The root hook stores none, so without one it falls back to the default
+// project, the pre-v12 single-tenant behavior. A command annotated
+// verbOwnsProject must resolve its project through verb.ResolveProject, and
+// the fallback would silently anchor it to the default one, so reaching here
+// from it panics with *verbOwnedProjectError.
 func getProjectID(cmd *cobra.Command) int {
 	if verbOwnsProject(cmd) {
 		panic(&verbOwnedProjectError{command: cmd.CommandPath()})
