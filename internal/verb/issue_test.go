@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -1985,14 +1986,16 @@ func blocks(t *testing.T, st store.Store, blocker, blocked int) {
 }
 
 // The graph walks a chain up -> focal -> down -> further in the requested
-// direction, stops at Depth, names every edge blocker-to-blocked, and is a
-// read that registers nothing.
+// direction, stops at Depth, names every edge blocker-to-blocked, carries
+// adjacency only for the issues it reached, and is a read that registers
+// nothing.
 func TestIssueGraphWalksTheRequestedDirectionToTheDepth(t *testing.T) {
 	st := openStore(t)
 	up, focal, down, further := createIssue(t, st), createIssue(t, st), createIssue(t, st), createIssue(t, st)
 	blocks(t, st, up, focal)
 	blocks(t, st, focal, down)
 	blocks(t, st, down, further)
+	blocks(t, st, createIssue(t, st), createIssue(t, st))
 	ctx := context.Background()
 	env := projectEnv(st, "/repos/reader", true)
 	ref := model.FormatID(focal)
@@ -2032,6 +2035,13 @@ func TestIssueGraphWalksTheRequestedDirectionToTheDepth(t *testing.T) {
 		}
 		if got := res.Backward[focal]; len(got) != 1 || got[0] != up {
 			t.Errorf("IssueGraph(%s, %d) Backward[focal] = %v, want [%d]", tc.direction, tc.depth, got, up)
+		}
+		for name, adj := range map[string]map[int][]int{"Forward": res.Forward, "Backward": res.Backward} {
+			for k := range adj {
+				if res.Issues[k] == nil {
+					t.Errorf("IssueGraph(%s, %d) %s carries unreached issue %d", tc.direction, tc.depth, name, k)
+				}
+			}
 		}
 	}
 	requireUnregistered(t, st, "/repos/reader")
@@ -2086,7 +2096,7 @@ func TestIssueGraphKeepsEveryEdgeIntoAConvergingIssue(t *testing.T) {
 		for _, e := range tc.edges {
 			want[e]++
 		}
-		if fmt.Sprint(got) != fmt.Sprint(want) {
+		if !maps.Equal(got, want) {
 			t.Errorf("IssueGraph(%s, %s, %d) edges = %v, want each of %v once", tc.start, tc.direction, tc.depth, res.Edges, tc.edges)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1166,7 +1167,8 @@ type IssueGraphEdge struct {
 // IssueGraphResult is the dependency graph around Issue. Issues holds every
 // issue the walk reached, the focal one included, keyed by id; Edges lists
 // the dependencies in walk order, down before up. Forward and Backward are
-// the store-wide blocks and blocked-by adjacency the walk followed.
+// the blocks and blocked-by adjacency the walk followed, keyed by reached
+// issues only; a list can still name a neighbor the walk did not reach.
 type IssueGraphResult struct {
 	Issue    *model.Issue
 	Issues   map[int]*model.Issue
@@ -1216,6 +1218,9 @@ func IssueGraph(ctx context.Context, env Env, in IssueGraphInput) (IssueGraphRes
 		return IssueGraphResult{}, newError(fmt.Errorf("fetching issues: %w", err), output.ErrGeneral)
 	}
 	res.Issues[id] = issue
+	unreached := func(k int, _ []int) bool { return res.Issues[k] == nil }
+	maps.DeleteFunc(res.Forward, unreached)
+	maps.DeleteFunc(res.Backward, unreached)
 	return res, nil
 }
 

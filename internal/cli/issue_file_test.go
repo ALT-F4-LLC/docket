@@ -99,6 +99,22 @@ func TestIssueFileAddAndRemoveRecordTheRegistrationTheyMake(t *testing.T) {
 			testsupport.Must(t, err, "%s: %v", tc.verb, err)
 			requireOneRegistration(t, conn, before, tc.verb)
 		})
+
+		// The registration commits before the issue lookup, so a command
+		// that then fails still logs it.
+		t.Run(tc.verb+" of a missing issue", func(t *testing.T) {
+			conn := newTestDB(t)
+			tc.cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
+			withFreshAnchoredProject(t, conn, tc.cmd)
+			before := registeredEventCount(t, conn)
+
+			err := tc.cmd.RunE(tc.cmd, []string{"DKT-9999", "a.go"})
+			var cmdError *CmdError
+			if !errors.As(err, &cmdError) || cmdError.Code != output.ErrNotFound {
+				t.Fatalf("%s DKT-9999 returned %v, want NOT_FOUND", tc.verb, err)
+			}
+			requireOneRegistration(t, conn, before, tc.verb)
+		})
 	}
 
 	t.Run("issue file list", func(t *testing.T) {
