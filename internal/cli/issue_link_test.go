@@ -2,10 +2,13 @@ package cli
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -72,10 +75,42 @@ func TestIssueLinkRefusalsKeepTheirCodesAndText(t *testing.T) {
 		{linkListCmd, []string{"DKT-9999"}, "NOT_FOUND", "issue not found: DKT-9999"},
 	}
 	for _, tt := range tests {
-		ce := runRefusedJSON(t, conn, tt.cmd, tt.args...)
+		ce := runRefusedJSON(t, conn, nil, tt.cmd, tt.args...)
 		if string(ce.Code) != tt.code || ce.Error() != tt.msg {
 			t.Errorf("%s %v = %s %q, want %s %q", tt.cmd.Name(), tt.args, ce.Code, ce.Error(), tt.code, tt.msg)
 		}
+	}
+}
+
+// The link writes take their project from the invocation's identity: an
+// unanchored caller is refused and no relation changes.
+func TestIssueLinkWritesRefuseAnUnanchoredCaller(t *testing.T) {
+	conn, source := seedIssue(t)
+	targetID, err := db.CreateIssue(conn, &model.Issue{
+		Title: "link target", Status: model.StatusBacklog, Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue: %v", err)
+	target := model.FormatID(targetID)
+	_, err = db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "claiming the default project: %v", err)
+	runJSON(t, conn, linkAddCmd, source, "relates_to", target)
+	unanchored := &config.Config{Identity: "/work/scratch"}
+
+	for _, cmd := range []*cobra.Command{linkAddCmd, linkRemoveCmd} {
+		args := []string{source, "blocks", target}
+		if cmd == linkRemoveCmd {
+			args = []string{source, "relates_to", target}
+		}
+		ce := runRefusedJSON(t, conn, unanchored, cmd, args...)
+		if ce.Code != output.ErrValidation || !strings.HasPrefix(ce.Error(), "cannot tell which project this belongs to") {
+			t.Errorf("link %s %v from an unanchored caller = %s %q, want the project refusal",
+				cmd.Name(), args, ce.Code, ce.Error())
+		}
+	}
+	relations, err := db.GetIssueRelations(conn, targetID)
+	testsupport.Must(t, err, "GetIssueRelations: %v", err)
+	if len(relations) != 1 || relations[0].RelationType != model.RelationRelatesTo {
+		t.Errorf("relations after unanchored writes = %+v, want only the relates_to link", relations)
 	}
 }
 

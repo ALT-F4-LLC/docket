@@ -2165,17 +2165,23 @@ func TestIssueLabelAddAndRmEchoTheStoredLabelsAsTheAuthor(t *testing.T) {
 	if got := fmt.Sprint(labelNames(removed.Labels)); got != "[beta]" {
 		t.Errorf("removed Labels = %s, want [beta]", got)
 	}
+	requireLabelRemovedBy(t, st, id, "alpha", "label-author")
+}
+
+// requireLabelRemovedBy asserts the activity log attributes the removal of
+// label from issue id to author.
+func requireLabelRemovedBy(t *testing.T, st store.Store, id int, label, author string) {
+	t.Helper()
 	activity, err := st.GetActivity(id, 0)
 	if err != nil {
 		t.Fatalf("GetActivity: %v", err)
 	}
-	detached := false
 	for _, a := range activity {
-		detached = detached || (a.FieldChanged == "label_removed" && a.OldValue == "alpha" && a.ChangedBy == "label-author")
+		if a.FieldChanged == "label_removed" && a.OldValue == label && a.ChangedBy == author {
+			return
+		}
 	}
-	if !detached {
-		t.Errorf("activity %+v has no removal of alpha attributed to label-author", activity)
-	}
+	t.Errorf("activity %+v has no removal of %s attributed to %s", activity, label, author)
 }
 
 func TestIssueLabelVerbRefusals(t *testing.T) {
@@ -2194,6 +2200,12 @@ func TestIssueLabelVerbRefusals(t *testing.T) {
 	requireCode(t, err, output.ErrValidation)
 	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: "not-an-id", Labels: labels})
 	requireCode(t, err, output.ErrValidation)
+
+	// The issue is looked up before the label names are checked.
+	_, err = verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: "DKT-9999", Labels: []string{" "}})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
+	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: "DKT-9999", Labels: []string{""}})
+	requireVerbError(t, err, output.ErrNotFound, "issue DKT-9999 not found")
 
 	_, err = verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{Issue: ref, Labels: []string{"alpha", " "}})
 	requireVerbError(t, err, output.ErrValidation, "label name cannot be empty")
@@ -2215,6 +2227,30 @@ func TestIssueLabelVerbRefusals(t *testing.T) {
 	other := createIssue(t, st)
 	_, err = verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: model.FormatID(other), Labels: labels})
 	requireVerbError(t, err, output.ErrValidation, "label is not attached to "+model.FormatID(other))
+}
+
+// IssueLabelRm names an issue the label is not attached to under the issue's
+// project prefix, not the process-wide default one.
+func TestIssueLabelRmNamesAnUnattachedIssueUnderItsProjectsPrefix(t *testing.T) {
+	st := openStore(t)
+	// The first identity registered claims the default project's row.
+	ensureProject(t, st, "/repos/alpha", "alpha")
+	beta := ensureProject(t, st, "/repos/beta", "beta")
+	if err := st.SetProjectPrefix(beta, "BETA"); err != nil {
+		t.Fatalf("SetProjectPrefix: %v", err)
+	}
+	labeled := createExportIssue(t, st, beta, "labeled", model.StatusTodo, "")
+	other := createExportIssue(t, st, beta, "unlabeled", model.StatusTodo, "")
+	ctx := context.Background()
+	env := projectEnv(st, "/repos/beta", true)
+	if _, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{
+		Issue: model.FormatID(labeled), Labels: []string{"alpha"},
+	}); err != nil {
+		t.Fatalf("IssueLabelAdd: %v", err)
+	}
+
+	_, err := verb.IssueLabelRm(ctx, env, verb.IssueLabelRmInput{Issue: model.FormatID(other), Labels: []string{"alpha"}})
+	requireVerbError(t, err, output.ErrValidation, "label is not attached to "+model.FormatIDWithPrefix(other, "BETA"))
 }
 
 func TestIssueLabelListCountsTheIssuesOfTheCallersProject(t *testing.T) {
@@ -2251,6 +2287,7 @@ func TestIssueLabelDeleteRefusesALabelInUseWithoutForce(t *testing.T) {
 	id := createIssue(t, st)
 	ctx := context.Background()
 	env := projectEnv(st, "", false)
+	env.Author = "label-deleter"
 	if _, err := verb.IssueLabelAdd(ctx, env, verb.IssueLabelAddInput{
 		Issue: model.FormatID(id), Labels: []string{"alpha"},
 	}); err != nil {
@@ -2258,7 +2295,10 @@ func TestIssueLabelDeleteRefusesALabelInUseWithoutForce(t *testing.T) {
 	}
 
 	refused, err := verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha"})
-	requireVerbError(t, err, output.ErrValidation, `label "alpha" is attached to 1 issue(s)`)
+	requireVerbError(t, err, output.ErrValidation, `label "alpha" is attached to 1 issue(s): use --force to delete it`)
+	if !errors.Is(err, verb.ErrLabelInUse) {
+		t.Errorf("refusal %v does not wrap ErrLabelInUse", err)
+	}
 	if refused.Label == nil || refused.Label.Name != "alpha" || refused.Label.IssueCount != 1 {
 		t.Errorf("refused Label = %+v, want alpha on one issue", refused.Label)
 	}
@@ -2276,6 +2316,7 @@ func TestIssueLabelDeleteRefusesALabelInUseWithoutForce(t *testing.T) {
 	if got, _ := st.GetIssueLabelObjects(id); len(got) != 0 {
 		t.Errorf("issue still carries %v after the delete", labelNames(got))
 	}
+	requireLabelRemovedBy(t, st, id, "alpha", "label-deleter")
 
 	_, err = verb.IssueLabelDelete(ctx, env, verb.IssueLabelDeleteInput{Label: "alpha", Force: true})
 	requireVerbError(t, err, output.ErrNotFound, `label "alpha" not found`)
@@ -2387,6 +2428,22 @@ func TestIssueLinkVerbRefusals(t *testing.T) {
 	requireVerbError(t, err, output.ErrNotFound, "issue not found: DKT-9999")
 	_, err = verb.IssueLinkList(ctx, env, verb.IssueLinkListInput{Issue: "not-an-id"})
 	requireCode(t, err, output.ErrValidation)
+}
+
+// IssueLinkList names an id no project owns under the caller's project
+// prefix.
+func TestIssueLinkListNamesAMissingIssueUnderTheCallersPrefix(t *testing.T) {
+	st := openStore(t)
+	// The first identity registered claims the default project's row.
+	ensureProject(t, st, "/repos/alpha", "alpha")
+	beta := ensureProject(t, st, "/repos/beta", "beta")
+	if err := st.SetProjectPrefix(beta, "BETA"); err != nil {
+		t.Fatalf("SetProjectPrefix: %v", err)
+	}
+
+	_, err := verb.IssueLinkList(context.Background(), projectEnv(st, "/repos/beta", true),
+		verb.IssueLinkListInput{Issue: "DKT-9999"})
+	requireVerbError(t, err, output.ErrNotFound, "issue not found: BETA-9999")
 }
 
 // Attaching, detaching and deleting labels and adding and removing links

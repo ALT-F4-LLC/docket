@@ -1211,7 +1211,7 @@ type IssueLabelRmResult struct {
 // IssueLabelRm detaches labels from an issue as env.Author. It writes into
 // the caller's project, so it may register it.
 func IssueLabelRm(ctx context.Context, env Env, in IssueLabelRmInput) (IssueLabelRmResult, error) {
-	_, registered, err := resolveRegisteringProject(env, "issue label rm")
+	projectID, registered, err := resolveRegisteringProject(env, "issue label rm")
 	res := IssueLabelRmResult{Registered: registered}
 	if err != nil {
 		return res, err
@@ -1230,7 +1230,7 @@ func IssueLabelRm(ctx context.Context, env Env, in IssueLabelRmInput) (IssueLabe
 			return res, e
 		}
 		if errors.Is(err, store.ErrNotAttached) {
-			return res, newError(fmt.Errorf("label is not attached to %s", model.FormatID(id)), output.ErrValidation)
+			return res, newError(fmt.Errorf("label is not attached to %s", issueDisplayID(env, projectID, id)), output.ErrValidation)
 		}
 		return res, newError(fmt.Errorf("removing labels: %w", err), output.ErrGeneral)
 	}
@@ -1285,6 +1285,11 @@ type IssueLabelDeleteInput struct {
 	Force bool
 }
 
+// ErrLabelInUse is the refusal IssueLabelDelete wraps when the label is still
+// attached to issues and the input did not set Force. With
+// ErrLabelInUse the result's Label is set and nothing was deleted.
+var ErrLabelInUse = errors.New("use --force to delete it")
+
 // IssueLabelDeleteResult is the label the call looked up and how many issues
 // the delete detached it from. Label is set whenever the lookup succeeded,
 // including when the delete was refused for want of Force. Registered is as
@@ -1315,8 +1320,8 @@ func IssueLabelDelete(ctx context.Context, env Env, in IssueLabelDeleteInput) (I
 	res.Label = label
 
 	if !in.Force && label.IssueCount > 0 {
-		return res, newError(fmt.Errorf("label %q is attached to %d issue(s): use --force to delete it",
-			in.Label, label.IssueCount), output.ErrValidation)
+		return res, newError(fmt.Errorf("label %q is attached to %d issue(s): %w",
+			in.Label, label.IssueCount, ErrLabelInUse), output.ErrValidation)
 	}
 
 	affected, err := env.Store.DeleteLabel(label.ID, in.Label, env.Author)

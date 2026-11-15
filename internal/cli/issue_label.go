@@ -169,7 +169,8 @@ var labelDeleteCmd = &cobra.Command{
 		// Without --force the verb deletes nothing from a label still in use
 		// and returns the label with its refusal; only a real terminal may
 		// then confirm.
-		if label := res.Label; err != nil && !force && label != nil && label.IssueCount > 0 {
+		if errors.Is(err, verb.ErrLabelInUse) {
+			label := res.Label
 			if w.JSONMode {
 				return cmdErr(fmt.Errorf("cannot delete label %q without --force in JSON mode (attached to %d issue(s))", name, label.IssueCount), output.ErrValidation)
 			}
