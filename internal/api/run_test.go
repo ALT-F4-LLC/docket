@@ -71,6 +71,12 @@ func (f *stepFixture) runEvents(t *testing.T, target runTarget, kind string) int
 	return page.Total
 }
 
+// The bytes driftPin pins and the bytes it leaves on disk.
+var (
+	pinnedBytes = []byte("BEFORE\n")
+	diskBytes   = []byte("AFTER\n")
+)
+
 // driftPin pins ref on target at bytes other than the ones on disk under the
 // store's config root, so a repin has a change to authorize.
 func (f *stepFixture) driftPin(t *testing.T, target runTarget, ref string) {
@@ -79,15 +85,22 @@ func (f *stepFixture) driftPin(t *testing.T, target runTarget, ref string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("AFTER\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, diskBytes, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	f.pinFile(t, target, ref)
+}
+
+// pinFile pins ref on target at pinnedBytes without touching disk, so a ref
+// with no file under the config root reads as missing.
+func (f *stepFixture) pinFile(t *testing.T, target runTarget, ref string) {
+	t.Helper()
 	tx, err := f.st.Begin()
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
 	if err := tx.InsertPinTx(store.Pin{
-		RunID: target.runID, Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256([]byte("BEFORE\n")),
+		RunID: target.runID, Kind: store.PinKindFile, Ref: ref, SHA256: workflow.SHA256(pinnedBytes),
 	}); err != nil {
 		tx.Rollback()
 		t.Fatalf("InsertPinTx: %v", err)
@@ -95,6 +108,22 @@ func (f *stepFixture) driftPin(t *testing.T, target runTarget, ref string) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
+}
+
+// pinSHA returns the hash target's file pin on ref records, and whether the
+// run holds that pin at all.
+func (f *stepFixture) pinSHA(t *testing.T, target runTarget, ref string) (string, bool) {
+	t.Helper()
+	pins, err := f.st.ListPins(target.runID)
+	if err != nil {
+		t.Fatalf("ListPins(%s): %v", target.run, err)
+	}
+	for _, p := range pins {
+		if p.Kind == store.PinKindFile && p.Ref == ref {
+			return p.SHA256, true
+		}
+	}
+	return "", false
 }
 
 // runRulingRPCs are the conductor-token run RPCs whose request carries every
@@ -230,15 +259,19 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		issues = append(issues, model.FormatID(id))
 	}
 
-	budget := 12.5
+	budget, usage := 12.5, 4000.0
 	started, err := f.c.RunStart(ctx, connect.NewRequest(&docketv1.RunStartRequest{
-		Request: "serve the run noun", Issues: issues[:1], Budget: &budget,
+		Request: "serve the run noun", Issues: issues[:1], Budget: &budget, UsageBudget: &usage,
 	}))
 	requireServed(t, "RunStart", err)
 	run := started.Msg.GetRun().GetId()
 	if got := started.Msg.GetRun(); run == "" || got.GetStatus() != string(model.RunPlanning) ||
-		got.GetRequest() != "serve the run noun" || got.GetBudget() != budget {
-		t.Fatalf("RunStart run = %v, want a planning run with the request and budget sent", got)
+		got.GetRequest() != "serve the run noun" || got.GetBudget() != budget || got.GetUsageBudget() != usage {
+		t.Fatalf("RunStart run = %v, want a planning run with the request and both caps sent", got)
+	}
+	runID, err := model.ParseRunID(run)
+	if err != nil {
+		t.Fatalf("ParseRunID(%q): %v", run, err)
 	}
 
 	added, err := f.c.RunIssueAdd(ctx, connect.NewRequest(&docketv1.RunIssueAddRequest{Run: run, Issues: issues[1:]}))
@@ -252,16 +285,63 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		t.Errorf("RunIssueRemove issues = %v, want [%s]", got, issues[0])
 	}
 
-	activated, err := f.c.RunActivate(ctx, connect.NewRequest(&docketv1.RunActivateRequest{Run: run}))
+	// A dry run computes the activation and writes nothing.
+	spare, err := f.c.RunStart(ctx, connect.NewRequest(&docketv1.RunStartRequest{
+		Request: "dry-run subject", Issues: issues[1:],
+	}))
+	requireServed(t, "RunStart", err)
+	spareRun := spare.Msg.GetRun().GetId()
+	spareID, err := model.ParseRunID(spareRun)
+	if err != nil {
+		t.Fatalf("ParseRunID(%q): %v", spareRun, err)
+	}
+	_, err = f.c.RunActivate(ctx, connect.NewRequest(&docketv1.RunActivateRequest{Run: spareRun, DryRun: true}))
+	requireServed(t, "RunActivate dry run", err)
+	if row, err := f.st.GetRun(spareID); err != nil || row.Status != model.RunPlanning {
+		t.Errorf("after a dry-run RunActivate, %s = %+v, %v; want it still planning", spareRun, row, err)
+	}
+	if steps, err := f.st.ListRunSteps(spareID); err != nil || len(steps) != 0 {
+		t.Errorf("after a dry-run RunActivate, %s has steps %v, %v; want none", spareRun, steps, err)
+	}
+
+	pinPath := filepath.Join(t.TempDir(), "pinned.md")
+	if err := os.WriteFile(pinPath, []byte("pinned by path\n"), 0o600); err != nil {
+		t.Fatalf("writing the pin file: %v", err)
+	}
+	activated, err := f.c.RunActivate(ctx, connect.NewRequest(&docketv1.RunActivateRequest{Run: run, Pin: []string{pinPath}}))
 	requireServed(t, "RunActivate", err)
 	if got := activated.Msg; got.GetRun().GetStatus() != string(model.RunActive) || got.GetSteps() != 2 {
 		t.Errorf("RunActivate = %v, want %s active with its two steps", got, run)
 	}
+	if sha, ok := f.pinSHA(t, runTarget{run: run, runID: runID}, pinPath); !ok ||
+		sha != workflow.SHA256([]byte("pinned by path\n")) {
+		t.Errorf("RunActivate pinned %s at %q (held %v), want the file's hash", pinPath, sha, ok)
+	}
 
 	listed, err := f.c.RunStatus(ctx, connect.NewRequest(&docketv1.RunStatusRequest{}))
 	requireServed(t, "RunStatus list", err)
-	if items := listed.Msg.GetItems(); len(items) != 1 || items[0].GetId() != run || listed.Msg.GetTotal() != 1 {
-		t.Errorf("RunStatus list = %v, want the one active run %s", listed.Msg, run)
+	if got := listed.Msg; len(got.GetItems()) != 2 || got.GetTotal() != 2 || got.GetTruncated() {
+		t.Errorf("RunStatus list = %v, want the two live runs %s and %s", got, run, spareRun)
+	}
+	limited, err := f.c.RunStatus(ctx, connect.NewRequest(&docketv1.RunStatusRequest{Limit: 1}))
+	requireServed(t, "RunStatus limit", err)
+	if got := limited.Msg; len(got.GetItems()) != 1 || got.GetTotal() != 2 || !got.GetTruncated() {
+		t.Errorf("RunStatus limit 1 = %v, want one of two runs, truncated", got)
+	}
+	if _, err := verb.RunAbandon(ctx, verb.Env{Store: f.st}, verb.RunAbandonInput{
+		Run: spareRun, Reason: "only the dry run", Authority: engine.AuthorityOperator,
+	}); err != nil {
+		t.Fatalf("abandoning %s: %v", spareRun, err)
+	}
+	live, err := f.c.RunStatus(ctx, connect.NewRequest(&docketv1.RunStatusRequest{}))
+	requireServed(t, "RunStatus list", err)
+	if items := live.Msg.GetItems(); len(items) != 1 || items[0].GetId() != run || live.Msg.GetTotal() != 1 {
+		t.Errorf("RunStatus list = %v, want the one live run %s", live.Msg, run)
+	}
+	all, err := f.c.RunStatus(ctx, connect.NewRequest(&docketv1.RunStatusRequest{All: true}))
+	requireServed(t, "RunStatus all", err)
+	if got := all.Msg; len(got.GetItems()) != 2 || got.GetTotal() != 2 {
+		t.Errorf("RunStatus all = %v, want %s and the abandoned %s", got, run, spareRun)
 	}
 	status, err := f.c.RunStatus(ctx, connect.NewRequest(&docketv1.RunStatusRequest{Run: run}))
 	requireServed(t, "RunStatus", err)
@@ -271,8 +351,17 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 
 	read, err := f.c.RunBudget(ctx, connect.NewRequest(&docketv1.RunBudgetRequest{Run: run}))
 	requireServed(t, "RunBudget", err)
-	if got := read.Msg; got.GetRun() != run || got.GetBudget() != budget {
-		t.Errorf("RunBudget = %v, want %s capped at %g", got, run, budget)
+	if got := read.Msg; got.GetRun() != run || got.GetBudget() != budget || got.GetUsageBudget() != usage {
+		t.Errorf("RunBudget = %v, want %s capped at %g and %g", got, run, budget, usage)
+	}
+	raised := 20.0
+	set, err := f.c.RunBudget(ctx, connect.NewRequest(&docketv1.RunBudgetRequest{Run: run, Set: &raised, Reason: "more room"}))
+	requireServed(t, "RunBudget set", err)
+	if got := set.Msg.GetBudget(); got != raised {
+		t.Errorf("RunBudget set = %g, want %g", got, raised)
+	}
+	if row, err := f.st.GetRun(runID); err != nil || row.Budget != raised {
+		t.Errorf("after RunBudget set, %s = %+v, %v; want its cap stored as %g", run, row, err, raised)
 	}
 
 	notes, err := f.c.RunNoteList(ctx, connect.NewRequest(&docketv1.RunNoteListRequest{Run: run}))
@@ -299,6 +388,150 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		t.Errorf("RunConduct = %v, want a fresh capability on %s", got, run)
 	}
 
+	// The capability RunConduct answers with is the one the run now accepts,
+	// and the one it replaced is refused.
+	t.Run("RunConduct capability", func(t *testing.T) {
+		target := f.boundRunTarget(t)
+		conducted, err := f.c.RunConduct(ctx, connect.NewRequest(&docketv1.RunConductRequest{Run: target.run}))
+		requireServed(t, "RunConduct", err)
+		token := conducted.Msg.GetToken()
+		if token == "" || token == target.conductor {
+			t.Fatalf("RunConduct token = %q, want a capability other than the one it replaces", token)
+		}
+		addNote := func(token string) (*connect.Response[docketv1.RunNoteAddResponse], error) {
+			return f.c.RunNoteAdd(ctx, connect.NewRequest(&docketv1.RunNoteAddRequest{
+				Run: target.run, Authority: engine.AuthorityOperator, Text: "keep the scope narrow", Token: token,
+			}))
+		}
+		_, err = addNote(target.conductor)
+		requireRefusal(t, "RunNoteAdd with the replaced token", err, connect.CodePermissionDenied, output.ErrAuth)
+
+		added, err := addNote(token)
+		requireServed(t, "RunNoteAdd with the conducted token", err)
+		note := added.Msg.GetNote()
+		if note.GetText() != "keep the scope narrow" || note.GetAuthority() != engine.AuthorityOperator {
+			t.Errorf("RunNoteAdd note = %v, want the text and authority sent", note)
+		}
+		notes, err := f.c.RunNoteList(ctx, connect.NewRequest(&docketv1.RunNoteListRequest{Run: target.run}))
+		requireServed(t, "RunNoteList", err)
+		if items := notes.Msg.GetItems(); len(items) != 1 || notes.Msg.GetTotal() != 1 ||
+			items[0].GetText() != note.GetText() || items[0].GetAuthority() != note.GetAuthority() ||
+			items[0].GetOrdinal() != note.GetOrdinal() {
+			t.Errorf("RunNoteList = %v, want the one note %v", notes.Msg, note)
+		}
+	})
+
+	// An unsound pin set is refused with its report attached, so the caller
+	// still reads which pin drifted.
+	t.Run("RunVerifyPins drift", func(t *testing.T) {
+		target := f.boundRunTarget(t)
+		f.driftPin(t, target, "contracts/drifted.md")
+		_, err := f.c.RunVerifyPins(ctx, connect.NewRequest(&docketv1.RunVerifyPinsRequest{Run: target.run}))
+		requireRefusal(t, "RunVerifyPins on a drifted run", err, connect.CodeAborted, output.ErrConflict)
+		var connectErr *connect.Error
+		if !errors.As(err, &connectErr) || len(connectErr.Details()) != 2 {
+			t.Fatalf("RunVerifyPins refusal = %v, want the ErrorDetail and the report", err)
+		}
+		value, err := connectErr.Details()[1].Value()
+		if err != nil {
+			t.Fatalf("report detail: %v", err)
+		}
+		report, ok := value.(*docketv1.RunVerifyPinsResponse)
+		if !ok {
+			t.Fatalf("report detail is %T, want *docketv1.RunVerifyPinsResponse", value)
+		}
+		if report.GetRun() != target.run || report.GetClean() {
+			t.Errorf("report = %v, want %s not clean", report, target.run)
+		}
+		var drifted *docketv1.PinVerdict
+		for _, p := range report.GetPins() {
+			if p.GetPath() == "contracts/drifted.md" {
+				drifted = p
+			}
+		}
+		if drifted == nil || drifted.GetVerdict() != engine.PinChanged ||
+			drifted.GetPinnedSha256() != workflow.SHA256(pinnedBytes) ||
+			drifted.GetCurrentSha256() != workflow.SHA256(diskBytes) {
+			t.Errorf("drifted pin verdict = %v, want changed from the pinned to the disk bytes", drifted)
+		}
+	})
+
+	// Repin adopts a drifted pin's disk bytes and retires a pin whose ref no
+	// longer resolves, by name or as every unresolvable one.
+	t.Run("RunRepin dispositions", func(t *testing.T) {
+		target := f.boundRunTarget(t)
+		f.driftPin(t, target, "contracts/drifted.md")
+		f.pinFile(t, target, "contracts/gone.md")
+		repinned, err := f.c.RunRepin(ctx, connect.NewRequest(&docketv1.RunRepinRequest{
+			Run: target.run, Reason: "adopt and retire", Drop: []string{"contracts/gone.md"}, Token: target.conductor,
+		}))
+		requireServed(t, "RunRepin with a named drop", err)
+		got := repinned.Msg
+		if len(got.GetRepinned()) != 1 || got.GetRepinned()[0].GetPath() != "contracts/drifted.md" ||
+			got.GetRepinned()[0].GetPinnedSha256() != workflow.SHA256(pinnedBytes) ||
+			got.GetRepinned()[0].GetCurrentSha256() != workflow.SHA256(diskBytes) {
+			t.Errorf("RunRepin repinned = %v, want contracts/drifted.md moved to the disk bytes", got.GetRepinned())
+		}
+		if strings.Join(got.GetDropped(), ",") != "contracts/gone.md" {
+			t.Errorf("RunRepin dropped = %v, want [contracts/gone.md]", got.GetDropped())
+		}
+		if sha, ok := f.pinSHA(t, target, "contracts/drifted.md"); !ok || sha != workflow.SHA256(diskBytes) {
+			t.Errorf("after RunRepin, contracts/drifted.md is pinned at %q (held %v), want the disk bytes", sha, ok)
+		}
+		if _, ok := f.pinSHA(t, target, "contracts/gone.md"); ok {
+			t.Error("after RunRepin, contracts/gone.md is still pinned, want it retired")
+		}
+
+		other := f.boundRunTarget(t)
+		f.pinFile(t, other, "contracts/gone.md")
+		swept, err := f.c.RunRepin(ctx, connect.NewRequest(&docketv1.RunRepinRequest{
+			Run: other.run, Reason: "retire the unresolvable", DropUnresolvable: true, Token: other.conductor,
+		}))
+		requireServed(t, "RunRepin dropping the unresolvable", err)
+		if strings.Join(swept.Msg.GetDropped(), ",") != "contracts/gone.md" {
+			t.Errorf("RunRepin dropped = %v, want [contracts/gone.md]", swept.Msg.GetDropped())
+		}
+		if _, ok := f.pinSHA(t, other, "contracts/gone.md"); ok {
+			t.Error("after RunRepin, contracts/gone.md is still pinned, want it retired")
+		}
+	})
+
+	// RunFactAdd names the event it recorded as EventsList serves it.
+	t.Run("RunFactAdd event", func(t *testing.T) {
+		target := f.boundRunTarget(t)
+		steps, err := f.st.ListRunSteps(target.runID)
+		if err != nil || len(steps) == 0 {
+			t.Fatalf("ListRunSteps = %v, %v; want the run's steps", steps, err)
+		}
+		added, err := f.c.RunFactAdd(ctx, connect.NewRequest(&docketv1.RunFactAddRequest{
+			Run: target.run, Kind: engine.RunFactStepDeferred, Step: model.FormatStepID(steps[0].ID),
+			Cause: engine.DeferralChain, Reason: "behind its predecessor", Token: target.conductor,
+		}))
+		requireServed(t, "RunFactAdd", err)
+		fact := added.Msg.GetEvent()
+		listed, err := f.c.EventsList(ctx, connect.NewRequest(&docketv1.EventsListRequest{Run: target.run}))
+		requireServed(t, "EventsList", err)
+		var stored *docketv1.Event
+		for _, e := range listed.Msg.GetItems() {
+			if e.GetSeq() == fact.GetSeq() {
+				stored = e
+			}
+		}
+		if stored == nil {
+			t.Fatalf("EventsList holds no event at RunFactAdd's seq %d", fact.GetSeq())
+		}
+		if fact.GetKind() != stored.GetKind() || fact.GetRun() != stored.GetRun() {
+			t.Errorf("RunFactAdd event = %v, want the stored event %v", fact, stored)
+		}
+		// A slot RunFactAdd fills must hold what EventsList serves there.
+		if s := fact.GetStep(); s != "" && s != stored.GetStep() {
+			t.Errorf("RunFactAdd step = %q, want none or the stored step %q", s, stored.GetStep())
+		}
+		if p := fact.GetPayloadJson(); p != "" && p != stored.GetPayloadJson() {
+			t.Errorf("RunFactAdd payload_json = %s, want none or the stored payload %s", p, stored.GetPayloadJson())
+		}
+	})
+
 	// RunPause and RunAbandon reach the verb, which refuses each for the
 	// authority the request has no field for, even with the run's own token.
 	for _, rpc := range []struct {
@@ -323,9 +556,6 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 			before := f.runState(t, target)
 			err := rpc.call(target)
 			requireRefusal(t, rpc.name, err, connect.CodeInvalidArgument, output.ErrValidation)
-			if err != nil && !strings.Contains(err.Error(), "--authority is required") {
-				t.Errorf("%s refusal = %v, want the verb's missing-authority refusal", rpc.name, err)
-			}
 			if after := f.runState(t, target); after != before {
 				t.Errorf("%s changed the run %+v -> %+v", rpc.name, before, after)
 			}

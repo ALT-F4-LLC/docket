@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 
 	"connectrpc.com/connect"
 
@@ -185,19 +183,16 @@ func decodeRunFactAdd(req *docketv1.RunFactAddRequest) (verb.RunFactAddInput, er
 	}, nil
 }
 
-// encodeRunFactAdd carries the whole fact as the event's payload.
+// encodeRunFactAdd names the recorded event by seq, kind and run, and leaves
+// step and payload_json empty: the fact holds a step id and its own fields,
+// where the stored event holds the step's instance and the ruling's data.
+// EventsList serves the event itself at that seq.
 func encodeRunFactAdd(res verb.RunFactAddResult) *docketv1.RunFactAddResponse {
 	f := res.Fact
 	if f == nil {
 		return &docketv1.RunFactAddResponse{}
 	}
-	payload, err := json.Marshal(f)
-	if err != nil {
-		panic(fmt.Sprintf("encoding a run fact: %v", err))
-	}
-	return &docketv1.RunFactAddResponse{Event: &docketv1.Event{
-		Seq: f.Seq, Kind: f.Kind, Run: f.Run, Step: f.Step, PayloadJson: string(payload),
-	}}
+	return &docketv1.RunFactAddResponse{Event: &docketv1.Event{Seq: f.Seq, Kind: f.Kind, Run: f.Run}}
 }
 
 func decodeRunIssueAdd(req *docketv1.RunIssueAddRequest) (verb.RunIssueAddInput, error) {
@@ -370,6 +365,8 @@ func decodeRunResume(req *docketv1.RunResumeRequest) (verb.RunResumeInput, error
 	}, nil
 }
 
+// encodeRunResume carries the run row alone: the response has no slot for the
+// pin drift the verb read after the resume, which RunVerifyPins reports.
 func encodeRunResume(res verb.RunResumeResult) *docketv1.RunResumeResponse {
 	return &docketv1.RunResumeResponse{Run: runMessage(res.Run)}
 }
@@ -396,8 +393,10 @@ func decodeRunStatus(req *docketv1.RunStatusRequest) (verb.RunStatusInput, error
 }
 
 // encodeRunStatus answers one run's read as a one-item list carrying the
-// run's step counts. A list is truncated when it holds fewer runs than it
-// matched, which only a limit causes.
+// run's step counts. The Run message has no slot for the rest of the detail
+// (pins, pin drift, activation head, unexpanded issues, retry-eligible steps),
+// so a client reads drift from RunVerifyPins. A list is truncated when it
+// holds fewer runs than it matched, which only a limit causes.
 func encodeRunStatus(res verb.RunStatusResult) *docketv1.RunStatusResponse {
 	if d := res.Detail; d != nil {
 		run := runMessage(d.Run)
