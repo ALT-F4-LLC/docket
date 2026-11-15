@@ -60,6 +60,52 @@ func TestIssueLinkAddListAndRemoveAnswerAsBefore(t *testing.T) {
 	}
 }
 
+// Through the real root in human mode, link add, list and remove name each
+// issue under its own project's prefix, list shows both directions under a
+// Relations header, and an issue left with no relations says so and how to
+// add one.
+func TestIssueLinkCommandsReportInHumanModeThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	t.Setenv("NO_COLOR", "1")
+	// The root hook leaves the owner resolver on this test's store, where
+	// issues read as ABC; a later test must not inherit it.
+	t.Cleanup(func() {
+		model.SetDisplayPrefix("DKT")
+		model.SetIssueOwnerPrefixResolver(nil)
+	})
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	_, err = runRootVerb(t, projectSetPrefixCmd, "project", "set-prefix", "abc")
+	testsupport.Must(t, err, "docket project set-prefix: %v", err)
+	source := createThroughRoot(t, "--title", "link source")
+	target := createThroughRoot(t, "--title", "link target")
+	if !strings.HasPrefix(source, "ABC-") || !strings.HasPrefix(target, "ABC-") {
+		t.Fatalf("created ids = %q, %q; want them under the project's ABC prefix", source, target)
+	}
+	// The prefix the process renders by default must not supply the owner's.
+	model.SetDisplayPrefix("DKT")
+
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		args []string
+		want string
+	}{
+		{linkAddCmd, []string{"add", source, "blocks", target}, "Linked " + source + " blocks " + target + "\n"},
+		// The table ends in a newline and the writer adds its own.
+		{linkListCmd, []string{"list", source}, "Relations for " + source + ":\n  blocks " + target + "\n\n"},
+		{linkListCmd, []string{"list", target}, "Relations for " + target + ":\n  blocked_by " + source + "\n\n"},
+		{linkRemoveCmd, []string{"remove", source, "blocks", target}, "Unlinked " + source + " blocks " + target + "\n"},
+		{linkListCmd, []string{"list", source}, "No relations found for " + source + "\n" +
+			"Add one with: docket issue link add " + source + " <relation> <target>\n"},
+	} {
+		out, err := runRootVerb(t, tc.cmd, append([]string{"issue", "link"}, tc.args...)...)
+		testsupport.Must(t, err, "issue link %v: %v", tc.args, err)
+		if out != tc.want {
+			t.Errorf("issue link %v printed %q, want %q", tc.args, out, tc.want)
+		}
+	}
+}
+
 func TestIssueLinkRefusalsKeepTheirCodesAndText(t *testing.T) {
 	conn, source := seedIssue(t)
 

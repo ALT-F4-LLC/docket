@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -26,16 +25,6 @@ func runRefusedJSON(t *testing.T, conn *sql.DB, cfg *config.Config, sub *cobra.C
 		t.Fatalf("%s %v: err = %v (%T), want a *CmdError", sub.Name(), args, err, err)
 	}
 	return ce
-}
-
-// runHuman runs sub's RunE against conn in human mode and returns what it
-// printed.
-func runHuman(t *testing.T, conn *sql.DB, sub *cobra.Command, args ...string) (string, error) {
-	t.Helper()
-	sub.SetContext(context.WithValue(context.Background(), dbKey, conn))
-	restore := captureStdout(t)
-	err := sub.RunE(sub, args)
-	return restore(), err
 }
 
 // setForce sets labelDeleteCmd's --force for one test.
@@ -140,7 +129,7 @@ func TestIssueLabelCommandsReportInHumanMode(t *testing.T) {
 		{labelAddCmd, []string{ref, "alpha", "beta"}, "Added label(s) to " + ref + ": attach target"},
 		{labelRmCmd, []string{ref, "beta"}, "Removed label(s) from " + ref + ": attach target"},
 	} {
-		out, err := runHuman(t, conn, tc.cmd, tc.args...)
+		out, err := runVoteHuman(t, conn, tc.cmd, tc.args...)
 		testsupport.Must(t, err, "label %s %v: %v", tc.cmd.Name(), tc.args, err)
 		if !strings.Contains(out, tc.want) {
 			t.Errorf("label %s %v printed %q, want it to contain %q", tc.cmd.Name(), tc.args, out, tc.want)
@@ -148,7 +137,7 @@ func TestIssueLabelCommandsReportInHumanMode(t *testing.T) {
 	}
 
 	withStdin(t, "")
-	_, err = runHuman(t, conn, labelDeleteCmd, "alpha")
+	_, err = runVoteHuman(t, conn, labelDeleteCmd, "alpha")
 	var ce *CmdError
 	want := `non-interactive environment detected; label "alpha" is attached to 1 issue(s): use --force to skip confirmation`
 	if !asCmdError(err, &ce) || ce.Code != output.ErrValidation || ce.Error() != want {
@@ -159,7 +148,7 @@ func TestIssueLabelCommandsReportInHumanMode(t *testing.T) {
 	}
 
 	setForce(t)
-	out, err := runHuman(t, conn, labelDeleteCmd, "alpha")
+	out, err := runVoteHuman(t, conn, labelDeleteCmd, "alpha")
 	testsupport.Must(t, err, "label delete --force: %v", err)
 	if want := `Deleted label "alpha" (removed from 1 issue(s))`; !strings.Contains(out, want) {
 		t.Errorf("label delete --force printed %q, want it to contain %q", out, want)
