@@ -1716,22 +1716,56 @@ func runRepinnedEvents(t *testing.T, st store.Store, runID int) int {
 }
 
 // snapshotRefresh is one of the three run refresh verbs, reduced to what the
-// shared contract checks: the issue its outcome names and the steps it reached.
+// shared contract checks: the issue its outcome names, the steps it reached,
+// the snapshot it moved and the event it recorded.
 type snapshotRefresh struct {
 	name string
-	// amend changes what issue declares, so the refresh has something to copy.
+	// event is the kind the refresh records its reason and actor on.
+	event string
+	// amend changes what issue declares, so the refresh has something to copy;
+	// amended is the text of that change the moved snapshot must carry.
 	amend   func(t *testing.T, st store.Store, issue int)
-	refresh func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error)
+	amended string
+	// snapshot reads the run-issue column this refresh writes.
+	snapshot func(t *testing.T, st store.Store, runID, issue int) string
+	refresh  func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error)
+}
+
+// runIssueSnapshot reads the frozen issue snapshot the files and scope
+// refreshes rewrite.
+func runIssueSnapshot(t *testing.T, st store.Store, runID, issue int) string {
+	t.Helper()
+	snapshot, err := st.RunIssueSnapshot(runID, issue)
+	if err != nil {
+		t.Fatalf("RunIssueSnapshot: %v", err)
+	}
+	return snapshot
 }
 
 var snapshotRefreshes = []snapshotRefresh{
 	{
-		name: "refresh-body",
+		name:  "refresh-body",
+		event: engine.EventIssueBodyRefreshed,
 		amend: func(t *testing.T, st store.Store, issue int) {
 			t.Helper()
 			if err := st.UpdateIssueCAS(issue, map[string]interface{}{"description": "AC1: amended"}, "operator", nil); err != nil {
 				t.Fatalf("UpdateIssueCAS: %v", err)
 			}
+		},
+		amended: "AC1: amended",
+		snapshot: func(t *testing.T, st store.Store, runID, issue int) string {
+			t.Helper()
+			attached, err := st.ListRunIssues(runID)
+			if err != nil {
+				t.Fatalf("ListRunIssues: %v", err)
+			}
+			for _, ri := range attached {
+				if ri.IssueID == issue {
+					return ri.BodySnapshot
+				}
+			}
+			t.Fatalf("%s is not attached to the run", model.FormatID(issue))
+			return ""
 		},
 		refresh: func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error) {
 			res, err := verb.RunRefreshBody(context.Background(), env, verb.RunRefreshBodyInput{
@@ -1744,13 +1778,16 @@ var snapshotRefreshes = []snapshotRefresh{
 		},
 	},
 	{
-		name: "refresh-files",
+		name:  "refresh-files",
+		event: engine.EventIssueFilesRefreshed,
 		amend: func(t *testing.T, st store.Store, issue int) {
 			t.Helper()
 			if err := st.AttachFiles(issue, []string{"docs/attached.md"}, "operator"); err != nil {
 				t.Fatalf("AttachFiles: %v", err)
 			}
 		},
+		amended:  "docs/attached.md",
+		snapshot: runIssueSnapshot,
 		refresh: func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error) {
 			res, err := verb.RunRefreshFiles(context.Background(), env, verb.RunRefreshFilesInput{
 				Run: run, Issue: issue, Reason: reason, ConductorToken: token,
@@ -1762,13 +1799,16 @@ var snapshotRefreshes = []snapshotRefresh{
 		},
 	},
 	{
-		name: "refresh-scope",
+		name:  "refresh-scope",
+		event: engine.EventIssueScopeRefreshed,
 		amend: func(t *testing.T, st store.Store, issue int) {
 			t.Helper()
 			if err := st.SetIssueScopeGlobs(issue, `["a/**"]`); err != nil {
 				t.Fatalf("SetIssueScopeGlobs: %v", err)
 			}
 		},
+		amended:  "a/**",
+		snapshot: runIssueSnapshot,
 		refresh: func(env verb.Env, run, issue, reason string, token func() string) (string, []string, error) {
 			res, err := verb.RunRefreshScope(context.Background(), env, verb.RunRefreshScopeInput{
 				Run: run, Issue: issue, Reason: reason, ConductorToken: token,
@@ -1821,36 +1861,92 @@ func TestRunRefreshVerbsMoveOneIssuesSnapshotUnderTheCapability(t *testing.T) {
 			_, _, err = r.refresh(projectEnv(st, "", false), run, issue, "amended", tokenOf(token))
 			requireVerbCode(t, err, output.ErrGeneral, "refusing to record an unattributed run "+r.name)
 
-			got, steps, err := r.refresh(env, run, issue, "amended", tokenOf(token))
+			if before := r.snapshot(t, st, runID, issueID); strings.Contains(before, r.amended) {
+				t.Fatalf("the frozen snapshot %q already carries %q before the refresh", before, r.amended)
+			}
+			got, steps, err := r.refresh(env, run, issue, "the operator amended it", tokenOf(token))
 			if err != nil {
 				t.Fatalf("%s: %v", r.name, err)
 			}
 			if got != issue || len(steps) == 0 {
 				t.Errorf("outcome names %s reaching %v, want %s reaching its remaining steps", got, steps, issue)
 			}
+			if after := r.snapshot(t, st, runID, issueID); !strings.Contains(after, r.amended) {
+				t.Errorf("the refreshed snapshot %q does not carry %q", after, r.amended)
+			}
+			page, err := engine.ListEventsStore(st, engine.EventQuery{RunID: runID, Kind: r.event})
+			if err != nil || len(page.Events) != 1 {
+				t.Fatalf("ListEventsStore(%s) = %d events, %v; want the one refresh", r.event, len(page.Events), err)
+			}
+			var data struct{ Issue, Reason, Actor string }
+			if err := json.Unmarshal(page.Events[0].Data, &data); err != nil {
+				t.Fatalf("decoding the %s event: %v", r.event, err)
+			}
+			if data.Issue != issue || data.Reason != "the operator amended it" || data.Actor != "operator" {
+				t.Errorf("%s event = %+v, want issue %s, the caller's reason and actor operator", r.event, data, issue)
+			}
 		})
 	}
 }
 
 // Every refresh input check runs through Validate, so a transport whose
-// attribution fails can still report the request's own fault first.
+// attribution fails can still report the request's own fault first. The
+// --issue and --reason refusals are each command's own words, as the CLI
+// printed them before the move.
 func TestRunRefreshInputsValidateTheirReferences(t *testing.T) {
-	for name, validate := range map[string]func(run, issue, reason string) error{
-		"refresh-body": func(run, issue, reason string) error {
-			return verb.RunRefreshBodyInput{Run: run, Issue: issue, Reason: reason}.Validate()
+	for _, tc := range []struct {
+		name                          string
+		validate                      func(run, issue, reason string) error
+		issueRequired, reasonRequired string
+	}{
+		{
+			name: "refresh-body",
+			validate: func(run, issue, reason string) error {
+				return verb.RunRefreshBodyInput{Run: run, Issue: issue, Reason: reason}.Validate()
+			},
+			issueRequired: "--issue is required: the body snapshot is frozen per issue, so a refresh " +
+				"names the one issue whose remaining steps should render the amended description",
+			reasonRequired: "--reason is required to refresh a snapshotted body; the event trail must " +
+				"say why a live run's packets changed what they ask for",
 		},
-		"refresh-files": func(run, issue, reason string) error {
-			return verb.RunRefreshFilesInput{Run: run, Issue: issue, Reason: reason}.Validate()
+		{
+			name: "refresh-files",
+			validate: func(run, issue, reason string) error {
+				return verb.RunRefreshFilesInput{Run: run, Issue: issue, Reason: reason}.Validate()
+			},
+			issueRequired: "--issue is required: the attachment list is frozen per issue, so a refresh " +
+				"names the one issue whose remaining steps should render the live list",
+			reasonRequired: "--reason is required to refresh a snapshotted attachment list; the event " +
+				"trail must say why a live run's packets changed which files they carry",
 		},
-		"refresh-scope": func(run, issue, reason string) error {
-			return verb.RunRefreshScopeInput{Run: run, Issue: issue, Reason: reason}.Validate()
+		{
+			name: "refresh-scope",
+			validate: func(run, issue, reason string) error {
+				return verb.RunRefreshScopeInput{Run: run, Issue: issue, Reason: reason}.Validate()
+			},
+			issueRequired: "--issue is required: the snapshot is frozen per issue, so a refresh names " +
+				"the one issue whose remaining steps should render the widened scope",
+			reasonRequired: "--reason is required to refresh a snapshotted scope; the event trail must " +
+				"say why a live run's packets changed what they declare",
 		},
 	} {
-		requireVerbCode(t, validate("RUN-x", "DKT-1", "r"), output.ErrValidation, `invalid run ID "RUN-x"`)
-		requireVerbCode(t, validate("RUN-1", "", "r"), output.ErrValidation, "--issue is required")
-		requireVerbCode(t, validate("RUN-1", "DKT-1", ""), output.ErrValidation, "--reason is required")
-		if err := validate("RUN-1", "DKT-1", "r"); err != nil {
-			t.Errorf("%s: Validate of a well-formed request = %v, want nil", name, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			requireVerbCode(t, tc.validate("RUN-x", "DKT-1", "r"), output.ErrValidation, `invalid run ID "RUN-x"`)
+			for _, refusal := range []struct {
+				err  error
+				want string
+			}{
+				{tc.validate("RUN-1", "", "r"), tc.issueRequired},
+				{tc.validate("RUN-1", "DKT-1", ""), tc.reasonRequired},
+			} {
+				requireCode(t, refusal.err, output.ErrValidation)
+				if refusal.err.Error() != refusal.want {
+					t.Errorf("refusal = %q, want %q", refusal.err, refusal.want)
+				}
+			}
+			if err := tc.validate("RUN-1", "DKT-1", "r"); err != nil {
+				t.Errorf("Validate of a well-formed request = %v, want nil", err)
+			}
+		})
 	}
 }
