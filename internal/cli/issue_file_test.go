@@ -76,6 +76,72 @@ func TestIssueFileListRendersTheAttachedFiles(t *testing.T) {
 	}
 }
 
+// TestIssueFileAddAndRemoveRecordTheRegistrationTheyMake: the root hook skips
+// these commands, so a project they register on first contact gets its
+// project-registered event from the command itself. Listing registers nothing.
+func TestIssueFileAddAndRemoveRecordTheRegistrationTheyMake(t *testing.T) {
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		verb string
+	}{
+		{fileAddCmd, "issue file add"},
+		{fileRemoveCmd, "issue file remove"},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			conn, id := seedIssue(t)
+			tc.cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
+			withFreshAnchoredProject(t, conn, tc.cmd)
+			before := registeredEventCount(t, conn)
+
+			restore := captureStdout(t)
+			err := tc.cmd.RunE(tc.cmd, []string{id, "a.go"})
+			restore()
+			testsupport.Must(t, err, "%s: %v", tc.verb, err)
+			requireOneRegistration(t, conn, before, tc.verb)
+		})
+	}
+
+	t.Run("issue file list", func(t *testing.T) {
+		conn, id := seedIssue(t)
+		fileListCmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
+		withFreshAnchoredProject(t, conn, fileListCmd)
+		projectsBefore, eventsBefore := projectCount(t, conn), registeredEventCount(t, conn)
+
+		restore := captureStdout(t)
+		err := fileListCmd.RunE(fileListCmd, []string{id})
+		restore()
+		testsupport.Must(t, err, "issue file list: %v", err)
+		if got := projectCount(t, conn); got != projectsBefore {
+			t.Errorf("issue file list created %d project row(s)", got-projectsBefore)
+		}
+		if got := registeredEventCount(t, conn); got != eventsBefore {
+			t.Errorf("issue file list logged %d project-registered event(s)", got-eventsBefore)
+		}
+	})
+}
+
+// TestIssueFileAddAndRemoveAnnounceTheIssue pins the human success lines.
+func TestIssueFileAddAndRemoveAnnounceTheIssue(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	conn, id := seedIssue(t)
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		want string
+	}{
+		{fileAddCmd, "Added file(s) to " + id + ": attach target\n"},
+		{fileRemoveCmd, "Removed file(s) from " + id + ": attach target\n"},
+	} {
+		tc.cmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
+		restore := captureStdout(t)
+		err := tc.cmd.RunE(tc.cmd, []string{id, "a.go"})
+		got := restore()
+		testsupport.Must(t, err, "issue file %s: %v", tc.cmd.Name(), err)
+		if got != tc.want {
+			t.Errorf("issue file %s printed %q, want %q", tc.cmd.Name(), got, tc.want)
+		}
+	}
+}
+
 // TestIssueFileCommandsOfAMissingIssueAreNotFound names the missing issue.
 func TestIssueFileCommandsOfAMissingIssueAreNotFound(t *testing.T) {
 	conn := newTestDB(t)

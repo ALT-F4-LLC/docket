@@ -39,21 +39,25 @@ func graphChain(t *testing.T) (conn *sql.DB, blocker, focal, blocked int) {
 	return conn, blocker, focal, blocked
 }
 
+// setGraphFlag sets one of graphCmd's flags for the rest of t.
+func setGraphFlag(t *testing.T, name, value string) {
+	t.Helper()
+	testsupport.Must(t, graphCmd.Flags().Set(name, value), "set --%s", name)
+	t.Cleanup(func() {
+		f := graphCmd.Flags().Lookup(name)
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	})
+}
+
 // runIssueGraphHuman runs the graph command in human mode with the given
-// flags and returns what it printed.
+// flags, which stay set for the rest of t, and returns what it printed.
 func runIssueGraphHuman(t *testing.T, conn *sql.DB, flags map[string]string, args ...string) string {
 	t.Helper()
 	t.Setenv("NO_COLOR", "1")
 	for name, value := range flags {
-		testsupport.Must(t, graphCmd.Flags().Set(name, value), "set --%s", name)
+		setGraphFlag(t, name, value)
 	}
-	defer func() {
-		for name := range flags {
-			f := graphCmd.Flags().Lookup(name)
-			_ = f.Value.Set(f.DefValue)
-			f.Changed = false
-		}
-	}()
 	graphCmd.SetContext(context.WithValue(context.Background(), dbKey, conn))
 	var out bytes.Buffer
 	err := runIssueGraph(graphCmd, args, &output.Writer{Stdout: &out, Stderr: &out})
@@ -101,30 +105,28 @@ func TestIssueGraphRendersThePlainTreeAndMermaid(t *testing.T) {
 	conn, blocker, focal, blocked := graphChain(t)
 	b, f, d := model.FormatID(blocker), model.FormatID(focal), model.FormatID(blocked)
 
-	tree := runIssueGraphHuman(t, conn, nil, f)
-	wantTree := "* " + f + " [todo] focal\n" +
-		"  Blocked by\n" +
-		"    " + b + " [todo] blocker\n" +
-		"  Blocks\n" +
-		"    " + d + " [backlog] blocked\n\n"
-	if tree != wantTree {
-		t.Errorf("tree =\n%q\nwant\n%q", tree, wantTree)
-	}
-
-	down := runIssueGraphHuman(t, conn, map[string]string{"direction": "down"}, f)
-	wantDown := "* " + f + " [todo] focal\n" +
-		"  Blocks\n" +
-		"    " + d + " [backlog] blocked\n\n"
-	if down != wantDown {
-		t.Errorf("down tree =\n%q\nwant\n%q", down, wantDown)
-	}
-
-	mermaid := runIssueGraphHuman(t, conn, map[string]string{"mermaid": "true"}, f)
-	wantMermaid := "graph TD\n" +
-		"    " + f + `["` + f + `: focal"] --> ` + d + `["` + d + `: blocked"]` + "\n" +
-		"    " + b + `["` + b + `: blocker"] --> ` + f + `["` + f + `: focal"]` + "\n\n"
-	if mermaid != wantMermaid {
-		t.Errorf("mermaid =\n%q\nwant\n%q", mermaid, wantMermaid)
+	for _, tc := range []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"tree", nil, "* " + f + " [todo] focal\n" +
+			"  Blocked by\n" +
+			"    " + b + " [todo] blocker\n" +
+			"  Blocks\n" +
+			"    " + d + " [backlog] blocked\n\n"},
+		{"down tree", map[string]string{"direction": "down"}, "* " + f + " [todo] focal\n" +
+			"  Blocks\n" +
+			"    " + d + " [backlog] blocked\n\n"},
+		{"mermaid", map[string]string{"mermaid": "true"}, "graph TD\n" +
+			"    " + f + `["` + f + `: focal"] --> ` + d + `["` + d + `: blocked"]` + "\n" +
+			"    " + b + `["` + b + `: blocker"] --> ` + f + `["` + f + `: focal"]` + "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runIssueGraphHuman(t, conn, tc.flags, f); got != tc.want {
+				t.Errorf("%s =\n%q\nwant\n%q", tc.name, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -142,18 +144,15 @@ func TestIssueGraphRefusals(t *testing.T) {
 			`invalid direction "sideways": must be one of [up, down, both]`},
 		{"depth", "-1", model.FormatID(focal), output.ErrValidation, "depth must be non-negative"},
 	} {
-		if tc.flag != "" {
-			testsupport.Must(t, graphCmd.Flags().Set(tc.flag, tc.value), "set --%s", tc.flag)
-		}
-		_, err := runLeaseCommandOutput(t, conn, nil, graphCmd, tc.issue)
-		var cmdError *CmdError
-		if !errors.As(err, &cmdError) || cmdError.Code != tc.code || cmdError.Error() != tc.msg {
-			t.Errorf("issue graph %s --%s=%s returned %v, want %s %q", tc.issue, tc.flag, tc.value, err, tc.code, tc.msg)
-		}
-		if tc.flag != "" {
-			f := graphCmd.Flags().Lookup(tc.flag)
-			_ = f.Value.Set(f.DefValue)
-			f.Changed = false
-		}
+		t.Run(tc.msg, func(t *testing.T) {
+			if tc.flag != "" {
+				setGraphFlag(t, tc.flag, tc.value)
+			}
+			_, err := runLeaseCommandOutput(t, conn, nil, graphCmd, tc.issue)
+			var cmdError *CmdError
+			if !errors.As(err, &cmdError) || cmdError.Code != tc.code || cmdError.Error() != tc.msg {
+				t.Errorf("issue graph %s --%s=%s returned %v, want %s %q", tc.issue, tc.flag, tc.value, err, tc.code, tc.msg)
+			}
+		})
 	}
 }

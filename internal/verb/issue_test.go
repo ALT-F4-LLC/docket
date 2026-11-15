@@ -1879,6 +1879,18 @@ func TestIssueFileAddAndRemoveEchoTheStoredFilesAsTheAuthor(t *testing.T) {
 	if len(removed.Files) != 1 || removed.Files[0] != "b/two.go" {
 		t.Errorf("removed Files = %v, want [b/two.go]", removed.Files)
 	}
+	activity, err := st.GetActivity(id, 0)
+	if err != nil {
+		t.Fatalf("GetActivity: %v", err)
+	}
+	detached := false
+	for _, a := range activity {
+		detached = detached || (a.FieldChanged == "files" && a.OldValue == "a/one.go" &&
+			a.NewValue == "" && a.ChangedBy == "file-author")
+	}
+	if !detached {
+		t.Errorf("activity %+v has no removal of a/one.go attributed to file-author", activity)
+	}
 
 	listed, err := verb.IssueFileList(ctx, env, verb.IssueFileListInput{Issue: ref})
 	if err != nil {
@@ -1928,6 +1940,12 @@ func TestIssueFileVerbsDeclareTheirProjectPolicy(t *testing.T) {
 	if files, _ := st.GetIssueFiles(id); len(files) != 0 {
 		t.Errorf("issue has files %v after unanchored adds, want none", files)
 	}
+
+	// The project refusal comes before the issue lookup.
+	_, err = verb.IssueFileAdd(ctx, unanchored, verb.IssueFileAddInput{Issue: "DKT-9999", Paths: paths})
+	requireCode(t, err, output.ErrValidation)
+	_, err = verb.IssueFileRemove(ctx, unanchored, verb.IssueFileRemoveInput{Issue: "DKT-9999", Paths: paths})
+	requireCode(t, err, output.ErrValidation)
 
 	if _, err := verb.IssueFileList(ctx, projectEnv(st, "/repos/reader", true),
 		verb.IssueFileListInput{Issue: ref}); err != nil {
@@ -2017,6 +2035,61 @@ func TestIssueGraphWalksTheRequestedDirectionToTheDepth(t *testing.T) {
 		}
 	}
 	requireUnregistered(t, st, "/repos/reader")
+}
+
+// A diamond (focal blocks left and right; both block join) reaches join by
+// two paths: the walk keeps both edges into it in either direction, and a
+// depth that stops short of join leaves it and its edges out.
+func TestIssueGraphKeepsEveryEdgeIntoAConvergingIssue(t *testing.T) {
+	st := openStore(t)
+	focal, left, right, join := createIssue(t, st), createIssue(t, st), createIssue(t, st), createIssue(t, st)
+	blocks(t, st, focal, left)
+	blocks(t, st, focal, right)
+	blocks(t, st, left, join)
+	blocks(t, st, right, join)
+	ctx := context.Background()
+	env := projectEnv(st, "/repos/reader", true)
+	all := []verb.IssueGraphEdge{
+		{From: focal, To: left, Type: "blocks"}, {From: focal, To: right, Type: "blocks"},
+		{From: left, To: join, Type: "blocks"}, {From: right, To: join, Type: "blocks"},
+	}
+
+	for _, tc := range []struct {
+		start, direction string
+		depth            int
+		nodes            []int
+		edges            []verb.IssueGraphEdge
+	}{
+		{model.FormatID(focal), "down", 0, []int{focal, left, right, join}, all},
+		{model.FormatID(focal), "down", 2, []int{focal, left, right, join}, all},
+		{model.FormatID(join), "up", 0, []int{focal, left, right, join}, all},
+		{model.FormatID(focal), "down", 1, []int{focal, left, right}, all[:2]},
+		{model.FormatID(join), "up", 1, []int{left, right, join}, all[2:]},
+	} {
+		res, err := verb.IssueGraph(ctx, env, verb.IssueGraphInput{Issue: tc.start, Direction: tc.direction, Depth: tc.depth})
+		if err != nil {
+			t.Fatalf("IssueGraph(%s, %s, %d): %v", tc.start, tc.direction, tc.depth, err)
+		}
+		if len(res.Issues) != len(tc.nodes) {
+			t.Errorf("IssueGraph(%s, %s, %d) reached %d issues, want %v", tc.start, tc.direction, tc.depth, len(res.Issues), tc.nodes)
+		}
+		for _, n := range tc.nodes {
+			if res.Issues[n] == nil {
+				t.Errorf("IssueGraph(%s, %s, %d) did not reach issue %d", tc.start, tc.direction, tc.depth, n)
+			}
+		}
+		got := map[verb.IssueGraphEdge]int{}
+		for _, e := range res.Edges {
+			got[e]++
+		}
+		want := map[verb.IssueGraphEdge]int{}
+		for _, e := range tc.edges {
+			want[e]++
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("IssueGraph(%s, %s, %d) edges = %v, want each of %v once", tc.start, tc.direction, tc.depth, res.Edges, tc.edges)
+		}
+	}
 }
 
 func TestIssueGraphRefusals(t *testing.T) {
