@@ -1110,7 +1110,7 @@ func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
 // `dispatch abandon` — the destructive one — guess too.
 func dispatchRunID(cmd *cobra.Command) (int, error) {
 	ref, _ := cmd.Flags().GetString("run")
-	return parseRunFlag(ref)
+	return fromVerb(verb.ParseRunRef(ref))
 }
 
 // ackSeqs parses the repeatable `--ack-reap SEQ` flag.

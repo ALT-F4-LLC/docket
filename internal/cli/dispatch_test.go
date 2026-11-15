@@ -20,6 +20,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -640,7 +641,7 @@ func TestDispatchCommandsRecordTheProjectsTheyRegister(t *testing.T) {
 	err = runDispatchClose(withAnchoredIdentity(dispatchCloseCmdWithDB(conn, ref), "/repos/dispatch-close"), w)
 	testsupport.Must(t, err, "dispatch close: %v", err)
 
-	runID, _ := parseRunFlag(ref)
+	runID, _ := verb.ParseRunRef(ref)
 	seatConductor(t, conn, runID)
 	backfill := withAnchoredIdentity(backfillCmdWithDB(conn, ref), "/repos/dispatch-backfill")
 	testsupport.Must(t, backfill.Flags().Set("step", model.FormatStepID(pendingStepID(t, conn, runID))),

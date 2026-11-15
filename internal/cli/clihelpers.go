@@ -54,18 +54,6 @@ func watchable(cmd *cobra.Command, args []string, run func(*cobra.Command, []str
 	return run(cmd, args, getWriter(cmd))
 }
 
-// issueArg parses an issue ID out of a command-line source (an args[]
-// element or a flag value) and wraps a parse failure in the VALIDATION_ERROR
-// every call site returns today.
-//
-// The source is passed as a string rather than an index or flag name because
-// call sites disagree on where the ID comes from — args[0], args[2], or a
-// --issue flag — and a single parameter that already holds the raw text
-// covers all three without the helper needing to know which.
-func issueArg(source string) (int, error) {
-	return fromVerb(verb.ParseIssueRef(source))
-}
-
 // fromVerb carries a verb call's result across to the CLI, re-coding a
 // *verb.Error as the *CmdError Execute renders.
 func fromVerb[T any](v T, err error) (T, error) {
@@ -87,8 +75,8 @@ func verbErr(err error) error {
 // caller's existing fallback (typically a generic ErrGeneral wrap) still
 // applies unchanged.
 //
-// It mirrors leaseError and casError's shape (token.go, ifversion.go),
-// including their (err, label) parameter order: a dispatcher that returns a
+// It mirrors verb.LeaseError and verb.CASError's shape, including their
+// (err, label) parameter order: a dispatcher that returns a
 // *CmdError on the conditions it recognizes and nil otherwise, so a call
 // site reads as
 //
@@ -161,16 +149,6 @@ func resolveParentIssue(conn store.LegacyDB, ref string, childProjectID int) (*m
 			projectLabel(conn, childProjectID)), output.ErrValidation)
 	}
 	return parent, nil
-}
-
-// parseRunFlag parses a --run reference already read from a flag, wrapping a
-// malformed reference in the VALIDATION_ERROR every --run parser reports.
-// It holds the one piece of logic dispatchRunID, optionalRunFlag, and
-// requiredRunFlag shared byte-for-byte; each keeps its own handling of an
-// EMPTY ref (required vs. optional vs. falling through to ParseRunID's own
-// error), which is what actually differs between the three.
-func parseRunFlag(ref string) (int, error) {
-	return fromVerb(verb.ParseRunRef(ref))
 }
 
 // hydrateIssueAssociations fills an issue's labels, files, and docs from their

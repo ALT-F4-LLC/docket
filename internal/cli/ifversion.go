@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -59,11 +58,4 @@ func idempotencyKeyOf(cmd *cobra.Command) (string, error) {
 		)
 	}
 	return key, nil
-}
-
-// casError maps a CAS failure to its CLI error code: a version mismatch is
-// CONFLICT (exit 4) and a missing row NOT_FOUND (exit 2). It returns nil for
-// any other error, which the caller wraps itself.
-func casError(err error, label string) error {
-	return verbErr(verb.CASError(err, label))
 }

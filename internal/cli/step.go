@@ -45,11 +45,11 @@ Read verbs here compute effective status and WRITE NOTHING. Only ` + "`next`" + 
 // stepErr maps an engine or lease failure to its CLI error code.
 //
 // It composes the two existing mappings rather than restating either:
-// leaseError owns the issue lease refusal matrix (reused verbatim at step
+// verb.LeaseError owns the issue lease refusal matrix (reused verbatim at step
 // level), and runErr owns the engine taxonomy. A third mapping here is exactly
 // how the step matrix would drift from the issue one.
 func stepErr(err error, label string) error {
-	if e := leaseError(err, label); e != nil {
+	if e := verbErr(verb.LeaseError(err, label)); e != nil {
 		return e
 	}
 	if errors.Is(err, store.ErrStepNotFound) {

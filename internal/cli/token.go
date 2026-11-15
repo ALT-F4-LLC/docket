@@ -8,7 +8,6 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
-	"github.com/ALT-F4-LLC/docket/internal/verb"
 )
 
 // TokenEnvVar is the environment variable carrying a capability token.
@@ -107,11 +106,4 @@ func errMissingToken() error {
 		),
 		output.ErrValidation,
 	)
-}
-
-// leaseError maps a lease refusal, or a missing row, to its CLI error code per
-// the lease refusal matrix, and returns nil for any other error, which the
-// caller wraps itself.
-func leaseError(err error, label string) error {
-	return verbErr(verb.LeaseError(err, label))
 }
