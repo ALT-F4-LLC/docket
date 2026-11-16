@@ -56,23 +56,28 @@ type RoutingLintReport struct {
 	Label string `json:"label"`
 	// LexiconTerms is the number of configured lexicon terms.
 	LexiconTerms int `json:"lexicon_terms"`
-	// LabelledIssues is the number of bound issues carrying the label whose
-	// scope the overlap check can compare (a glob with a literal prefix): the
-	// only issues an overlap can be found against.
+	// LabelledIssues is the number of bound issues carrying the label that the
+	// overlap check can compare: those that attach at least one file or whose
+	// scope holds a glob with a literal prefix. Only these can be overlapped.
 	LabelledIssues int `json:"labelled_issues"`
 	// Linted is the number of bound issues without the label that were checked.
 	Linted int `json:"linted"`
-	// Unscoped is the number of linted issues whose scope held no glob with a
-	// literal prefix, so the overlap check could not apply to them.
+	// Unscoped is the number of linted issues that attach no file and whose
+	// scope holds no glob with a literal prefix, so the overlap check could not
+	// apply to them.
 	Unscoped int `json:"unscoped"`
+	// ComparablePairs is the number of (labelled, linted) issue pairs the
+	// overlap check actually compared: both attach files, or both scopes hold a
+	// glob with a literal prefix. Two comparable issues need not form a
+	// comparable pair, as when one compares only by files and the other only by
+	// a glob.
+	ComparablePairs int `json:"comparable_pairs"`
 }
 
-// CheckedNothing reports a lint that was off, or had no lexicon and nothing to
-// compare scopes against (no comparable labelled issue, or no linted issue with a
-// comparable scope): its empty result carries no information.
+// CheckedNothing reports a lint that was off, or had no lexicon and compared no
+// labelled/linted pair: its empty result carries no information.
 func (r RoutingLintReport) CheckedNothing() bool {
-	return r.Label == "" ||
-		(r.LexiconTerms == 0 && (r.LabelledIssues == 0 || r.Unscoped == r.Linted))
+	return r.Label == "" || (r.LexiconTerms == 0 && r.ComparablePairs == 0)
 }
 
 // RoutingWarning is one bound issue the lint flagged.
@@ -136,7 +141,7 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 
 	report := RoutingLintReport{Label: label.Value, LexiconTerms: len(terms)}
 	for _, issue := range issues {
-		if issue.security && hasLiteralPrefixGlob(issue.scope) {
+		if issue.security && issue.comparable() {
 			report.LabelledIssues++
 		}
 	}
@@ -147,12 +152,19 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 			continue
 		}
 		report.Linted++
-		if !hasLiteralPrefixGlob(issue.scope) {
+		if !issue.comparable() {
 			report.Unscoped++
 		}
 		var overlaps, found []string
 		for _, other := range issues {
-			if other.security && scopesOverlap(issue.declaredPaths, other.declaredPaths) {
+			if !other.security {
+				continue
+			}
+			overlap, compared := scopesOverlap(issue.declaredPaths, other.declaredPaths)
+			if compared {
+				report.ComparablePairs++
+			}
+			if overlap {
 				overlaps = append(overlaps, model.FormatID(other.id))
 			}
 		}
@@ -242,21 +254,31 @@ type declaredPaths struct {
 	files []string
 }
 
-// scopesOverlap reports whether a and b declare a common path. When both list
-// files, only a shared file counts: two globs that intersect over files
-// neither issue edits are no signal. When either lists none, it falls back to
-// whether any glob of a shares paths with any glob of b, by the engine's own
-// conservative test (globsIntersect). A glob with no literal prefix (`**`,
-// `**/x.go`) intersects everything, which makes it no signal here, so it is
-// skipped.
-func scopesOverlap(a, b declaredPaths) bool {
+// comparable reports whether the overlap check can compare p against some
+// other issue: it attaches a file or has a glob with a literal prefix.
+func (p declaredPaths) comparable() bool {
+	return len(p.files) > 0 || hasLiteralPrefixGlob(p.scope)
+}
+
+// scopesOverlap reports whether a and b declare a common path, and whether it
+// could compare them at all. When both list files, only a shared file counts:
+// two globs that intersect over files neither issue edits are no signal. When
+// either lists none, it falls back to whether any glob of a shares paths with
+// any glob of b, by the engine's own conservative test (globsIntersect). A glob
+// with no literal prefix (`**`, `**/x.go`) intersects everything, which makes
+// it no signal here, so it is skipped; a side left with no glob to compare
+// makes the pair uncompared.
+func scopesOverlap(a, b declaredPaths) (overlap, compared bool) {
 	if len(a.files) > 0 && len(b.files) > 0 {
 		for _, f := range a.files {
 			if slices.Contains(b.files, f) {
-				return true
+				return true, true
 			}
 		}
-		return false
+		return false, true
+	}
+	if !hasLiteralPrefixGlob(a.scope) || !hasLiteralPrefixGlob(b.scope) {
+		return false, false
 	}
 	for _, ga := range a.scope {
 		if literalPrefix(ga) == "" {
@@ -264,9 +286,9 @@ func scopesOverlap(a, b declaredPaths) bool {
 		}
 		for _, gb := range b.scope {
 			if literalPrefix(gb) != "" && globsIntersect(ga, gb) {
-				return true
+				return true, true
 			}
 		}
 	}
-	return false
+	return false, true
 }
