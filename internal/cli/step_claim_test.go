@@ -323,6 +323,8 @@ func TestStepClaimTakesNoSecretOnArgv(t *testing.T) {
 	for _, line := range strings.Split(local, "\n") {
 		for _, field := range strings.Fields(line) {
 			if name, ok := strings.CutPrefix(field, "--"); ok {
+				// pflag >= 1.1 renders a boolean as --name[=true|false].
+				name, _, _ = strings.Cut(name, "[")
 				listed = append(listed, name)
 				break
 			}
