@@ -488,14 +488,25 @@ func isScratchShapedPath(path string) bool {
 	return slices.Contains(strings.Split(path, string(filepath.Separator)), "scratchpad")
 }
 
-// checkDoctorStragglers is check 7: detached worktrees homed under a
-// scratch-shaped path — left behind by a session that never cleaned up after
-// itself (a crash, a killed process). A pre-gate reconstruction worktree
-// (pregate_scratch.go, os.MkdirTemp under os.TempDir with a docket-pregate-
-// prefix) is caught here too, but only when os.TempDir itself is
-// scratch-shaped (e.g. a session whose TMPDIR sits under /tmp/claude-); the
-// default macOS /var/folders/... temp root is not, so a pregate worktree left
-// there goes unreported by this check.
+// checkDoctorStragglers is check 7: scratch trees left behind by a session
+// or claim that never cleaned up after itself (a crash, a killed process).
+// It finds them two ways.
+//
+// REGISTERED: detached worktrees in `git worktree list` homed under a
+// scratch-shaped path. This catches a session's own leftover worktree, and a
+// pre-gate tree an earlier binary made with `git worktree add` when
+// os.TempDir itself is scratch-shaped.
+//
+// RECORDED: the pre-gate and resume scratch trees this binary makes
+// (pregate_scratch.go) are in no git registry. recordedScratchTrees finds
+// them through their sidecars, whose record names this repository's object
+// store. These skip isScratchShapedPath: the record and the ownership checks
+// are the proof of origin, and the temp root they live in (macOS
+// /var/folders/...) is not scratch-shaped. They are listed whether or not
+// their claim is alive, because telling the two apart means taking the
+// sidecar's flock, and doctor takes no locks; a live claim's tree shows here
+// for the length of its measurement. Only this process's os.TempDir() is
+// read, so a tree made under a different TMPDIR is not seen.
 //
 // AC3: THIS IS A REPORT, NEVER A VERDICT that blocks — it reads OK or WARN
 // only, never FAIL, and doctorDisposition excludes it from `clean` on top of
@@ -531,14 +542,29 @@ func checkDoctorStragglers(cwd string) DoctorCheck {
 		}
 	}
 	flush()
+	recorded := recordedScratchTrees(cwd)
 
-	if len(strays) == 0 {
+	tmp := os.TempDir()
+
+	if len(strays) == 0 && len(recorded) == 0 {
 		return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorOK,
-			Detail: "no detached worktrees under a scratch path"}
+			Detail: "no detached worktrees under a scratch path and no recorded scratch trees in " + tmp}
 	}
-	sort.Strings(strays)
-	return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorWarn, Detail: fmt.Sprintf(
-		"%d detached worktree(s) under a scratch path (report only): %v", len(strays), strays)}
+	var parts []string
+	if len(strays) > 0 {
+		sort.Strings(strays)
+		parts = append(parts, fmt.Sprintf(
+			"%d detached worktree(s) under a scratch path: %v", len(strays), strays))
+	}
+	if len(recorded) > 0 {
+		sort.Strings(recorded)
+		parts = append(parts, fmt.Sprintf(
+			"%d recorded scratch tree(s) in %s, which may include a live claim's; "+
+				"the next dispatch open or close removes the dead ones: %v",
+			len(recorded), tmp, recorded))
+	}
+	return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorWarn,
+		Detail: strings.Join(parts, "; ") + " (report only)"}
 }
 
 // doctorCanonicalPath resolves symlinks best-effort, mirroring

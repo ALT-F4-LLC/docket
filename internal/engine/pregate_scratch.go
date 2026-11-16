@@ -528,9 +528,9 @@ func removeScratchTree(dir string) bool {
 // Best-effort throughout. A removal that fails leaves the tree, with its
 // sidecar, for the next sweep; nothing here can fail the dispatch, because
 // housekeeping must not stand between an operator and a manifest. Doctor's
-// straggler check reads git's worktree list and so reports only the
-// registered kind: a tree of the recorded kind that will not delete is
-// visible through recordedScratchTrees and to nothing else yet.
+// straggler check reports both kinds: the registered kind from git's
+// worktree list, and the recorded kind, including one that will not delete,
+// through recordedScratchTrees.
 //
 // Legacy caches are swept first and independently of execRoot; see
 // sweepLegacyPreGateCaches. They are not part of the returned list, which
@@ -664,8 +664,8 @@ func ownedScratchDir(path string) (owned, absent bool) {
 
 // recordedScratchTrees lists the scratch trees whose sidecar names execRoot's
 // repository, whether or not their claim is alive. It takes no lock and
-// removes nothing. Tests are its only caller today; it is the read a report
-// of standing trees would use.
+// removes nothing. Doctor's straggler check (checkDoctorStragglers) uses it
+// to report standing trees.
 func recordedScratchTrees(execRoot string) []string {
 	source, ok := scratchSourceOf(execRoot)
 	if !ok {
