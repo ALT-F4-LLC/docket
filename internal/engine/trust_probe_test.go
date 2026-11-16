@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,8 +17,8 @@ import (
 )
 
 // probeRepo builds a throwaway repository with one commit, the same fixture
-// gitdiff_test.go's gitRepo builds, so `git rev-parse HEAD` and `git worktree
-// add` have a real object database to work against.
+// gitdiff_test.go's gitRepo builds, so `git rev-parse HEAD` and the probe's
+// checkout have a real object database to work against.
 func probeRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -57,7 +58,8 @@ func probeTempDir(t *testing.T) string {
 }
 
 // assertNoProbeLeftovers fails when anything the probe created in tmp, the
-// worktree or its cache root, survived ProbeTrust's return.
+// tree, its git directory, its cache root or its sidecar, survived
+// ProbeTrust's return.
 func assertNoProbeLeftovers(t *testing.T, tmp string) {
 	t.Helper()
 	left, err := os.ReadDir(tmp)
@@ -591,4 +593,108 @@ func TestProbeTrustSurvivesPinnedSymlinkFlip(t *testing.T) {
 	if result.Passed {
 		t.Error("a refused pinned entry must fail the probe")
 	}
+}
+
+// TestTrustProbeWritesNothingToTheGitDir: with the repository's worktrees/
+// directory not writable, ProbeTrust still runs its entries in a tree where
+// `git rev-parse HEAD` equals the probed commit, adds no entry under the git
+// directory's worktrees/, and removes the tree afterwards.
+//
+// The gate counts worktrees/ WHILE the probe runs, as well as the test
+// asserting the probe's success, so the test does not pass vacuously for a
+// user the mode bits do not stop: a probe that registered a worktree would
+// succeed as root, and its release would remove the entry before any
+// assertion after ProbeTrust could see it. The listings taken afterwards
+// catch anything left behind.
+func TestTrustProbeWritesNothingToTheGitDir(t *testing.T) {
+	repo := probeRepo(t)
+	tmp := probeTempDir(t)
+	head := gitRun(t, repo, "rev-parse", "HEAD")
+
+	worktrees := filepath.Join(repo, ".git", "worktrees")
+	testsupport.Must(t, os.Mkdir(worktrees, 0o555), "making worktrees/ read-only")
+	t.Cleanup(func() { _ = os.Chmod(worktrees, 0o755) })
+	before := gitDirListing(t, repo)
+
+	// The gate records where it ran, what HEAD it saw and how many entries
+	// worktrees/ held meanwhile, outside the temp directory the probe's
+	// leftovers are counted in.
+	seen := filepath.Join(t.TempDir(), "seen")
+	entries := []trust.Entry{{Name: "head", Argv: []string{"sh", "-c",
+		`{ pwd; git rev-parse HEAD; ls -A "$1" | wc -l; } > "$0"`, seen, worktrees}}}
+
+	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
+	testsupport.Must(t, err, "ProbeTrust with worktrees/ not writable: %v", err)
+	if !result.Passed {
+		t.Fatalf("the probe's entry failed: %+v", result.Gates)
+	}
+
+	raw, err := os.ReadFile(seen)
+	testsupport.Must(t, err, "reading what the gate saw: %v", err)
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("the gate wrote %q, want its directory, HEAD and the worktrees/ count", raw)
+	}
+	if n := strings.TrimSpace(lines[2]); n != "0" {
+		t.Errorf("worktrees/ held %s entries while the probe ran, want 0", n)
+	}
+	if lines[1] != head {
+		t.Errorf("git rev-parse HEAD in the probe tree = %s, want the probed commit %s", lines[1], head)
+	}
+	if lines[0] == repo || !strings.HasPrefix(lines[0], tmp) {
+		t.Errorf("the gate ran in %s, want a throwaway tree under %s", lines[0], tmp)
+	}
+
+	got, err := os.ReadDir(worktrees)
+	testsupport.Must(t, err, "reading worktrees/: %v", err)
+	if len(got) != 0 {
+		t.Errorf("the probe added %d entries under the git directory's worktrees/", len(got))
+	}
+	if after := gitDirListing(t, repo); !slices.Equal(before, after) {
+		t.Errorf("the probe changed the repository's git directory:\nbefore %v\nafter  %v", before, after)
+	}
+	if _, err := os.Lstat(lines[0]); !os.IsNotExist(err) {
+		t.Errorf("the probe tree %s survived ProbeTrust's return (lstat: %v)", lines[0], err)
+	}
+	assertNoProbeLeftovers(t, tmp)
+}
+
+// TestTrustProbeCheckoutFailureLeavesNothing: a commit the repository does
+// not hold is refused with an error, and everything made for the tree before
+// the checkout failed is removed.
+func TestTrustProbeCheckoutFailureLeavesNothing(t *testing.T) {
+	repo := probeRepo(t)
+	tmp := probeTempDir(t)
+
+	if _, err := probeWorktree(repo, strings.Repeat("1", 40)); err == nil {
+		t.Fatal("probeWorktree checked out a commit the repository does not hold")
+	}
+	assertNoProbeLeftovers(t, tmp)
+}
+
+// TestTrustProbeTreeIsSweptOnlyOnceItsLockIsGone: the pre-gate sweep leaves a
+// probe tree alone while the probe holds it, and removes it, sidecar and all,
+// once the holder is gone, as it would after a killed probe.
+func TestTrustProbeTreeIsSweptOnlyOnceItsLockIsGone(t *testing.T) {
+	repo := probeRepo(t)
+	tmp := probeTempDir(t)
+	head := gitRun(t, repo, "rev-parse", "HEAD")
+
+	h, err := probeWorktree(repo, head)
+	testsupport.Must(t, err, "probeWorktree: %v", err)
+	t.Cleanup(h.release)
+
+	if swept := sweepStalePreGateScratch(repo); len(swept) != 0 {
+		t.Fatalf("the sweep removed %v while the probe held its tree", swept)
+	}
+	if _, err := os.Stat(h.Dir); err != nil {
+		t.Fatalf("the held probe tree is gone after a sweep: %v", err)
+	}
+
+	// Closing the lock file is what the kernel does for a killed probe.
+	h.tree.lock.Close()
+	if swept := sweepStalePreGateScratch(repo); !slices.Equal(swept, []string{h.Dir}) {
+		t.Errorf("the sweep removed %v, want the abandoned probe tree %s", swept, h.Dir)
+	}
+	assertNoProbeLeftovers(t, tmp)
 }

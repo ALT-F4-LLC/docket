@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -69,7 +70,7 @@ type TrustProbeResult struct {
 var ErrEmptyTrustRoster = errors.New("the trust roster has nothing to probe")
 
 // ProbeTrust runs every non-action entry of `entries` once, in one throwaway
-// detached worktree of clean HEAD, and reports one row per gate.
+// checkout of clean HEAD (probeWorktree), and reports one row per gate.
 //
 // isAction classifies a roster entry BY NAME (DKT-1283 AC2/AC5) — built from
 // ActionNames() by the caller so this function stays testable without a
@@ -79,7 +80,7 @@ var ErrEmptyTrustRoster = errors.New("the trust roster has nothing to probe")
 // step's own worktree — only the working DIRECTORY moves to the throwaway
 // checkout.
 //
-// THE WORKTREE IS REMOVED UNCONDITIONALLY (AC4): on a normal return, on any
+// THE CHECKOUT IS REMOVED UNCONDITIONALLY (AC4): on a normal return, on any
 // error, and when ctx is canceled — a caller that wires ctx to
 // signal.NotifyContext gets removal on SIGINT/SIGTERM too, because a canceled
 // context makes this function return rather than killing the process out from
@@ -122,7 +123,7 @@ func ProbeTrust(
 
 	worktree, err := probeWorktree(repoRoot, head)
 	if err != nil {
-		return nil, fmt.Errorf("preparing a throwaway worktree of %s: %w", head, err)
+		return nil, fmt.Errorf("preparing a throwaway checkout of %s: %w", head, err)
 	}
 	defer worktree.release()
 
@@ -146,7 +147,7 @@ func ProbeTrust(
 	return result, nil
 }
 
-// runProbeGate runs one roster entry's own argv in the throwaway worktree,
+// runProbeGate runs one roster entry's own argv in the throwaway checkout,
 // through the SAME spawn primitive gate_exec.go's spawnMatched uses, so a
 // probed gate runs exactly as it would at record time: resolved argv, the
 // allowlisted environment, the entry's own timeout and process-group kill.
@@ -158,12 +159,12 @@ func ProbeTrust(
 // deliberately NOT gateBaseSHA's: that resolver leaves the var unset for a
 // shared-checkout step because a live HEAD is not a range endpoint docket can
 // vouch for as THAT STEP's base. The probe is the one case where HEAD is
-// exactly right — the throwaway worktree sits at the probed sha, nothing has
+// exactly right — the throwaway checkout sits at the probed sha, nothing has
 // been committed on top of it, and an empty footprint is the answer a healthy
 // gate should give. A later refactor must not unify the two.
 //
-// The linter caches go to the worktree's own cache root for the reason
-// exec.EnvPolicy.CacheRoot documents: the worktree is deleted when the probe
+// The linter caches go to the checkout's own cache root for the reason
+// exec.EnvPolicy.CacheRoot documents: the checkout is deleted when the probe
 // returns, so a cache entry naming its paths must be deleted with it.
 func runProbeGate(repoRoot string, worktree probeWorktreeHandle, base string, e trust.Entry) TrustProbeGate {
 	row := TrustProbeGate{Name: e.Name, Stub: e.Stub}
@@ -273,68 +274,84 @@ func probeHead(repoRoot string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// probeWorktreeHandle is the throwaway detached checkout ProbeTrust measures
-// every gate in.
+// probeWorktreeHandle is the throwaway checkout ProbeTrust measures every
+// gate in.
 type probeWorktreeHandle struct {
 	Dir string
 	// Cache is the linter cache root that lives exactly as long as Dir. It is
-	// a sibling of the worktree, never inside it, so the cache stays out of
-	// the tree the gates measure (scratchTree.Cache holds the same rule).
-	Cache  string
-	parent string
+	// a sibling of the tree, never inside it, so the cache stays out of the
+	// tree the gates measure (scratchTree.Cache holds the same rule).
+	Cache string
+	// tree owns the sidecar's flock. It is kept here, not copied out, so the
+	// lock file stays reachable for as long as the handle is: a dropped
+	// *os.File is closed by its finalizer, and a sweep that then takes the
+	// flock would delete a tree the probe is still measuring.
+	tree scratchTree
 }
 
-// probeWorktree is probe's analog of pregate_scratch.go's reconstructTarget:
-// a fresh, detached `git worktree add` of one sha, made to be thrown away.
-// Unlike reconstructTarget it RETURNS AN ERROR on failure — a pre-gate
-// falls back to `skipped` because a step's own tree not being reconstructible
-// is an ordinary gap, but `trust probe` has nothing else to report and no
-// step to park, so a checkout it cannot build is refused rather than silently
-// reported as zero gates run.
+// probeWorktree checks sha out into a throwaway repository of its own that
+// borrows repoRoot's objects, the checkout pregate_scratch.go makes for
+// pre-gates (see that file's comment for the layout and what the tree does
+// not share). Nothing is written to the repository's git directory, so the
+// probe runs where the repository's worktrees/ directory is read-only.
+//
+// The steps and their failure paths are reconstructTarget's, in its order:
+// name reserved, sidecar locked and recorded, git directory and cache made,
+// then the checkout. The tree takes a scratchPrefix name and a sidecar on
+// purpose: sweepStalePreGateScratch finds a tree left by a killed probe and
+// removes it once the flock is free, and leaves a tree the probe still holds.
+// A drift from reconstructTarget's order breaks the sweep's ownership proof.
+//
+// sha must be a full commit id; probeHead's is. Unlike reconstructTarget this
+// RETURNS AN ERROR naming the failed stage: a pre-gate falls back to
+// `skipped`, but `trust probe` has nothing else to report and no step to
+// park, so a checkout it cannot build is refused rather than reported as zero
+// gates run.
+//
+// WHO CAN WRITE THE TREE'S GIT CONFIG. Every roster argv runs in this tree,
+// and the tree's git directory (config, info/attributes, HEAD, index) sits in
+// the temp directory, mode 0700. A process of this user that can write the
+// temp directory can plant a filter there that the gate commands' own git
+// calls run while the probe stands. After the checkout the probe runs no git
+// command in the tree; the checkout's own `read-tree` is the one engine git
+// call such a filter can reach. The operator accepted this exposure for
+// pre-gate and gate-resume trees (DKT-4626) and extended it to the probe
+// (DKT-4627). The tree's files sat in the temp directory before this change
+// too, and every gate runs scripts from them.
 func probeWorktree(repoRoot, sha string) (probeWorktreeHandle, error) {
-	dir, err := os.MkdirTemp("", "docket-trust-probe-")
+	source, ok := scratchSourceOf(repoRoot)
+	if !ok {
+		return probeWorktreeHandle{}, errors.New("reading the repository's object store and object format")
+	}
+	dir, err := os.MkdirTemp("", scratchPrefix)
 	if err != nil {
-		return probeWorktreeHandle{}, err
+		return probeWorktreeHandle{}, fmt.Errorf("reserving the tree's name: %w", err)
 	}
-	// MkdirTemp creates the directory; `git worktree add` requires it not to.
-	// Removing it and handing git the path keeps the name reserved for the
-	// length of one syscall (pregate_scratch.go's same trick).
-	if err := os.Remove(dir); err != nil {
-		return probeWorktreeHandle{}, err
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
 	}
-
-	cmd := gitCommand(gitDirArgs(repoRoot, "worktree", "add", "--detach", dir, sha)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		os.RemoveAll(dir)
-		return probeWorktreeHandle{}, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	lock, err := holdScratchLock(dir, source.objects)
+	if err != nil {
+		_ = os.Remove(dir)
+		return probeWorktreeHandle{}, fmt.Errorf("taking the tree's sidecar lock: %w", err)
 	}
-
-	handle := probeWorktreeHandle{Dir: dir, parent: repoRoot}
-	cache := dir + "-cache"
-	if err := os.Mkdir(cache, 0o700); err != nil {
-		handle.release()
-		return probeWorktreeHandle{}, fmt.Errorf("creating the linter cache root: %w", err)
+	if !reserveScratchSiblings(dir) {
+		_ = os.Remove(dir)
+		_ = os.Remove(scratchLockPath(dir))
+		lock.Close()
+		return probeWorktreeHandle{}, fmt.Errorf("making the git directory and cache root beside %s", dir)
 	}
-	handle.Cache = cache
-	return handle, nil
+	tree := scratchTree{Dir: dir, Cache: scratchCachePath(dir), lock: lock}
+	if !checkoutScratch(dir, source, sha) {
+		tree.release()
+		return probeWorktreeHandle{}, fmt.Errorf("checking the commit out into %s", dir)
+	}
+	return probeWorktreeHandle{Dir: dir, Cache: tree.Cache, tree: tree}, nil
 }
 
-// release removes the worktree and its administrative record, in both
-// directions and unconditionally (AC4) — `pregate_scratch.go`'s release does
-// the identical two-step for the identical reason: `os.RemoveAll` alone
-// leaves a stale `.git/worktrees` entry `git worktree list` reports forever,
-// and `git worktree remove` alone can decline over a gate's stray output
-// file, which `--force` covers. The cache root goes with it, so no linter
-// cache entry naming the deleted worktree outlives the probe.
+// release removes the tree, its git directory and its cache root, then the
+// sidecar, unconditionally (AC4), through scratchTree.release. A part that
+// will not delete keeps its sidecar, and the pre-gate sweep retries it.
 func (h probeWorktreeHandle) release() {
-	if h.Cache != "" {
-		_ = os.RemoveAll(h.Cache)
-	}
-	if h.Dir == "" {
-		return
-	}
-	if h.parent != "" {
-		_ = gitCommand(gitDirArgs(h.parent, "worktree", "remove", "--force", h.Dir)...).Run()
-	}
-	_ = os.RemoveAll(h.Dir)
+	h.tree.release()
 }
