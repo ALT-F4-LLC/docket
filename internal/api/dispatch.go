@@ -189,8 +189,7 @@ func decodeDispatchOpen(req *docketv1.DispatchOpenRequest) (verb.DispatchOpenInp
 	return verb.DispatchOpenInput{Run: req.GetRun(), Limit: int(req.GetLimit()), AckReap: req.GetAckReap()}, nil
 }
 
-// encodeDispatchOpen names each drifted pin by its ref, which every pin
-// kind carries, and each stale target by its step instance.
+// encodeDispatchOpen names each stale target by its step instance.
 func encodeDispatchOpen(res verb.DispatchOpenResult) *docketv1.DispatchOpenResponse {
 	m := res.Manifest
 	if m == nil {
@@ -198,9 +197,7 @@ func encodeDispatchOpen(res verb.DispatchOpenResult) *docketv1.DispatchOpenRespo
 	}
 	msg := &docketv1.DispatchOpenResponse{Manifest: manifestMessage(m.Dispatch, m.Run, manifestOpen, m.Rows)}
 	for _, p := range m.PinDrift {
-		msg.PinDrift = append(msg.PinDrift, &docketv1.PinVerdict{
-			Path: p.Ref, PinnedSha256: p.Pinned, CurrentSha256: p.Found, Verdict: p.Status,
-		})
+		msg.PinDrift = append(msg.PinDrift, pinVerdictMessage(p))
 	}
 	for _, st := range m.StaleTargets {
 		msg.StaleTargets = append(msg.StaleTargets, st.Instance)

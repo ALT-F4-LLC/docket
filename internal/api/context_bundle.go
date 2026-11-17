@@ -76,12 +76,7 @@ func ContextBundle(c *engine.Context) (*docketv1.StepContextBundle, error) {
 		bundle.ResolutionRecord = &docketv1.ContextResolution{Routing: c.Resolution.Routing, Note: c.Resolution.Note}
 	}
 	for _, note := range c.Notes {
-		bundle.Notes = append(bundle.Notes, &docketv1.RunNote{
-			Ordinal:     int32(note.ID),
-			Authority:   note.Authority,
-			Text:        note.Text,
-			CreatedAtMs: note.RecordedAtMS,
-		})
+		bundle.Notes = append(bundle.Notes, runNoteMessage(note))
 	}
 	return bundle, nil
 }

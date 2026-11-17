@@ -6,6 +6,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
 )
@@ -225,9 +226,7 @@ func encodeRunNoteAdd(res verb.RunNoteAddResult) *docketv1.RunNoteAddResponse {
 	if n == nil {
 		return &docketv1.RunNoteAddResponse{}
 	}
-	return &docketv1.RunNoteAddResponse{Note: &docketv1.RunNote{
-		Ordinal: int32(n.ID), Authority: n.Authority, Text: n.Text, CreatedAtMs: n.RecordedAtMS,
-	}}
+	return &docketv1.RunNoteAddResponse{Note: runNoteMessage(*n)}
 }
 
 func decodeRunNoteList(req *docketv1.RunNoteListRequest) (verb.RunNoteListInput, error) {
@@ -237,9 +236,7 @@ func decodeRunNoteList(req *docketv1.RunNoteListRequest) (verb.RunNoteListInput,
 func encodeRunNoteList(res verb.RunNoteListResult) *docketv1.RunNoteListResponse {
 	items := make([]*docketv1.RunNote, 0, len(res.Notes))
 	for _, n := range res.Notes {
-		items = append(items, &docketv1.RunNote{
-			Ordinal: int32(n.ID), Authority: n.Authority, Text: n.Text, CreatedAtMs: n.RecordedAtMS,
-		})
+		items = append(items, runNoteMessage(n))
 	}
 	return &docketv1.RunNoteListResponse{Items: items, Total: int32(len(items))}
 }
@@ -425,14 +422,25 @@ func encodeRunVerifyPins(res verb.RunVerifyPinsResult) *docketv1.RunVerifyPinsRe
 	if r == nil {
 		return &docketv1.RunVerifyPinsResponse{}
 	}
-	// A pin is named by its ref, which every pin kind carries.
 	msg := &docketv1.RunVerifyPinsResponse{Run: r.Run, Clean: r.Sound()}
 	for _, p := range r.Pins {
-		msg.Pins = append(msg.Pins, &docketv1.PinVerdict{
-			Path: p.Ref, PinnedSha256: p.Pinned, CurrentSha256: p.Found, Verdict: p.Status,
-		})
+		msg.Pins = append(msg.Pins, pinVerdictMessage(p))
 	}
 	return msg
+}
+
+// pinVerdictMessage is a checked pin on the wire. It names the pin by its
+// ref, which every pin kind carries.
+func pinVerdictMessage(p engine.PinVerdict) *docketv1.PinVerdict {
+	return &docketv1.PinVerdict{
+		Path: p.Ref, PinnedSha256: p.Pinned, CurrentSha256: p.Found, Verdict: p.Status,
+	}
+}
+
+func runNoteMessage(n engine.RunNote) *docketv1.RunNote {
+	return &docketv1.RunNote{
+		Ordinal: int32(n.ID), Authority: n.Authority, Text: n.Text, CreatedAtMs: n.RecordedAtMS,
+	}
 }
 
 // runMessage is a run row on the wire, nil for no run. It carries no issues
