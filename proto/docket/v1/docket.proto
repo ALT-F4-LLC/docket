@@ -1394,6 +1394,9 @@ message RunActivateResponse {
   Run run = 1;
   repeated PinVerdict pins = 2;
   int32 steps = 3;
+  // token is the conductor capability a run's first activation mints, sent
+  // once; a re-activation or a dry run answers it empty.
+  string token = 4;
 }
 
 message RunBudgetRequest {

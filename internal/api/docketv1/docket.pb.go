@@ -11394,10 +11394,13 @@ func (x *RunActivateRequest) GetReason() string {
 }
 
 type RunActivateResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Run           *Run                   `protobuf:"bytes,1,opt,name=run,proto3" json:"run,omitempty"`
-	Pins          []*PinVerdict          `protobuf:"bytes,2,rep,name=pins,proto3" json:"pins,omitempty"`
-	Steps         int32                  `protobuf:"varint,3,opt,name=steps,proto3" json:"steps,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Run   *Run                   `protobuf:"bytes,1,opt,name=run,proto3" json:"run,omitempty"`
+	Pins  []*PinVerdict          `protobuf:"bytes,2,rep,name=pins,proto3" json:"pins,omitempty"`
+	Steps int32                  `protobuf:"varint,3,opt,name=steps,proto3" json:"steps,omitempty"`
+	// token is the conductor capability a run's first activation mints, sent
+	// once; a re-activation or a dry run answers it empty.
+	Token         string `protobuf:"bytes,4,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11451,6 +11454,13 @@ func (x *RunActivateResponse) GetSteps() int32 {
 		return x.Steps
 	}
 	return 0
+}
+
+func (x *RunActivateResponse) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
 }
 
 type RunBudgetRequest struct {
@@ -18752,11 +18762,12 @@ const file_docket_v1_docket_proto_rawDesc = "" +
 	"\x03run\x18\x01 \x01(\tR\x03run\x12\x17\n" +
 	"\adry_run\x18\x02 \x01(\bR\x06dryRun\x12\x10\n" +
 	"\x03pin\x18\x03 \x03(\tR\x03pin\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"x\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x8e\x01\n" +
 	"\x13RunActivateResponse\x12 \n" +
 	"\x03run\x18\x01 \x01(\v2\x0e.docket.v1.RunR\x03run\x12)\n" +
 	"\x04pins\x18\x02 \x03(\v2\x15.docket.v1.PinVerdictR\x04pins\x12\x14\n" +
-	"\x05steps\x18\x03 \x01(\x05R\x05steps\"[\n" +
+	"\x05steps\x18\x03 \x01(\x05R\x05steps\x12\x14\n" +
+	"\x05token\x18\x04 \x01(\tR\x05token\"[\n" +
 	"\x10RunBudgetRequest\x12\x10\n" +
 	"\x03run\x18\x01 \x01(\tR\x03run\x12\x15\n" +
 	"\x03set\x18\x02 \x01(\x01H\x00R\x03set\x88\x01\x01\x12\x16\n" +

@@ -143,7 +143,7 @@ func encodeRunActivate(res verb.RunActivateResult) *docketv1.RunActivateResponse
 	if a == nil {
 		return &docketv1.RunActivateResponse{}
 	}
-	return &docketv1.RunActivateResponse{Run: runMessage(a.Run), Steps: int32(a.StepsCreated)}
+	return &docketv1.RunActivateResponse{Run: runMessage(a.Run), Steps: int32(a.StepsCreated), Token: a.ConductorToken}
 }
 
 func decodeRunBudget(req *docketv1.RunBudgetRequest) (verb.RunBudgetInput, error) {

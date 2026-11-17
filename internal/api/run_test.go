@@ -710,3 +710,48 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		})
 	}
 }
+
+// TestRunActivateReturnsTheConductorToken pins that a Connect caller gets
+// the conductor capability from the activation that mints it, without the
+// RunConduct seat-taking that would retire it, and that a re-activation
+// mints none.
+func TestRunActivateReturnsTheConductorToken(t *testing.T) {
+	f := newStepFixture(t)
+	ctx := context.Background()
+	issue, _, err := f.st.CreateIssueIdempotent(&model.Issue{
+		Title: "activation subject", Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask,
+	}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent: %v", err)
+	}
+	run, _, err := f.st.InsertRunWithContextIdempotent(
+		store.DefaultProjectID, "", 0, model.NowMS(), store.RunContext{ExecRoot: f.execRoot}, "", issue)
+	if err != nil {
+		t.Fatalf("InsertRunWithContextIdempotent: %v", err)
+	}
+	target := runTarget{run: model.FormatRunID(run.ID), runID: run.ID}
+	noteAdd := func(token string) error {
+		_, err := f.c.RunNoteAdd(ctx, connect.NewRequest(&docketv1.RunNoteAddRequest{
+			Run: target.run, Authority: engine.AuthorityOperator, Text: "keep the scope narrow", Token: token,
+		}))
+		return err
+	}
+
+	activated, err := f.c.RunActivate(ctx, connect.NewRequest(&docketv1.RunActivateRequest{Run: target.run}))
+	requireServed(t, "RunActivate", err)
+	token := activated.Msg.GetToken()
+	if token == "" {
+		t.Fatalf("RunActivate = %v, want the conductor token the first activation mints", activated.Msg)
+	}
+	if n := f.runEvents(t, target, engine.EventConductorSeated); n != 0 {
+		t.Errorf("after the first activation %s holds %d %s events, want none", target.run, n, engine.EventConductorSeated)
+	}
+	requireServed(t, "RunNoteAdd with the activation's token", noteAdd(token))
+
+	again, err := f.c.RunActivate(ctx, connect.NewRequest(&docketv1.RunActivateRequest{Run: target.run}))
+	requireServed(t, "RunActivate again", err)
+	if got := again.Msg.GetToken(); got != "" {
+		t.Errorf("a second RunActivate answered token %q, want none", got)
+	}
+	requireServed(t, "RunNoteAdd with the activation's token after a re-activation", noteAdd(token))
+}
