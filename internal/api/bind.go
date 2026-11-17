@@ -14,10 +14,15 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/verb"
 )
 
-// The request headers unary reads into Env. The daemon records author and cwd
-// verbatim and unverified; the client sets both on every request, and the
-// daemon never supplies either itself. Project is the caller's project
-// identity, copied verbatim.
+// The request headers unary reads into Env, copied verbatim. No identity
+// header is verified on any transport, loopback or not: the bearer secret
+// authenticates the transport only. None is an authorization input; conductor
+// and lease tokens authorize, never these headers. Docket-Author and
+// Docket-Cwd are recorded as attribution; the client sets both on every
+// request, and the daemon never supplies either itself. Two uses are inputs
+// rather than attribution: Docket-Project selects the caller's project, the
+// one a verb reads and writes, and Doctor reads Docket-Cwd as the directory it
+// checks.
 const (
 	authorHeader  = "Docket-Author"
 	cwdHeader     = "Docket-Cwd"
