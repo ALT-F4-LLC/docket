@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,12 @@ var (
 
 // driftPin pins ref on target at bytes other than the ones on disk under the
 // store's config root, so a repin has a change to authorize.
+//
+// driftPin and pinFile stay copies of pinDriftedFile and insertFilePin in
+// internal/verb's tests rather than moving into internal/testsupport. Each
+// pair is a few store calls, the assertions here read pinnedBytes and
+// diskBytes by name, and a shared helper would make testsupport import store
+// and workflow for that small saving.
 func (f *stepFixture) driftPin(t *testing.T, target runTarget, ref string) {
 	t.Helper()
 	path := filepath.Join(os.Getenv("DOCKET_PATH"), "config", ref)
@@ -162,6 +169,17 @@ func (f *stepFixture) recordUsage(t *testing.T, runID int, tokens, seconds float
 	}
 }
 
+// pauseRun pauses target on the operator's authority through the verb layer,
+// since the RunPause RPC has no authority field to send it with.
+func pauseRun(t *testing.T, f *stepFixture, target runTarget) {
+	t.Helper()
+	if _, err := verb.RunPause(context.Background(), verb.Env{Store: f.st}, verb.RunPauseInput{
+		Run: target.run, Authority: engine.AuthorityOperator, ConductorToken: conductorToken(target.conductor),
+	}); err != nil {
+		t.Fatalf("pausing %s: %v", target.run, err)
+	}
+}
+
 // runRulingRPCs are the conductor-token run RPCs whose request carries every
 // input the verb requires. setup readies a fresh bound run, call sends the
 // RPC with token, and event is the event kind the ruling records.
@@ -174,14 +192,7 @@ var runRulingRPCs = []struct {
 	{
 		name:  "RunResume",
 		event: engine.EventRunResumed,
-		setup: func(t *testing.T, f *stepFixture, target runTarget) {
-			t.Helper()
-			if _, err := verb.RunPause(context.Background(), verb.Env{Store: f.st}, verb.RunPauseInput{
-				Run: target.run, Authority: engine.AuthorityOperator, ConductorToken: conductorToken(target.conductor),
-			}); err != nil {
-				t.Fatalf("pausing %s: %v", target.run, err)
-			}
-		},
+		setup: pauseRun,
 		call: func(f *stepFixture, target runTarget, token string) error {
 			_, err := f.c.RunResume(context.Background(), connect.NewRequest(&docketv1.RunResumeRequest{
 				Run: target.run, Reason: "the operator answered", Token: token,
@@ -556,8 +567,8 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		}
 	})
 
-	// RunReport carries each step's attempt status and the artifacts the run
-	// recorded.
+	// RunReport carries each step's attempt row, the run's per-status step
+	// counts, and the artifacts the run recorded.
 	t.Run("RunReport ledger", func(t *testing.T) {
 		target := f.boundRunTarget(t)
 		steps, err := f.st.ListRunSteps(target.runID)
@@ -572,19 +583,50 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 		}
 		f.complete(t, first, f.claim(t, first))
 
+		// The stored step rows are the oracle for each reported attempt count.
+		steps, err = f.st.ListRunSteps(target.runID)
+		if err != nil {
+			t.Fatalf("ListRunSteps: %v", err)
+		}
+		attempts := map[string]int{}
+		for _, s := range steps {
+			attempts[s.Instance] = s.Attempt
+		}
+		if attempts["first@0"] != 1 {
+			t.Fatalf("first@0 attempt = %d after one claim, want 1", attempts["first@0"])
+		}
+
 		report, err := f.c.RunReport(ctx, connect.NewRequest(&docketv1.RunReportRequest{Run: target.run}))
 		requireServed(t, "RunReport", err)
 		got := report.Msg
 		if len(got.GetSteps()) != len(steps) {
 			t.Fatalf("RunReport steps = %v, want one per step of %s", got.GetSteps(), target.run)
 		}
+		issue := model.FormatID(target.issue)
 		for _, s := range got.GetSteps() {
-			if s.GetRow().GetInstance() == "first@0" && s.GetStatus() != store.StepDone {
+			instance := s.GetRow().GetInstance()
+			if instance == "first@0" && s.GetStatus() != store.StepDone {
 				t.Errorf("RunReport first@0 status = %q, want %q after its complete", s.GetStatus(), store.StepDone)
 			}
 			if s.GetStatus() == "" {
-				t.Errorf("RunReport step %s carries no status", s.GetRow().GetInstance())
+				t.Errorf("RunReport step %s carries no status", instance)
 			}
+			if want, ok := attempts[instance]; !ok || int(s.GetAttempt()) != want {
+				t.Errorf("RunReport step %s attempt = %d, want the stored %d", instance, s.GetAttempt(), want)
+			}
+			if s.GetRow().GetIssue() != issue {
+				t.Errorf("RunReport step %s issue = %q, want %s", instance, s.GetRow().GetIssue(), issue)
+			}
+		}
+		// first@0 is done, and second@0, whose one predecessor is done, reads
+		// as ready rather than its stored pending.
+		counts := map[string]int{store.StepDone: 1, store.StepReady: 1}
+		reported := map[string]int{}
+		for _, c := range got.GetRun().GetSteps() {
+			reported[c.GetStatus()] = int(c.GetCount())
+		}
+		if !maps.Equal(reported, counts) {
+			t.Errorf("RunReport run step counts = %v, want %v", reported, counts)
 		}
 		var result *docketv1.Artifact
 		for _, a := range got.GetArtifacts() {
@@ -600,11 +642,7 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 	// RunResume records the reason it was sent on the run it returns to active.
 	t.Run("RunResume reason", func(t *testing.T) {
 		target := f.boundRunTarget(t)
-		if _, err := verb.RunPause(ctx, verb.Env{Store: f.st}, verb.RunPauseInput{
-			Run: target.run, Authority: engine.AuthorityOperator, ConductorToken: conductorToken(target.conductor),
-		}); err != nil {
-			t.Fatalf("pausing %s: %v", target.run, err)
-		}
+		pauseRun(t, f, target)
 		resumed, err := f.c.RunResume(ctx, connect.NewRequest(&docketv1.RunResumeRequest{
 			Run: target.run, Reason: "the operator answered", Token: target.conductor,
 		}))
