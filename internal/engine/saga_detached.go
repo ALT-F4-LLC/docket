@@ -30,6 +30,16 @@ import (
 // child runs, ResumeSaga must leave the step alone. The child holds a per-step
 // flock; ResumeSaga only probes it (no create), so a store without a lock
 // directory, and every test, behaves exactly as before.
+//
+// THE HANDOFF IS RECORDED BEFORE THE LAUNCH. A child that dies before its
+// first gate writes nothing, and the recording parent has already returned, so
+// only a record committed before the launch can cover it: `step record`
+// commits a `saga-detach-started` event first, for every detached handoff. A
+// reader of the event feed can then tell a stranded saga (a handoff with no
+// `gate-started` after it, past its `stranded_after_ms`) without anyone
+// calling `next`; no engine surface reads the event yet. ResumeStrandedSagas
+// stays the recovery and does not consult it. A handoff that cannot be
+// recorded is never launched.
 
 // LaunchDetachedSaga starts one detached `step resume` for a step whose stage 1
 // just committed. Nil means no launcher is installed and the saga runs inline;
@@ -111,6 +121,31 @@ func (e *Engine) RunDetachedSagaStore(storage store.Store, stepID int, nowMS int
 	}
 	run.Outcome = DetachedSagaRan
 	return run, nil
+}
+
+// recordSagaDetachStarted commits the handoff event for a step about to be
+// launched detached, in its own transaction, outside stage 1's. Its deadline is
+// stage 1's activity stamp plus the stranded grace: the instant
+// ResumeStrandedSagas starts qualifying the step.
+func recordSagaDetachStarted(conn store.LegacyDB, stepID int, nowMS int64) error {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if err != nil {
+		return err
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning the saga handoff: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventSagaDetachStarted, RunID: step.RunID,
+		Instance: step.Instance, IssueID: step.IssueID,
+		Data: fmt.Sprintf(`{"stranded_after_ms":%d}`, nowMS+strandedSagaGraceMS),
+		AtMS: nowMS,
+	}); err != nil {
+		return err
+	}
+	return commitWrite(tx)
 }
 
 // hasCompletionGates reports whether the recorded step declares a gate that

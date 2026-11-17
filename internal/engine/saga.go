@@ -303,8 +303,14 @@ func (e *Engine) CompleteStepStore(storage store.Store, stepID int, opts Complet
 		// routing keeps downstream vote and action steps ready the moment
 		// the record returns. A launch that fails, or no launcher at all,
 		// runs the saga inline, as it always did.
+		//
+		// The handoff event commits BEFORE the launch: a child that dies
+		// before its first gate cannot write its own record, and the parent
+		// returns right after launching. A handoff that cannot be recorded
+		// is never launched; the saga runs inline instead.
 		if LaunchDetachedSaga != nil && detachedSagaLockPath(stepID) != "" &&
-			e.hasCompletionGates(conn, stepID) {
+			e.hasCompletionGates(conn, stepID) &&
+			recordSagaDetachStarted(conn, stepID, opts.NowMS) == nil {
 			if err := LaunchDetachedSaga(stepID); err == nil {
 				if opts.Pending != nil {
 					*opts.Pending = true

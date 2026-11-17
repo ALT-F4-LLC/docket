@@ -411,6 +411,19 @@ const (
 	// conductor that lost its parks to a context reset otherwise holds them
 	// until an operator asks.
 	EventParkRetryEligible = "park-retry-eligible"
+
+	// EventSagaDetachStarted records that `step record` handed a recorded
+	// step's completion gates to a detached `step resume` child. It commits
+	// BEFORE the launch, as `gate-started` commits before the spawn it
+	// announces, so a child that dies before its first gate still leaves a
+	// durable record: this event with no `gate-started` after it. Nothing the
+	// child does, or fails to do, can remove it. data.stranded_after_ms is the
+	// instant ResumeStrandedSagas starts treating the step as stranded, for a
+	// child that committed nothing (any stage it commits moves the clock). A
+	// launch that fails is followed at once by the inline saga's own
+	// `gate-started`. A re-claimed step writes one per attempt; a reader
+	// scopes to the latest `step-claimed`.
+	EventSagaDetachStarted = "saga-detach-started"
 )
 
 // eventKinds is the closed set, as a set. The writer checks membership here, so
@@ -459,6 +472,7 @@ var eventKinds = map[string]bool{
 	EventVoteReseated:         true,
 	EventStepDeferred:         true,
 	EventParkRetryEligible:    true,
+	EventSagaDetachStarted:    true,
 }
 
 // recordEvent writes one event in the caller's transaction.

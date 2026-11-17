@@ -274,12 +274,16 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// The retry-eligible park (DKT-4257) — ONE: the scheduler noticing a
 		// gap-only park's prerequisites closed, which no operator verb causes.
 		"park-retry-eligible",
+
+		// The detached-saga handoff — ONE: the record a child that dies before
+		// its first gate cannot erase, written before the launch.
+		"saga-detach-started",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the enumeration names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 60 {
+	if len(eventKinds) != 61 {
 		t.Errorf("eventKinds has %d entries; the original set plus stage 4, "+
 			"stage 5, stage 6, stage 7, "+
 			"DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -292,8 +296,9 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
 			"DKT-2766's config-changed kind, DKT-2758's "+
 			"dispatch-close-refused kind, DKT-2776's claim-refused kind, the "+
-			"step-reminted kind, DKT-2759's two conductor-fact kinds, and "+
-			"DKT-4257's retry-eligible kind enumerate 60 (see DKT-21)",
+			"step-reminted kind, DKT-2759's two conductor-fact kinds, "+
+			"DKT-4257's retry-eligible kind, and the detached-saga handoff "+
+			"kind enumerate 61 (see DKT-21)",
 			len(eventKinds))
 	}
 }

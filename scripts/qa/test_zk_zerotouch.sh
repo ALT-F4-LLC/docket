@@ -308,6 +308,7 @@ test_zk_zerotouch() {
       # human — an operator verb, including one a harness relays
       run-started|run-activated|run-paused|run-resumed|run-abandoned|run-done) ;;
       step-claimed|step-heartbeat|step-recorded|step-resolved|step-approved|step-rejected) ;;
+      saga-detach-started) ;;
       issue-abandoned|trust-added|trust-removed) ;;
       dispatch-opened|dispatch-closed|reap-acknowledged) ;;
       *) ZK_UNATTRIBUTED="$ZK_UNATTRIBUTED $kind" ;;

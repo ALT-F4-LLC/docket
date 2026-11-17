@@ -479,6 +479,10 @@ var eventActors = map[string]Actor{
 	// The retry-eligible signal (DKT-4257): the scheduler noticing that a parked
 	// step's prerequisites closed, which no operator verb causes.
 	EventParkRetryEligible: ActorNext,
+
+	// The detached-saga handoff: written by the `step record` invocation that
+	// launches the child, the same cause as the `step-recorded` before it.
+	EventSagaDetachStarted: ActorHuman,
 }
 
 // ActorFor reports which of the four causes an event kind is attributable to,
