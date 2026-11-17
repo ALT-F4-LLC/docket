@@ -317,24 +317,44 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.Issue, warning.Reason, warning.Issue, warning.Label)
 	}
 	// An empty list is not a clearance: say so when the lint had nothing to
-	// compare against, and name what it skipped when it did.
+	// compare against, and name what it skipped when it did. The overlap check
+	// compares a pair only when both issues attach files or both declare a glob
+	// with a literal prefix, so a linted issue can be comparable in general and
+	// still meet no labelled issue it compares with: Uncompared, not
+	// ComparablePairs or Unscoped, is the count that says so. With no labelled
+	// issue bound there was no pair to compare, so that alone earns no line.
 	if lint := result.RoutingLint; lint != nil {
+		unscoped := ""
+		if lint.Unscoped > 0 {
+			unscoped = fmt.Sprintf("; %d of them attach no file and have no glob with "+
+				"a literal prefix, and attaching a file or declaring such a glob makes "+
+				"an issue comparable", lint.Unscoped)
+		}
 		switch {
 		case lint.Label == "":
 			w.Warn("the security-routing lint is off (routing.security_label is empty)")
 		case lint.CheckedNothing():
 			w.Warn("the security-routing lint checked nothing: no lexicon terms are "+
-				"configured and no bound issue with a comparable scope carries the %s "+
-				"label; judge each "+
-				"issue's sensitivity yourself", lint.Label)
-		case lint.LabelledIssues == 0 && lint.Unscoped > 0:
+				"configured and none of the %d linted issue(s) formed a comparable pair "+
+				"with a bound issue carrying the %s label%s; judge each issue's "+
+				"sensitivity yourself", lint.Linted, lint.Label, unscoped)
+		case lint.LabelledBound == 0 && lint.Unscoped > 0:
 			w.Warn("the security-routing lint compared no scopes: no bound issue carries "+
-				"the %s label with a comparable scope, and %d of %d issue(s) have no "+
-				"glob with a literal prefix; only the lexicon was checked", lint.Label, lint.Unscoped, lint.Linted)
-		case lint.Unscoped > 0:
-			w.Warn("the security-routing lint could not compare the scope of %d of %d "+
-				"issue(s): none of their globs has a literal prefix",
-				lint.Unscoped, lint.Linted)
+				"the %s label, and %d of %d linted issue(s) attach no file and have no "+
+				"glob with a literal prefix (attaching a file or declaring such a glob "+
+				"makes an issue comparable); only the lexicon was checked",
+				lint.Label, lint.Unscoped, lint.Linted)
+		case lint.LabelledBound > 0 && lint.Uncompared > 0:
+			// A pair elsewhere compared, so CheckedNothing is false even with no
+			// lexicon; the tail must not then claim a lexicon covered these issues.
+			checked := "only the lexicon was checked for them"
+			if lint.LexiconTerms == 0 {
+				checked = "nothing was checked for them, since no lexicon terms are configured"
+			}
+			w.Warn("the security-routing lint found %d of %d linted issue(s) was "+
+				"compared against no labelled issue: a pair compares only when both issues "+
+				"attach files or both declare a glob with a literal prefix%s; %s",
+				lint.Uncompared, lint.Linted, unscoped, checked)
 		}
 	}
 

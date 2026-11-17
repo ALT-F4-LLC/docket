@@ -60,6 +60,10 @@ type RoutingLintReport struct {
 	// overlap check can compare: those that attach at least one file or whose
 	// scope holds a glob with a literal prefix. Only these can be overlapped.
 	LabelledIssues int `json:"labelled_issues"`
+	// LabelledBound is the number of bound issues carrying the label, comparable
+	// or not. With none bound, the overlap check had no pair to compare, so an
+	// uncompared linted issue is no gap in it.
+	LabelledBound int `json:"labelled_bound"`
 	// Linted is the number of bound issues without the label that were checked.
 	Linted int `json:"linted"`
 	// Unscoped is the number of linted issues that attach no file and whose
@@ -72,6 +76,12 @@ type RoutingLintReport struct {
 	// comparable pair, as when one compares only by files and the other only by
 	// a glob.
 	ComparablePairs int `json:"comparable_pairs"`
+	// Uncompared is the number of linted issues that formed no comparable pair
+	// with any labelled issue, so the overlap check said nothing about them. It
+	// counts every Unscoped issue, and also issues that are comparable in
+	// general but not with any labelled issue bound here: one comparing only by
+	// files against labelled issues that compare only by globs, or the reverse.
+	Uncompared int `json:"uncompared"`
 }
 
 // CheckedNothing reports a lint that was off, or had no lexicon and compared no
@@ -141,7 +151,11 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 
 	report := RoutingLintReport{Label: label.Value, LexiconTerms: len(terms)}
 	for _, issue := range issues {
-		if issue.security && issue.comparable() {
+		if !issue.security {
+			continue
+		}
+		report.LabelledBound++
+		if issue.comparable() {
 			report.LabelledIssues++
 		}
 	}
@@ -156,17 +170,22 @@ func buildRoutingWarningsTx(tx store.LegacyTx, runID, projectID int) ([]RoutingW
 			report.Unscoped++
 		}
 		var overlaps, found []string
+		pairs := 0
 		for _, other := range issues {
 			if !other.security {
 				continue
 			}
 			overlap, compared := scopesOverlap(issue.declaredPaths, other.declaredPaths)
 			if compared {
-				report.ComparablePairs++
+				pairs++
 			}
 			if overlap {
 				overlaps = append(overlaps, model.FormatID(other.id))
 			}
+		}
+		report.ComparablePairs += pairs
+		if pairs == 0 {
+			report.Uncompared++
 		}
 		haystack := newLexiconText(issue.title + "\n" + strings.Join(issue.scope, "\n") + "\n" + issue.body)
 		for _, term := range terms {
