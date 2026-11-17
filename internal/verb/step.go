@@ -158,7 +158,7 @@ func StepHeartbeat(ctx context.Context, env Env, in StepHeartbeatInput) (StepHea
 	}
 
 	registered, err := resolveRunAddressedProject(env, "step heartbeat")
-	res := StepHeartbeatResult{Step: id, Registered: registered}
+	res := StepHeartbeatResult{Registered: registered}
 	if err != nil {
 		return res, err
 	}
@@ -167,7 +167,7 @@ func StepHeartbeat(ctx context.Context, env Env, in StepHeartbeatInput) (StepHea
 	if err != nil {
 		return res, stepError(err, id)
 	}
-	res.Lease = *lease
+	res.Step, res.Lease = id, *lease
 	return res, nil
 }
 

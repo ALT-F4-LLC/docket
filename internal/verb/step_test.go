@@ -235,6 +235,29 @@ func TestStepLeaseVerbsCarryTheLeaseLifecycle(t *testing.T) {
 	requireCode(t, err, output.ErrAuth)
 }
 
+// A refused heartbeat returns the zero result: the api binding sends any
+// non-zero result beside the error as a partial-failure detail.
+func TestStepHeartbeatRefusalReturnsZeroResult(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := activatedStep(t, st)
+	ref := model.FormatStepID(id)
+	claimStep(t, env, id)
+
+	res, err := verb.StepHeartbeat(context.Background(), env,
+		verb.StepHeartbeatInput{Step: ref, Token: "not-the-token"})
+	requireCode(t, err, output.ErrAuth)
+	if res.Step != 0 {
+		t.Errorf("refused heartbeat Step = %d, want 0", res.Step)
+	}
+	if res.Lease != (model.Lease{}) {
+		t.Errorf("refused heartbeat Lease = %+v, want the zero lease", res.Lease)
+	}
+	if res != (verb.StepHeartbeatResult{}) {
+		t.Errorf("refused heartbeat = %+v, want the zero result", res)
+	}
+}
+
 func TestStepLeaseVerbsOnAMissingStepAreNotFound(t *testing.T) {
 	st := openStore(t)
 	env := projectEnv(st, "", false)
