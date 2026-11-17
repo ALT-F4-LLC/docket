@@ -1374,6 +1374,8 @@ message RunAbandonRequest {
   // issue, when set, stops only that issue's work in the run.
   string issue = 3;
   string token = 4;
+  string authority = 5;
+  string authority_ref = 6;
 }
 
 message RunAbandonResponse {
@@ -1475,6 +1477,8 @@ message RunPauseRequest {
   string run = 1;
   string reason = 2;
   string token = 3;
+  string authority = 4;
+  string authority_ref = 5;
 }
 
 message RunPauseResponse {
