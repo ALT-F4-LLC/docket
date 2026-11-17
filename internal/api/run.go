@@ -111,12 +111,14 @@ func (s *Service) RunVerifyPins(ctx context.Context, req *connect.Request[docket
 	return unary(ctx, s, req, decodeRunVerifyPins, verb.RunVerifyPins, encodeRunVerifyPins)
 }
 
-// decodeRunAbandon leaves the authority unset: the request has no authority
-// field, and the daemon never asserts one for the caller, so the verb refuses
-// the abandon as VALIDATION_ERROR.
+// decodeRunAbandon forwards the authority and authority_ref as the caller
+// sent them. They are the caller's unverified assertion: the run records them
+// as the caller's claim, not as verified operator provenance, and the
+// conductor token, not the authority, authorizes the abandon.
 func decodeRunAbandon(req *docketv1.RunAbandonRequest) (verb.RunAbandonInput, error) {
 	return verb.RunAbandonInput{
 		Run: req.GetRun(), Issue: req.GetIssue(), Reason: req.GetReason(),
+		Authority: req.GetAuthority(), AuthorityRef: req.GetAuthorityRef(),
 		ConductorToken: conductorToken(req.GetToken()),
 	}, nil
 }
@@ -241,10 +243,14 @@ func encodeRunNoteList(res verb.RunNoteListResult) *docketv1.RunNoteListResponse
 	return &docketv1.RunNoteListResponse{Items: items, Total: int32(len(items))}
 }
 
-// decodeRunPause leaves the authority unset, as decodeRunAbandon does.
+// decodeRunPause forwards the caller's unverified authority and
+// authority_ref, as decodeRunAbandon does: the conductor token, not the
+// authority, authorizes the pause.
 func decodeRunPause(req *docketv1.RunPauseRequest) (verb.RunPauseInput, error) {
 	return verb.RunPauseInput{
-		Run: req.GetRun(), Reason: req.GetReason(), ConductorToken: conductorToken(req.GetToken()),
+		Run: req.GetRun(), Reason: req.GetReason(),
+		Authority: req.GetAuthority(), AuthorityRef: req.GetAuthorityRef(),
+		ConductorToken: conductorToken(req.GetToken()),
 	}, nil
 }
 

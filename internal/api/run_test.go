@@ -170,7 +170,7 @@ func (f *stepFixture) recordUsage(t *testing.T, runID int, tokens, seconds float
 }
 
 // pauseRun pauses target on the operator's authority through the verb layer,
-// since the RunPause RPC has no authority field to send it with.
+// so a test that needs a paused run does not depend on the RunPause RPC.
 func pauseRun(t *testing.T, f *stepFixture, target runTarget) {
 	t.Helper()
 	if _, err := verb.RunPause(context.Background(), verb.Env{Store: f.st}, verb.RunPauseInput{
@@ -196,6 +196,37 @@ var runRulingRPCs = []struct {
 		call: func(f *stepFixture, target runTarget, token string) error {
 			_, err := f.c.RunResume(context.Background(), connect.NewRequest(&docketv1.RunResumeRequest{
 				Run: target.run, Reason: "the operator answered", Token: token,
+			}))
+			return err
+		},
+	},
+	{
+		name:  "RunPause",
+		event: engine.EventRunPaused,
+		call: func(f *stepFixture, target runTarget, token string) error {
+			_, err := f.c.RunPause(context.Background(), connect.NewRequest(&docketv1.RunPauseRequest{
+				Run: target.run, Reason: "waiting on the operator", Authority: engine.AuthorityOperator, Token: token,
+			}))
+			return err
+		},
+	},
+	{
+		name:  "RunAbandon",
+		event: engine.EventRunAbandoned,
+		call: func(f *stepFixture, target runTarget, token string) error {
+			_, err := f.c.RunAbandon(context.Background(), connect.NewRequest(&docketv1.RunAbandonRequest{
+				Run: target.run, Reason: "superseded", Authority: engine.AuthorityOperator, Token: token,
+			}))
+			return err
+		},
+	},
+	{
+		name:  "RunAbandonIssue",
+		event: engine.EventIssueAbandoned,
+		call: func(f *stepFixture, target runTarget, token string) error {
+			_, err := f.c.RunAbandon(context.Background(), connect.NewRequest(&docketv1.RunAbandonRequest{
+				Run: target.run, Issue: model.FormatID(target.issue), Reason: "superseded",
+				Authority: engine.AuthorityOperator, Token: token,
 			}))
 			return err
 		},
@@ -690,36 +721,6 @@ func TestRunHandlersBindVerbLayer(t *testing.T) {
 			t.Errorf("RunFactAdd payload_json = %s, want none or the stored payload %s", p, stored.GetPayloadJson())
 		}
 	})
-
-	// RunPause and RunAbandon reach the verb, which refuses each for the
-	// authority the request has no field for, even with the run's own token.
-	for _, rpc := range []struct {
-		name string
-		call func(target runTarget) error
-	}{
-		{"RunPause", func(target runTarget) error {
-			_, err := f.c.RunPause(ctx, connect.NewRequest(&docketv1.RunPauseRequest{
-				Run: target.run, Reason: "waiting on the operator", Token: target.conductor,
-			}))
-			return err
-		}},
-		{"RunAbandon", func(target runTarget) error {
-			_, err := f.c.RunAbandon(ctx, connect.NewRequest(&docketv1.RunAbandonRequest{
-				Run: target.run, Reason: "superseded", Token: target.conductor,
-			}))
-			return err
-		}},
-	} {
-		t.Run(rpc.name, func(t *testing.T) {
-			target := f.boundRunTarget(t)
-			before := f.runState(t, target)
-			err := rpc.call(target)
-			requireRefusal(t, rpc.name, err, connect.CodeInvalidArgument, output.ErrValidation)
-			if after := f.runState(t, target); after != before {
-				t.Errorf("%s changed the run %+v -> %+v", rpc.name, before, after)
-			}
-		})
-	}
 
 	for _, rpc := range runRulingRPCs {
 		t.Run(rpc.name, func(t *testing.T) {
