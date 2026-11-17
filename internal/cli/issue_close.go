@@ -53,6 +53,8 @@ func ifVersionFlagValue(cmd *cobra.Command) *int {
 	if !cmd.Flags().Changed(ifVersionFlag) {
 		return nil
 	}
+	// The GetInt error is unreachable: Changed is false for an unregistered
+	// flag, and addIfVersionFlag registers it with Int, so no type mismatch.
 	v, _ := cmd.Flags().GetInt(ifVersionFlag)
 	return &v
 }
