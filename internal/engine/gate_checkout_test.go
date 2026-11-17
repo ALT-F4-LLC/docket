@@ -310,6 +310,111 @@ func TestCaptureRecordedHeadRefusesWorkItCannotReproduce(t *testing.T) {
 	}
 }
 
+// The sandbox leaves untracked stubs in a writer's worktree: paths it
+// write-protects and nobody wrote. A worktree that holds nothing else
+// uncommitted still records a head a checkout can replace, and a writer's own
+// uncommitted state keeps the head live whether or not stubs sit beside it.
+func TestCaptureRecordedHeadIgnoresSandboxStubs(t *testing.T) {
+	// The protected paths, spelled out so that dropping one from
+	// sandboxStubPaths fails the stub-only case.
+	protected := []string{
+		".bash_profile", ".bashrc", ".gitconfig", ".gitmodules", ".idea",
+		".mcp.json", ".profile", ".ripgreprc", ".vscode", ".zprofile", ".zshrc",
+		".claude/agents", ".claude/commands", ".claude/hooks",
+		".claude/launch.json", ".claude/loop.md", ".claude/output-styles",
+		".claude/routines", ".claude/scheduled_tasks.json",
+		".claude/settings.json", ".claude/settings.local.json",
+		".claude/skills", ".claude/workflows",
+	}
+	if len(sandboxStubPaths) != len(protected) {
+		t.Errorf("sandboxStubPaths holds %d paths, this test covers %d", len(sandboxStubPaths), len(protected))
+	}
+	// The zero-length form: the mount point of each protected path. A test
+	// cannot create the device form.
+	stubs := func(t *testing.T, wt string) {
+		for _, path := range protected {
+			writeFile(t, wt, path, "")
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, wt string)
+		live  bool
+	}{
+		{"stub-only untracked paths record live false", stubs, false},
+		{"modified tracked file records live true", func(t *testing.T, wt string) {
+			stubs(t, wt)
+			writeFile(t, wt, "mine/a.txt", "changed after the commit\n")
+		}, true},
+		{"non-stub untracked file records live true", func(t *testing.T, wt string) {
+			stubs(t, wt)
+			writeFile(t, wt, "mine/untracked.txt", "left over\n")
+		}, true},
+		{"content at a stub path records live true", func(t *testing.T, wt string) {
+			writeFile(t, wt, ".mcp.json", "{}\n")
+		}, true},
+		{"empty file outside the stub paths records live true", func(t *testing.T, wt string) {
+			writeFile(t, wt, "mine/empty.txt", "")
+		}, true},
+		{"empty file below a stub path records live true", func(t *testing.T, wt string) {
+			writeFile(t, wt, ".claude/skills/mine/SKILL.md", "")
+		}, true},
+		// A link is read as a link: one that points at the null device is
+		// the writer's file, not a device.
+		{"symlink to the null device records live true", func(t *testing.T, wt string) {
+			testsupport.Must(t, os.Symlink(os.DevNull, filepath.Join(wt, "mine", "link")), "symlink")
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shared := gitRepo(t)
+			worktree := filepath.Join(t.TempDir(), "wt")
+			runGit(t, shared, "worktree", "add", "-q", worktree)
+			writeFile(t, worktree, "mine/a.txt", "a\n")
+			runGit(t, worktree, "add", "-A")
+			runGit(t, worktree, "commit", "-q", "-m", "a")
+			tc.setup(t, worktree)
+			e := testEngine()
+			e.HeadFn = sharedCheckoutHead
+
+			rec, ok := e.captureRecordedHeadIn(shared, worktree)
+			if !ok || rec.Live != tc.live {
+				t.Errorf("recorded %+v (ok %v), want live %v", rec, ok, tc.live)
+			}
+		})
+	}
+
+	// The device form is a bind of the null device, a stub under any name.
+	t.Run("character device is a stub under any name", func(t *testing.T) {
+		null, err := os.Lstat(os.DevNull)
+		testsupport.Must(t, err, "stat of the null device: %v", err)
+		if !sandboxStubMode("mine/any-name", null.Mode(), null.Size()) {
+			t.Errorf("a path with the null device's mode %v is not a stub", null.Mode())
+		}
+		if sandboxStubMode(".claude", os.ModeDir|0o755, 0) {
+			t.Error("a directory is a stub")
+		}
+	})
+
+	// The sandbox removes a mount point when its command ends, which can fall
+	// between the status listing and the read of the path.
+	t.Run("only a protected path at the top level may vanish and stay a stub", func(t *testing.T) {
+		top := t.TempDir()
+		writeFile(t, top, ".git", "gitdir: elsewhere\n")
+		writeFile(t, top, "sub/keep.txt", "keep\n")
+		if !sandboxStub(top, ".mcp.json") {
+			t.Error("a protected path that is gone is not a stub")
+		}
+		if sandboxStub(top, "mine/gone.txt") {
+			t.Error("a path outside the protected set that is gone is a stub")
+		}
+		// From a subdirectory a status path does not resolve, so a miss is
+		// no evidence that the path is gone.
+		if sandboxStub(filepath.Join(top, "sub"), ".mcp.json") {
+			t.Error("a protected path missing below the top level is a stub")
+		}
+	})
+}
+
 // The shared-checkout exemption holds for every spelling of the checkout: a
 // --worktree arrives filepath.Abs'd while the run's ExecRoot is canonicalized,
 // so a symlink to the shared checkout is still the shared checkout, not a

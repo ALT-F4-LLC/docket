@@ -2,7 +2,10 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -33,7 +36,8 @@ type recordedHead struct {
 	// checkout is never measured at the stale sha.
 	Worktree string `json:"worktree"`
 	// Live marks a head whose WHOLE work a checkout of it would not reproduce:
-	// the worktree held uncommitted or untracked state, or no resolvable fork
+	// the worktree held uncommitted or untracked state (sandbox stubs do not
+	// count: sandboxStub), or no resolvable fork
 	// point, or a commit the run's checkout cannot check out. The gates and the
 	// diff then read the live worktree, as they always did, but REFUSE to stand
 	// for it once its HEAD is no longer Head, so a worktree that moves on after
@@ -151,14 +155,78 @@ func (e *Engine) liveHeadMoved(rec recordedHead, worktree string) bool {
 	return e.HeadFn == nil || e.HeadFn(worktree) != rec.Head
 }
 
-// worktreeClean reports whether dir has no tracked change and no untracked
-// file. Anything it cannot read counts as not clean.
+// worktreeClean reports whether dir, a worktree's top level, has no tracked
+// change and no untracked file a writer could have left. An untracked path
+// the sandbox placed there (sandboxStub) is nobody's work and does not count.
+// Anything it cannot read counts as not clean.
 func worktreeClean(dir string) bool {
 	// No fsmonitor hook and no index lock: this reads a tree the executor owns.
 	out, err := gitCommand("-c", "core.fsmonitor=false", "-C", dir,
-		"--no-optional-locks", "status", "--porcelain",
+		"--no-optional-locks", "status", "--porcelain", "-z",
 		"--untracked-files=all").Output()
-	return err == nil && len(strings.TrimSpace(string(out))) == 0
+	if err != nil {
+		return false
+	}
+	for entry := range strings.SplitSeq(string(out), "\x00") {
+		if entry == "" {
+			continue
+		}
+		// The first entry that is not untracked ends the walk, so the bare
+		// second path a rename entry carries is never read as an entry.
+		path, untracked := strings.CutPrefix(entry, "?? ")
+		if !untracked || !sandboxStub(dir, path) {
+			return false
+		}
+	}
+	return true
+}
+
+// sandboxStubPaths are the worktree-relative paths the Claude Code sandbox
+// was found to write-protect in a command's working directory. On Linux a
+// protected path that does not exist is masked with a bind of the null
+// device, and the mount point that bind needs is a zero-length file on disk,
+// which a command started while it exists sees as that file. Which form a
+// reader meets depends on what was on disk when its sandbox was set up.
+var sandboxStubPaths = map[string]bool{
+	".bash_profile": true, ".bashrc": true, ".gitconfig": true,
+	".gitmodules": true, ".idea": true, ".mcp.json": true, ".profile": true,
+	".ripgreprc": true, ".vscode": true, ".zprofile": true, ".zshrc": true,
+	".claude/agents": true, ".claude/commands": true, ".claude/hooks": true,
+	".claude/launch.json": true, ".claude/loop.md": true,
+	".claude/output-styles": true, ".claude/routines": true,
+	".claude/scheduled_tasks.json": true, ".claude/settings.json": true,
+	".claude/settings.local.json": true, ".claude/skills": true,
+	".claude/workflows": true,
+}
+
+// sandboxStub reports whether the untracked path, as git status spells it
+// from dir's top level, is a sandbox stub. The sandbox removes its mount
+// points when a command ends, so a protected path that is gone by the time it
+// is read was one; any other path that cannot be read is not. Below the top
+// level a status path does not resolve from dir, and a miss there says
+// nothing, so the path counts as the writer's.
+func sandboxStub(dir, path string) bool {
+	info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(path)))
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) || !sandboxStubPaths[path] {
+			return false
+		}
+		_, err = os.Lstat(filepath.Join(dir, ".git"))
+		return err == nil
+	}
+	return sandboxStubMode(path, info.Mode(), info.Size())
+}
+
+// sandboxStubMode is the rule sandboxStub applies. A character device is a
+// stub under any name: git cannot add one, so no commit could carry it. A
+// zero-length regular file is a stub only at a path the sandbox protects, so
+// an empty file a writer created anywhere else, and a file with content at a
+// protected path, still count as the writer's work.
+func sandboxStubMode(path string, mode fs.FileMode, size int64) bool {
+	if mode&fs.ModeCharDevice != 0 {
+		return true
+	}
+	return mode.IsRegular() && size == 0 && sandboxStubPaths[path]
 }
 
 // insertRecordedHeadTx records the commit a step's worktree holds, or, when
