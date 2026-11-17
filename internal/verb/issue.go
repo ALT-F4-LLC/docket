@@ -717,6 +717,20 @@ func migrateIssue(env Env, projectID, id int, target string) (*IssueMigration, e
 var ErrIssueHasSubIssues = errors.New(
 	"use --force to cascade-delete or --orphan to make them root issues")
 
+// IssueHasSubIssuesError is IssueDelete's refusal of an issue with
+// sub-issues: it names the issue and counts its sub-issues for a caller that
+// prompts for the choice, and it matches ErrIssueHasSubIssues.
+type IssueHasSubIssuesError struct {
+	Issue     string
+	SubIssues int
+}
+
+func (e *IssueHasSubIssuesError) Error() string {
+	return fmt.Sprintf("issue %s has %d sub-issue(s): %v", e.Issue, e.SubIssues, ErrIssueHasSubIssues)
+}
+
+func (e *IssueHasSubIssuesError) Unwrap() error { return ErrIssueHasSubIssues }
+
 // IssueDeleteInput is an issue delete request. Cascade deletes the issue's
 // sub-issues with it; Orphan makes them root issues first. Either is needed
 // only when the issue has sub-issues.
@@ -726,11 +740,11 @@ type IssueDeleteInput struct {
 	Orphan  bool
 }
 
-// IssueDeleteResult describes the issue IssueDelete was asked to delete.
-// Issue is its display id, rendered before the delete while its owning
-// project can still be read. SubIssues counts its sub-issues; with
-// ErrIssueHasSubIssues the result is set and nothing was deleted, so read it
-// before checking the error. Registered is as on IssueClaimResult.
+// IssueDeleteResult describes the issue IssueDelete deleted. Issue is its
+// display id, rendered before the delete while its owning project can still
+// be read. SubIssues counts the sub-issues it cascaded to or orphaned. On any
+// error nothing is reported deleted and only Registered may be set; it is as
+// on IssueClaimResult.
 type IssueDeleteResult struct {
 	Issue      string
 	Title      string
@@ -743,50 +757,51 @@ type IssueDeleteResult struct {
 // it.
 func IssueDelete(ctx context.Context, env Env, in IssueDeleteInput) (IssueDeleteResult, error) {
 	projectID, registered, err := resolveRegisteringProject(env, "issue delete")
-	res := IssueDeleteResult{Registered: registered}
+	failed := IssueDeleteResult{Registered: registered}
 	if err != nil {
-		return res, err
+		return failed, err
 	}
 
 	if in.Cascade && in.Orphan {
-		return res, newError(errors.New("--force and --orphan are mutually exclusive"), output.ErrValidation)
+		return failed, newError(errors.New("--force and --orphan are mutually exclusive"), output.ErrValidation)
 	}
 	id, err := model.ParseID(in.Issue)
 	if err != nil {
-		return res, newError(err, output.ErrValidation)
+		return failed, newError(err, output.ErrValidation)
 	}
 
 	issue, err := env.Store.GetIssue(id)
 	if err != nil {
-		return res, issueFetchError(err, "issue "+issueDisplayID(env, projectID, id))
+		return failed, issueFetchError(err, "issue "+issueDisplayID(env, projectID, id))
 	}
-	res.Issue, res.Title = issueDisplayID(env, projectID, id), issue.Title
-
 	subIssues, err := env.Store.GetSubIssues(id)
 	if err != nil {
-		return res, newError(fmt.Errorf("checking sub-issues: %w", err), output.ErrGeneral)
+		return failed, newError(fmt.Errorf("checking sub-issues: %w", err), output.ErrGeneral)
 	}
-	res.SubIssues = len(subIssues)
+	deleted := IssueDeleteResult{
+		Issue: issueDisplayID(env, projectID, id), Title: issue.Title,
+		SubIssues: len(subIssues), Registered: registered,
+	}
 
 	switch {
-	case res.SubIssues == 0:
+	case deleted.SubIssues == 0:
 	case in.Cascade:
 		if err := env.Store.CascadeDeleteIssue(id); err != nil {
-			return res, newError(fmt.Errorf("cascade deleting issue: %w", err), output.ErrGeneral)
+			return failed, newError(fmt.Errorf("cascade deleting issue: %w", err), output.ErrGeneral)
 		}
-		return res, nil
+		return deleted, nil
 	case in.Orphan:
 		if err := env.Store.OrphanSubIssues(id, env.Author); err != nil {
-			return res, newError(fmt.Errorf("orphaning sub-issues: %w", err), output.ErrGeneral)
+			return failed, newError(fmt.Errorf("orphaning sub-issues: %w", err), output.ErrGeneral)
 		}
 	default:
-		return res, newError(fmt.Errorf("issue %s has %d sub-issue(s): %w",
-			res.Issue, res.SubIssues, ErrIssueHasSubIssues), output.ErrValidation)
+		return failed, newError(&IssueHasSubIssuesError{Issue: deleted.Issue, SubIssues: deleted.SubIssues},
+			output.ErrValidation)
 	}
 	if err := env.Store.DeleteIssue(id); err != nil {
-		return res, newError(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
+		return failed, newError(fmt.Errorf("deleting issue: %w", err), output.ErrGeneral)
 	}
-	return res, nil
+	return deleted, nil
 }
 
 // IssueShowInput names the issues to show, each by reference.

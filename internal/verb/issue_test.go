@@ -1182,7 +1182,8 @@ func TestIssueDeleteDeletesAnIssueWithoutSubIssues(t *testing.T) {
 }
 
 // An issue with sub-issues is never deleted on a guess: the caller must choose
-// cascade or orphan, and the refusal carries the count its prompt needs.
+// cascade or orphan. The refusal error carries the count its prompt needs, and
+// the result reports nothing deleted.
 func TestIssueDeleteRefusesSubIssuesWithoutAChoice(t *testing.T) {
 	st := openStore(t)
 	parent := createIssue(t, st)
@@ -1195,8 +1196,12 @@ func TestIssueDeleteRefusesSubIssuesWithoutAChoice(t *testing.T) {
 	if !errors.Is(err, verb.ErrIssueHasSubIssues) {
 		t.Errorf("error = %v, want it to match ErrIssueHasSubIssues", err)
 	}
-	if res.SubIssues != 1 || res.Issue != model.FormatID(parent) {
-		t.Errorf("result = %+v, want the parent with 1 sub-issue", res)
+	var refusal *verb.IssueHasSubIssuesError
+	if !errors.As(err, &refusal) || refusal.SubIssues != 1 || refusal.Issue != model.FormatID(parent) {
+		t.Errorf("error = %#v, want an IssueHasSubIssuesError naming the parent with 1 sub-issue", err)
+	}
+	if res != (verb.IssueDeleteResult{}) {
+		t.Errorf("result = %+v, want the zero result: nothing was deleted", res)
 	}
 	for _, id := range []int{parent, child} {
 		if _, err := st.GetIssue(id); err != nil {

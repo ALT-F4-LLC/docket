@@ -38,9 +38,10 @@ var deleteCmd = &cobra.Command{
 		}
 
 		in := verb.IssueDeleteInput{Issue: args[0], Cascade: force, Orphan: orphan}
-		res, err := deleteIssue(cmd, w, in)
+		err := deleteIssue(cmd, w, in)
 		// JSON mode requires explicit flag when sub-issues exist.
-		if !errors.Is(err, verb.ErrIssueHasSubIssues) || w.JSONMode {
+		var refusal *verb.IssueHasSubIssuesError
+		if !errors.As(err, &refusal) || w.JSONMode {
 			return verbErr(err)
 		}
 
@@ -52,7 +53,7 @@ var deleteCmd = &cobra.Command{
 		form := huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
-					Title(fmt.Sprintf("Issue %s has %d sub-issue(s). How do you want to proceed?", res.Issue, res.SubIssues)).
+					Title(fmt.Sprintf("Issue %s has %d sub-issue(s). How do you want to proceed?", refusal.Issue, refusal.SubIssues)).
 					Options(
 						huh.NewOption("Delete issue and all sub-issues", "cascade"),
 						huh.NewOption("Make sub-issues root issues", "orphan"),
@@ -81,18 +82,18 @@ var deleteCmd = &cobra.Command{
 		default:
 			return nil
 		}
-		_, err = deleteIssue(cmd, w, in)
+		err = deleteIssue(cmd, w, in)
 		return verbErr(err)
 	},
 }
 
 // deleteIssue runs verb.IssueDelete and reports a delete it made. Its error
-// is the verb's own, so a caller can match verb.ErrIssueHasSubIssues.
-func deleteIssue(cmd *cobra.Command, w *output.Writer, in verb.IssueDeleteInput) (verb.IssueDeleteResult, error) {
+// is the verb's own, so a caller can match verb.IssueHasSubIssuesError.
+func deleteIssue(cmd *cobra.Command, w *output.Writer, in verb.IssueDeleteInput) error {
 	res, err := verb.IssueDelete(cmd.Context(), verbEnv(cmd), in)
 	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return res, err
+		return err
 	}
 
 	message := fmt.Sprintf("Deleted %s: %s", res.Issue, res.Title)
@@ -104,7 +105,7 @@ func deleteIssue(cmd *cobra.Command, w *output.Writer, in verb.IssueDeleteInput)
 		message += fmt.Sprintf(" (orphaned %d sub-issue(s))", res.SubIssues)
 	}
 	w.Success(deleteResult{ID: res.Issue}, message)
-	return res, nil
+	return nil
 }
 
 func init() {

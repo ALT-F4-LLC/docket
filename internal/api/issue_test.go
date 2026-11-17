@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -158,6 +159,38 @@ func TestIssueHandlersBindVerbLayer(t *testing.T) {
 	}
 	if exists, err := f.st.IssueExists(issueID(t, child.GetId())); err != nil || exists {
 		t.Errorf("IssueExists(%s) after delete = %v, %v; want gone", child.GetId(), exists, err)
+	}
+}
+
+// A refused delete deleted nothing, so it carries no IssueDeleteResponse
+// detail that would name the refused issue as deleted.
+func TestIssueDeleteRefusedCarriesNoDeletedDetail(t *testing.T) {
+	f := newStepFixture(t)
+	c, ctx := f.c, context.Background()
+	parent := f.createIssue(t, &docketv1.IssueCreateRequest{Title: "parent", Status: "todo", Priority: "low", Type: "task"})
+	f.createIssue(t, &docketv1.IssueCreateRequest{Title: "child", Status: "todo", Priority: "low", Type: "task", Parent: parent.GetId()})
+
+	_, err := c.IssueDelete(ctx, connect.NewRequest(&docketv1.IssueDeleteRequest{Issue: parent.GetId()}))
+	requireRefusal(t, "IssueDelete of a parent without a choice", err, connect.CodeInvalidArgument, output.ErrValidation)
+	var connectErr *connect.Error
+	if !errors.As(err, &connectErr) {
+		t.Fatalf("err = %v, want a *connect.Error", err)
+	}
+	for _, detail := range connectErr.Details() {
+		if value, valueErr := detail.Value(); valueErr == nil {
+			if res, ok := value.(*docketv1.IssueDeleteResponse); ok {
+				t.Errorf("refused IssueDelete carries an IssueDeleteResponse detail %v, want none", res)
+			}
+		}
+	}
+	if exists, err := f.st.IssueExists(issueID(t, parent.GetId())); err != nil || !exists {
+		t.Errorf("IssueExists(%s) after the refusal = %v, %v; want it kept", parent.GetId(), exists, err)
+	}
+
+	deleted, err := c.IssueDelete(ctx, connect.NewRequest(&docketv1.IssueDeleteRequest{Issue: parent.GetId(), Cascade: true}))
+	requireServed(t, "IssueDelete --cascade", err)
+	if !slices.Equal(deleted.Msg.GetDeleted(), []string{parent.GetId()}) {
+		t.Errorf("IssueDelete deleted = %v, want %s", deleted.Msg.GetDeleted(), parent.GetId())
 	}
 }
 
