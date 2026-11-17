@@ -18,8 +18,11 @@ import (
 // The engine launches it; an operator has no ordinary reason to. It is hidden
 // rather than absent because the engine's launch IS a re-execution of this
 // binary, and a verb that exists only as an argv the engine composes still has
-// to parse, open the store, and resolve the project exactly as every other
-// verb does — PersistentPreRunE is the one place that happens.
+// to parse, open the store, and resolve the project as every other verb does.
+// It resolves its project with the run-addressed policy
+// (verb.ProjectRunAddressed): the project is the step's, so an anchored
+// checkout is registered on first contact and an unanchored caller is not
+// refused.
 
 var stepPreGateCmd = &cobra.Command{
 	Use:    "pregate STEP-N --target SHA",
@@ -55,6 +58,9 @@ resolves, or whose step is already over, measures nothing and says so.`,
 			return cmdErr(
 				fmt.Errorf("--target is required: the full commit id the pre-gates measure"),
 				output.ErrValidation)
+		}
+		if err := resolveStepCommandProject(cmd, "step pregate"); err != nil {
+			return err
 		}
 
 		run, err := engine.NewEngine().RunDetachedPreGates(conn, id, target, model.NowMS())

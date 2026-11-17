@@ -39,6 +39,9 @@ running. It takes no token: the step is engine-owned from the recording.`,
 		if err != nil {
 			return err
 		}
+		if err := resolveStepCommandProject(cmd, "step resume"); err != nil {
+			return err
+		}
 		run, err := engine.NewEngine().RunDetachedSaga(conn, id, model.NowMS())
 		if err != nil {
 			return stepErr(err, stepLabel(id))

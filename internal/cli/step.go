@@ -1348,6 +1348,9 @@ func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error
 		}
 		ids = append(ids, id)
 	}
+	if err := resolveStepCommandProject(cmd, "step integrate"); err != nil {
+		return err
+	}
 	by, err := rulingBy()
 	if err != nil {
 		return err
@@ -1365,6 +1368,31 @@ func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error
 		parts = append(parts, fmt.Sprintf("%s -> %.12s (%d commit(s))", d.Step, d.IntegratedSHA, len(d.Picked)))
 	}
 	w.Success(done, "Integrated "+strings.Join(parts, "; "))
+	return nil
+}
+
+// resolveStepCommandProject resolves the caller's project for a step command
+// that takes its project from the step it is handed (verb.ProjectRunAddressed)
+// and records the project-registered event, attributed to verbPath, when this
+// call registered it.
+func resolveStepCommandProject(cmd *cobra.Command, verbPath string) error {
+	env := verbEnv(cmd)
+	projectID, created, err := env.ResolveProject(verb.ProjectRunAddressed)
+	if err != nil {
+		return verbErr(err)
+	}
+	if !created {
+		return nil
+	}
+	prefix, _ := env.Store.ProjectPrefix(projectID)
+	recordProjectRegistration(cmd, &engine.ProjectRegistration{
+		ID:       projectID,
+		Name:     filepath.Base(env.Project.Identity),
+		Identity: env.Project.Identity,
+		Cwd:      env.Cwd,
+		Verb:     verbPath,
+		Prefix:   prefix,
+	})
 	return nil
 }
 
