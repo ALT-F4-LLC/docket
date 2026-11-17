@@ -1,14 +1,18 @@
 package engine
 
 import (
+	"database/sql"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // A scratch checkout is a repository of its own beside the temp directory's
@@ -661,5 +665,222 @@ func TestScratchCheckoutRunsNoHookTheUserConfigNames(t *testing.T) {
 	}
 	if exists(filepath.Join(scratchGitPath(tree.Dir), "hooks")) {
 		t.Error("the scratch git directory was given the user's template hooks")
+	}
+}
+
+// checkoutRefusal is the line the refusing filter writes to its error output.
+const checkoutRefusal = "docket-test: the checkout was refused by the test filter"
+
+// refuseScratchCheckouts makes every later checkout of a commit whose
+// .gitattributes names the docket-test-refusal filter fail, through a user
+// config that marks the filter required and gives it a smudge command that
+// writes checkoutRefusal to its error output and exits non-zero. The commit
+// still resolves: only writing its files out fails.
+//
+// Call it after the commits are made; a required filter with no clean
+// command would refuse them too.
+func refuseScratchCheckouts(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	script := filepath.Join(home, "refuse.sh")
+	err := os.WriteFile(script, []byte("#!/bin/sh\necho '"+checkoutRefusal+"' >&2\nexit 3\n"), 0o700)
+	testsupport.Must(t, err, "writing the refusing filter: %v", err)
+	err = os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(
+		"[filter \"docket-test-refusal\"]\n\tsmudge = "+script+"\n\trequired = true\n"), 0o600)
+	testsupport.Must(t, err, "writing the user config: %v", err)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+}
+
+// commitRefusedAttributes commits a .gitattributes in dir that sends
+// measured.txt through the refusing filter, and returns the new commit.
+func commitRefusedAttributes(t *testing.T, dir string) string {
+	t.Helper()
+	writeFile(t, dir, ".gitattributes", "measured.txt filter=docket-test-refusal\n")
+	writeFile(t, dir, "measured.txt", "under review\n")
+	gitRun(t, dir, "add", ".gitattributes", "measured.txt")
+	gitRun(t, dir, "commit", "-q", "-m", "route measured.txt through a filter")
+	return gitRun(t, dir, "rev-parse", "HEAD")
+}
+
+// requireCheckoutFailureReason asserts a skipped reason for a commit that
+// resolves but would not check out: it names the commit, quotes the
+// checkout's error output, and does not call the commit missing.
+func requireCheckoutFailureReason(t *testing.T, reason, sha string) {
+	t.Helper()
+	if !strings.Contains(reason, sha[:12]) {
+		t.Errorf("the reason does not name the commit %s:\n%s", sha[:12], reason)
+	}
+	if !strings.Contains(reason, checkoutRefusal) {
+		t.Errorf("the reason does not quote the checkout's error output %q:\n%s", checkoutRefusal, reason)
+	}
+	if strings.Contains(reason, "object database") {
+		t.Errorf("the reason says a resolvable commit is missing:\n%s", reason)
+	}
+}
+
+// TestScratchCheckoutFailureReasonQuotesTheError: a commit that resolves in
+// the repository but fails to check out records a pre-gate `skipped` reason
+// that says why, with or without a swept worktree, instead of calling the
+// commit missing.
+func TestScratchCheckoutFailureReasonQuotesTheError(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		swept bool
+	}{{"no worktree", false}, {"swept worktree", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			conn := mustDB(t)
+			activatedRun(t, conn)
+			e := testEngine()
+			step := preGateStep(t, conn, e)
+			repo := t.TempDir()
+			seedGitRepo(t, repo, "seed.txt", "seed")
+			sha := commitRefusedAttributes(t, repo)
+			setRunExecRoot(t, conn, step.RunID, repo)
+			refuseScratchCheckouts(t)
+
+			if got := gitRun(t, repo, "rev-parse", "--verify", sha+"^{commit}"); got != sha {
+				t.Fatalf("premise: the commit does not resolve in the repository (%s)", got)
+			}
+			worktree := ""
+			if c.swept {
+				worktree = filepath.Join(t.TempDir(), "swept-worktree")
+			}
+
+			got, err := runPreGates(conn, e, step,
+				[]workflow.Gate{{Name: "ac-commands", Pre: true}}, sha, worktree, nowMS)
+			testsupport.Must(t, err, "runPreGates: %v", err)
+			if len(got) != 1 {
+				t.Fatalf("got %d results, want 1", len(got))
+			}
+			if got[0].Verdict != VerdictSkipped {
+				t.Fatalf("verdict = %q, want %q; reason: %s", got[0].Verdict, VerdictSkipped, got[0].Reason)
+			}
+			requireCheckoutFailureReason(t, got[0].Reason, sha)
+		})
+	}
+}
+
+// TestGateResumeCheckoutFailureReasonQuotesTheError: the gate resume's skip
+// row for a recorded commit that resolves but fails to check out names the
+// commit and quotes the checkout's error output.
+func TestGateResumeCheckoutFailureReasonQuotesTheError(t *testing.T) {
+	w := newBindingWorld(t, false)
+	head := commitRefusedAttributes(t, w.worktree)
+	execSQL(t, w.conn,
+		`UPDATE artifacts SET payload = ? WHERE step_id = ? AND kind = ?`,
+		`{"head":"`+head+`","base":"`+w.recorded+`","worktree":"`+w.worktree+`"}`,
+		w.stepID, RecordedHeadArtifactKind)
+	refuseScratchCheckouts(t)
+
+	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
+	testsupport.Must(t, err, "detached saga: %v", err)
+	if len(w.captured.seen) != 0 {
+		t.Errorf("%d gate(s) measured a tree though the recorded commit would not check out", len(w.captured.seen))
+	}
+	rows, err := w.conn.Query(`SELECT verdict, reason FROM gate_results WHERE step_id = ?`, w.stepID)
+	testsupport.Must(t, err, "reading gate results: %v", err)
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var verdict string
+		var reason sql.NullString
+		testsupport.Must(t, rows.Scan(&verdict, &reason), "scan")
+		n++
+		if verdict != VerdictSkipped {
+			t.Errorf("gate verdict = %q; want %q", verdict, VerdictSkipped)
+		}
+		requireCheckoutFailureReason(t, reason.String, head)
+	}
+	testsupport.Must(t, rows.Err(), "reading gate results: %v", rows.Err())
+	if n == 0 {
+		t.Fatal("no gate row was recorded")
+	}
+}
+
+// TestCheckoutFailureTextBoundsAndCleansTheOutput: the error text a reason
+// quotes is the tail of the output, marked when anything was dropped, valid
+// UTF-8 with no NUL bytes, and never cut inside a character.
+func TestCheckoutFailureTextBoundsAndCleansTheOutput(t *testing.T) {
+	exact := strings.Repeat("a", maxCheckoutFailureBytes)
+	if got := checkoutFailureText(errors.New(exact)); got != exact {
+		t.Errorf("output of exactly the bound was changed: len %d, marked %v",
+			len(got), strings.HasPrefix(got, elidedMarker))
+	}
+
+	long := strings.Repeat("x", 5000) + "\nfatal: the line that matters"
+	got := checkoutFailureText(errors.New(long))
+	if !strings.HasPrefix(got, elidedMarker) || !strings.HasSuffix(got, "fatal: the line that matters") {
+		t.Errorf("long output was not cut to a marked tail: %q...", got[:60])
+	}
+	if body := strings.TrimPrefix(got, elidedMarker); len(body) > maxCheckoutFailureBytes {
+		t.Errorf("the kept tail is %d bytes, over the %d-byte bound", len(body), maxCheckoutFailureBytes)
+	}
+
+	// A three-byte rune straddles the cut point.
+	runes := "x" + strings.Repeat("€", maxCheckoutFailureBytes/3+5)
+	if got := checkoutFailureText(errors.New(runes)); !utf8.ValidString(got) {
+		t.Errorf("the cut split a character: %q", got[:40])
+	}
+
+	dirty := checkoutFailureText(errors.New("bad\x00byte \xff here"))
+	if strings.ContainsRune(dirty, 0) || !utf8.ValidString(dirty) {
+		t.Errorf("NUL or invalid UTF-8 survived: %q", dirty)
+	}
+
+	if got := checkoutFailureText(errors.New(elidedMarker + "tail")); got != elidedMarker+"tail" {
+		t.Errorf("output already cut was marked again: %q", got)
+	}
+}
+
+// TestTailBufferKeepsTheLastBytesAcrossWrites: whatever the write sizes, the
+// buffer holds the last max bytes written and says whether it dropped any.
+func TestTailBufferKeepsTheLastBytesAcrossWrites(t *testing.T) {
+	var all strings.Builder
+	for i := 0; i < 9000; i++ {
+		all.WriteByte(byte('a' + i%26))
+	}
+	src := all.String()
+	for _, chunk := range []int{1, 7, 100, 2047, 2048, 2049, 9000} {
+		b := &tailBuffer{max: 2048}
+		for i := 0; i < len(src); i += chunk {
+			end := min(i+chunk, len(src))
+			if n, err := b.Write([]byte(src[i:end])); n != end-i || err != nil {
+				t.Fatalf("chunk %d: Write = %d, %v", chunk, n, err)
+			}
+		}
+		if string(b.buf) != src[len(src)-2048:] || !b.cut {
+			t.Errorf("chunk %d: kept %d bytes (cut %v), want the last 2048 and cut", chunk, len(b.buf), b.cut)
+		}
+	}
+	short := &tailBuffer{max: 2048}
+	_, _ = short.Write([]byte(src[:2048]))
+	if short.cut || string(short.buf) != src[:2048] {
+		t.Errorf("output within the bound was reported cut (%v) or changed", short.cut)
+	}
+}
+
+// TestScratchGitQuotesTheExitStatusWithoutErrorOutput: a git step that fails
+// and writes no error output still carries text a reason can quote, and a
+// step that writes some carries that output.
+func TestScratchGitQuotesTheExitStatusWithoutErrorOutput(t *testing.T) {
+	repo := t.TempDir()
+	seedGitRepo(t, repo, "measured.txt", "under review")
+
+	// `rev-parse --quiet --verify` of a missing name exits 1 and prints nothing.
+	_, err := scratchGit(gitDirArgs(repo, "rev-parse", "--quiet", "--verify", "no-such-ref")...)
+	if err == nil {
+		t.Fatal("premise: verifying a missing name succeeded")
+	}
+	if got := checkoutFailureText(err); got != "exit status 1, with no error output" {
+		t.Errorf("a failure with no error output reads %q", got)
+	}
+
+	_, err = scratchGit(gitDirArgs(repo, "read-tree", "no-such-tree")...)
+	if err == nil {
+		t.Fatal("premise: reading a missing tree succeeded")
+	}
+	if got := checkoutFailureText(err); !strings.Contains(got, "no-such-tree") {
+		t.Errorf("a failure's error output was not carried: %q", got)
 	}
 }

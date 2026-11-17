@@ -1206,9 +1206,10 @@ func (e *Engine) runGateStageWith(
 	// another. The writer's worktree stays a containment root (sc.Worktree).
 	//
 	// Once a record is honored there is NO fallback to the live worktree: a
-	// sha the object database no longer holds records a `skipped` row (the
-	// gate could not measure), never a measurement of whatever the worktree
-	// holds now.
+	// sha the object database no longer holds, or one whose checkout fails,
+	// records a `skipped` row (the gate could not measure) that quotes the
+	// checkout's error output when there is any, never a measurement of
+	// whatever the worktree holds now.
 	sc.Worktree = step.WorkRoot
 	var rows []GateResultRow
 	skipRow := func(why string) []GateResultRow {
@@ -1241,10 +1242,14 @@ func (e *Engine) runGateStageWith(
 				tree, releaseTree := trees.checkout(conn, step.RunID, rec.Head)
 				defer releaseTree()
 				if tree.Dir == "" {
+					why := ""
+					if tree.Failure != "" {
+						why = ": " + quoteCheckoutFailure(tree.Failure)
+					}
 					rows, measured = skipRow(fmt.Sprintf(
-						"the commit %.12s this step recorded cannot be checked out, so the "+
+						"the commit %.12s this step recorded cannot be checked out%s, so the "+
 							"gate could not measure it; not measuring the worktree in its place",
-						rec.Head)), true
+						rec.Head, why)), true
 				} else {
 					sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
 					sc.Base = rec.Base

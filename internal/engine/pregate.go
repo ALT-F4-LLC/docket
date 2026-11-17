@@ -273,7 +273,7 @@ func runPreGates(
 
 		var rows []GateResultRow
 		if !bound {
-			rows, err = recordUnbindablePreGate(conn, step, gate, targetSHA, workRoot, nowMS)
+			rows, err = recordUnbindablePreGate(conn, step, gate, targetSHA, workRoot, scratch.Failure, nowMS)
 		} else {
 			rows, err = measurePreGate(conn, e, step, gate, preGateMeasurement{
 				workRoot: workRoot, scratch: scratch, targetSHA: targetSHA,
@@ -501,11 +501,11 @@ func pendingPastClaimBudget(rows []GateResultRow, targetSHA string) []GateResult
 // leave the bundle looking like a step that declared no pre-gates at all.
 func recordUnbindablePreGate(
 	conn store.LegacyDB, step *store.Step, gate workflow.Gate,
-	targetSHA, worktree string, nowMS int64,
+	targetSHA, worktree, failure string, nowMS int64,
 ) ([]GateResultRow, error) {
 	rows := []GateResultRow{{
 		Gate: gate.Name, Verdict: VerdictSkipped, Pre: true,
-		Reason: unbindableReason(targetSHA, worktree),
+		Reason: unbindableReason(targetSHA, worktree, failure),
 	}}
 	if err := recordPreGateRows(conn, step, gate.Name, rows, nowMS); err != nil {
 		return nil, err
@@ -719,17 +719,36 @@ func refreshed2ExpiresMS(nowMS, ttlMS int64) int64 {
 }
 
 // unbindableReason names WHY the tree could not be bound, distinguishing the
-// three ways it happens so an operator knows which remedy applies.
+// four ways it happens so an operator knows which remedy applies.
 //
 // The distinctions are not cosmetic. A missing OBJECT means the producing
 // step's commit never reached this machine — the remedy is to fetch it. A
-// present object with a swept worktree means reconstruction was tried and
-// failed, which points at the checkout rather than at the run. A step with a
-// worktree path and no sha at all is a producer that declared a tree and no
-// commit, which is a workflow-authoring problem. One sentence for all three
-// would send every operator down the same wrong path two times in three.
-func unbindableReason(targetSHA, worktree string) string {
+// present object whose checkout failed points at the checkout rather than at
+// the run, and the checkout's own error output says what stopped it. A swept
+// worktree whose commit could not be reconstructed, with no error output to
+// quote, is the missing-object case seen from a step that had a tree. A step
+// with a worktree path and no sha at all is a producer that declared a tree
+// and no commit, which is a workflow-authoring problem. One sentence for all
+// of them would send most operators down the wrong path.
+//
+// failure is the scratch checkout's error text (scratchTree.Failure). It is
+// set only when the commit resolved in the repository and checking it out
+// failed; the reason then names the commit and quotes that text, and does
+// not claim the commit is missing, since it is not.
+func unbindableReason(targetSHA, worktree, failure string) string {
 	switch {
+	case targetSHA != "" && failure != "" && worktree != "":
+		return fmt.Sprintf(
+			"the step's worktree %s no longer exists and the commit %s could "+
+				"not be checked out: %s; not measuring the shared checkout in "+
+				"its place",
+			worktree, targetSHA, quoteCheckoutFailure(failure))
+	case targetSHA != "" && failure != "":
+		return fmt.Sprintf(
+			"the tree under review (%s) is not checked out anywhere this step "+
+				"can reach and the commit could not be checked out: %s; not "+
+				"measuring the shared checkout in its place",
+			targetSHA, quoteCheckoutFailure(failure))
 	case targetSHA != "" && worktree != "":
 		return fmt.Sprintf(
 			"the step's worktree %s no longer exists and %s could not be "+

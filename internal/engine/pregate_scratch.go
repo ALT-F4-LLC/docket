@@ -1,11 +1,16 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
+	"unicode/utf8"
 
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
@@ -31,9 +36,10 @@ import (
 //
 // WHAT THIS IS NOT. It is not a fallback that "tries its best": if the sha
 // cannot be checked out, the pre-gates record `skipped` naming the sha, exactly
-// as they would have without this file. Measuring a DIFFERENT tree is the
-// defect; measuring no tree is merely a gap, and the two must not be traded for
-// each other.
+// as they would have without this file, and quoting the checkout's error
+// output when the commit resolved and the checkout of it failed. Measuring a
+// DIFFERENT tree is the defect; measuring no tree is merely a gap, and the two
+// must not be traded for each other.
 //
 // THE CHECKOUT WRITES NOTHING TO THE REPOSITORY'S GIT DIRECTORY. `git worktree
 // add` registers the tree under the repository's worktrees/ directory, and a
@@ -102,6 +108,12 @@ type scratchTree struct {
 	// Dir is the reconstructed checkout, or "" when reconstruction was not
 	// attempted or did not succeed.
 	Dir string
+	// Failure is set only when Dir is "" and the commit resolved in the
+	// repository: it is the error output of the checkout step that failed,
+	// as checkoutFailureText renders it. It is "" when there was nothing to
+	// check out, including a commit the repository does not hold, so a
+	// caller can tell a failed checkout from a missing commit.
+	Failure string
 	// Cache is a scratch cache root that lives exactly as long as Dir, handed
 	// to the gate's children as their linter result caches (DKT-1166).
 	//
@@ -221,34 +233,133 @@ type scratchSource struct {
 
 // scratchSourceOf asks execRoot's repository for its scratchSource.
 func scratchSourceOf(execRoot string) (scratchSource, bool) {
-	out, err := gitCommand(gitDirArgs(execRoot, "rev-parse", "--path-format=absolute",
-		"--git-path", "objects", "--git-path", "shallow", "--show-object-format")...).Output()
+	source, err := resolveScratchSource(execRoot)
+	return source, err == nil
+}
+
+// resolveScratchSource is scratchSourceOf with the reason it failed.
+func resolveScratchSource(execRoot string) (scratchSource, error) {
+	out, err := scratchGit(gitDirArgs(execRoot, "rev-parse", "--path-format=absolute",
+		"--git-path", "objects", "--git-path", "shallow", "--show-object-format")...)
 	if err != nil {
-		return scratchSource{}, false
+		return scratchSource{}, err
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(lines) != 3 || lines[0] == "" || lines[1] == "" || lines[2] == "" {
 		// A path holding a newline lands here too: an alternates file and a
 		// sidecar record are both line-oriented and cannot name it.
-		return scratchSource{}, false
+		return scratchSource{}, fmt.Errorf(
+			"the repository's object store paths cannot be named line by line: %q", out)
 	}
 	objects, err := filepath.EvalSymlinks(lines[0])
 	if err != nil {
-		return scratchSource{}, false
+		return scratchSource{}, err
 	}
-	return scratchSource{objects: objects, shallow: lines[1], format: lines[2]}, true
+	return scratchSource{objects: objects, shallow: lines[1], format: lines[2]}, nil
+}
+
+// scratchGit runs one git step of a scratch checkout and returns its
+// standard output. A failure carries the command's error output when it
+// wrote any, and the exit status otherwise.
+//
+// The error output is held in a tailBuffer, so a command that writes without
+// end costs a bounded buffer, and output it dropped is marked as elided.
+// WaitDelay stops a child that outlives git and keeps the error pipe open,
+// such as a filter's, from holding the claim. Git itself exited cleanly in
+// that case, so the step counts as done: exec.ErrWaitDelay alone is not a
+// failure.
+func scratchGit(args ...string) ([]byte, error) {
+	cmd := gitCommand(args...)
+	stderr := &tailBuffer{max: maxCheckoutFailureBytes}
+	cmd.Stderr = stderr
+	cmd.WaitDelay = scratchGitWaitDelay
+	out, err := cmd.Output()
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+		return out, nil
+	}
+	if msg := strings.TrimSpace(string(stderr.buf)); msg != "" {
+		if stderr.cut {
+			msg = elidedMarker + msg
+		}
+		return out, errors.New(msg)
+	}
+	return out, fmt.Errorf("%w, with no error output", err)
+}
+
+// scratchGitWaitDelay is how long a scratch checkout's git step waits, once
+// git has exited, for its output pipes to close.
+const scratchGitWaitDelay = 10 * time.Second
+
+// tailBuffer keeps the last max bytes written to it, accepts every write, and
+// records whether it dropped any.
+type tailBuffer struct {
+	buf []byte
+	max int
+	cut bool
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	if len(p) >= b.max {
+		b.cut = b.cut || len(b.buf) > 0 || len(p) > b.max
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return len(p), nil
+	}
+	if over := len(b.buf) + len(p) - b.max; over > 0 {
+		b.cut = true
+		b.buf = append(b.buf[:0], b.buf[over:]...)
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+// maxCheckoutFailureBytes bounds the error output a skipped reason quotes.
+const maxCheckoutFailureBytes = 2048
+
+// elidedMarker begins a Failure whose earlier output was dropped.
+const elidedMarker = "[earlier output elided] "
+
+// checkoutFailureText is the error text a scratchTree's Failure carries:
+// trimmed, made valid UTF-8 with no NUL bytes so any store can hold it, and
+// cut to its last maxCheckoutFailureBytes with the cut marked, because the
+// last lines are where git puts the error that stopped it. Text scratchGit
+// already cut keeps its one marker.
+func checkoutFailureText(err error) string {
+	text := strings.ToValidUTF8(err.Error(), "�")
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\x00", ""))
+	body, elided := strings.CutPrefix(text, elidedMarker)
+	if len(body) > maxCheckoutFailureBytes {
+		cut := len(body) - maxCheckoutFailureBytes
+		for cut < len(body) && !utf8.RuneStart(body[cut]) {
+			cut++
+		}
+		body, elided = body[cut:], true
+	}
+	if !elided {
+		return body
+	}
+	return elidedMarker + strings.TrimSpace(body)
+}
+
+// quoteCheckoutFailure renders a Failure for a one-line reason: quoted, with
+// its newlines escaped, so the error output reads as one quotation.
+func quoteCheckoutFailure(failure string) string {
+	return strconv.Quote(failure)
 }
 
 // reconstructTarget checks `sha` out into a throwaway repository of its own
 // that borrows the run's objects (see the file comment for the layout).
 //
-// It returns a zero scratchTree and NO ERROR when reconstruction is not
-// possible. That is deliberate: every caller's fallback is to record `skipped`,
-// which is a better outcome than failing the claim, and an error return would
-// make a missing commit look like an engine fault. The reason a caller reports
-// comes from the sha it asked for, not from git's stderr — an operator needs to
-// know WHICH tree could not be built, and git's message about a detached HEAD
-// would bury it.
+// It returns a scratchTree with no Dir and NO ERROR when reconstruction is
+// not possible. That is deliberate: every caller's fallback is to record
+// `skipped`, which is a better outcome than failing the claim, and an error
+// return would make a missing commit look like an engine fault. The error
+// text travels in the tree instead: when the commit resolves in the
+// repository and a later step fails, Failure carries that step's error
+// output (checkoutFailureText). A caller's reason names the sha it asked for
+// first, since an operator needs to know WHICH tree could not be built, and
+// quotes Failure after it, since the error output is what says why. A commit
+// the repository does not hold leaves Failure empty: that is a missing
+// object, not a failed checkout.
 func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 	if sha == "" {
 		return scratchTree{}
@@ -269,9 +380,14 @@ func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 	if err != nil || commit == "" {
 		return scratchTree{}
 	}
-	source, ok := scratchSourceOf(parent)
-	if !ok {
-		return scratchTree{}
+	// From here on the commit resolves, so every failure is a failed
+	// checkout and carries its error text.
+	failed := func(err error) scratchTree {
+		return scratchTree{Failure: checkoutFailureText(err)}
+	}
+	source, err := resolveScratchSource(parent)
+	if err != nil {
+		return failed(err)
 	}
 
 	// MkdirTemp reserves the name and leaves the directory 0700. The path is
@@ -279,7 +395,7 @@ func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 	// run in and once as an argument read from inside that directory.
 	dir, err := os.MkdirTemp("", scratchPrefix)
 	if err != nil {
-		return scratchTree{}
+		return failed(err)
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
@@ -291,7 +407,7 @@ func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 	lock, err := holdScratchLock(dir, source.objects)
 	if err != nil {
 		_ = os.Remove(dir)
-		return scratchTree{}
+		return failed(err)
 	}
 
 	// The git directory and the tree-lifetime cache root (DKT-1166) are made
@@ -302,17 +418,17 @@ func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 	// the cache can report a suppressed issue as live, and this file's whole
 	// doctrine is that measuring the WRONG thing is the defect while measuring
 	// nothing is merely a gap.
-	if !reserveScratchSiblings(dir) {
+	if err := reserveScratchSiblingsErr(dir); err != nil {
 		_ = os.Remove(dir)
 		_ = os.Remove(scratchLockPath(dir))
 		lock.Close()
-		return scratchTree{}
+		return failed(err)
 	}
 	tree := scratchTree{Dir: dir, Cache: scratchCachePath(dir), lock: lock}
 
-	if !checkoutScratch(dir, source, commit) {
+	if err := checkoutScratchErr(dir, source, commit); err != nil {
 		tree.release()
-		return scratchTree{}
+		return failed(err)
 	}
 	return tree
 }
@@ -326,14 +442,20 @@ func reconstructTarget(conn store.LegacyDB, runID int, sha string) scratchTree {
 // into whatever repository the link names. What was already there is left
 // there; it is not this claim's to remove.
 func reserveScratchSiblings(dir string) bool {
+	return reserveScratchSiblingsErr(dir) == nil
+}
+
+// reserveScratchSiblingsErr is reserveScratchSiblings with the reason it
+// failed.
+func reserveScratchSiblingsErr(dir string) error {
 	if err := os.Mkdir(scratchGitPath(dir), 0o700); err != nil {
-		return false
+		return err
 	}
 	if err := os.Mkdir(scratchCachePath(dir), 0o700); err != nil {
 		_ = os.Remove(scratchGitPath(dir))
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 // checkoutScratch turns the reserved directory into a checkout of commit, in
@@ -366,43 +488,54 @@ func reserveScratchSiblings(dir string) bool {
 //
 // A step that fails leaves what it made for the caller's release to remove.
 func checkoutScratch(dir string, source scratchSource, commit string) bool {
+	return checkoutScratchErr(dir, source, commit) == nil
+}
+
+// checkoutScratchErr is checkoutScratch with the reason it failed: a git
+// step's error output (scratchGit), or the error of a step that is not a
+// command.
+func checkoutScratchErr(dir string, source scratchSource, commit string) error {
 	gitDir := scratchGitPath(dir)
-	if owned, _ := ownedScratchDir(gitDir); !owned {
-		return false
+	if owned, absent := ownedScratchDir(gitDir); !owned {
+		if absent {
+			return fmt.Errorf("%s does not exist", gitDir)
+		}
+		return fmt.Errorf("%s is not a directory this user owns", gitDir)
 	}
-	if err := gitCommand(gitDirArgs(dir, "init", "--quiet", "--template=",
-		"--object-format="+source.format, "--separate-git-dir="+gitDir)...).Run(); err != nil {
-		return false
+	if _, err := scratchGit(gitDirArgs(dir, "init", "--quiet", "--template=",
+		"--object-format="+source.format, "--separate-git-dir="+gitDir)...); err != nil {
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(gitDir, "objects", "info", "alternates"),
 		[]byte(source.objects+"\n"), 0o600); err != nil {
-		return false
+		return err
 	}
 	// Only a regular file is read: a pipe or a device under that name would
 	// hold the claim for as long as it kept producing bytes.
 	switch info, err := os.Stat(source.shallow); {
 	case err == nil:
 		if !info.Mode().IsRegular() {
-			return false
+			return fmt.Errorf("%s is not a regular file", source.shallow)
 		}
 		boundary, err := os.ReadFile(source.shallow)
 		if err != nil {
-			return false
+			return err
 		}
 		if err := os.WriteFile(filepath.Join(gitDir, "shallow"), boundary, 0o600); err != nil {
-			return false
+			return err
 		}
 	case !os.IsNotExist(err):
-		return false
+		return err
 	}
 	pinned := func(args ...string) []string {
 		return append([]string{"-C", dir, "--git-dir=" + gitDir, "--work-tree=" + dir}, args...)
 	}
-	if err := gitCommand(pinned(
-		"update-ref", "--no-deref", "HEAD", commit)...).Run(); err != nil {
-		return false
+	if _, err := scratchGit(pinned(
+		"update-ref", "--no-deref", "HEAD", commit)...); err != nil {
+		return err
 	}
-	return gitCommand(pinned("read-tree", "-m", "-u", commit)...).Run() == nil
+	_, err := scratchGit(pinned("read-tree", "-m", "-u", commit)...)
+	return err
 }
 
 // gateTreeCache is the one checkout the completion-gate stages of a single
