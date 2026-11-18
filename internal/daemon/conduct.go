@@ -31,7 +31,7 @@ const (
 // conductor of an unbound run is seated only over HTTP, and the Unix socket is
 // refused with AUTH_ERROR. A bound run is re-seated over either transport.
 func ConductRun(conn *sql.DB, runID int, via Transport, opts engine.ConductOptions) (*engine.ConductResult, error) {
-	if err := requireSeatTransport(conn, runID, via); err != nil {
+	if err := requireSeatTransport(store.StoreOn(conn), runID, via); err != nil {
 		return nil, err
 	}
 	return engine.ConductRun(conn, runID, opts)
@@ -44,8 +44,8 @@ func ConductRun(conn *sql.DB, runID int, via Transport, opts engine.ConductOptio
 // The binding is read before the seat in its own query. That is safe because
 // a run never returns to unbound: every write of its capability hash stores a
 // freshly minted one.
-func requireSeatTransport(conn *sql.DB, runID int, via Transport) error {
-	switch hash, err := store.StoreOn(conn).RunConductorHash(runID); {
+func requireSeatTransport(st store.Store, runID int, via Transport) error {
+	switch hash, err := st.RunConductorHash(runID); {
 	case errors.Is(err, store.ErrRunNotFound):
 		// The seat reports the missing run as NOT_FOUND.
 	case err != nil:
@@ -71,20 +71,22 @@ type conductorRule struct {
 // RunConduct refuses the seat wherever ConductRun's transport rule refuses it
 // for the listener api.TransportOf reads from ctx, and otherwise passes the
 // request to the wrapped service, which seats the conductor. A run reference
-// that does not parse passes through for the service to refuse.
+// that does not parse passes through for the service to refuse. A daemon
+// serving no store seats nobody.
 func (c conductorRule) RunConduct(ctx context.Context, req *connect.Request[docketv1.RunConductRequest]) (*connect.Response[docketv1.RunConductResponse], error) {
-	if runID, err := model.ParseRunID(req.Msg.GetRun()); err == nil {
-		conn, err := store.SQLDB(c.store)
-		if err == nil {
-			err = requireSeatTransport(conn, runID, api.TransportOf(ctx))
+	runID, err := model.ParseRunID(req.Msg.GetRun())
+	if err != nil {
+		return c.DocketServiceHandler.RunConduct(ctx, req)
+	}
+	if c.store == nil {
+		return nil, output.NewConnectError(output.ErrGeneral, errors.New("this daemon serves no store, so it seats no conductor"))
+	}
+	if err := requireSeatTransport(c.store, runID, api.TransportOf(ctx)); err != nil {
+		code := output.ErrGeneral
+		if engineCode, _ := engine.CodeOf(err); engineCode == engine.CodeAuth {
+			code = output.ErrAuth
 		}
-		if err != nil {
-			code := output.ErrGeneral
-			if engineCode, _ := engine.CodeOf(err); engineCode == engine.CodeAuth {
-				code = output.ErrAuth
-			}
-			return nil, output.NewConnectError(code, err)
-		}
+		return nil, output.NewConnectError(code, err)
 	}
 	return c.DocketServiceHandler.RunConduct(ctx, req)
 }

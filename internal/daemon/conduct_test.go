@@ -1,13 +1,23 @@
 package daemon
 
 import (
+	"context"
 	"database/sql"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"connectrpc.com/connect"
+
+	"github.com/ALT-F4-LLC/docket/internal/api"
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
+	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -82,4 +92,25 @@ func TestConductUnboundRunRequiresHTTP(t *testing.T) {
 		}
 		assertSeated(t, conn, runID, result)
 	})
+}
+
+// TestStorelessServiceSeatsNoConductor: the hosted daemon's service, built
+// over no store, refuses RunConduct with GENERAL_ERROR instead of seating or
+// failing the connection.
+func TestStorelessServiceSeatsNoConductor(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	path, handler := api.NewHandler(NewService(nil, "dev"), logger)
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	c := client.NewClient(server.Client(), server.URL, logger)
+
+	_, err := c.RunConduct(context.Background(), connect.NewRequest(&docketv1.RunConductRequest{Run: "RUN-1"}))
+	if code := output.ErrorCodeFromConnectError(err); code != output.ErrGeneral {
+		t.Fatalf("RunConduct on a storeless service: code = %q (%v), want %s", code, err, output.ErrGeneral)
+	}
+	if !strings.Contains(err.Error(), "no store") {
+		t.Errorf("refusal %q does not say the daemon serves no store", err)
+	}
 }
