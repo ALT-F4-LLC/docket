@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"os"
@@ -793,4 +794,55 @@ func TestRunActivateReturnsTheConductorToken(t *testing.T) {
 		t.Errorf("a second RunActivate answered token %q, want none", got)
 	}
 	requireServed(t, "RunNoteAdd with the activation's token after a re-activation", noteAdd(token))
+}
+
+// TestRunPauseAbandonRecordTheClaimedAuthority pins that RunPause and
+// RunAbandon record the request's authority and authority_ref exactly as
+// sent. The conductor token gates the call; it does not rewrite the claim.
+func TestRunPauseAbandonRecordTheClaimedAuthority(t *testing.T) {
+	f := newStepFixture(t)
+	ctx := context.Background()
+	send := map[string]func(target runTarget, authority, ref string) error{
+		engine.EventRunPaused: func(target runTarget, authority, ref string) error {
+			_, err := f.c.RunPause(ctx, connect.NewRequest(&docketv1.RunPauseRequest{
+				Run: target.run, Reason: "waiting on the operator",
+				Authority: authority, AuthorityRef: ref, Token: target.conductor,
+			}))
+			return err
+		},
+		engine.EventRunAbandoned: func(target runTarget, authority, ref string) error {
+			_, err := f.c.RunAbandon(ctx, connect.NewRequest(&docketv1.RunAbandonRequest{
+				Run: target.run, Reason: "superseded",
+				Authority: authority, AuthorityRef: ref, Token: target.conductor,
+			}))
+			return err
+		},
+	}
+	claims := []struct{ authority, ref string }{
+		{engine.AuthorityConductor, ""},
+		{engine.AuthorityStandingGrant, "RUN NOTE 7"},
+	}
+	for event, call := range send {
+		for _, claim := range claims {
+			t.Run(event+" "+claim.authority, func(t *testing.T) {
+				target := f.boundRunTarget(t)
+				requireServed(t, event, call(target, claim.authority, claim.ref))
+				page, err := engine.ListEventsStore(f.st, engine.EventQuery{RunID: target.runID, Kind: event})
+				if err != nil || len(page.Events) != 1 {
+					t.Fatalf("ListEventsStore(%s, %s) = %v, %v; want the one event", target.run, event, page, err)
+				}
+				var payload struct {
+					Authority    string `json:"authority"`
+					AuthorityRef string `json:"authority_ref"`
+				}
+				if err := json.Unmarshal(page.Events[0].Data, &payload); err != nil {
+					t.Fatalf("decoding the %s payload: %v", event, err)
+				}
+				if payload.Authority != claim.authority || payload.AuthorityRef != claim.ref {
+					t.Errorf("%s recorded authority %q, authority_ref %q; want the claim sent, %q and %q",
+						event, payload.Authority, payload.AuthorityRef, claim.authority, claim.ref)
+				}
+			})
+		}
+	}
 }
