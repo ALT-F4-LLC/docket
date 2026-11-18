@@ -159,7 +159,7 @@ in v1.
 ### Claim retry
 
 A client that loses its token retries the claim with the same owner. The
-server answers one of three ways:
+recovery secret decides three cases:
 
 - A same-owner re-claim that carries the issued recovery secret re-mints
   the token on the live lease.
