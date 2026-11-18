@@ -156,6 +156,18 @@ file on stdin) becomes the client's job: the client generates or reads the
 secret and always sends one. `IssueClaimRequest` carries no recovery secret
 in v1.
 
+### Claim retry
+
+A client that loses its token retries the claim with the same owner. The
+server answers one of three ways:
+
+- A same-owner re-claim that carries the issued recovery secret re-mints
+  the token on the live lease.
+- A claim whose `recovery_secret` is empty is rejected with
+  `VALIDATION_ERROR` before any lease is taken.
+- A same-owner re-claim that carries a mismatched secret gets `CONFLICT`
+  until the lease expires; the step stays held until then.
+
 ## Client-rendered envelopes
 
 The wire carries no envelope. A response is the typed `XResponse` message,
