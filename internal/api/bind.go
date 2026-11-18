@@ -29,11 +29,11 @@ const (
 	projectHeader = "Docket-Project"
 )
 
-// unary serves one RPC: it builds the Env op runs with, refuses a request
-// missing an attribution header, decodes the request, runs op, and encodes
-// op's result. It is the one place a Service method builds Env and maps
-// errors: a missing header or a decode failure is VALIDATION_ERROR and op does
-// not run; a *verb.Error carries its own code, and any other op failure is
+// unary serves one RPC: it builds the Env op runs with, refuses an HTTP
+// request naming a worktree and a request missing an attribution header,
+// decodes the request, runs op, and encodes op's result. It is the one place a
+// Service method builds Env and maps errors: either refusal or a decode
+// failure is VALIDATION_ERROR and op does not run; a *verb.Error carries its own code, and any other op failure is
 // GENERAL_ERROR.
 func unary[Req, Res any, PRes interface {
 	*Res
@@ -54,6 +54,9 @@ func unary[Req, Res any, PRes interface {
 		// caller's identity as anchored and never registers a project from it.
 		Project: verb.ProjectInput{Identity: req.Header().Get(projectHeader)},
 		Build:   verb.BuildInfo{Version: s.build},
+	}
+	if err := refuseClientWorktreeOverHTTP(ctx, req.Msg); err != nil {
+		return nil, err
 	}
 	// Handshake is exempt because a client calls it before anything else; the
 	// exemption keys on the routed procedure, which the caller cannot choose
