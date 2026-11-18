@@ -57,7 +57,7 @@ func IssueClaim(ctx context.Context, env Env, in IssueClaimInput) (IssueClaimRes
 	}
 
 	projectID, registered, err := resolveRegisteringProject(env, "issue claim")
-	res := IssueClaimResult{Issue: id, Registered: registered}
+	res := IssueClaimResult{Registered: registered}
 	if err != nil {
 		return res, err
 	}
@@ -77,7 +77,7 @@ func IssueClaim(ctx context.Context, env Env, in IssueClaimInput) (IssueClaimRes
 		return res, fmt.Errorf("reading issue version: %w", err)
 	}
 
-	res.Token, res.Lease, res.Version = token, *lease, version
+	res.Issue, res.Token, res.Lease, res.Version = id, token, *lease, version
 	return res, nil
 }
 
@@ -107,7 +107,7 @@ func IssueRelease(ctx context.Context, env Env, in IssueReleaseInput) (IssueRele
 	}
 
 	projectID, registered, err := resolveRegisteringProject(env, "issue release")
-	res := IssueReleaseResult{Issue: id, Registered: registered}
+	res := IssueReleaseResult{Registered: registered}
 	if err != nil {
 		return res, err
 	}
@@ -117,7 +117,7 @@ func IssueRelease(ctx context.Context, env Env, in IssueReleaseInput) (IssueRele
 		return res, leaseRefusal(env, projectID, id, err, "releasing lease")
 	}
 
-	res.Lease = *lease
+	res.Issue, res.Lease = id, *lease
 	return res, nil
 }
 
@@ -154,7 +154,7 @@ func IssueHeartbeat(ctx context.Context, env Env, in IssueHeartbeatInput) (Issue
 	}
 
 	projectID, registered, err := resolveRegisteringProject(env, "issue heartbeat")
-	res := IssueHeartbeatResult{Issue: id, Registered: registered}
+	res := IssueHeartbeatResult{Registered: registered}
 	if err != nil {
 		return res, err
 	}
@@ -169,7 +169,7 @@ func IssueHeartbeat(ctx context.Context, env Env, in IssueHeartbeatInput) (Issue
 		return res, leaseRefusal(env, projectID, id, err, "extending lease")
 	}
 
-	res.Lease = *lease
+	res.Issue, res.Lease = id, *lease
 	return res, nil
 }
 

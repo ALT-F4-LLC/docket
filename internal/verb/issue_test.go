@@ -243,6 +243,43 @@ func TestIssueLeaseVerbsReportTheRegistrationWhenTheyFailAfterRegistering(t *tes
 	}
 }
 
+// A refused lease call returns the zero result, because the Connect binding
+// attaches any non-zero result to the error as a partial-failure detail.
+func TestIssueLeaseRefusalReturnsZeroResult(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+	claim(t, env, id)
+	ref := model.FormatID(id)
+	ctx := context.Background()
+
+	beat, err := verb.IssueHeartbeat(ctx, env, verb.IssueHeartbeatInput{Issue: ref, Token: "deadbeef"})
+	requireCode(t, err, output.ErrAuth)
+	if beat.Issue != 0 || beat.Lease != (model.Lease{}) {
+		t.Errorf("refused heartbeat result = %+v, want the zero result", beat)
+	}
+
+	released, err := verb.IssueRelease(ctx, env, verb.IssueReleaseInput{Issue: ref, Token: "deadbeef"})
+	requireCode(t, err, output.ErrAuth)
+	if released.Issue != 0 || released.Lease != (model.Lease{}) {
+		t.Errorf("refused release result = %+v, want the zero result", released)
+	}
+}
+
+func TestIssueClaimRefusalReturnsZeroResult(t *testing.T) {
+	st := openStore(t)
+	env := projectEnv(st, "", false)
+	id := createIssue(t, st)
+	claim(t, env, id)
+
+	res, err := verb.IssueClaim(context.Background(), env,
+		verb.IssueClaimInput{Issue: model.FormatID(id), Owner: "worker-2"})
+	requireCode(t, err, output.ErrConflict)
+	if res.Issue != 0 || res.Token != "" || res.Lease != (model.Lease{}) || res.Version != 0 {
+		t.Errorf("refused claim result = %+v, want the zero result", res)
+	}
+}
+
 func setConfig(t *testing.T, st store.Store, projectID int, key, value string) {
 	t.Helper()
 	if err := st.SetConfig(projectID, key, value); err != nil {
