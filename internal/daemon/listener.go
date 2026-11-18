@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/api"
 	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
@@ -81,9 +82,13 @@ func ListenLoopbackHTTP(ctx context.Context, listen string, resolver Resolver, h
 	return &Server{server: newHTTPServer(handler), listener: ln}, nil
 }
 
+// newHTTPServer serves handler with every request stamped as arrived over
+// HTTP, the fact the conductor rule keys on.
 func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
-		Handler: handler,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler.ServeHTTP(w, r.WithContext(api.WithTransport(r.Context(), TransportHTTP)))
+		}),
 		// Bound what an unauthenticated peer can hold open or send.
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
