@@ -62,7 +62,7 @@ func requireSeatTransport(st store.Store, runID int, via Transport) error {
 }
 
 // conductorRule is a daemon's service with RunConduct held to ConductRun's
-// transport rule.
+// transport rule, and every conductor-gated RPC held to requireConducted's.
 type conductorRule struct {
 	docketv1connect.DocketServiceHandler
 	store store.Store

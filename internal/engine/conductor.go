@@ -35,6 +35,9 @@ import (
 //     exists. This is the "guard with no engine = allow" posture: nothing is
 //     required where nothing was ever minted, and a migrated store's runs in
 //     flight keep working. Every run THIS binary activates is bound at birth.
+//     The engine sees no transport, so this holds on every one; the daemon
+//     narrows it, refusing these verbs over its HTTP listener on an unbound
+//     run until someone conducts it (internal/daemon/conductor_gate.go).
 //   - `run conduct` is itself token-free, because nothing authenticates a
 //     caller and a run whose conductor session died must not be un-pausable
 //     forever. That makes the mechanism TAMPER-EVIDENT rather than

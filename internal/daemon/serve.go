@@ -14,7 +14,8 @@ import (
 )
 
 // NewService is the daemon's Connect service over st, reporting build as its
-// version: api.NewService with RunConduct held to ConductRun's transport rule
+// version: api.NewService with RunConduct held to ConductRun's transport rule,
+// and each conductor-gated RPC refused over HTTP on a run no conductor holds,
 // for the listener each request arrived on.
 func NewService(st store.Store, build string) docketv1connect.DocketServiceHandler {
 	return conductorRule{DocketServiceHandler: api.NewService(st, build), store: st}
