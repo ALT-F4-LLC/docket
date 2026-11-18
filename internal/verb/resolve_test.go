@@ -1,9 +1,12 @@
 package verb_test
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
@@ -155,6 +158,59 @@ func TestResolveProjectRunAddressedRegistersAnAnchoredIdentity(t *testing.T) {
 	stored, found, lookupErr := st.LookupProject("/repos/new")
 	if lookupErr != nil || !found || stored != id || !created {
 		t.Errorf("got (%d, %v), lookup (%d, %v, %v); want a new row", id, created, stored, found, lookupErr)
+	}
+}
+
+type projectRegisteredEvent struct {
+	ProjectID int    `json:"project_id"`
+	Name      string `json:"name"`
+	Identity  string `json:"identity"`
+	Cwd       string `json:"cwd"`
+	Verb      string `json:"verb"`
+}
+
+func projectRegisteredEvents(t *testing.T, st store.Store) []projectRegisteredEvent {
+	t.Helper()
+	tx, err := st.BeginReadSnapshot()
+	if err != nil {
+		t.Fatalf("BeginReadSnapshot: %v", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.ListEventsTx(store.EventFilter{Kind: engine.EventProjectRegistered}, 0, 0)
+	if err != nil {
+		t.Fatalf("ListEventsTx: %v", err)
+	}
+	out := make([]projectRegisteredEvent, 0, len(rows))
+	for _, row := range rows {
+		var e projectRegisteredEvent
+		if err := json.Unmarshal([]byte(row.Data), &e); err != nil {
+			t.Fatalf("decoding event data %q: %v", row.Data, err)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func TestResolveProjectRecordsOneProjectRegisteredEventOnFirstContact(t *testing.T) {
+	for _, policy := range []verb.ProjectPolicy{verb.ProjectMayRegister, verb.ProjectRunAddressed} {
+		st := openStore(t)
+		env := projectEnv(st, "/repos/new", true)
+		env.Verb = "issue claim"
+
+		id, _, err := env.ResolveProject(policy)
+		if err != nil {
+			t.Fatalf("policy %v: first resolve: %v", policy, err)
+		}
+		if _, _, err := env.ResolveProject(policy); err != nil {
+			t.Fatalf("policy %v: second resolve: %v", policy, err)
+		}
+
+		want := []projectRegisteredEvent{{
+			ProjectID: id, Name: "new", Identity: "/repos/new", Cwd: "/work/scratch", Verb: "issue claim",
+		}}
+		if got := projectRegisteredEvents(t, st); !reflect.DeepEqual(got, want) {
+			t.Errorf("policy %v: project-registered events = %+v, want %+v", policy, got, want)
+		}
 	}
 }
 

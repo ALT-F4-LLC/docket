@@ -17,7 +17,10 @@ type Env struct {
 	Author string
 	// Cwd is the caller's working directory, which the engine records on
 	// rulings. The daemon fills it from the client's request headers.
-	Cwd     string
+	Cwd string
+	// Verb is the command path (`issue claim`, `doc create`) the
+	// project-registered event attributes a first-contact registration to.
+	Verb    string
 	Project ProjectInput
 	Build   BuildInfo
 }

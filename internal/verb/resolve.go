@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
 )
@@ -32,8 +33,10 @@ const (
 )
 
 // ResolveProject answers which project env.Project names under policy.
-// created reports that this call registered the project; the caller records
-// the project-registered event, since that write is outside store.Store.
+// created reports that this call registered the project, and the call then
+// records the project-registered event attributed to env.Verb. A failed event
+// write is returned as the error: the project row stays, so a retry resolves
+// it without registering again.
 //
 // An empty identity is a store that is not multi-tenant and resolves to
 // store.DefaultProjectID. An identity that is already registered resolves to
@@ -73,10 +76,19 @@ func (env Env) ResolveProject(policy ProjectPolicy) (id int, created bool, err e
 		return store.UnregisteredProjectID, false, nil
 	}
 
-	id, created, err = env.Store.EnsureProjectCreated(
-		identity, filepath.Base(identity), time.Now().UnixMilli())
+	name := filepath.Base(identity)
+	id, created, err = env.Store.EnsureProjectCreated(identity, name, time.Now().UnixMilli())
 	if err != nil {
 		return 0, false, fmt.Errorf("resolving the project: %w", err)
 	}
-	return id, created, nil
+	if !created {
+		return id, false, nil
+	}
+	prefix, _ := env.Store.ProjectPrefix(id)
+	if err := engine.RecordProjectRegisteredEventStore(env.Store, engine.ProjectRegistration{
+		ID: id, Name: name, Identity: identity, Cwd: env.Cwd, Verb: env.Verb, Prefix: prefix,
+	}, time.Now().UnixMilli()); err != nil {
+		return id, true, fmt.Errorf("registered project %q but could not record the event: %w", name, err)
+	}
+	return id, true, nil
 }

@@ -1372,27 +1372,14 @@ func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error
 }
 
 // resolveStepCommandProject resolves the caller's project for a step command
-// that takes its project from the step it is handed (verb.ProjectRunAddressed)
-// and records the project-registered event, attributed to verbPath, when this
-// call registered it.
+// that takes its project from the step it is handed (verb.ProjectRunAddressed),
+// attributing a registration it makes to verbPath.
 func resolveStepCommandProject(cmd *cobra.Command, verbPath string) error {
 	env := verbEnv(cmd)
-	projectID, created, err := env.ResolveProject(verb.ProjectRunAddressed)
-	if err != nil {
+	env.Verb = verbPath
+	if _, _, err := env.ResolveProject(verb.ProjectRunAddressed); err != nil {
 		return verbErr(err)
 	}
-	if !created {
-		return nil
-	}
-	prefix, _ := env.Store.ProjectPrefix(projectID)
-	recordProjectRegistration(cmd, &engine.ProjectRegistration{
-		ID:       projectID,
-		Name:     filepath.Base(env.Project.Identity),
-		Identity: env.Project.Identity,
-		Cwd:      env.Cwd,
-		Verb:     verbPath,
-		Prefix:   prefix,
-	})
 	return nil
 }
 

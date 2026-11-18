@@ -139,20 +139,10 @@ func ttlFlag(cmd *cobra.Command) (*time.Duration, error) {
 	return &ttl, nil
 }
 
-// recordProjectRegistration records the project-registered event for a
-// project an issue lease verb registered, as the root hook does for the
-// projects it registers. A failed write is reported and does not fail the
-// command: the project exists either way.
-func recordProjectRegistration(cmd *cobra.Command, reg *engine.ProjectRegistration) {
-	if reg == nil {
-		return
-	}
-	if err := engine.RecordProjectRegisteredEvent(getDB(cmd), *reg, time.Now().UnixMilli()); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"docket: registered project %q but could not record the event: %v\n",
-			reg.Name, err)
-	}
-}
+// recordProjectRegistration writes nothing: verb.Env.ResolveProject records
+// the project-registered event when it registers a project. Its call sites
+// are dead and await removal.
+func recordProjectRegistration(*cobra.Command, *engine.ProjectRegistration) {}
 
 func init() {
 	claimCmd.Flags().String("owner", "", "Identity of the lease holder (required)")

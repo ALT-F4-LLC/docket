@@ -1051,9 +1051,10 @@ func parseArtifactRef(ref string) (int, error) {
 
 // resolveRunAddressedProject resolves the caller's project for a verb that
 // takes its project from the step it is handed. When it registers one, it
-// returns the registration, attributed to verbPath, for the caller to record
-// as an event.
+// records the project-registered event attributed to verbPath and returns
+// the registration.
 func resolveRunAddressedProject(env Env, verbPath string) (*engine.ProjectRegistration, error) {
+	env.Verb = verbPath
 	projectID, created, err := env.ResolveProject(ProjectRunAddressed)
 	if err != nil || !created {
 		return nil, err

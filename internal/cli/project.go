@@ -4,10 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -173,6 +171,7 @@ func projectVerbEnv(cmd *cobra.Command) verb.Env {
 		Store:  store.StoreOn(getDB(cmd)),
 		Author: config.DefaultAuthor(),
 		Cwd:    cwd,
+		Verb:   commandPath(cmd),
 	}
 	if cfg := getCfg(cmd); cfg != nil {
 		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}
@@ -180,23 +179,10 @@ func projectVerbEnv(cmd *cobra.Command) verb.Env {
 	return env
 }
 
-// recordRegisteredProject writes the project-registered event (DKT-61) for
-// a project a verb registered on first contact, as the root hook does for
-// the commands whose project it resolves. A failure is reported, not
-// returned: the project exists either way.
-func recordRegisteredProject(cmd *cobra.Command, env verb.Env, registered *model.Project) {
-	if registered == nil {
-		return
-	}
-	if err := engine.RecordProjectRegisteredEvent(getDB(cmd), engine.ProjectRegistration{
-		ID: registered.ID, Name: registered.Name, Identity: registered.Identity,
-		Cwd: env.Cwd, Verb: commandPath(cmd), Prefix: registered.Prefix,
-	}, time.Now().UnixMilli()); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"docket: registered project %q but could not record the event: %v\n",
-			registered.Name, err)
-	}
-}
+// recordRegisteredProject writes nothing: verb.Env.ResolveProject records
+// the project-registered event when it registers a project. Its call sites
+// are dead and await removal.
+func recordRegisteredProject(*cobra.Command, verb.Env, *model.Project) {}
 
 // resolveProjectRef forwards to verb.ResolveProjectRef for the CLI surfaces
 // that address a project by `--project`.

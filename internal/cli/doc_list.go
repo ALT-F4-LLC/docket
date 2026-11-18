@@ -88,6 +88,7 @@ func verbEnv(cmd *cobra.Command) verb.Env {
 		Store:  store.StoreOn(getDB(cmd)),
 		Author: config.DefaultAuthor(),
 		Cwd:    cwd,
+		Verb:   commandPath(cmd),
 	}
 	if cfg := getCfg(cmd); cfg != nil {
 		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}

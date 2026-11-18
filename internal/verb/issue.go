@@ -1991,9 +1991,11 @@ func checkTTL(ttl *time.Duration) error {
 }
 
 // resolveRegisteringProject resolves the caller's project for a verb that
-// writes there and so may register it. When it registers one, it returns the
-// registration, attributed to verbPath, for the caller to record as an event.
+// writes there and so may register it. When it registers one, it records the
+// project-registered event attributed to verbPath and returns the
+// registration.
 func resolveRegisteringProject(env Env, verbPath string) (int, *engine.ProjectRegistration, error) {
+	env.Verb = verbPath
 	projectID, created, err := env.ResolveProject(ProjectMayRegister)
 	if err != nil || !created {
 		return projectID, nil, err
