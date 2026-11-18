@@ -69,3 +69,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.13.0 // indirect
 )
+
+tool connectrpc.com/connect/cmd/protoc-gen-connect-go

@@ -61,6 +61,7 @@ API_GO_PKG := Mdocket/v1/docket.proto=$(API_MODULE)/docketv1
 
 proto:
 	protoc --proto_path=proto \
+		--plugin=protoc-gen-connect-go="$$(go tool -n protoc-gen-connect-go)" \
 		--go_out=internal/api --go_opt=module=$(API_MODULE) --go_opt=$(API_GO_PKG) \
 		--connect-go_out=internal/api --connect-go_opt=module=$(API_MODULE) --connect-go_opt=$(API_GO_PKG) \
 		$(shell find proto -name '*.proto')
