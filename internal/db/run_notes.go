@@ -37,17 +37,13 @@ type RunNote struct {
 // change no feed reader can attribute, and an event with no note would name a
 // ruling that renders nowhere.
 func InsertRunNoteTx(tx *sql.Tx, n RunNote) (int, error) {
-	res, err := tx.Exec(
-		`INSERT INTO run_notes (run_id, text, authority, created_at_ms) VALUES (?, ?, ?, ?)`,
-		n.RunID, n.Text, n.Authority, n.CreatedAtMS)
-	if err != nil {
+	var id int
+	if err := tx.QueryRow(
+		`INSERT INTO run_notes (run_id, text, authority, created_at_ms) VALUES (?, ?, ?, ?) RETURNING id`,
+		n.RunID, n.Text, n.Authority, n.CreatedAtMS).Scan(&id); err != nil {
 		return 0, fmt.Errorf("recording the run note: %w", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("reading the run note id: %w", err)
-	}
-	return int(id), nil
+	return id, nil
 }
 
 // ListRunNotesTx returns every note recorded for one run, in insertion order

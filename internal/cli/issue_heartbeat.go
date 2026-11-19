@@ -5,9 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -39,11 +38,11 @@ which tells the holder to claim again rather than that it was never trusted.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
-		if err != nil {
-			return err
+		// A malformed ref is reported before the token is read, so it is
+		// not masked by a missing token and leaves stdin undrained.
+		if _, err := verb.ParseIssueRef(args[0]); err != nil {
+			return verbErr(err)
 		}
 
 		token, err := readToken(os.Stdin)
@@ -52,20 +51,20 @@ which tells the holder to claim again rather than that it was never trusted.`,
 		}
 
 		class, _ := cmd.Flags().GetString("class")
-		ttl, err := resolveTTL(cmd, conn, class)
+		ttl, err := ttlFlag(cmd)
 		if err != nil {
 			return err
 		}
 
-		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		lease, err := db.HeartbeatIssue(conn, id, token, ttl.Milliseconds(), model.NowMS())
+		res, err := verb.IssueHeartbeat(cmd.Context(), verbEnv(cmd), verb.IssueHeartbeatInput{
+			Issue: args[0], Token: token, TTL: ttl, Class: class,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			if e := leaseError(err, label); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("extending lease: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
+		id, lease := res.Issue, res.Lease
 		w.Success(
 			heartbeatResponse{
 				Issue:          model.FormatID(id),

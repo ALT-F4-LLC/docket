@@ -478,7 +478,9 @@ func TestWorkflowListIsACollection(t *testing.T) {
 // TestWorkflowListItemsCarryRowVersionUnderV2: the v2 envelope consults
 // output.Versioned on the items CONTAINER, not on every element, so a bare
 // slice of workflows renders v1 items inside a v2 envelope. QA caught exactly
-// that, and this is the unit-level guard for it.
+// that, and this is the unit-level guard for it. Row-version coverage for
+// `workflow list` is v2 only: every item carries row_version beside the
+// definition's own version, and no test pins the v1 envelope's omission of it.
 func TestWorkflowListItemsCarryRowVersionUnderV2(t *testing.T) {
 	conn := newTestDB(t)
 	err := registerSource(t, conn, minimalWorkflow)
@@ -513,15 +515,6 @@ func TestWorkflowListItemsCarryRowVersionUnderV2(t *testing.T) {
 		if item.Version != 1 {
 			t.Errorf("item %q: version = %d, want the definition's 1", item.Name, item.Version)
 		}
-	}
-
-	// And v1 items carry none, which is the dormancy rule at the envelope.
-	cmd = workflowListCmdWithDB(conn, 50)
-	w, buf = bufWriter(true)
-	err = runWorkflowList(cmd, nil, w)
-	testsupport.Must(t, err, "list v1: %v", err)
-	if strings.Contains(buf.String(), "row_version") {
-		t.Errorf("v1 output carries row_version: %s", buf.String())
 	}
 }
 

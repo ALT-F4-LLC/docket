@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"math"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -31,7 +31,7 @@ type pinnedVoteFixture struct {
 // step for a fresh issue in a fresh run, and opens the step's proposal through
 // the engine's own phase 2 — so the idempotency key, the link and the pinned
 // bytes are exactly what a live run leaves.
-func seedPinnedVoteStep(t *testing.T, conn *sql.DB, src string) pinnedVoteFixture {
+func seedPinnedVoteStep(t *testing.T, conn store.LegacyDB, src string) pinnedVoteFixture {
 	t.Helper()
 	registerVoteRule(t, conn, "majority", "0.6", "")
 
@@ -86,12 +86,12 @@ on_fail = "skip"
 
 // castAs is one cast through the engine's cast path, at a confidence and
 // relevance that never reach quorum on a three-seat panel by themselves.
-func castAs(conn *sql.DB, proposalID int, voter string) (*db.CastVoteResult, error) {
+func castAs(conn store.LegacyDB, proposalID int, voter string) (*db.CastVoteResult, error) {
 	return castWeighted(conn, proposalID, voter, model.VerdictApprove, 0.9, 0.8)
 }
 
 func castWeighted(
-	conn *sql.DB, proposalID int, voter string, verdict model.Verdict,
+	conn store.LegacyDB, proposalID int, voter string, verdict model.Verdict,
 	confidence, relevance float64,
 ) (*db.CastVoteResult, error) {
 	return CastVote(conn, &model.Vote{
@@ -118,7 +118,7 @@ func assertRefused(t *testing.T, err error, wants ...string) {
 }
 
 // voteCount is the votes table's row count for one proposal.
-func voteCount(t *testing.T, conn *sql.DB, proposalID int) int {
+func voteCount(t *testing.T, conn store.LegacyDB, proposalID int) int {
 	t.Helper()
 	var n int
 	err := conn.QueryRow(`SELECT COUNT(*) FROM votes WHERE proposal_id = ?`, proposalID).Scan(&n)
@@ -128,7 +128,7 @@ func voteCount(t *testing.T, conn *sql.DB, proposalID int) int {
 
 // adHocProposal is a proposal no vote step opened — an operator's own ballot,
 // or a reap acknowledgment's — which the cast path must leave exactly as it was.
-func adHocProposal(t *testing.T, conn *sql.DB, required int) int {
+func adHocProposal(t *testing.T, conn store.LegacyDB, required int) int {
 	t.Helper()
 	id, err := db.CreateProposal(conn, &model.Proposal{
 		Description: "ad hoc", Criticality: model.CriticalityLow,
@@ -208,7 +208,7 @@ func TestVoteEqualWeightingIgnoresDeclaredConfidence(t *testing.T) {
 			voteFixture(`executor = "worker"`, tail),
 			`voters = ["alice", "bob", "carol"]`, `voters = ["alice", "bob"]`, 1)
 	}
-	tally := func(t *testing.T, conn *sql.DB, proposalID int) float64 {
+	tally := func(t *testing.T, conn store.LegacyDB, proposalID int) float64 {
 		t.Helper()
 		_, err := castWeighted(conn, proposalID, "alice", model.VerdictApprove, 0.9, 1.0)
 		testsupport.Must(t, err, "first cast: %v", err)
@@ -219,7 +219,7 @@ func TestVoteEqualWeightingIgnoresDeclaredConfidence(t *testing.T) {
 		}
 		return *res.WeightedScore
 	}
-	assertDeclaredKept := func(t *testing.T, conn *sql.DB, proposalID int) {
+	assertDeclaredKept := func(t *testing.T, conn store.LegacyDB, proposalID int) {
 		t.Helper()
 		votes, err := db.GetProposalVotes(conn, proposalID)
 		testsupport.Must(t, err, "GetProposalVotes: %v", err)
@@ -388,7 +388,7 @@ func TestVoteCastNeedsARationaleWithConcerns(t *testing.T) {
 // failRunEventInserts installs a trigger that aborts every step-less insert of
 // the given event kinds: the writes a panel's run events make after the cast's
 // own transaction has committed.
-func failRunEventInserts(t *testing.T, conn *sql.DB, kinds ...string) {
+func failRunEventInserts(t *testing.T, conn store.LegacyDB, kinds ...string) {
 	t.Helper()
 	execSQL(t, conn, fmt.Sprintf(
 		`CREATE TRIGGER fail_run_event_inserts BEFORE INSERT ON events

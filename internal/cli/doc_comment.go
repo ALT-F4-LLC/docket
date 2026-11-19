@@ -6,10 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -24,19 +23,12 @@ var docCommentAddCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := model.ParseDocID(args[0])
+		env := verbEnv(cmd)
+		target, err := verb.DocCommentTarget(cmd.Context(), env, verb.DocCommentTargetInput{Doc: args[0]})
+		recordRegisteredProject(cmd, env, target.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
-		}
-
-		doc, err := db.GetDoc(conn, id)
-		if err != nil {
-			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
 		jsonMode, _ := jsonModeOf(cmd)
@@ -68,33 +60,22 @@ var docCommentAddCmd = &cobra.Command{
 			return nil
 		}
 
-		author := config.DefaultAuthor()
-
-		comment := model.DocComment{
-			DocID:  id,
-			Body:   body,
-			Author: author,
-		}
-
 		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
 			return err
 		}
 
-		commentID, err := db.CreateDocCommentIdempotent(conn, &comment, idempotencyKey)
+		res, err := verb.DocCommentAdd(cmd.Context(), env, verb.DocCommentAddInput{
+			Doc:            args[0],
+			Body:           body,
+			IdempotencyKey: idempotencyKey,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			if e := notFound(err, fmt.Sprintf("doc %s", args[0])); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("creating comment: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		created, err := db.GetDocComment(conn, commentID)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching created comment: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(created, fmt.Sprintf("Comment added to %s: %s", model.FormatDocID(id), doc.Title))
+		w.Success(res.Comment, fmt.Sprintf("Comment added to %s: %s", model.FormatDocID(res.Doc.ID), res.Doc.Title))
 
 		return nil
 	},

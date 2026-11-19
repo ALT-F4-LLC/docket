@@ -5,9 +5,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -33,6 +32,10 @@ import (
 //
 // Everything below still denies through exit 2. The break is scoped to the
 // absence of a database, not to any verdict a guard actually computed.
+//
+// ENGINE STATE THAT EXISTS BUT CANNOT BE CONSULTED IS A DENIAL: a store that
+// does not open, or a project linked to a daemon. Execute renders it with code
+// UNAVAILABLE and exit 2, because any other exit lets a hook proceed.
 
 var guardCmd = &cobra.Command{
 	Use:   "guard",
@@ -42,6 +45,11 @@ var guardCmd = &cobra.Command{
 They are hook predicates, not ordinary verbs: EXIT 0 means allow, EXIT 2 means
 deny and a reason is printed. That contract is independent of the error
 taxonomy other verbs use, so exit 2 here means "denied", not "not found".
+
+With no database and no daemon link for this project, a guard allows (exit 0)
+as not applicable. When engine state exists but cannot be consulted (the
+database does not open, or the project is linked to a daemon), a guard denies
+(exit 2) with code UNAVAILABLE.
 
 The reason goes to stderr in human mode and into the JSON envelope's error
 field under --json.`,
@@ -79,11 +87,14 @@ repository does not interfere with another repository's work. --all-projects
 asks the store-wide question instead.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		verdict, err := engine.GuardStop(getDB(cmd), guardProjectScope(cmd), model.NowMS())
+		allProjects, _ := cmd.Flags().GetBool("all-projects")
+		decision, err := verb.GuardStop(cmd.Context(), verbEnv(cmd), verb.GuardStopInput{
+			AllProjects: allProjects,
+		})
 		if err != nil {
-			return runErr(err)
+			return verbErr(err)
 		}
-		return emitGuard(cmd, verdict)
+		return emitGuard(cmd, decision)
 	},
 }
 
@@ -120,15 +131,15 @@ answers; --all-projects widens the search to the whole store.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		stepName, _ := cmd.Flags().GetString("step")
-		runID, err := optionalRunFlag(cmd)
+		runRef, _ := cmd.Flags().GetString("run")
+		allProjects, _ := cmd.Flags().GetBool("all-projects")
+		decision, err := verb.GuardGate(cmd.Context(), verbEnv(cmd), verb.GuardGateInput{
+			Step: stepName, Run: runRef, AllProjects: allProjects,
+		})
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-		verdict, err := engine.GuardGate(getDB(cmd), stepName, runID, guardProjectScope(cmd))
-		if err != nil {
-			return runErr(err)
-		}
-		return emitGuard(cmd, verdict)
+		return emitGuard(cmd, decision)
 	},
 }
 
@@ -152,16 +163,15 @@ It writes nothing, and it neither reaps nor abandons anything: a guard that
 mutated scheduling state would make a hook's mere presence change a run.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		runID, err := optionalRunFlag(cmd)
+		runRef, _ := cmd.Flags().GetString("run")
+		allProjects, _ := cmd.Flags().GetBool("all-projects")
+		decision, err := verb.GuardRecord(cmd.Context(), verbEnv(cmd), verb.GuardRecordInput{
+			Run: runRef, AllProjects: allProjects,
+		})
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-		verdict, err := engine.GuardRecord(
-			getDB(cmd), runID, guardProjectScope(cmd), model.NowMS())
-		if err != nil {
-			return runErr(err)
-		}
-		return emitGuard(cmd, verdict)
+		return emitGuard(cmd, decision)
 	},
 }
 
@@ -223,141 +233,23 @@ It writes nothing except that acknowledgment and, when a carve-out is used,
 that audit event.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		active, _ := cmd.Flags().GetBool("active")
-		if active {
-			return runGuardSpawnActive(cmd)
+		in := verb.GuardSpawnInput{}
+		in.Run, _ = cmd.Flags().GetString("run")
+		in.Active, _ = cmd.Flags().GetBool("active")
+		in.AckReap, _ = cmd.Flags().GetInt64Slice("ack-reap")
+		in.DecidingVote, _ = cmd.Flags().GetString("deciding-vote")
+		in.UsageJoin, _ = cmd.Flags().GetBool("usage-join")
+		in.AllProjects, _ = cmd.Flags().GetBool("all-projects")
+		if path, _ := cmd.Flags().GetString("rows"); path != "" {
+			in.Rows = func() ([]byte, error) { return readProposedRows(cmd) }
 		}
 
-		runID, err := requiredRunFlag(cmd)
+		decision, err := verb.GuardSpawn(cmd.Context(), verbEnv(cmd), in)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-		seqs, err := ackSeqs(cmd)
-		if err != nil {
-			return err
-		}
-		rows, err := readProposedRows(cmd)
-		if err != nil {
-			return err
-		}
-
-		decidingVote, err := decidingVoteFlag(cmd)
-		if err != nil {
-			return err
-		}
-		usageJoin, _ := cmd.Flags().GetBool("usage-join")
-
-		verdict, err := engine.NewEngine().GuardSpawn(
-			getDB(cmd), runID, engine.SpawnOptions{
-				Rows: rows, AckSeqs: seqs, DecidingVote: decidingVote,
-				UsageJoin: usageJoin,
-				NowMS:     model.NowMS(),
-			})
-		if err != nil {
-			return runErr(err)
-		}
-		return emitGuard(cmd, verdict)
+		return emitGuard(cmd, decision)
 	},
-}
-
-// runGuardSpawnActive is `guard spawn --active` (DKT-1287). --run, --rows and
-// --ack-reap are each an act about ONE run's manifest or ledger, and --active
-// answers a different question — every active run's reap half at once — so it
-// refuses to guess which run they meant instead of silently narrowing back to
-// one. --deciding-vote needs no guess: the proposal resolves its own run.
-func runGuardSpawnActive(cmd *cobra.Command) error {
-	if ref, _ := cmd.Flags().GetString("run"); ref != "" {
-		return cmdErr(fmt.Errorf(
-			"--active and --run are mutually exclusive: --active already means "+
-				"every active run"), output.ErrValidation)
-	}
-	if path, _ := cmd.Flags().GetString("rows"); path != "" {
-		return cmdErr(fmt.Errorf(
-			"--active does not take --rows: a proposed batch is one run's "+
-				"manifest, so name that run with --run instead"), output.ErrValidation)
-	}
-	if seqs, _ := cmd.Flags().GetInt64Slice("ack-reap"); len(seqs) > 0 {
-		return cmdErr(fmt.Errorf(
-			"--active does not take --ack-reap: an acknowledgment is one run's "+
-				"ledger entry, so name that run with --run instead"), output.ErrValidation)
-	}
-	decidingVote, err := decidingVoteFlag(cmd)
-	if err != nil {
-		return err
-	}
-	usageJoin, _ := cmd.Flags().GetBool("usage-join")
-
-	verdict, err := engine.GuardSpawnActive(
-		getDB(cmd), guardProjectScope(cmd), decidingVote, usageJoin, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
-	return emitGuard(cmd, verdict)
-}
-
-// decidingVoteFlag resolves `--deciding-vote` (DKT-236). Absent is 0, meaning
-// no carve-out is claimed; a malformed reference is a VALIDATION_ERROR rather
-// than a silent 0, because a hook that typed the id wrong would otherwise be
-// denied with a message that never mentions its own typo.
-func decidingVoteFlag(cmd *cobra.Command) (int, error) {
-	ref, _ := cmd.Flags().GetString("deciding-vote")
-	if ref == "" {
-		return 0, nil
-	}
-	id, err := model.ParseProposalID(ref)
-	if err != nil {
-		return 0, cmdErr(
-			fmt.Errorf("invalid --deciding-vote %q: %w", ref, err),
-			output.ErrValidation)
-	}
-	return id, nil
-}
-
-// guardProjectScope resolves which project a guard answers for: the invoking
-// cwd's project by default, or 0 (every project in the store) under
-// --all-projects.
-//
-// Scoped-by-default is the fix for the shared store widening every guard from
-// repo-wide to machine-wide (a Stop hook in one repository was denied over
-// another repository's run, observed 2026-08-11): the guard's question is
-// "does engine state forbid THIS session's action", and another project's
-// engine state does not.
-func guardProjectScope(cmd *cobra.Command) int {
-	if all, _ := cmd.Flags().GetBool("all-projects"); all {
-		return 0
-	}
-	return getProjectID(cmd)
-}
-
-// optionalRunFlag resolves the OPTIONAL `--run` of `guard record` and
-// `guard gate`.
-//
-// An absent flag is run 0, meaning "every non-terminal run" — matching `guard
-// stop`'s all-active-runs shape. A present but malformed one is a
-// VALIDATION_ERROR, because a hook that typed the reference wrong should learn
-// that rather than silently widening to every run.
-func optionalRunFlag(cmd *cobra.Command) (int, error) {
-	ref, _ := cmd.Flags().GetString("run")
-	if ref == "" {
-		return 0, nil
-	}
-	return parseRunFlag(ref)
-}
-
-// requiredRunFlag resolves `guard spawn`'s REQUIRED `--run`.
-//
-// It is required here and optional for `record` because the two questions have
-// different scopes: "is anything unreconciled" is answerable over every run,
-// while "does this batch match the manifest" is about ONE run's dispatch and has
-// no all-runs reading.
-func requiredRunFlag(cmd *cobra.Command) (int, error) {
-	ref, _ := cmd.Flags().GetString("run")
-	if ref == "" {
-		return 0, cmdErr(
-			fmt.Errorf("--run is required: name the run whose batch is being spawned"),
-			output.ErrValidation)
-	}
-	return parseRunFlag(ref)
 }
 
 // readProposedRows reads `--rows FILE`, or stdin for "-".
@@ -393,7 +285,7 @@ type guardResult struct {
 	Allowed bool `json:"allowed"`
 }
 
-func emitGuard(cmd *cobra.Command, verdict *engine.GuardVerdict) error {
+func emitGuard(cmd *cobra.Command, verdict verb.GuardDecision) error {
 	w := getWriter(cmd)
 
 	if verdict.Allowed {

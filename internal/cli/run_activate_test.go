@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -164,6 +166,271 @@ func TestRunActivateJSONCarriesANewPolicyPin(t *testing.T) {
 		testsupport.Must(t, json.Unmarshal([]byte(stdout), &env), "decoding %s", stdout)
 		if raw, ok := env.Data["new_policy_pin"]; ok {
 			t.Errorf("envelope carries new_policy_pin %s for an inherited policy pin", raw)
+		}
+	})
+}
+
+// TestRunActivateScopeWarningsNameEachWarningsOwnRemedy: the human-mode scope
+// warnings print the `--scope` remedy only for an issue that declares no scope,
+// since the other scope lints' reasons already name their remedy, and a warning
+// with no bound workflow leaves no gap where the workflow name would be.
+func TestRunActivateScopeWarningsNameEachWarningsOwnRemedy(t *testing.T) {
+	// The reasons are the engine lints' wording, spelled here rather than
+	// borrowed so the test pins what an operator actually reads.
+	warnings := []engine.ScopeWarning{
+		{
+			IssueID:  "DKT-1",
+			Workflow: "standard-change@1",
+			Reason: "no scope is declared, so its \"implement\" step holds the " +
+				"tree without excluding, or being excluded by, any other issue",
+		},
+		{
+			IssueID: "DKT-2",
+			Reason: "none of its declared scope paths resolves under /repo — the " +
+				"issue may belong to a different repository; re-home it with " +
+				"`docket issue move --project` or fix the scope",
+		},
+		{
+			IssueID: "DKT-3",
+			Reason: "scope names a.go but not its existing test a_test.go — a fix " +
+				"that must change the test cannot land; add the test to the issue's scope",
+		},
+	}
+	stderr := &bytes.Buffer{}
+	warnScopeWarnings(&output.Writer{Stdout: &bytes.Buffer{}, Stderr: stderr}, warnings)
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != len(warnings) {
+		t.Fatalf("want one line per warning (%d), got %d:\n%s", len(warnings), len(lines), stderr)
+	}
+	for i, w := range warnings {
+		if !strings.Contains(lines[i], w.IssueID) || !strings.Contains(lines[i], w.Reason) {
+			t.Fatalf("line %d does not carry %s and its reason: %q", i, w.IssueID, lines[i])
+		}
+	}
+
+	if want := "declare one with `docket issue edit DKT-1 --scope GLOB`"; !strings.Contains(lines[0], want) {
+		t.Errorf("no-scope warning lacks %q: %q", want, lines[0])
+	}
+	for _, line := range lines[1:] {
+		if strings.Contains(line, "declare one with") {
+			t.Errorf("warning appends the no-scope remedy to a reason naming its own: %q", line)
+		}
+		if strings.Contains(line, "  ") {
+			t.Errorf("warning with no workflow leaves a doubled space: %q", line)
+		}
+	}
+}
+
+// The activating checkout's head rides on the run-activated event.
+func TestRunActivateRecordsTheCheckoutHead(t *testing.T) {
+	conn, runRef := reactivationFixture(t, true)
+	checkout := t.TempDir()
+	repinGit(t, checkout, "init", "-q", "-b", "trunk")
+	repinGit(t, checkout, "commit", "-q", "--allow-empty", "-m", "base")
+	commit := repinGit(t, checkout, "rev-parse", "HEAD")
+
+	cmd := newRunActivateCmd()
+	cmd.SetContext(context.WithValue(context.WithValue(context.Background(), dbKey, conn),
+		cfgKey, &config.Config{ExecRoot: checkout}))
+	w, _ := bufWriter(true)
+	err := runRunActivate(cmd, []string{runRef}, w)
+	testsupport.Must(t, err, "run activate: %v", err)
+
+	var data string
+	err = conn.QueryRow(`SELECT data FROM events WHERE kind = ? ORDER BY seq DESC LIMIT 1`,
+		engine.EventRunActivated).Scan(&data)
+	testsupport.Must(t, err, "reading the run-activated event: %v", err)
+	var head struct {
+		Branch string `json:"head_branch"`
+		Commit string `json:"head_commit"`
+	}
+	if err := json.Unmarshal([]byte(data), &head); err != nil {
+		t.Fatalf("decoding the event %s: %v", data, err)
+	}
+	if head.Branch != "trunk" || head.Commit != commit {
+		t.Errorf("event head = %+v, want branch trunk at %s", head, commit)
+	}
+}
+
+// lintIssue is one bound issue of a routing-lint fixture: its security label,
+// its scope globs as JSON, and its attached files.
+type lintIssue struct {
+	security bool
+	scope    string
+	files    []string
+}
+
+// routingLintDryRun binds issues to a fresh run, configures the lexicon (empty
+// leaves it off), and returns the human dry run's stderr.
+func routingLintDryRun(t *testing.T, lexicon string, issues ...lintIssue) string {
+	t.Helper()
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".docket", "config")
+	testsupport.Must(t, os.MkdirAll(filepath.Join(configDir, "workflows"), 0o755), "creating the workflows dir")
+	testsupport.Must(t, os.MkdirAll(filepath.Join(configDir, "contracts"), 0o755), "creating the contracts dir")
+	t.Setenv("DOCKET_PATH", filepath.Join(root, ".docket"))
+	testsupport.Must(t, os.WriteFile(filepath.Join(configDir, "workflows", "pin-show.toml"),
+		[]byte(pinShowWorkflow), 0o644), "writing the workflow")
+	testsupport.Must(t, os.WriteFile(filepath.Join(configDir, "contracts", "judge.md"),
+		[]byte("the judge contract\n"), 0o644), "writing the contract")
+
+	conn := newTestDB(t)
+	if lexicon != "" {
+		testsupport.Must(t, db.SetConfig(conn, 1, db.KeyRoutingSecurityLexicon, lexicon), "setting the lexicon")
+	}
+	run, err := db.InsertRun(conn, 1, "test run", 0, model.NowMS())
+	testsupport.Must(t, err, "InsertRun: %v", err)
+	for i, issue := range issues {
+		var labels []string
+		if issue.security {
+			labels = []string{"security"}
+		}
+		id, err := db.CreateIssue(conn, &model.Issue{
+			Title: "issue " + string(rune('A'+i)), Status: model.StatusBacklog,
+			Priority: model.PriorityNone, Kind: model.IssueKindFeature,
+		}, labels, issue.files)
+		testsupport.Must(t, err, "CreateIssue: %v", err)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, id, issue.scope), "declaring scope")
+		testsupport.Must(t, db.AddRunIssue(conn, run.ID, id), "AddRunIssue")
+	}
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	w := &output.Writer{Stdout: stdout, Stderr: stderr}
+	testsupport.Must(t, runActivateWithWriter(t, conn, w, run.Ref(), "--dry-run"), "run activate --dry-run")
+	return stderr.String()
+}
+
+// routingLintLine returns the security-routing lint's disclosure line, or "".
+func routingLintLine(stderr string) string {
+	for _, l := range strings.Split(stderr, "\n") {
+		if strings.Contains(l, "security-routing lint") {
+			return l
+		}
+	}
+	return ""
+}
+
+// TestRunActivateDryRunDisclosesUncomparedIssues: an empty routing-warning
+// list is read against what the overlap check compared. A linted issue that
+// formed no comparable pair with any labelled issue is disclosed even when it
+// is comparable in general and other pairs were compared, and the warnings
+// for a lint that compared nothing describe comparability accurately.
+func TestRunActivateDryRunDisclosesUncomparedIssues(t *testing.T) {
+	const lexicon = "zzz-no-such-term"
+	const uncompared = "linted issue(s) was compared against no labelled issue"
+	goFile := []string{"internal/exec/resolve.go"}
+
+	t.Run("1 a file-only issue meets a glob-only labelled issue", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, lexicon,
+			lintIssue{security: true, scope: `["internal/exec/**"]`},
+			lintIssue{scope: `["**"]`, files: goFile},
+		))
+		if !strings.Contains(line, "1 of 1 "+uncompared) {
+			t.Errorf("want a warning that 1 of 1 %s; got %q", uncompared, line)
+		}
+	})
+
+	t.Run("2 one of two linted issues is uncompared although a pair compared", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, lexicon,
+			lintIssue{security: true, scope: `["internal/exec/**"]`},
+			lintIssue{scope: `["internal/exec/sub/**"]`},
+			lintIssue{scope: `["**"]`, files: goFile},
+		))
+		if !strings.Contains(line, "1 of 2 "+uncompared) {
+			t.Errorf("want a warning that 1 of 2 %s; got %q", uncompared, line)
+		}
+	})
+
+	t.Run("3 a glob-only issue meets a file-only labelled issue", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, lexicon,
+			lintIssue{security: true, scope: `["**"]`, files: goFile},
+			lintIssue{scope: `["internal/exec/**"]`},
+		))
+		if !strings.Contains(line, "1 of 1 "+uncompared) {
+			t.Errorf("want a warning that 1 of 1 %s; got %q", uncompared, line)
+		}
+	})
+
+	t.Run("4 checked nothing does not deny a comparable labelled issue", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, "",
+			lintIssue{security: true, scope: `["internal/exec/**"]`},
+			lintIssue{scope: `["**"]`},
+		))
+		if !strings.Contains(line, "checked nothing") {
+			t.Fatalf("want the checked-nothing warning; got %q", line)
+		}
+		if strings.Contains(line, "no bound issue with a comparable scope carries") {
+			t.Errorf("warning denies the comparable labelled issue that is bound: %q", line)
+		}
+	})
+
+	t.Run("5 an unscoped issue is told a file makes it comparable", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, lexicon,
+			lintIssue{security: true, scope: `["internal/exec/**"]`},
+			lintIssue{scope: `["**"]`},
+		))
+		if !strings.Contains(line, "attaching a file") || !strings.Contains(line, "makes an issue comparable") {
+			t.Errorf("want the warning to say attaching a file makes an issue comparable; got %q", line)
+		}
+	})
+}
+
+// TestRunActivateDryRunIsSilentWithNoLabelledIssueBound: with a lexicon
+// configured, no labelled issue bound, and every linted issue comparable, the
+// overlap check had no pair to compare, so the dry run prints no routing-lint
+// line. A labelled issue that is bound but comparable with nothing still earns
+// the uncompared warning.
+func TestRunActivateDryRunIsSilentWithNoLabelledIssueBound(t *testing.T) {
+	if line := routingLintLine(routingLintDryRun(t, "zzz-no-such-term",
+		lintIssue{scope: `["internal/exec/**"]`},
+		lintIssue{scope: `["**"]`, files: []string{"internal/exec/resolve.go"}},
+	)); line != "" {
+		t.Errorf("want no routing-lint line with no labelled issue bound; got %q", line)
+	}
+	if line := routingLintLine(routingLintDryRun(t, "zzz-no-such-term",
+		lintIssue{security: true, scope: `["**"]`},
+		lintIssue{scope: `["internal/exec/**"]`},
+	)); !strings.Contains(line, "1 of 1 linted issue(s) was compared against no labelled issue") {
+		t.Errorf("want the uncompared warning for a bound but uncomparable labelled issue; got %q", line)
+	}
+}
+
+// TestRunActivateDryRunRoutingLintStatesWhatWasChecked: the uncompared warning
+// claims a lexicon check only when a lexicon is configured, and the warning for
+// a run with no labelled issue bound names the unscoped issues while a run
+// with a bound but uncomparable labelled issue does not deny it is bound.
+func TestRunActivateDryRunRoutingLintStatesWhatWasChecked(t *testing.T) {
+	goFile := []string{"internal/exec/resolve.go"}
+
+	t.Run("no lexicon: the uncompared issue was not lexicon-checked", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, "",
+			lintIssue{security: true, scope: `["internal/exec/**"]`},
+			lintIssue{scope: `["internal/exec/sub/**"]`},
+			lintIssue{scope: `["**"]`, files: goFile},
+		))
+		if !strings.Contains(line, "1 of 2 linted issue(s) was compared against no labelled issue") ||
+			!strings.Contains(line, "nothing was checked for them") || strings.Contains(line, "only the lexicon") {
+			t.Errorf("want the uncompared warning saying nothing was checked; got %q", line)
+		}
+	})
+
+	t.Run("no labelled issue bound and an unscoped issue", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, "zzz-no-such-term",
+			lintIssue{scope: `["**"]`},
+		))
+		if !strings.Contains(line, "compared no scopes") || !strings.Contains(line, "attaching a file") {
+			t.Errorf("want the compared-no-scopes warning naming the remedy; got %q", line)
+		}
+	})
+
+	t.Run("a bound but uncomparable labelled issue is not denied", func(t *testing.T) {
+		line := routingLintLine(routingLintDryRun(t, "zzz-no-such-term",
+			lintIssue{security: true, scope: `["**"]`},
+			lintIssue{scope: `["**"]`},
+		))
+		if !strings.Contains(line, "1 of 1 linted issue(s) was compared against no labelled issue") ||
+			strings.Contains(line, "no bound issue carries") {
+			t.Errorf("want the uncompared warning without denying the labelled issue; got %q", line)
 		}
 	})
 }

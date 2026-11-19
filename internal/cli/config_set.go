@@ -1,15 +1,14 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -17,8 +16,8 @@ import (
 // key, so the listing renders as {items,total,truncated} like every other list
 // verb.
 type configEntryList struct {
-	Entries []db.ConfigEntry `json:"entries"`
-	Total   int              `json:"total"`
+	Entries []store.ConfigEntry `json:"entries"`
+	Total   int                 `json:"total"`
 }
 
 func (c configEntryList) CollectionItems() any      { return c.Entries }
@@ -51,6 +50,14 @@ a typo fails here rather than silently storing something nothing reads.
   context.warn_bytes   integer    context size that triggers a warning
   context.error_bytes  integer    context size that triggers an error
 
+One client key is written to the client config, client.toml in the user
+config directory ($XDG_CONFIG_HOME/docket, default ~/.config/docket), not to
+the database:
+
+  default_profile      profile    the [profile.<name>] table used when nothing
+                                  else selects one; "" means the local daemon
+                                  socket
+
 A CLASS IS A STEP'S class FIELD, AND IT DEFAULTS TO THE EXECUTOR NAME.
 A step that declares no class carries its executor's name in that column, so
 lease.ttl.read binds nothing unless your steps actually declare class = "read".
@@ -65,48 +72,31 @@ mid-run.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		key, value := args[0], args[1]
+		if args[0] == clientDefaultProfileKey {
+			return setClientDefaultProfile(cmd, args[1])
+		}
 
 		// Project-scoped by default (v12): the value applies to this project
 		// and no other. --global writes the store-wide default every project
 		// without its own override falls back to — which is also what every
 		// pre-v12 value already is.
-		projectID := getProjectID(cmd)
-		if global, _ := cmd.Flags().GetBool("global"); global {
-			projectID = 0
+		in := verb.ConfigSetInput{Key: args[0], Value: args[1]}
+		in.Global, _ = cmd.Flags().GetBool("global")
+
+		env := projectVerbEnv(cmd)
+		result, err := verb.ConfigSet(cmd.Context(), env, in)
+		recordRegisteredProject(cmd, env, result.Registered)
+		if err != nil {
+			return verbErr(err)
 		}
 
-		// Through the engine rather than db.SetConfig directly (DKT-2767): a
-		// write to a vote-rule key records a `config-changed` event in the
-		// write's own transaction, attributed to the same identity the
-		// activity log uses, so a rewrite of a security-load-bearing key is
-		// detectable even though nothing yet prevents it.
-		if err := engine.SetConfig(conn, projectID, key, value, config.DefaultAuthor()); err != nil {
-			if errors.Is(err, db.ErrUnknownConfigKey) {
-				return cmdErr(err, output.ErrValidation)
-			}
-			// A validation failure on the value is the other expected case;
-			// anything else is a storage failure.
-			if strings.Contains(err.Error(), "storing config") {
-				return cmdErr(err, output.ErrGeneral)
-			}
-			return cmdErr(err, output.ErrValidation)
+		message := fmt.Sprintf("Set %s = %s", in.Key, in.Value)
+		if result.Warning != "" {
+			fmt.Fprintln(os.Stderr, result.Warning)
+			message += "\n" + result.Warning
 		}
-
-		// AFTER the write, not before (DKT-260). The value is valid and was
-		// stored; this is a disclosure about what it will bind to, and
-		// withholding the write over it would refuse a configuration the
-		// operator may be setting ahead of the workflow that uses it.
-		message := fmt.Sprintf("Set %s = %s", key, value)
-		if warning := leaseTTLClassWarning(conn, projectID, key); warning != "" {
-			fmt.Fprintln(os.Stderr, warning)
-			message += "\n" + warning
-		}
-
-		entry := db.ConfigEntry{Key: key, Value: value, Source: "set"}
-		w.Success(entry, message)
+		w.Success(result.Entry, message)
 		return nil
 	},
 }
@@ -126,34 +116,30 @@ nothing.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		projectID := getProjectID(cmd)
-		if global, _ := cmd.Flags().GetBool("global"); global {
-			projectID = 0
+		if len(args) == 1 && args[0] == clientDefaultProfileKey {
+			return getClientDefaultProfile(cmd)
 		}
 
-		if len(args) == 0 {
-			entries, err := db.ListConfig(conn, projectID)
-			if err != nil {
-				return cmdErr(fmt.Errorf("listing config: %w", err), output.ErrGeneral)
-			}
+		in := verb.ConfigGetInput{}
+		in.Global, _ = cmd.Flags().GetBool("global")
+		if len(args) == 1 {
+			in.Key = args[0]
+		}
+
+		result, err := verb.ConfigGet(cmd.Context(), projectVerbEnv(cmd), in)
+		if err != nil {
+			return verbErr(err)
+		}
+
+		if in.Key == "" {
 			w.Success(
-				configEntryList{Entries: entries, Total: len(entries)},
-				formatConfigEntries(entries),
+				configEntryList{Entries: result.Entries, Total: len(result.Entries)},
+				formatConfigEntries(result.Entries),
 			)
 			return nil
 		}
-
-		entry, err := db.GetConfig(conn, projectID, args[0])
-		if err != nil {
-			if errors.Is(err, db.ErrUnknownConfigKey) {
-				return cmdErr(err, output.ErrValidation)
-			}
-			return cmdErr(fmt.Errorf("reading config: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(entry, configValueForHuman(entry))
+		w.Success(result.Entry, configValueForHuman(result.Entry))
 		return nil
 	},
 }
@@ -178,7 +164,7 @@ const unsetConfigValue = "<unset>"
 // erase exactly the distinction `source` exists to carry. JSON is untouched —
 // the envelope already distinguishes the two, and a consumer parsing `value`
 // must not have to strip a human marker out of it.
-func configValueForHuman(entry db.ConfigEntry) string {
+func configValueForHuman(entry store.ConfigEntry) string {
 	if entry.Value == "" && entry.Source != "set" {
 		return unsetConfigValue
 	}
@@ -186,7 +172,7 @@ func configValueForHuman(entry db.ConfigEntry) string {
 }
 
 // formatConfigEntries renders the listing for human mode, aligned on the key.
-func formatConfigEntries(entries []db.ConfigEntry) string {
+func formatConfigEntries(entries []store.ConfigEntry) string {
 	width := 0
 	for _, e := range entries {
 		if len(e.Key) > width {
@@ -205,6 +191,63 @@ func formatConfigEntries(entries []db.ConfigEntry) string {
 		}
 	}
 	return b.String()
+}
+
+// clientDefaultProfileKey is the one key `config set` and `config get` route to
+// the client config file instead of the database.
+const clientDefaultProfileKey = "default_profile"
+
+// refuseGlobalForClientKey refuses --global on a client key: the client config is
+// per-user, not per-project, so the flag has nothing to select.
+func refuseGlobalForClientKey(cmd *cobra.Command) error {
+	if global, _ := cmd.Flags().GetBool("global"); global {
+		return cmdErr(fmt.Errorf("%s is a client config key, not a project setting; --global does not apply", clientDefaultProfileKey),
+			output.ErrValidation)
+	}
+	return nil
+}
+
+// setClientDefaultProfile updates default_profile in the client config file in
+// place, keeping its path, mode 0600, and every other setting. The value must
+// name a [profile.<name>] table, or be empty for the local daemon socket, so
+// the file still loads afterwards.
+func setClientDefaultProfile(cmd *cobra.Command, profile string) error {
+	if err := refuseGlobalForClientKey(cmd); err != nil {
+		return err
+	}
+	client, err := config.LoadClientConfig()
+	if err != nil {
+		return userConfigCmdError(err)
+	}
+	if _, ok := client.Profiles[profile]; profile != "" && !ok {
+		return cmdErr(fmt.Errorf("profile %q is not defined: %s has no [profile.%s] table", profile, client.Path, profile),
+			output.ErrValidation)
+	}
+	client.DefaultProfile = profile
+	if err := writePrivateTOML(client.Path, "the client config", client); err != nil {
+		return userConfigCmdError(err)
+	}
+	getWriter(cmd).Success(store.ConfigEntry{Key: clientDefaultProfileKey, Value: profile, Source: "set"},
+		fmt.Sprintf("Set %s = %s in %s", clientDefaultProfileKey, profile, client.Path))
+	return nil
+}
+
+// getClientDefaultProfile reads default_profile from the client config file.
+// An empty value is the local daemon socket, reported with source "default".
+func getClientDefaultProfile(cmd *cobra.Command) error {
+	if err := refuseGlobalForClientKey(cmd); err != nil {
+		return err
+	}
+	client, err := config.LoadClientConfig()
+	if err != nil {
+		return userConfigCmdError(err)
+	}
+	entry := store.ConfigEntry{Key: clientDefaultProfileKey, Value: client.DefaultProfile, Source: "set"}
+	if entry.Value == "" {
+		entry.Source = "default"
+	}
+	getWriter(cmd).Success(entry, configValueForHuman(entry))
+	return nil
 }
 
 func init() {

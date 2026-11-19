@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -79,6 +80,64 @@ func TestVoteCreateSealedFlagStoresTheFlag(t *testing.T) {
 	}
 }
 
+// TestVoteCreateCommandStoresEveryProposalFlag reads back each flag the
+// proposal carries, each with a distinct value, so a dropped or swapped field
+// fails.
+func TestVoteCreateCommandStoresEveryProposalFlag(t *testing.T) {
+	conn := newVoteCreateStore(t)
+
+	err := runVoteCreate(t, "--description", "every flag", "--rationale", "why it matters",
+		"--criticality", "high", "--voters", "3", "--threshold", "0.8", "--created-by", "carol",
+		"--domain-tags", "cli, api", "--files-changed", "a.go,b/c.go", "--escalation-reason", "stuck")
+	testsupport.Must(t, err, "vote create: %v", err)
+
+	p, err := db.GetProposal(conn, 1)
+	testsupport.Must(t, err, "GetProposal: %v", err)
+	if p.Description != "every flag" || p.Rationale != "why it matters" ||
+		p.Criticality != model.CriticalityHigh || p.RequiredVoters != 3 || p.Threshold != 0.8 ||
+		p.CreatedBy != "carol" || p.Sealed {
+		t.Errorf("created proposal = %+v, want every flag's value", p)
+	}
+	if strings.Join(p.DomainTags, "|") != "cli|api" || strings.Join(p.FilesChanged, "|") != "a.go|b/c.go" {
+		t.Errorf("domain tags %q and files changed %q, want [cli api] and [a.go b/c.go]", p.DomainTags, p.FilesChanged)
+	}
+	if p.EscalationReason == nil || *p.EscalationReason != "stuck" {
+		t.Errorf("escalation reason = %v, want \"stuck\"", p.EscalationReason)
+	}
+}
+
+// TestVoteCreateRefusesTheProjectBeforeItsFlags: an unanchored caller is
+// refused before any flag check, so a JSON-mode run with no flags reports the
+// project, never the missing --description.
+func TestVoteCreateRefusesTheProjectBeforeItsFlags(t *testing.T) {
+	conn := newTestDB(t)
+	_, err := runLeaseCommandOutput(t, conn, &config.Config{Identity: "/work/scratch"}, voteCreateCmd)
+	var cmdError *CmdError
+	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation ||
+		!strings.HasPrefix(cmdError.Error(), "cannot tell which project this belongs to") {
+		t.Errorf("vote create with no flags from an unanchored caller returned %v, want the project refusal", err)
+	}
+}
+
+// TestVoteCreateRefusesTheProposalBeforeAnEmptyKey: the proposal's own fields
+// are refused before an empty --idempotency-key, and the key is refused when
+// they pass.
+func TestVoteCreateRefusesTheProposalBeforeAnEmptyKey(t *testing.T) {
+	conn := newVoteCreateStore(t)
+	for voters, want := range map[string]string{
+		"0": "--voters must be >= 1",
+		"1": "--idempotency-key must not be empty",
+	} {
+		err := runVoteCreate(t, "--description", "d", "--voters", voters, "--idempotency-key", "")
+		if code := codeOf(t, err); code != output.ErrValidation || !strings.Contains(err.Error(), want) {
+			t.Errorf("--voters %s with an empty key returned %s %v, want %q", voters, code, err, want)
+		}
+	}
+	if n := countProposals(t, conn); n != 0 {
+		t.Errorf("proposals = %d after the refusals, want 0", n)
+	}
+}
+
 // TestVoteCreateRefusesVoteStepIdempotencyKey: the `vote-step:` key family is
 // the engine's link from a workflow vote step to its proposal. A caller key in
 // that family is refused as VALIDATION_ERROR before anything is written, so it
@@ -132,6 +191,29 @@ func TestVoteCreateReplaysCallerKeys(t *testing.T) {
 					key, again, countProposals(t, conn), first)
 			}
 		})
+	}
+}
+
+// TestVoteCreateReportsKeyReuseAsConflict: a key reused with a different
+// description is CONFLICT, exit 4, with a message naming the key.
+func TestVoteCreateReportsKeyReuseAsConflict(t *testing.T) {
+	conn := newVoteCreateStore(t)
+	const key = "reused-key"
+
+	err := runVoteCreate(t, "--description", "first", "--voters", "1", "--idempotency-key", key)
+	testsupport.Must(t, err, "first vote create: %v", err)
+
+	err = runVoteCreate(t, "--description", "second", "--voters", "1", "--idempotency-key", key)
+	code := codeOf(t, err)
+	if code != output.ErrConflict || output.ExitCodeForError(code) != 4 {
+		t.Fatalf("reuse with a different description returned code %s (exit %d), want %s (exit 4)",
+			code, output.ExitCodeForError(code), output.ErrConflict)
+	}
+	if !strings.Contains(err.Error(), key) {
+		t.Errorf("conflict %q does not name the key %q", err, key)
+	}
+	if n := countProposals(t, conn); n != 1 {
+		t.Errorf("proposals = %d after the conflict, want 1", n)
 	}
 }
 

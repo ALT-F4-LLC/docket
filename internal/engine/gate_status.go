@@ -1,11 +1,10 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -70,7 +69,12 @@ type GateStatusResult struct {
 	Target       *GateTarget
 }
 
-// GateStatus reads STEP-N's decision state: step status, outcome, and — for a
+// GateStatus is GateStatusStore on store.StoreOn(conn).
+func GateStatus(conn store.LegacyDB, stepID int, nowMS int64) (*GateStatusResult, error) {
+	return GateStatusStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// GateStatusStore reads STEP-N's decision state: step status, outcome, and — for a
 // vote step with an open proposal — the tally and every declared seat's cast
 // state, all from ONE StepView plus the two proposal reads a seat roster
 // needs.
@@ -78,7 +82,11 @@ type GateStatusResult struct {
 // stepID must name a `type="human"` or `type="vote"` step — the same
 // restriction `guard gate` applies, because every other step kind has no
 // decision to report status for.
-func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error) {
+func GateStatusStore(storage store.Store, stepID int, nowMS int64) (*GateStatusResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	view, err := LoadStepView(conn, stepID, nowMS)
 	if err != nil {
 		return nil, err
@@ -116,7 +124,8 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 			return nil, fmt.Errorf(
 				"parsing proposal %q on %s: %w", view.Row.Proposal, model.FormatStepID(stepID), err)
 		}
-		proposal, err := db.GetProposal(conn, proposalID)
+		st := store.StoreOn(conn)
+		proposal, err := st.GetProposal(proposalID)
 		if err != nil {
 			return nil, fmt.Errorf("reading proposal %s: %w", view.Row.Proposal, err)
 		}
@@ -124,7 +133,7 @@ func GateStatus(conn *sql.DB, stepID int, nowMS int64) (*GateStatusResult, error
 		result.Tally = &GateTally{WeightedScore: proposal.WeightedScore, Threshold: proposal.Threshold}
 		sealedOpen = proposal.SealedOpen()
 
-		votes, err := db.GetProposalVotes(conn, proposalID)
+		votes, err := st.GetProposalVotes(proposalID)
 		if err != nil {
 			return nil, fmt.Errorf("reading votes on %s: %w", view.Row.Proposal, err)
 		}
@@ -177,7 +186,7 @@ func voteGateOutcome(status model.ProposalStatus) GateOutcome {
 // `pass` routing is approved, still short of `done` is open, and `done` by
 // any other routing is a decision that was not a pass — rejected.
 func humanGateOutcome(status, routing string) GateOutcome {
-	if status != db.StepDone {
+	if status != store.StepDone {
 		return GateOutcomeOpen
 	}
 	if routingIs(routing, RoutingPass) {

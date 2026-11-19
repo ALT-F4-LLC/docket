@@ -1,14 +1,13 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +15,7 @@ import (
 //
 // `workflow register`, `workflow deprecate`, and `schema register` write rows
 // that are project-scoped — UNIQUE(project_id, name, version) — but each of
-// them picked its project from getProjectID(cmd) and nowhere else. So
+// them picked its project from the working directory and nowhere else. So
 // "retire this orphaned name" and "register the current corpus" meant one
 // invocation per project, run from inside that project's checkout, with no
 // verb anywhere that would say whether the other twelve had been done. A
@@ -138,23 +137,6 @@ func addProjectReadFlag(cmd *cobra.Command, action string) {
 			"(its PREFIX, NAME, IDENTITY, or row id)", action))
 }
 
-// resolveReadProject answers which ONE project a reading verb consults: the
-// --project ref when given, else the working directory's. The ref resolves
-// through resolveProjectRef, the same function the writing verbs use, so an
-// unknown ref fails with the same error here as there — and a project whose
-// checkout is missing from this machine can still be read by prefix.
-func resolveReadProject(cmd *cobra.Command, conn *sql.DB) (int, error) {
-	ref, _ := cmd.Flags().GetString("project")
-	if ref = strings.TrimSpace(ref); ref == "" {
-		return getProjectID(cmd), nil
-	}
-	target, err := resolveProjectRef(conn, ref)
-	if err != nil {
-		return 0, err
-	}
-	return target.ID, nil
-}
-
 // resolveRegistryTargets answers which projects this invocation writes to.
 //
 // The bool is FANNED-OUT, not "found something": false means neither flag was
@@ -168,7 +150,7 @@ func resolveReadProject(cmd *cobra.Command, conn *sql.DB) (int, error) {
 // caller constructing a command directly (every unit test in this package)
 // never runs.
 func resolveRegistryTargets(
-	cmd *cobra.Command, conn *sql.DB,
+	cmd *cobra.Command, conn store.LegacyDB,
 ) (targets []*model.Project, fannedOut bool, err error) {
 	ref, _ := cmd.Flags().GetString("project")
 	ref = strings.TrimSpace(ref)
@@ -202,8 +184,8 @@ func resolveRegistryTargets(
 
 // allRegistryProjects is every project in the store, the --all-projects
 // target set shared by the writing verbs and `workflow lint`.
-func allRegistryProjects(conn *sql.DB) ([]*model.Project, error) {
-	projects, err := db.ListProjects(conn)
+func allRegistryProjects(conn store.LegacyDB) ([]*model.Project, error) {
+	projects, err := store.StoreOn(conn).ListProjects()
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("listing projects: %w", err), output.ErrGeneral)
 	}
@@ -239,11 +221,11 @@ func registryFailureResult(
 
 	outcome := outcomeError
 	switch {
-	case errors.Is(err, db.ErrWorkflowAlreadyDeprecated),
-		errors.Is(err, db.ErrSchemaAlreadyDeprecated):
+	case errors.Is(err, store.ErrWorkflowAlreadyDeprecated),
+		errors.Is(err, store.ErrSchemaAlreadyDeprecated):
 		// The ONE sentinel workflowErr does not classify, because the
 		// single-project path answers it before reaching that mapper. Retiring
-		// twice is a CONFLICT there (db.ErrWorkflowAlreadyDeprecated's own
+		// twice is a CONFLICT there (store.ErrWorkflowAlreadyDeprecated's own
 		// header: the second caller's "I am taking this out of service" is
 		// wrong), and it has to be a CONFLICT here too — a fan-out that
 		// downgraded it would make the same store answer differently depending

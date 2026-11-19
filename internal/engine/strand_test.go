@@ -1,12 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -21,7 +21,7 @@ import (
 
 // openBallot registers an OPEN proposal under `key`, the way both an engine
 // vote step and a conductor's ballot are registered.
-func openBallot(t *testing.T, conn *sql.DB, key, description string) int {
+func openBallot(t *testing.T, conn store.LegacyDB, key, description string) int {
 	t.Helper()
 	id, err := db.CreateProposalIdempotent(conn, &model.Proposal{
 		Description: description,
@@ -38,7 +38,7 @@ func openBallot(t *testing.T, conn *sql.DB, key, description string) int {
 	return id
 }
 
-func proposalStatus(t *testing.T, conn *sql.DB, id int) model.ProposalStatus {
+func proposalStatus(t *testing.T, conn store.LegacyDB, id int) model.ProposalStatus {
 	t.Helper()
 	var status string
 	err := conn.QueryRow(`SELECT status FROM proposals WHERE id = ?`, id).Scan(&status)
@@ -46,7 +46,7 @@ func proposalStatus(t *testing.T, conn *sql.DB, id int) model.ProposalStatus {
 	return model.ProposalStatus(status)
 }
 
-func proposalOutcome(t *testing.T, conn *sql.DB, id int) string {
+func proposalOutcome(t *testing.T, conn store.LegacyDB, id int) string {
 	t.Helper()
 	var outcome string
 	err := conn.QueryRow(
@@ -63,7 +63,7 @@ func proposalOutcome(t *testing.T, conn *sql.DB, id int) string {
 // reap's own machinery — which reap_ack.go's own tests already cover. Driving a
 // real reap would couple every case here to write-class configuration that has
 // nothing to do with the question.
-func seedReapFor(t *testing.T, conn *sql.DB, runID int) int64 {
+func seedReapFor(t *testing.T, conn store.LegacyDB, runID int) int64 {
 	t.Helper()
 	stepID := stepIDByInstance(t, conn, "implement@0")
 	const seq = int64(9001)

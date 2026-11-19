@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -67,126 +64,42 @@ This verb records the same intent as a fact rather than as a puzzle.`,
 }
 
 func runWorkflowDeprecate(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	name, version, err := model.ParseWorkflowRef(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-	// An explicit version is REQUIRED. Retirement is version-scoped, and
-	// letting a bare name mean "the highest" would make the destructive-
-	// sounding verb operate on whichever version happened to be on top —
-	// a different row tomorrow than today.
-	if version == 0 {
-		return cmdErr(fmt.Errorf(
-			"deprecate needs an explicit version, as %s@<version>: "+
-				"retirement applies to one registered version, and a bare name "+
-				"would silently mean whichever is highest today", name),
-			output.ErrValidation)
-	}
-
 	restore, _ := cmd.Flags().GetBool("restore")
+	project, _ := cmd.Flags().GetString("project")
+	all, _ := cmd.Flags().GetBool("all-projects")
 
-	targets, fannedOut, err := resolveRegistryTargets(cmd, conn)
+	res, err := verb.WorkflowDeprecate(cmd.Context(), verbEnv(cmd), verb.WorkflowDeprecateInput{
+		Ref:         args[0],
+		Restore:     restore,
+		Project:     project,
+		AllProjects: all,
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-	if fannedOut {
-		return deprecateWorkflowAcrossProjects(
-			cmd, w, conn, args[0], name, version, restore, targets)
+
+	if res.Targets != nil {
+		report := &registryFanoutReport{
+			Operation: "workflow deprecate", Subject: args[0], Scope: fanoutScope(cmd),
+		}
+		if restore {
+			report.Operation = "workflow deprecate --restore"
+			return finishWorkflowFanout(w, report, res.Targets,
+				outcomeRestored, outcomeAlreadyBinding)
+		}
+		return finishWorkflowFanout(w, report, res.Targets,
+			outcomeDeprecated, outcomeDeprecated)
 	}
 
 	if restore {
-		wf, err := db.RestoreWorkflow(conn, getProjectID(cmd), name, version)
-		if err != nil {
-			return workflowErr(describeMissingWorkflow(err, args[0]))
-		}
-		w.Success(wf, fmt.Sprintf("%s restored to binding.", wf.Ref()))
+		w.Success(res.Workflow, fmt.Sprintf("%s restored to binding.", res.Workflow.Ref()))
 		return nil
 	}
-
-	wf, err := db.DeprecateWorkflow(conn, getProjectID(cmd), name, version, model.NowMS())
-	if err != nil {
-		if errors.Is(err, db.ErrWorkflowAlreadyDeprecated) {
-			return cmdErr(fmt.Errorf("%s is already deprecated", args[0]),
-				output.ErrConflict)
-		}
-		return workflowErr(describeMissingWorkflow(err, args[0]))
-	}
-
-	w.Success(wf, fmt.Sprintf(
+	w.Success(res.Workflow, fmt.Sprintf(
 		"%s retired from binding. It stays registered and readable, and runs "+
-			"that pinned it still resolve it.", wf.Ref()))
+			"that pinned it still resolve it.", res.Workflow.Ref()))
 	return nil
-}
-
-// describeDeprecateFailure gives a fanned-out refusal the SAME sentence its
-// single-project counterpart writes, so the per-project detail line reads as
-// what the operator would have seen standing in that checkout. The sentinels
-// stay wrapped, since the classifier and the report both match on them.
-func describeDeprecateFailure(err error, ref string) error {
-	if errors.Is(err, db.ErrWorkflowAlreadyDeprecated) {
-		return fmt.Errorf("%s is already deprecated: %w", ref, err)
-	}
-	return describeMissingWorkflow(err, ref)
-}
-
-// deprecateWorkflowAcrossProjects is the --project / --all-projects path for
-// both directions of the verb.
-//
-// RESTORE IS IDEMPOTENT AND DEPRECATE IS NOT, and the report keeps that
-// asymmetry visible rather than smoothing it: db.RestoreWorkflow returns the
-// row unchanged when it was never retired (reported as already-binding, a
-// success), while db.DeprecateWorkflow refuses a second retirement (reported as
-// already-deprecated, a failure carrying CONFLICT). Both readings are the
-// single-project behavior, per project, which is the criterion — a sweep must
-// not turn one project's refusal into another's silence.
-func deprecateWorkflowAcrossProjects(
-	cmd *cobra.Command, w *output.Writer, conn *sql.DB,
-	ref, name string, version int, restore bool, targets []*model.Project,
-) error {
-	operation := "workflow deprecate"
-	if restore {
-		operation = "workflow deprecate --restore"
-	}
-	report := &registryFanoutReport{
-		Operation: operation, Subject: ref, Scope: fanoutScope(cmd),
-	}
-
-	for _, target := range targets {
-		var (
-			wf      *model.Workflow
-			err     error
-			outcome string
-		)
-		if restore {
-			// The pre-state decides which success this is; RestoreWorkflow
-			// itself returns the same row either way.
-			before, lookupErr := db.GetWorkflow(conn, target.ID, name, version)
-			if lookupErr != nil {
-				report.Results = append(report.Results, registryFailureResult(
-					target, describeDeprecateFailure(lookupErr, ref), workflowErr))
-				continue
-			}
-			outcome = outcomeAlreadyBinding
-			if before.Deprecated() {
-				outcome = outcomeRestored
-			}
-			wf, err = db.RestoreWorkflow(conn, target.ID, name, version)
-		} else {
-			outcome = outcomeDeprecated
-			wf, err = db.DeprecateWorkflow(conn, target.ID, name, version, model.NowMS())
-		}
-		if err != nil {
-			report.Results = append(report.Results, registryFailureResult(
-				target, describeDeprecateFailure(err, ref), workflowErr))
-			continue
-		}
-		report.Results = append(report.Results,
-			registrySuccessResult(target, outcome, wf.Ref()))
-	}
-
-	return finishRegistryFanout(w, report)
 }
 
 func init() {

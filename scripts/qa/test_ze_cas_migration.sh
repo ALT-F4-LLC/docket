@@ -109,9 +109,9 @@ test_ze_cas_migration() {
   assert_exit "ZE" "ZE2_setup" 0
   ZE_ID=$(extract_id)
 
-  # ZE2: v1 carries no version field; v2 does.
+  # ZE2: the v2 envelope carries the version field, and bare --json is v2.
   run issue show "$ZE_ID" --json
-  assert_json_null "ZE" "ZE2_v1_no_version" ".data.version"
+  assert_json "ZE" "ZE2_bare_version" ".data.version" "1"
   run issue show "$ZE_ID" --json=v2
   assert_json "ZE" "ZE2_v2_version" ".data.version" "1"
 
@@ -120,11 +120,12 @@ test_ze_cas_migration() {
   assert_exit "ZE" "ZE3_move" 0
   assert_json "ZE" "ZE3_version_2" ".data.version" "2"
 
-  # ZE4: list items carry versions under v2 only.
+  # ZE4: list items carry versions under v2, including bare --json.
   run issue list --json=v2
   assert_json_all "ZE" "ZE4_all_versioned" ".data.items" "has(\"version\")"
   run issue list --json
-  assert_json_all "ZE" "ZE4_v1_unversioned" ".data.issues" "has(\"version\") | not"
+  assert_json_array_min "ZE" "ZE4_bare_nonempty" ".data.items" 1
+  assert_json_all "ZE" "ZE4_bare_versioned" ".data.items" "has(\"version\")"
 
   # ---------------------------------------------------------------------------
   # CAS: --if-version.

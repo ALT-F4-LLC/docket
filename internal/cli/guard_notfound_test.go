@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,6 +162,197 @@ func TestGuardNotFoundExitsZero(t *testing.T) {
 			}
 		}
 	})
+}
+
+// unavailableGuardVerbs are the guards a hook blocks on: spawn, the commit
+// gate, and stop.
+var unavailableGuardVerbs = [][]string{
+	{"guard", "spawn", "--active"},
+	{"guard", "gate", "--step", "X"},
+	{"guard", "stop"},
+}
+
+// assertGuardUnavailable runs each guard in dir and requires the
+// fail-closed deny: exit 2, UNAVAILABLE on stderr, and none of the phrases a
+// hook reads as an allow.
+func assertGuardUnavailable(t *testing.T, bin, dir string) {
+	t.Helper()
+	for _, argv := range unavailableGuardVerbs {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			_, stderr, code := runDocket(t, bin, dir, argv...)
+			if code != 2 {
+				t.Errorf("exit = %d, want 2; a guard that cannot consult engine state must deny\nstderr: %s",
+					code, stderr)
+			}
+			if !strings.Contains(stderr, "UNAVAILABLE") {
+				t.Errorf("stderr = %q, want it to say UNAVAILABLE", stderr)
+			}
+			for _, allowPhrase := range []string{"in any active run", "no docket database"} {
+				if strings.Contains(stderr, allowPhrase) {
+					t.Errorf("stderr = %q contains %q, which the commit hook reads as an allow",
+						stderr, allowPhrase)
+				}
+			}
+		})
+	}
+
+	t.Run("JSON carries the UNAVAILABLE code", func(t *testing.T) {
+		stdout, _, code := runDocket(t, bin, dir, "guard", "stop", "--json=v2")
+		if code != 2 {
+			t.Errorf("exit = %d, want 2", code)
+		}
+		if !strings.Contains(stdout, `"code":"UNAVAILABLE"`) {
+			t.Errorf("stdout = %q, want the UNAVAILABLE code", stdout)
+		}
+	})
+}
+
+// TestGuardUnavailableLocal: a store that exists but cannot be opened denies.
+// Hooks block only on exit 2, so the exit 1 this used to produce let a
+// Workflow spawn through with no reap-hold check.
+func TestGuardUnavailableLocal(t *testing.T) {
+	bin := buildDocketBinary(t)
+
+	breakStore := []struct {
+		name  string
+		apply func(t *testing.T, dbPath string)
+	}{
+		{"not a database", func(t *testing.T, dbPath string) {
+			if err := os.WriteFile(dbPath, []byte("this is not an sqlite file, not even close"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unreadable", func(t *testing.T, dbPath string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root reads a mode-000 file, so the store stays readable")
+			}
+			if err := os.Chmod(dbPath, 0); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+
+	for _, tc := range breakStore {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {
+				t.Fatalf("init failed: %s", stderr)
+			}
+			dbPath := filepath.Join(repo, ".docket", "issues.db")
+			if _, err := os.Stat(dbPath); err != nil {
+				t.Fatalf("init left no store at %s: %v", dbPath, err)
+			}
+			tc.apply(t, dbPath)
+
+			assertGuardUnavailable(t, bin, repo)
+
+			// Scoped to guards: an ordinary verb keeps its general error.
+			t.Run("non-guard verb still exits 1", func(t *testing.T) {
+				_, stderr, code := runDocket(t, bin, repo, "issue", "list")
+				if code != 1 {
+					t.Errorf("exit = %d, want 1\nstderr: %s", code, stderr)
+				}
+			})
+		})
+	}
+}
+
+// writeClientConfig writes a 0600 client.toml defining one profile, in the
+// hermetic config directory runDocket points XDG_CONFIG_HOME at.
+func writeClientConfig(t *testing.T, dir, profile, url string) {
+	t.Helper()
+	cfgDir := filepath.Join(dir, "xdg", "docket")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("version = 1\n\n[profile.%s]\nurl = %q\n", profile, url)
+	if err := os.WriteFile(filepath.Join(cfgDir, "client.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// refusingURL returns an http URL on a loopback port nothing listens on.
+func refusingURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return "http://" + addr
+}
+
+// TestGuardUnavailableHosted: a project linked to a daemon has engine state
+// even with no local store, so the guards deny rather than answer "not
+// applicable". The daemon here refuses connections.
+func TestGuardUnavailableHosted(t *testing.T) {
+	bin := buildDocketBinary(t)
+
+	linked := func(t *testing.T) string {
+		t.Helper()
+		repo := t.TempDir()
+		writeClientConfig(t, repo, "hosted", refusingURL(t))
+		if _, stderr, code := runDocket(t, bin, repo,
+			"link", "--profile", "hosted", "--project-id", "7"); code != 0 {
+			t.Fatalf("link failed: %s", stderr)
+		}
+		return repo
+	}
+
+	t.Run("linked to a refusing daemon", func(t *testing.T) {
+		assertGuardUnavailable(t, bin, linked(t))
+	})
+
+	// A link file that fails its integrity check leaves the binding unknown,
+	// and unknown is not "none".
+	t.Run("link file fails its integrity check", func(t *testing.T) {
+		repo := linked(t)
+		if err := os.Chmod(filepath.Join(repo, "xdg", "docket", "links.toml"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		assertGuardUnavailable(t, bin, repo)
+	})
+}
+
+// TestGuardNotApplicable: a link file that binds OTHER projects is not a
+// binding of this one, so a project with no store and no link of its own is
+// still not applicable.
+func TestGuardNotApplicable(t *testing.T) {
+	bin := buildDocketBinary(t)
+
+	other := t.TempDir()
+	repo := t.TempDir()
+	writeClientConfig(t, repo, "hosted", refusingURL(t))
+	// Link a different directory, using repo's config dir.
+	linkCmd := exec.Command(bin, "link", "--profile", "hosted", "--project-id", "7")
+	linkCmd.Dir = other
+	linkCmd.Env = append(os.Environ(),
+		"DOCKET_PATH=",
+		"XDG_CONFIG_HOME="+filepath.Join(repo, "xdg"),
+		"HOME="+repo,
+	)
+	if out, err := linkCmd.CombinedOutput(); err != nil {
+		t.Fatalf("link failed: %v\n%s", err, out)
+	}
+
+	for _, argv := range unavailableGuardVerbs {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			stdout, stderr, code := runDocket(t, bin, repo, argv...)
+			if code != 0 {
+				t.Errorf("exit = %d, want 0; another project's link does not bind this one\nstderr: %s",
+					code, stderr)
+			}
+			if !strings.Contains(stderr, "no docket database") {
+				t.Errorf("stderr = %q, want the not-applicable reason", stderr)
+			}
+			if !strings.Contains(stdout, "allowed") {
+				t.Errorf("stdout = %q, want the ordinary allow verdict", stdout)
+			}
+		})
+	}
 }
 
 // TestGuardSpawnActiveFlagValidation is DKT-1287: `--active` is mutually

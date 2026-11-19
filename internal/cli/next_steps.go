@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"fmt"
-	"strings"
-
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -48,45 +45,34 @@ var (
 	_ output.CollectionSiblings = nextStepsResult{}
 )
 
-// issueModeFlags are the filters that mean something in ISSUE mode and nothing
-// in step mode.
-//
-// They are REFUSED rather than silently ignored. An issue-mode filter
-// that quietly does nothing in step mode is a filter a dispatcher will trust
-// and be wrong about — it would ask for `--priority critical` steps, get every
-// step, and dispatch work it meant to defer.
-var issueModeFlags = []string{"status", "priority", "label", "type"}
+// givenFilter is the --name issue filter as step mode passes it to verb.Next:
+// nil when the flag was not given, so the verb refuses exactly the filters
+// the caller gave, an empty value included.
+func givenFilter(cmd *cobra.Command, name string) []string {
+	if !cmd.Flags().Changed(name) {
+		return nil
+	}
+	values, _ := cmd.Flags().GetStringSlice(name)
+	return values
+}
 
 func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(runRef)
-	if err != nil {
-		return cmdErr(fmt.Errorf("invalid run ID: %w", err), output.ErrValidation)
-	}
-
-	var conflicting []string
-	for _, name := range issueModeFlags {
-		if cmd.Flags().Changed(name) {
-			conflicting = append(conflicting, "--"+name)
-		}
-	}
-	if len(conflicting) > 0 {
-		subject := "is an issue filter"
-		if len(conflicting) > 1 {
-			subject = "are issue filters"
-		}
-		return cmdErr(
-			fmt.Errorf(
-				"%s %s and cannot be combined with --run, which lists a run's "+
-					"ready STEPS; inspect the run with `docket run status` instead",
-				strings.Join(conflicting, ", "), subject,
-			),
-			output.ErrValidation,
-		)
-	}
-
+	// --size is not passed: step mode has always ignored it rather than
+	// refused it.
 	limit, _ := cmd.Flags().GetInt("limit")
+	in := verb.NextInput{
+		Statuses:   givenFilter(cmd, "status"),
+		Priorities: givenFilter(cmd, "priority"),
+		Labels:     givenFilter(cmd, "label"),
+		Types:      givenFilter(cmd, "type"),
+		Run:        runRef,
+		Limit:      limit,
+	}
+	// A bad run reference or a refused filter is reported before a bad
+	// --limit.
+	if err := in.Validate(); err != nil {
+		return verbErr(err)
+	}
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
@@ -99,13 +85,14 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 	// who typed a cut asked for one, and the v2 envelope reports it as
 	// truncated.
 	if !cmd.Flags().Changed("limit") {
-		limit = 0 // 0 means no limit (readyRows)
+		in.Limit = 0 // 0 means no limit (readyRows)
 	}
 
-	ready, err := engine.NewEngine().NextSteps(conn, runID, limit, model.NowMS())
+	next, err := verb.Next(cmd.Context(), verbEnv(cmd), in)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	ready := next.Steps
 
 	// Reaping is the one write this read-shaped verb performs. Saying so
 	// on stderr keeps it auditable without touching the payload — a JSON
@@ -150,7 +137,7 @@ func runNextSteps(cmd *cobra.Command, runRef string, w *output.Writer) error {
 
 	result := nextStepsResult{
 		Steps: ready.Steps, Total: len(ready.Steps),
-		readyTotal: ready.Total, limit: limit,
+		readyTotal: ready.Total, limit: in.Limit,
 		limits: ready.Limits, limitSources: ready.LimitSources,
 	}
 

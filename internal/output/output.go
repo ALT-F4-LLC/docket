@@ -15,9 +15,9 @@ import (
 type Writer struct {
 	JSONMode  bool
 	QuietMode bool
-	// JSONVersion selects the envelope shape when JSONMode is true. The zero
-	// value (JSONNone) is treated as JSONV1 so a Writer built by older code —
-	// or in a test — keeps emitting exactly the v1 envelope.
+	// JSONVersion records the requested envelope version. JSONV2 is the only
+	// JSON dialect, so JSON-mode rendering does not branch on it and the zero
+	// value renders v2 too.
 	JSONVersion JSONVersion
 	Stdout      io.Writer
 	Stderr      io.Writer
@@ -31,12 +31,12 @@ func New(jsonMode, quietMode bool) *Writer {
 
 // NormalizeJSONVersion resolves the version a caller gets when it may declare
 // only the legacy jsonMode bool, an explicit version, or (like RunWatch) both:
-// JSONNone becomes JSONV1 whenever jsonMode is set, and any version already
+// JSONNone becomes JSONV2 whenever jsonMode is set, and any version already
 // given passes through unchanged. New keys off it so a caller that mixes the
 // bool with an explicit version can never see the two disagree.
 func NormalizeJSONVersion(jsonMode bool, version JSONVersion) JSONVersion {
 	if jsonMode && version == JSONNone {
-		return JSONV1
+		return JSONV2
 	}
 	return version
 }
@@ -58,11 +58,7 @@ func NewWithVersion(version JSONVersion, quietMode bool) *Writer {
 // Stdout.
 func (w *Writer) Success(data any, message string) {
 	if w.JSONMode {
-		if w.JSONVersion == JSONV2 {
-			writeJSONSuccessV2(w.Stdout, data, message)
-		} else {
-			writeJSONSuccess(w.Stdout, data, message)
-		}
+		writeJSONSuccess(w.Stdout, data, message)
 		return
 	}
 	writeHumanSuccess(w.Stdout, message)
@@ -81,11 +77,7 @@ func (w *Writer) Success(data any, message string) {
 // which an executor read as a pass and reported up as one.
 func (w *Writer) Outcome(data any, message string) {
 	if w.JSONMode {
-		if w.JSONVersion == JSONV2 {
-			writeJSONSuccessV2(w.Stdout, data, message)
-		} else {
-			writeJSONSuccess(w.Stdout, data, message)
-		}
+		writeJSONSuccess(w.Stdout, data, message)
 		return
 	}
 	writeHumanOutcome(w.Stdout, message)
@@ -109,17 +101,13 @@ func (w *Writer) Error(err error, code ErrorCode) int {
 // The corresponding exit code is returned so the caller can pass it to os.Exit.
 //
 // In JSON mode Stdout receives exactly one envelope: ok false, the error and
-// code exactly as Error would write them, and data as Success would write it
-// for the selected version. A caller reading .ok and a caller reading the exit
-// code therefore reach the same verdict. In human mode the message (the
-// rendered report) goes to Stdout with the failure glyph and the error goes to
-// Stderr, as Error writes it.
+// code exactly as Error would write them, and data as Success would write it.
+// A caller reading .ok and a caller reading the exit code therefore reach the
+// same verdict. In human mode the message (the rendered report) goes to Stdout
+// with the failure glyph and the error goes to Stderr, as Error writes it.
 func (w *Writer) PartialFailure(data any, message string, err error, code ErrorCode) int {
 	if w.JSONMode {
-		if w.JSONVersion == JSONV2 {
-			data = shapeV2Data(data)
-		}
-		writeJSONPartialFailure(w.Stdout, data, err, code)
+		writeJSONPartialFailure(w.Stdout, shapeV2Data(data), err, code)
 	} else {
 		writeHumanOutcome(w.Stdout, message)
 		writeHumanError(w.Stderr, err)

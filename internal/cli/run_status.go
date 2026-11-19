@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -64,9 +64,9 @@ type pinJSON struct {
 	SHA256 string `json:"sha256"`
 }
 
-// MarshalJSON on the wrapper keeps the run's own v1 shape nested under `run`,
-// so a consumer reads one document rather than a run with rollup fields spliced
-// into it — the rollup is about the run, not part of it.
+// VersionedPayload nests the versioned run under `run`, so a consumer reads one
+// document rather than a run with rollup fields spliced into it — the rollup is
+// about the run, not part of it.
 func (r runStatusResult) VersionedPayload() any {
 	return struct {
 		Run            any                      `json:"run"`
@@ -100,13 +100,12 @@ type runListResult struct {
 // newRunListResult builds the list result with an empty collection rendered as
 // `[]`, never `null`.
 //
-// db.ListRuns returns a nil slice when nothing matches, and encoding/json
-// renders a nil slice as `null`. The v2 Collection path never showed it — its
-// items go through runListPayload — but the v1 dialect marshals this struct
-// directly, so a project with no non-terminal run printed `"runs":null` and a
-// reader iterating `.data.runs[]` failed on it. `step list --issue` settled the
-// rule for an empty collection: it is `[]`, and the normalization lives where
-// the result is built so no marshaling path can miss it.
+// Store.ListRuns returns a nil slice when nothing matches, and encoding/json
+// renders a nil slice as `null`. The collection envelope's items never are,
+// but a writer that marshals this struct directly would print `"runs":null`,
+// and a reader iterating `.data.runs[]` fails on it. `step list --issue`
+// settled the rule for an empty collection: it is `[]`, and the normalization
+// lives where the result is built so no marshaling path can miss it.
 func newRunListResult(runs []*model.Run, total, limit int) runListResult {
 	if runs == nil {
 		runs = []*model.Run{}
@@ -114,116 +113,50 @@ func newRunListResult(runs []*model.Run, total, limit int) runListResult {
 	return runListResult{Runs: runs, Total: total, limit: limit}
 }
 
-func (r runListResult) CollectionItems() any { return runListPayload{runs: r.Runs} }
+func (r runListResult) CollectionItems() any { return model.RunsWithVersion(r.Runs) }
 func (r runListResult) CollectionTotal() int { return r.Total }
 func (r runListResult) CollectionTruncated() bool {
 	return output.IsTruncated(r.limit, r.Total, len(r.Runs))
 }
 
 func runRunStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
 	all, _ := cmd.Flags().GetBool("all")
 	limit, _ := cmd.Flags().GetInt("limit")
 
+	in := verb.RunStatusInput{All: all, Limit: limit}
 	if len(args) == 1 {
-		if all {
-			return cmdErr(
-				fmt.Errorf("--all widens a list; it does not apply to a single run"),
-				output.ErrValidation)
-		}
-		return showOneRun(cmd, args[0], w)
-	}
-
-	if err := validateLimit(cmd, limit); err != nil {
+		in.Run, in.OneRun = args[0], true
+	} else if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
 
-	runs, total, err := db.ListRuns(conn, db.RunListOptions{
-		ProjectID:  getProjectID(cmd),
-		ActiveOnly: !all, Limit: limit,
-	})
+	res, err := verb.RunStatus(cmd.Context(), verbEnv(cmd), in)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
-	result := newRunListResult(runs, total, limit)
-	var message string
-	if !w.JSONMode {
-		message = renderRunList(runs)
-	}
-	w.Success(result, message)
-	return nil
-}
-
-func showOneRun(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	run, err := db.GetRun(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	runIssues, err := db.ListRunIssues(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-	// EFFECTIVE counts, exactly as this verb's contract states — the
-	// same computation `step show`/`step list` render, so the rollup and a
-	// step read taken at the same moment cannot disagree (DKT-468). The raw
-	// GROUP BY this replaced counted a lapsed-lease claim as `claimed` while
-	// `step show` reported the same step `ready`.
-	steps, err := engine.EffectiveStatusCounts(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
-	pins, err := db.ListPins(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	head, err := engine.LatestActivationHead(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	unexpanded, retryEligible, err := engine.RunAdvisories(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
-	result := runStatusResult{
-		Run: run, Issues: len(runIssues), Steps: steps, ActivationHead: head,
-		Unexpanded:    unexpanded,
-		RetryEligible: retryEligible,
-	}
-	for _, p := range pins {
-		result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
-	}
-
-	// The drift check reads DISK on purpose, breaking this verb's usual
-	// database-only diet (DKT-408): a parked run whose pins a corpus install
-	// replaced must say so in the status a resuming conductor reads FIRST,
-	// not after a wave discovers it step by step. Still a read — VerifyPins
-	// writes nothing — and still cheap: it hashes the run's pinned files, the
-	// same work `verify-pins` does. Skipped for terminal runs, whose pins are
-	// history rather than an agreement anything will read again.
-	if run.Status == model.RunActive || run.Status == model.RunWaitingHuman {
-		drift, err := engine.PinDrift(conn, runID)
-		if err != nil {
-			return runErr(err)
+	if d := res.Detail; d != nil {
+		result := runStatusResult{
+			Run: d.Run, Issues: d.Issues, Steps: d.Steps, PinDrift: d.PinDrift,
+			ActivationHead: d.ActivationHead,
+			Unexpanded:     d.Unexpanded,
+			RetryEligible:  d.RetryEligible,
 		}
-		result.PinDrift = drift
+		for _, p := range d.Pins {
+			result.Pins = append(result.Pins, pinJSON{Kind: p.Kind, Ref: p.Ref, SHA256: p.SHA256})
+		}
+		var message string
+		if !w.JSONMode {
+			message = renderRunStatus(result)
+		}
+		w.Success(result, message)
+		return nil
 	}
 
+	result := newRunListResult(res.Runs, res.Total, limit)
 	var message string
 	if !w.JSONMode {
-		message = renderRunStatus(result)
+		message = renderRunList(res.Runs)
 	}
 	w.Success(result, message)
 	return nil

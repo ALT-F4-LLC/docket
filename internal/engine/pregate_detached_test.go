@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
+	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // A pre-gate longer than the claim's budget is measured AHEAD of the claim
@@ -357,6 +359,18 @@ func TestDetachedRunRecordsNothingItCouldNotMeasure(t *testing.T) {
 	}
 	if rows := preGateRows(t, conn, stepID, "ac-commands"); len(rows) != 0 {
 		t.Errorf("a run that measured nothing recorded rows: %+v", rows)
+	}
+}
+
+// TestDetachedRunForAMissingStepIsNotFound: `docket step pregate` on a step
+// id with no row answers NOT_FOUND (exit 2), not a bare store error.
+func TestDetachedRunForAMissingStepIsNotFound(t *testing.T) {
+	withDetachedPreGateLockDir(t)
+	conn := mustDB(t)
+
+	_, err := testEngine().RunDetachedPreGates(conn, 999999, strings.Repeat("a", 40), nowMS)
+	if code, ok := CodeOf(err); !ok || code != CodeNotFound {
+		t.Fatalf("RunDetachedPreGates on a missing step: err = %v (code %q), want %s", err, code, CodeNotFound)
 	}
 }
 
@@ -746,16 +760,15 @@ func TestDetachedPreGateInFlightHoldsTheStepUntilItsResultLands(t *testing.T) {
 // to no target, as a claim with no detached result to serve does.
 //
 // The budget starts before the tree under review is bound, so which row it
-// leaves depends on when it runs out. Spent while the gate runs, it cuts the
-// gate off: `fail`. Spent before the gate starts, as a slow reconstruction on
-// a loaded host can do to 500ms, nothing spawns: `skipped`. The first case
-// accepts either. The second shrinks the budget to a nanosecond, which the
-// claim's own transactions spend before any gate is reached, so it pins
-// `skipped` every time.
+// leaves depends on when it runs out. Spent while the gate runs, it stops the
+// gate and the row says the measurement is pending. Spent before the gate
+// starts, as a slow reconstruction on a loaded host can do to 500ms, nothing
+// spawns. Both are `skipped` naming the budget, never the kill's `fail`. The
+// second case shrinks the budget to a nanosecond, which the claim's own
+// transactions spend before any gate is reached.
 //
 // The mutant that holds whenever a pre-gate is declared, regardless of the
-// lock, reports the step blocked in both cases. The mutant that accepts only
-// `fail` goes red on the second.
+// lock, reports the step blocked in both cases.
 func TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -763,7 +776,7 @@ func TestNoDetachedLockLeavesReadinessAndTheClaimUnchanged(t *testing.T) {
 		accept []string
 	}{
 		{"budget ends during or before the gate", 500 * time.Millisecond,
-			[]string{VerdictFail, VerdictSkipped}},
+			[]string{VerdictSkipped}},
 		{"budget spent before the gate starts", time.Nanosecond,
 			[]string{VerdictSkipped}},
 	}
@@ -883,6 +896,272 @@ func TestClaimWhileDetachedRunInFlightIsRefusedWithoutWaiting(t *testing.T) {
 	if rows := preGateRows(t, conn, stepID, "ac-commands"); len(rows) != 0 {
 		t.Errorf("the refused claim recorded rows: %+v", rows)
 	}
+}
+
+// budgetKillRows returns the rows a claim recorded for a gate as a process the
+// claim's budget stopped: an exit status beside a verdict other than pass, on
+// a row keyed to no target (the claim's own, not a detached run's).
+func budgetKillRows(t *testing.T, conn *sql.DB, stepID int, gate string) []db.GateResultRow {
+	t.Helper()
+	var out []db.GateResultRow
+	for _, r := range preGateRows(t, conn, stepID, gate) {
+		if r.TargetSHA == "" && r.Verdict != VerdictPass && (r.Exit != nil || r.Verdict == VerdictFail) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// The three claim paths for a gate whose trust entry's timeout (the default
+// 5m) exceeds the claim's budget, each with a gate that cannot finish inside
+// that budget: on none of them does the claim record the budget's kill as the
+// gate's result. A detached run in flight refuses the claim (the hold); a
+// detached run that finished is served; with no detached result the claim
+// records the measurement as pending.
+
+// TestClaimOnATargetWithNoDetachedResultRecordsPendingNotAKill: no detached
+// run ever measured this target, so the claim runs the gate inside its budget
+// and the budget ends first. The row says the measurement is pending —
+// `skipped`, no exit, naming the target — and no kill row is recorded.
+//
+// The mutant that records the budget-cut process as the gate's result again
+// (dropping pendingPastClaimBudget) records `fail` with an exit here.
+func TestClaimOnATargetWithNoDetachedResultRecordsPendingNotAKill(t *testing.T) {
+	// Long enough that the gate starts before the budget ends on a loaded
+	// host, so the row is the budget's cut and not a skip before the spawn.
+	shrinkClaimBudget(t, 2*time.Second)
+	conn, e, _, repoRoot := preGatedRun(t, []string{"/bin/sleep", "30"})
+	stepID, head := advanceToVerifyWithCommit(t, conn, e, repoRoot)
+	if _, err := os.Stat(detachedPreGateLockPath(stepID, head)); !os.IsNotExist(err) {
+		t.Fatalf("premise: a lockfile exists before any run was launched: %v", err)
+	}
+
+	start := time.Now()
+	claim, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	elapsed := time.Since(start)
+	testsupport.Must(t, err, "claim: %v", err)
+	if elapsed > 10*time.Second {
+		t.Errorf("the claim took %s against a %s pre-gate budget", elapsed, claimPreGateBudget)
+	}
+
+	if len(claim.Context.PreGates) != 1 {
+		t.Fatalf("pre-gate results = %+v, want one", claim.Context.PreGates)
+	}
+	row := claim.Context.PreGates[0]
+	if row.Verdict != VerdictSkipped || row.Exit != nil {
+		t.Errorf("row = %+v, want skipped with no exit: the budget's kill is not the gate's result", row)
+	}
+	// A host slow enough to spend the budget before the spawn records the
+	// pre-spawn skip instead, which is no kill either.
+	pending := strings.Contains(row.Reason, "pending") && strings.Contains(row.Reason, head[:12])
+	if !pending && !strings.Contains(row.Reason, "budget was spent before this gate could run") {
+		t.Errorf("the row does not say the measurement of %.12s is pending: %q", head, row.Reason)
+	}
+	if kills := budgetKillRows(t, conn, stepID, "ac-commands"); len(kills) != 0 {
+		t.Errorf("the claim recorded the budget's kill as the gate's result: %+v", kills)
+	}
+}
+
+// TestClaimOnATargetWhoseDetachedRunFinishedServesItNotAKill: the detached
+// run recorded its complete row for the target, and the claim, whose budget
+// the gate could never fit, serves that row and spawns nothing.
+func TestClaimOnATargetWhoseDetachedRunFinishedServesItNotAKill(t *testing.T) {
+	shrinkClaimBudget(t, 2*time.Second)
+	conn, e, _, repoRoot := preGatedRun(t, nil)
+	argv, sentinel := witnessCommand(t, repoRoot, "finished-run-remeasured")
+	e = execEngineWithTrust(t, repoRoot, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot),
+	})
+	stepID, head := advanceToVerifyWithCommit(t, conn, e, repoRoot)
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+
+	// The finished detached run's row, as RunDetachedPreGates records it.
+	zero := 0
+	err = recordPreGateRows(conn, step, "ac-commands", []GateResultRow{{
+		Gate: "ac-commands", Argv: argv, Exit: &zero, Verdict: VerdictPass, Pre: true,
+		TargetSHA: head, Reason: detachedNote(head),
+	}}, nowMS)
+	testsupport.Must(t, err, "recording the finished run's row: %v", err)
+
+	claim, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	if sentinelExists(t, sentinel) {
+		t.Error("the claim ran the gate instead of serving the finished run's row")
+	}
+	if len(claim.Context.PreGates) != 1 {
+		t.Fatalf("pre-gate results = %+v, want one", claim.Context.PreGates)
+	}
+	row := claim.Context.PreGates[0]
+	if row.Verdict != VerdictPass || row.Exit == nil || *row.Exit != 0 {
+		t.Errorf("row = %+v, want the finished run's pass", row)
+	}
+	if kills := budgetKillRows(t, conn, stepID, "ac-commands"); len(kills) != 0 {
+		t.Errorf("the claim recorded the budget's kill as the gate's result: %+v", kills)
+	}
+	if rows := preGateRows(t, conn, stepID, "ac-commands"); len(rows) != 1 || rows[0].TargetSHA != head {
+		t.Errorf("recorded rows = %+v, want the finished run's one row keyed to %.12s", rows, head)
+	}
+}
+
+// TestClaimOnATargetWhoseDetachedRunIsInFlightRecordsNoKill: the hold refuses
+// the claim, recording nothing. A claim whose readiness check ran before the
+// child took the lock reaches the pre-gate phase with the run in flight; that
+// phase (runPreGates, driven directly here) records the measurement as
+// pending, not the budget's kill. The phase reads only recorded detached rows,
+// never the lock, so holding the lock does not change its outcome: the second
+// half pins that the in-flight state alone (a held lock, no row yet) leaves no
+// kill row, the same outcome as the no-detached-run path.
+func TestClaimOnATargetWhoseDetachedRunIsInFlightRecordsNoKill(t *testing.T) {
+	shrinkClaimBudget(t, 2*time.Second)
+	conn, e, _, repoRoot := preGatedRun(t, []string{"/bin/sleep", "30"})
+	stepID, head := advanceToVerifyWithCommit(t, conn, e, repoRoot)
+	holdLockInAnotherProcess(t, detachedPreGateLockPath(stepID, head))
+
+	_, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	if err == nil || !strings.Contains(err.Error(), string(CondPreGatePending)) {
+		t.Fatalf("claim while the detached run is in flight: err = %v, want a refusal naming %s",
+			err, CondPreGatePending)
+	}
+	if rows := preGateRows(t, conn, stepID, "ac-commands"); len(rows) != 0 {
+		t.Errorf("the refused claim recorded rows: %+v", rows)
+	}
+
+	step, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	got, err := runPreGates(conn, e, step, preClaimGatesOf(t, conn, step), head, "", nowMS)
+	testsupport.Must(t, err, "runPreGates: %v", err)
+	if len(got) != 1 || got[0].Verdict != VerdictSkipped || got[0].Exit != nil ||
+		!strings.Contains(got[0].Reason, "pending") {
+		t.Errorf("pre-gate results = %+v, want one pending row with no exit", got)
+	}
+	if kills := budgetKillRows(t, conn, stepID, "ac-commands"); len(kills) != 0 {
+		t.Errorf("the pre-gate phase recorded the budget's kill as the gate's result: %+v", kills)
+	}
+}
+
+// TestClaimOnATargetRecordsNoKillForAFlakyEntry: a flaky entry re-attempts
+// after the budget's kill, and every attempt after the first finds the budget
+// already spent. None of those attempts is recorded as the gate's result: the
+// one the budget stopped and the ones it never started are all pending rows.
+func TestClaimOnATargetRecordsNoKillForAFlakyEntry(t *testing.T) {
+	shrinkClaimBudget(t, 2*time.Second)
+	conn, e, _, repoRoot := preGatedRun(t, nil)
+	argv := []string{"/bin/sleep", "30"}
+	e = execEngineWithTrust(t, repoRoot, trust.Entry{
+		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
+		Repo: mustResolve(repoRoot), Flaky: true,
+	})
+	stepID, head := advanceToVerifyWithCommit(t, conn, e, repoRoot)
+
+	claim, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	if len(claim.Context.PreGates) < 2 {
+		t.Fatalf("premise: pre-gate results = %+v, want the flaky entry's several attempts",
+			claim.Context.PreGates)
+	}
+	for _, row := range claim.Context.PreGates {
+		if row.Verdict != VerdictSkipped || row.Exit != nil ||
+			!strings.Contains(row.Reason, "pending") || !strings.Contains(row.Reason, head[:12]) {
+			t.Errorf("attempt row = %+v, want a pending row for %.12s with no exit", row, head)
+		}
+	}
+	if kills := budgetKillRows(t, conn, stepID, "ac-commands"); len(kills) != 0 {
+		t.Errorf("the claim recorded the budget's kill as the gate's result: %+v", kills)
+	}
+}
+
+// budgetFenceRunner reports a fence gate whose budget ends during its second
+// line: the first line passed, the second ran until the claim's deadline and
+// was killed, and the third was never spawned. It waits out the deadline
+// itself, so the claim sees the budget spent when the gate returns.
+type budgetFenceRunner struct{}
+
+func (budgetFenceRunner) Run(context.Context, GateSpec, StepContext) (GateResult, error) {
+	return GateResult{}, fmt.Errorf("budgetFenceRunner runs only through Execute")
+}
+
+func (budgetFenceRunner) Execute(_ context.Context, g GateSpec, sc StepContext) (GateExecution, error) {
+	start := time.Now()
+	time.Sleep(time.Until(sc.Deadline))
+	return GateExecution{Verdict: VerdictFail, Results: []GateResultRow{
+		{Gate: g.Name, Ordinal: 0, Argv: []string{"line", "0"}, Exit: gateExit(0),
+			DurationMS: 1, Verdict: VerdictPass},
+		{Gate: g.Name, Ordinal: 1, Argv: []string{"line", "1"}, Exit: gateExit(-1),
+			DurationMS: time.Since(start).Milliseconds(), Output: "partial output",
+			Verdict: VerdictFail, Reason: "the command exceeded its timeout and its process group was killed"},
+		{Gate: g.Name, Ordinal: 2, Argv: []string{"line", "2"}, Verdict: VerdictSkipped,
+			Reason: "the claim's pre-gate budget was spent before this gate could run; nothing was measured"},
+	}}, nil
+}
+
+// TestClaimOnATargetRecordsNoKillForAFenceLine: a fence gate's killed line is
+// not its last row, since the lines after it record the budget's pre-spawn
+// skip. The killed line is still recorded as pending, the line that passed
+// before the budget ended keeps its pass, and the never-spawned line keeps
+// its own skip.
+func TestClaimOnATargetRecordsNoKillForAFenceLine(t *testing.T) {
+	shrinkClaimBudget(t, 300*time.Millisecond)
+	conn, e, _, repoRoot := preGatedRun(t, nil)
+	stepID, head := advanceToVerifyWithCommit(t, conn, e, repoRoot)
+	e.Gates = budgetFenceRunner{}
+
+	claim, err := e.ClaimStepWithGates(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "claim: %v", err)
+
+	got := claim.Context.PreGates
+	if len(got) != 3 {
+		t.Fatalf("pre-gate results = %+v, want the fence's three lines", got)
+	}
+	if got[0].Verdict != VerdictPass || got[0].Exit == nil || *got[0].Exit != 0 {
+		t.Errorf("line 0 = %+v, want its pass kept: it finished before the budget ended", got[0])
+	}
+	if got[1].Verdict != VerdictSkipped || got[1].Exit != nil ||
+		!strings.Contains(got[1].Reason, "pending") || !strings.Contains(got[1].Reason, head[:12]) {
+		t.Errorf("line 1 = %+v, want a pending row for %.12s with no exit", got[1], head)
+	}
+	if got[2].Verdict != VerdictSkipped || got[2].Exit != nil {
+		t.Errorf("line 2 = %+v, want its pre-spawn skip kept", got[2])
+	}
+	if kills := budgetKillRows(t, conn, stepID, "ac-commands"); len(kills) != 0 {
+		t.Errorf("the claim recorded the budget's kill as the gate's result: %+v", kills)
+	}
+}
+
+// TestPendingPastClaimBudgetKeepsAnAttemptThatEndedOnItsOwn: only the attempt
+// running when the budget ended, and the attempts after it that never started,
+// become pending. An earlier attempt that exited on its own measured the gate,
+// so its failure stays recorded.
+func TestPendingPastClaimBudgetKeepsAnAttemptThatEndedOnItsOwn(t *testing.T) {
+	rows := pendingPastClaimBudget([]GateResultRow{
+		{Gate: "g", Ordinal: 0, Exit: gateExit(1), DurationMS: 40, Verdict: VerdictFail},
+		{Gate: "g", Ordinal: 1, Exit: gateExit(-1), DurationMS: 1900, Verdict: VerdictFail},
+		{Gate: "g", Ordinal: 2, Exit: gateExit(-1), Verdict: VerdictFail},
+	}, "0123456789abcdef")
+
+	if rows[0].Verdict != VerdictFail || rows[0].Exit == nil || *rows[0].Exit != 1 {
+		t.Errorf("attempt 0 = %+v, want its own failure kept", rows[0])
+	}
+	for _, r := range rows[1:] {
+		if r.Verdict != VerdictSkipped || r.Exit != nil || !strings.Contains(r.Reason, "pending") {
+			t.Errorf("attempt %d = %+v, want a pending row with no exit", r.Ordinal, r)
+		}
+	}
+	if !strings.Contains(rows[1].Reason, "stopped") || !strings.Contains(rows[2].Reason, "before") {
+		t.Errorf("reasons = %q / %q, want the stopped attempt and the unstarted one told apart",
+			rows[1].Reason, rows[2].Reason)
+	}
+}
+
+// preClaimGatesOf is the step's declared pre-gates, as the claim reads them.
+func preClaimGatesOf(t *testing.T, conn *sql.DB, step *db.Step) []workflow.Gate {
+	t.Helper()
+	defs, err := StepDefinitions(conn, step.RunID)
+	testsupport.Must(t, err, "StepDefinitions: %v", err)
+	return preClaimGates(materializedSpec(defs[step.WorkflowID], step, holdTally{}))
 }
 
 // preGatedRun is the hold tests' shared setup: an activated fixture run whose

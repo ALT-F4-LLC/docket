@@ -5,6 +5,7 @@ import (
 	"maps"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -294,6 +295,44 @@ func TestRunStepListEnumeratesTheRun(t *testing.T) {
 	_, err = RunStepList(conn, 999, nowMS)
 	if err == nil {
 		t.Error("RunStepList(absent run) returned no error")
+	}
+}
+
+// TestLoadTTLConfigResolvesEachClassOfTheRun pins the config half of the TTL
+// precedence: a class the run's steps carry resolves its own
+// `lease.ttl.<class>`, and a class configured but absent from the run gets no
+// entry of its own.
+func TestLoadTTLConfigResolvesEachClassOfTheRun(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	var class string
+	err := conn.QueryRow(
+		`SELECT class FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		run.ID).Scan(&class)
+	testsupport.Must(t, err, "reading implement@0's class: %v", err)
+	if class == "" {
+		t.Fatal("implement@0 carries no class, so the case would prove nothing")
+	}
+	const absent = "not-in-this-run"
+	err = db.SetConfig(conn, 0, db.KeyLeaseTTLPrefix+class, "7m")
+	testsupport.Must(t, err, "setting lease.ttl.%s: %v", class, err)
+	err = db.SetConfig(conn, 0, db.KeyLeaseTTLPrefix+absent, "9m")
+	testsupport.Must(t, err, "setting lease.ttl.%s: %v", absent, err)
+
+	ttls, err := loadTTLConfig(conn, run.ID)
+	testsupport.Must(t, err, "loadTTLConfig: %v", err)
+
+	if got := ttls.forClass(workflow.Limit{}, class); got != 7*time.Minute {
+		t.Errorf("TTL for the run's class %q = %v, want the configured 7m", class, got)
+	}
+	if _, ok := ttls.perClass[absent]; ok {
+		t.Errorf("perClass carries %q, a class no step of the run has", absent)
+	}
+	fallback, err := db.LeaseTTL(conn, 0, "")
+	testsupport.Must(t, err, "reading lease.ttl.default: %v", err)
+	if got := ttls.forClass(workflow.Limit{}, absent); got != fallback {
+		t.Errorf("TTL for a class outside the run = %v, want the default %v", got, fallback)
 	}
 }
 

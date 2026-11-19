@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -31,6 +30,16 @@ import (
 // child runs, ResumeSaga must leave the step alone. The child holds a per-step
 // flock; ResumeSaga only probes it (no create), so a store without a lock
 // directory, and every test, behaves exactly as before.
+//
+// THE HANDOFF IS RECORDED BEFORE THE LAUNCH. A child that dies before its
+// first gate writes nothing, and the recording parent has already returned, so
+// only a record committed before the launch can cover it: `step record`
+// commits a `saga-detach-started` event first, for every detached handoff. A
+// reader of the event feed can then tell a stranded saga (a handoff with no
+// `gate-started` after it, past its `stranded_after_ms`) without anyone
+// calling `next`; no engine surface reads the event yet. ResumeStrandedSagas
+// stays the recovery and does not consult it. A handoff that cannot be
+// recorded is never launched.
 
 // LaunchDetachedSaga starts one detached `step resume` for a step whose stage 1
 // just committed. Nil means no launcher is installed and the saga runs inline;
@@ -69,10 +78,19 @@ func sagaHeldElsewhere(stepID int) bool {
 	return path != "" && detachedPreGateHeld(path)
 }
 
-// RunDetachedSaga is the detached child's whole work: hold the step's saga
+// RunDetachedSaga is RunDetachedSagaStore on store.StoreOn(conn).
+func (e *Engine) RunDetachedSaga(conn store.LegacyDB, stepID int, nowMS int64) (DetachedSagaRun, error) {
+	return e.RunDetachedSagaStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// RunDetachedSagaStore is the detached child's whole work: hold the step's saga
 // lock, resume the saga, then drive the run's engine-side lifecycles. A child
 // finding the lock held exits without running.
-func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (DetachedSagaRun, error) {
+func (e *Engine) RunDetachedSagaStore(storage store.Store, stepID int, nowMS int64) (DetachedSagaRun, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return DetachedSagaRun{}, err
+	}
 	run := DetachedSagaRun{Step: model.FormatStepID(stepID)}
 
 	lockPath := detachedSagaLockPath(stepID)
@@ -93,7 +111,7 @@ func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (Detache
 	if err := e.resumeSaga(conn, stepID, nowMS); err != nil {
 		return run, err
 	}
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return run, err
 	}
@@ -105,11 +123,36 @@ func (e *Engine) RunDetachedSaga(conn *sql.DB, stepID int, nowMS int64) (Detache
 	return run, nil
 }
 
+// recordSagaDetachStarted commits the handoff event for a step about to be
+// launched detached, in its own transaction, outside stage 1's. Its deadline is
+// stage 1's activity stamp plus the stranded grace: the instant
+// ResumeStrandedSagas starts qualifying the step.
+func recordSagaDetachStarted(conn store.LegacyDB, stepID int, nowMS int64) error {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if err != nil {
+		return err
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning the saga handoff: %w", err)
+	}
+	defer tx.Rollback()
+	if err := recordEvent(tx, eventRecord{
+		Kind: EventSagaDetachStarted, RunID: step.RunID,
+		Instance: step.Instance, IssueID: step.IssueID,
+		Data: fmt.Sprintf(`{"stranded_after_ms":%d}`, nowMS+strandedSagaGraceMS),
+		AtMS: nowMS,
+	}); err != nil {
+		return err
+	}
+	return commitWrite(tx)
+}
+
 // hasCompletionGates reports whether the recorded step declares a gate that
 // runs inside the saga. A step whose spec cannot be resolved reports false, so
 // it runs inline.
-func (e *Engine) hasCompletionGates(conn *sql.DB, stepID int) bool {
-	step, err := db.GetStep(conn, stepID)
+func (e *Engine) hasCompletionGates(conn store.LegacyDB, stepID int) bool {
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return false
 	}
@@ -138,32 +181,15 @@ const strandedSagaGraceMS = 30_000
 // detaches behaves exactly as before. Held and action sagas have their own
 // resume paths and are left alone. Each step is resumed under its saga lock,
 // so a live child and the sweep never both run a gate.
-func (e *Engine) ResumeStrandedSagas(conn *sql.DB, runID int, nowMS int64) error {
+func (e *Engine) ResumeStrandedSagas(conn store.LegacyDB, runID int, nowMS int64) error {
 	if LaunchDetachedSaga == nil {
 		return nil
 	}
-	rows, err := conn.Query(
-		`SELECT id FROM steps
-		  WHERE run_id = ? AND saga_stage IS NOT NULL AND saga_stage NOT IN ('', ?)
-		    AND kind != ? AND updated_at_ms < ?`,
-		runID, db.SagaHeld, workflow.ClassAction, nowMS-strandedSagaGraceMS)
+	ids, err := store.StoreOn(conn).StrandedSagaStepIDs(
+		runID, workflow.ClassAction, nowMS-strandedSagaGraceMS)
 	if err != nil {
-		return fmt.Errorf("listing stranded sagas: %w", err)
+		return err
 	}
-	var ids []int
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return fmt.Errorf("listing stranded sagas: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("listing stranded sagas: %w", err)
-	}
-	rows.Close()
 
 	var failed []error
 	for _, id := range ids {

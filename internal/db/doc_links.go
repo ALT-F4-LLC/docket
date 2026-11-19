@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -326,9 +327,17 @@ func queryLinkIDs(db *sql.DB, query string, arg int) ([]int, error) {
 	})
 }
 
+// isUniqueOrPKConflict reports whether err is a UNIQUE or PRIMARY KEY
+// violation: SQLite's by its message, PostgreSQL's by SQLSTATE 23505
+// (unique_violation), which the pgx error carries without this package
+// importing the driver.
 func isUniqueOrPKConflict(err error) bool {
 	if err == nil {
 		return false
+	}
+	var coded interface{ SQLState() string }
+	if errors.As(err, &coded) {
+		return coded.SQLState() == "23505"
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint") || strings.Contains(msg, "PRIMARY KEY")

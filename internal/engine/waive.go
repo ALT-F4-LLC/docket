@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // DKT-742 — the run-scoped stale-target waiver.
@@ -41,7 +40,15 @@ type WaivedTarget struct {
 // short-sha convention; the advisory the operator copies from renders 12.
 var waiverSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 
-// WaiveStaleTargets records one waiver per named step instance, all for one
+// WaiveStaleTargets is WaiveStaleTargetsStore on store.StoreOn(conn).
+func (e *Engine) WaiveStaleTargets(
+	conn store.LegacyDB, runID int, instances []string, targetSHA, note string, by Attribution,
+	token string, nowMS int64,
+) ([]WaivedTarget, error) {
+	return e.WaiveStaleTargetsStore(store.StoreOn(conn), runID, instances, targetSHA, note, by, token, nowMS)
+}
+
+// WaiveStaleTargetsStore records one waiver per named step instance, all for one
 // target sha, in ONE transaction — the operator's ruling either covers every
 // row they listed or none of them. Each waiver logs its own
 // `stale-target-waived` event, so the feed shows exactly what standing
@@ -55,10 +62,14 @@ var waiverSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 //
 // A waiver is a conductor ruling: on a run bound to a conductor capability,
 // token must be that capability, checked inside the writing transaction.
-func (e *Engine) WaiveStaleTargets(
-	conn *sql.DB, runID int, instances []string, targetSHA, note string, by Attribution,
+func (e *Engine) WaiveStaleTargetsStore(
+	storage store.Store, runID int, instances []string, targetSHA, note string, by Attribution,
 	token string, nowMS int64,
 ) ([]WaivedTarget, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if len(instances) == 0 {
 		return nil, validationErr("name at least one step instance to waive")
 	}
@@ -81,8 +92,8 @@ func (e *Engine) WaiveStaleTargets(
 		return nil, err
 	}
 
-	if _, err := db.GetRun(conn, runID); err != nil {
-		if errors.Is(err, db.ErrRunNotFound) {
+	if _, err := store.StoreOn(conn).GetRun(runID); err != nil {
+		if errors.Is(err, store.ErrRunNotFound) {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
 		return nil, err
@@ -98,9 +109,10 @@ func (e *Engine) WaiveStaleTargets(
 		return nil, err
 	}
 
+	st := store.TxOn(tx)
 	out := make([]WaivedTarget, 0, len(instances))
 	for _, instance := range instances {
-		id, err := db.InsertStaleTargetWaiverTx(tx, db.StaleTargetWaiver{
+		id, err := st.InsertStaleTargetWaiverTx(store.StaleTargetWaiver{
 			RunID: runID, StepInstance: instance, TargetSHA: targetSHA,
 			Note: note, CreatedAtMS: nowMS,
 		})
@@ -122,7 +134,7 @@ func (e *Engine) WaiveStaleTargets(
 		out = append(out, WaivedTarget{ID: id, Instance: instance, Target: targetSHA})
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("recording the stale-target waiver(s): %w", err)
 	}
 	return out, nil

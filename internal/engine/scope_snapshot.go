@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The mid-run scope widen, and why there is no verb that performs it (DKT-741).
@@ -54,7 +53,12 @@ import (
 //
 // ScopeEditFrozenForActiveRuns is what names both at the moment it matters.
 
-// ScopeEditFrozenForActiveRuns names the live runs an `issue edit --scope` on
+// ScopeEditFrozenForActiveRuns is ScopeEditFrozenForActiveRunsStore on store.StoreOn(conn).
+func ScopeEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
+	return ScopeEditFrozenForActiveRunsStore(store.StoreOn(conn), issueID)
+}
+
+// ScopeEditFrozenForActiveRunsStore names the live runs an `issue edit --scope` on
 // issueID did NOT reach, and the abandon + re-plan path that would (DKT-741).
 //
 // It fires only when the widen is actually invisible somewhere: the issue is
@@ -74,24 +78,30 @@ import (
 //
 // Every error is swallowed to nil, matching OverridePassSkipsInterposedTargets:
 // an advisory that cannot be computed must never fail the verb that already
-// succeeded.
-func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
-	live, err := liveIssueScope(conn, issueID)
+// succeeded. A Store with no SQLite handle is the one exception: it gets one
+// warning naming store.SQLDB's refusal, so the guard cannot read as clear.
+func ScopeEditFrozenForActiveRunsStore(storage store.Store, issueID int) []string {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return []string{"scope advisory not computed: " + err.Error()}
+	}
+	st := store.StoreOn(conn)
+	live, err := liveIssueScope(st, issueID)
 	if err != nil {
 		return nil
 	}
-	bindings, err := frozenBindingsWithLiveSteps(conn, issueID)
+	bindings, err := st.FrozenIssueBindings(issueID)
 	if err != nil {
 		return nil
 	}
 
 	var warnings []string
 	for _, b := range bindings {
-		runID, liveSteps := b.runID, b.liveSteps
+		runID, liveSteps := b.RunID, b.LiveSteps
 		var frozen struct {
 			Scope []string `json:"scope"`
 		}
-		if err := json.Unmarshal([]byte(b.issueSnapshot), &frozen); err != nil {
+		if err := json.Unmarshal([]byte(b.IssueSnapshot), &frozen); err != nil {
 			continue
 		}
 		if sameScope(frozen.Scope, live) {
@@ -122,7 +132,12 @@ func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 	return warnings
 }
 
-// DescriptionEditFrozenForActiveRuns is ScopeEditFrozenForActiveRuns for an
+// DescriptionEditFrozenForActiveRuns is DescriptionEditFrozenForActiveRunsStore on store.StoreOn(conn).
+func DescriptionEditFrozenForActiveRuns(conn store.LegacyDB, issueID int) []string {
+	return DescriptionEditFrozenForActiveRunsStore(store.StoreOn(conn), issueID)
+}
+
+// DescriptionEditFrozenForActiveRunsStore is ScopeEditFrozenForActiveRuns for an
 // `issue edit --description`: it names each live run that froze a different
 // description for issueID and still holds a non-terminal step that will render
 // it, and points at `run refresh-body`, the verb that makes the amendment
@@ -131,22 +146,26 @@ func ScopeEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 // The description has no live reader at all — a packet's REQUEST and
 // issue.body both render `run_issues.body_snapshot` — so, unlike the scope
 // advisory, there is no half of the edit that already took effect to report.
-// It is advisory-only and swallows every error to nil for the same reasons.
-func DescriptionEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
-	var description sql.NullString
-	if err := conn.QueryRow(
-		`SELECT description FROM issues WHERE id = ?`, issueID,
-	).Scan(&description); err != nil {
+// It is advisory-only and swallows every error to nil for the same reasons,
+// with the same exception for a Store with no SQLite handle.
+func DescriptionEditFrozenForActiveRunsStore(storage store.Store, issueID int) []string {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return []string{"description advisory not computed: " + err.Error()}
+	}
+	st := store.StoreOn(conn)
+	description, _, err := st.IssueDeclaration(issueID)
+	if err != nil {
 		return nil
 	}
-	bindings, err := frozenBindingsWithLiveSteps(conn, issueID)
+	bindings, err := st.FrozenIssueBindings(issueID)
 	if err != nil {
 		return nil
 	}
 
 	var warnings []string
 	for _, b := range bindings {
-		if b.bodySnapshot == description.String {
+		if b.BodySnapshot == description {
 			continue
 		}
 		warnings = append(warnings, fmt.Sprintf(
@@ -158,82 +177,20 @@ func DescriptionEditFrozenForActiveRuns(conn *sql.DB, issueID int) []string {
 				"`docket run refresh-body %s --issue %s --reason \"description amended\"` "+
 				"(refuses while any of the issue's steps is claimed, running "+
 				"or gated)",
-			model.FormatID(issueID), model.FormatRunID(b.runID), b.liveSteps,
-			model.FormatRunID(b.runID), model.FormatID(issueID),
+			model.FormatID(issueID), model.FormatRunID(b.RunID), b.LiveSteps,
+			model.FormatRunID(b.RunID), model.FormatID(issueID),
 		))
 	}
 	return warnings
 }
 
-// frozenBinding is one run's activation snapshot of an issue, in a run where
-// that snapshot will still be rendered.
-type frozenBinding struct {
-	runID         int
-	issueSnapshot string
-	bodySnapshot  string
-	liveSteps     int
-}
-
-// frozenBindingsWithLiveSteps returns, in run order, every binding of issueID
-// into a non-terminal run that has activated it (so a snapshot exists) and
-// still holds at least one non-terminal step for it (so a packet will still be
-// rendered from that snapshot). This is the "live steps in a live run" both
-// mid-run edit advisories fire on.
-//
-// The rows are drained before returning, so a caller may query again: the
-// engine's pool is single-connection (the SQLite writer discipline), and a
-// query issued while this cursor was open would wait forever for the
-// connection the walk holds.
-func frozenBindingsWithLiveSteps(conn *sql.DB, issueID int) ([]frozenBinding, error) {
-	rows, err := conn.Query(
-		`SELECT ri.run_id, ri.issue_snapshot, COALESCE(ri.body_snapshot, ''),
-		        COUNT(s.id)
-		   FROM run_issues ri
-		   JOIN runs r ON r.id = ri.run_id
-		   LEFT JOIN steps s
-		     ON s.run_id = ri.run_id AND s.issue_id = ri.issue_id
-		    AND s.status NOT IN (`+placeholders(len(terminalStepStatuses))+`)
-		  WHERE ri.issue_id = ?
-		    AND ri.issue_snapshot IS NOT NULL AND ri.issue_snapshot != ''
-		    AND r.status NOT IN (?, ?)
-		  GROUP BY ri.run_id
-		 HAVING COUNT(s.id) > 0
-		  ORDER BY ri.run_id`,
-		append(
-			terminalStepStatusArgs(),
-			issueID, string(model.RunDone), string(model.RunAbandoned),
-		)...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var bindings []frozenBinding
-	for rows.Next() {
-		var b frozenBinding
-		if err := rows.Scan(&b.runID, &b.issueSnapshot, &b.bodySnapshot, &b.liveSteps); err != nil {
-			return nil, err
-		}
-		bindings = append(bindings, b)
-	}
-	return bindings, rows.Err()
-}
-
-// terminalStepStatuses is db.StepTerminal's membership, as the SQL above needs
-// it. It is derived from the constants rather than spelled as literals so a
-// tenth status added to the machine cannot go stale here — TestStepTerminal
+// terminalStepStatuses is store.StepTerminal's membership, the step statuses
+// store.FrozenIssueBindings excludes when it counts a binding's live steps. It
+// is derived from the constants rather than spelled as literals so a tenth
+// status added to the machine cannot go stale here — TestStepTerminal
 // StatusesMatchesStepTerminal pins the two together.
 var terminalStepStatuses = []string{
-	db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
-}
-
-func terminalStepStatusArgs() []any {
-	args := make([]any, 0, len(terminalStepStatuses)+3)
-	for _, s := range terminalStepStatuses {
-		args = append(args, s)
-	}
-	return args
+	store.StepDone, store.StepSkipped, store.StepSuperseded, store.StepFailedRouted,
 }
 
 // placeholders renders `?, ?, …` for an IN clause of n values.
@@ -242,14 +199,12 @@ func placeholders(n int) string {
 }
 
 // liveIssueScope reads `issues.scope_globs` — the column `--scope` writes.
-func liveIssueScope(conn *sql.DB, issueID int) ([]string, error) {
-	var stored sql.NullString
-	if err := conn.QueryRow(
-		`SELECT scope_globs FROM issues WHERE id = ?`, issueID,
-	).Scan(&stored); err != nil {
+func liveIssueScope(st store.Store, issueID int) ([]string, error) {
+	stored, err := st.IssueScopeGlobs(issueID)
+	if err != nil {
 		return nil, err
 	}
-	return decodeScope(stored.String)
+	return decodeScope(stored)
 }
 
 // sameScope compares two scope declarations IN ORDER, because the order is the

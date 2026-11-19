@@ -1,16 +1,14 @@
 package engine
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -48,7 +46,7 @@ type RunBudgetReport struct {
 	Floor float64 `json:"floor"`
 	// Reported is per-unit and NEVER summed across units: summing
 	// {tokens: 4000, seconds: 12} to 4012 would be core asserting those add up.
-	Reported []db.UnitTotal `json:"reported,omitempty"`
+	Reported []store.UnitTotal `json:"reported,omitempty"`
 	// Unit is `budget.unit` — which of the above, if any, the cap counts.
 	Unit string `json:"budget_unit,omitempty"`
 	// Spend is `max(reported, floor)`: the quantity the cap is compared to.
@@ -167,10 +165,10 @@ type RunReport struct {
 	// writers.
 	NoteRulings []RunNoteRuling `json:"note_rulings,omitempty"`
 
-	Gates       []db.VerdictCount   `json:"gates,omitempty"`
-	GateTrail   []db.ResultTrailRow `json:"gate_trail,omitempty"`
-	Actions     []db.VerdictCount   `json:"actions,omitempty"`
-	ActionTrail []db.ResultTrailRow `json:"action_trail,omitempty"`
+	Gates       []store.VerdictCount   `json:"gates,omitempty"`
+	GateTrail   []store.ResultTrailRow `json:"gate_trail,omitempty"`
+	Actions     []store.VerdictCount   `json:"actions,omitempty"`
+	ActionTrail []store.ResultTrailRow `json:"action_trail,omitempty"`
 
 	// Artifacts is the INDEX — id, kind, producer instance, sha256, bytes.
 	// NEVER THE BODIES. A rollup that inlined artifact bodies would turn a
@@ -213,14 +211,14 @@ type RunReport struct {
 
 	// Metadata is the genericity line at its thinnest: keys to distinct
 	// values with counts, verbatim and uninterpreted.
-	Metadata []db.MetadataKeyRollup `json:"metadata,omitempty"`
+	Metadata []store.MetadataKeyRollup `json:"metadata,omitempty"`
 
 	// VoteMetadata is the same rollup over CAST VOTES (DKT-71): every
 	// `--metadata` claim the run's vote-step proposals collected. Vote seats
 	// are the one spend the usage ledger cannot see — a vote step is never
 	// claimed — so this is where tribunal routing and cost claims become
 	// verifiable from the run document.
-	VoteMetadata []db.MetadataKeyRollup `json:"vote_metadata,omitempty"`
+	VoteMetadata []store.MetadataKeyRollup `json:"vote_metadata,omitempty"`
 
 	// VoteUsage is DKT-95: the seats' own spend reports, summed per unit —
 	// UsageByUnit's question asked of the casts, from the vote_usage ledger
@@ -228,7 +226,7 @@ type RunReport struct {
 	// 0). Beside VoteMetadata, this is what makes tribunal cost measurable
 	// from the run document instead of an absent zero awaiting an operator's
 	// backfill.
-	VoteUsage []db.UnitTotal `json:"vote_usage,omitempty"`
+	VoteUsage []store.UnitTotal `json:"vote_usage,omitempty"`
 
 	// VoteUsageCoverage is how many seat-casts reported their spend (DKT-257).
 	//
@@ -243,7 +241,7 @@ type RunReport struct {
 	// Core cannot supply the missing numbers — it cannot observe a
 	// conductor-side seat's spend — but it can stop the silence from looking
 	// like a zero.
-	VoteUsageCoverage db.VoteUsageCoverage `json:"vote_usage_coverage"`
+	VoteUsageCoverage store.VoteUsageCoverage `json:"vote_usage_coverage"`
 
 	// SilentVoteSeats is the identity behind VoteUsageCoverage.Silent
 	// (DKT-733): each cast that reported no spend — which seat, on which
@@ -286,7 +284,7 @@ type RunReport struct {
 	// WHICH steps already have usage — could be answered from no read verb at
 	// all, and conductors hand-filtered batches by trial and error across
 	// three sessions. `omitempty`, so a run whose ledger is empty is unchanged.
-	StepUsage []db.StepUsageRow `json:"step_usage,omitempty"`
+	StepUsage []store.StepUsageRow `json:"step_usage,omitempty"`
 
 	// MissingUsage is D2 asked WITHOUT its grace: every claimed step that
 	// reached a terminal status and has no ledger row, however recently.
@@ -612,9 +610,18 @@ type ClusterSourceAttribution struct {
 	Clusters int `json:"clusters"`
 }
 
-// LoadRunReport builds the document. IT WRITES NOTHING.
-func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
-	run, err := db.GetRun(conn, runID)
+// LoadRunReport is LoadRunReportStore on store.StoreOn(conn).
+func LoadRunReport(conn store.LegacyDB, runID int, nowMS int64) (*RunReport, error) {
+	return LoadRunReportStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// LoadRunReportStore builds the document. IT WRITES NOTHING.
+func LoadRunReportStore(storage store.Store, runID int, nowMS int64) (*RunReport, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	run, err := store.StoreOn(conn).GetRun(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -630,8 +637,8 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// internal/db caps the connection pool at ONE connection, so a pool read
 	// from inside an open transaction deadlocks permanently rather than
 	// failing. This function keeps every pool read above the
-	// beginReadSnapshot call, and TestNoPoolReadsInsideTransactions covers
-	// the beginReadSnapshot region, so a pool read moved below it fails
+	// store.BeginSQLiteReadSnapshot call, and TestNoPoolReadsInsideTransactions
+	// covers that region, so a pool read moved below it fails
 	// that test. A rollback that silently failed would leave the transaction
 	// open and turn the next of these into the deadlock.
 	//
@@ -642,31 +649,31 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	reported, err := db.UsageByUnit(conn, runID)
+	reported, err := store.StoreOn(conn).UsageByUnit(runID)
 	if err != nil {
 		return nil, err
 	}
-	facts, err := db.RunBudgetFactsFor(conn, runID)
+	facts, err := store.StoreOn(conn).RunBudgetFactsFor(runID)
 	if err != nil {
 		return nil, err
 	}
-	if report.Gates, err = db.GateRollup(conn, runID); err != nil {
+	if report.Gates, err = store.StoreOn(conn).GateRollup(runID); err != nil {
 		return nil, err
 	}
-	if report.GateTrail, err = db.GateTrail(conn, runID); err != nil {
+	if report.GateTrail, err = store.StoreOn(conn).GateTrail(runID); err != nil {
 		return nil, err
 	}
-	if report.Actions, err = db.ActionRollup(conn, runID); err != nil {
+	if report.Actions, err = store.StoreOn(conn).ActionRollup(runID); err != nil {
 		return nil, err
 	}
-	if report.ActionTrail, err = db.ActionTrail(conn, runID); err != nil {
+	if report.ActionTrail, err = store.StoreOn(conn).ActionTrail(runID); err != nil {
 		return nil, err
 	}
-	if report.Metadata, err = db.MetadataRollup(conn, runID); err != nil {
+	if report.Metadata, err = store.StoreOn(conn).MetadataRollup(runID); err != nil {
 		return nil, err
 	}
-	if report.VoteMetadata, err = db.VoteMetadataRollup(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
+	if report.VoteMetadata, err = store.StoreOn(conn).VoteMetadataRollup(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID)); err != nil {
 		return nil, err
 	}
 	// DKT-584: the vote-step key family alone missed every panel the run's
@@ -679,13 +686,13 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	if report.VoteUsage, err = db.VoteUsageRollup(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+	if report.VoteUsage, err = store.StoreOn(conn).VoteUsageRollup(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID),
 		extraProposalIDs...); err != nil {
 		return nil, err
 	}
-	if report.VoteUsageCoverage, err = db.VoteUsageCoverageFor(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID),
+	if report.VoteUsageCoverage, err = store.StoreOn(conn).VoteUsageCoverageFor(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID),
 		extraProposalIDs...); err != nil {
 		return nil, err
 	}
@@ -696,7 +703,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	if report.Findings, err = castFindings(conn, runID, extraProposalIDs); err != nil {
 		return nil, err
 	}
-	if report.StepUsage, err = db.UsageByStep(conn, runID); err != nil {
+	if report.StepUsage, err = store.StoreOn(conn).UsageByStep(runID); err != nil {
 		return nil, err
 	}
 	if report.Artifacts, err = artifactIndex(conn, runID); err != nil {
@@ -723,7 +730,7 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// it: effective status is a question about a set of rows at one instant, and
 	// a report that re-read between sections could count one step twice under
 	// two statuses.
-	tx, err := beginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning the report: %w", err)
 	}
@@ -770,12 +777,12 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 		if err != nil {
 			return nil, err
 		}
-		unit, err = db.BudgetUnitTx(tx, sched.run.ProjectID)
+		unit, err = store.TxOn(tx).BudgetUnitTx(sched.run.ProjectID)
 		if err != nil {
 			return nil, err
 		}
 		if unit != "" {
-			reportedInUnit, err = db.ReportedUsageTx(tx, runID, unit)
+			reportedInUnit, err = store.TxOn(tx).ReportedUsageTx(runID, unit)
 			if err != nil {
 				return nil, err
 			}
@@ -848,20 +855,6 @@ func LoadRunReport(conn *sql.DB, runID int, nowMS int64) (*RunReport, error) {
 	// there is nothing to commit, and the zero-write property is that
 	// structural fact rather than a convention.
 	return report, nil
-}
-
-// beginReadSnapshot opens a read snapshot as a deferred BEGIN, for a
-// transaction that only reads and is always rolled back.
-//
-// The handle's plain Begin is BEGIN IMMEDIATE, which would hold the write lock
-// for the whole read — a scheduler load on a large run, or a full report — and
-// could outlast another process's busy_timeout. ReadOnly makes the driver
-// issue a deferred BEGIN instead: the snapshot never upgrades to a write, so
-// the stale-snapshot hazard the immediate lock exists to prevent cannot arise
-// here, and writers proceed. The driver does not enforce ReadOnly, so a caller
-// must issue no write inside the snapshot.
-func beginReadSnapshot(conn *sql.DB) (*sql.Tx, error) {
-	return conn.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 }
 
 // wallClockMS is activation -> now, or activation -> the terminal transition.
@@ -973,17 +966,15 @@ func effectiveStepFacts(sched *Scheduler) ([]model.StatusCount, []StepAttempt) {
 // at one connection, so a pool read from inside the report's open snapshot
 // deadlocks permanently rather than failing (the rule LoadRunReport's own
 // comment states and TestNoPoolReadsInsideTransactions enforces lexically).
-func issueDispositionsTx(tx *sql.Tx, runID int) ([]IssueDisposition, error) {
-	rulings, err := scanAbandonRulings(tx.Query(
-		abandonRulingSelect+` AND e.run_id = ? AND e.issue_id IS NOT NULL
-		  ORDER BY e.seq`,
-		EventIssueAbandoned, runID))
+func issueDispositionsTx(tx store.LegacyReadTx, runID int) ([]IssueDisposition, error) {
+	events, err := store.TxOn(tx).RunIssueEventsTx(runID, EventIssueAbandoned)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading issue dispositions: %w", err)
 	}
 
 	byIssue := make(map[int]IssueDisposition)
-	for _, r := range rulings {
+	for _, e := range events {
+		r := abandonRulingOf(e)
 		// LAST RULING WINS. Neither path can normally fire twice on one issue —
 		// the second is refused, and the first leaves no non-terminal step for
 		// a cascade to find — but if a store ever holds two, the one that
@@ -1014,24 +1005,6 @@ func issueDispositionsTx(tx *sql.Tx, runID int) ([]IssueDisposition, error) {
 	return out, nil
 }
 
-// abandonRulingSelect is the ONE read behind every issue-level disposition,
-// however it is keyed.
-//
-// The run report asks it for "every ruling in this run" and `issue show` for
-// "the last ruling about this issue, in whatever run made it" (DKT-404) — two
-// WHERE clauses over one join, not two queries. The join is what makes the
-// row complete: the routing path leaves the operator's note on the DECIDING
-// STEP and the run-level path leaves it in the EVENT PAYLOAD, so a reader of
-// either column alone recovers half the rulings and silently loses the other
-// half's reason.
-//
-// Callers append their own filter and ORDER BY, and pass the event kind first.
-const abandonRulingSelect = `
-	SELECT e.issue_id, COALESCE(e.run_id, 0), e.at_ms, e.data, COALESCE(s.routing, '')
-	  FROM events e
-	  LEFT JOIN steps s ON s.id = e.step_id
-	 WHERE e.kind = ?`
-
 // abandonRuling is one `issue-abandoned` event with its note already recovered
 // from whichever of the two places the writing path left it.
 type abandonRuling struct {
@@ -1042,53 +1015,41 @@ type abandonRuling struct {
 	reason  string
 }
 
-// scanAbandonRulings drains an abandonRulingSelect query, in the order the
-// caller asked for.
-//
-// It takes the query's own (rows, err) pair so a caller reads as one statement
-// whether it queries through a transaction or the pool — the two disposition
-// readers do one each, and neither may be tempted to reach for the wrong one.
-func scanAbandonRulings(rows *sql.Rows, err error) ([]abandonRuling, error) {
-	if err != nil {
-		return nil, fmt.Errorf("reading issue dispositions: %w", err)
+// abandonRulingOf recovers the ruling behind every issue-level disposition,
+// however it is keyed: the run report reads "every ruling in this run" and
+// `issue show` "the last ruling about this issue, in whatever run made it"
+// (DKT-404). Both reads carry the deciding step's routing beside the event
+// payload because the routing path leaves the operator's note on the DECIDING
+// STEP and the run-level path leaves it in the EVENT PAYLOAD; a reader of
+// either alone recovers half the rulings and silently loses the other half's
+// reason.
+func abandonRulingOf(e store.IssueEvent) abandonRuling {
+	r := abandonRuling{issueID: e.IssueID, runID: e.RunID, atMS: e.AtMS}
+	// The payload is core's OWN, written by the two abandon paths — but a
+	// malformed one is NOT worth failing a read verb over. The
+	// report works on a run in any state, and a report that refused here
+	// would be unavailable during exactly the incident that produced the
+	// bad row. An unparseable payload costs the reason line and nothing
+	// else: the abandonment itself is the event's existence.
+	var payload struct {
+		Instance string `json:"instance"`
+		Reason   string `json:"reason"`
 	}
-	defer rows.Close()
-
-	var out []abandonRuling
-	for rows.Next() {
-		var (
-			r       abandonRuling
-			data    string
-			routing string
-		)
-		if err := rows.Scan(&r.issueID, &r.runID, &r.atMS, &data, &routing); err != nil {
-			return nil, fmt.Errorf("reading an issue disposition: %w", err)
-		}
-		// The payload is core's OWN, written by the two abandon paths — but a
-		// malformed one is NOT worth failing a read verb over. The
-		// report works on a run in any state, and a report that refused here
-		// would be unavailable during exactly the incident that produced the
-		// bad row. An unparseable payload costs the reason line and nothing
-		// else: the abandonment itself is the event's existence.
-		var payload struct {
-			Instance string `json:"instance"`
-			Reason   string `json:"reason"`
-		}
-		if err := json.Unmarshal([]byte(data), &payload); err == nil {
-			r.by, r.reason = payload.Instance, payload.Reason
-		}
-		if r.reason == "" {
-			r.reason = abandonNote(routing)
-		}
-		out = append(out, r)
+	if err := json.Unmarshal([]byte(e.Data), &payload); err == nil {
+		r.by, r.reason = payload.Instance, payload.Reason
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading issue dispositions: %w", err)
+	if r.reason == "" {
+		r.reason = abandonNote(e.StepRouting)
 	}
-	return out, nil
+	return r
 }
 
-// LatestIssueDisposition reads the LAST terminal ruling any run recorded about
+// LatestIssueDisposition is LatestIssueDispositionStore on store.StoreOn(conn).
+func LatestIssueDisposition(conn store.LegacyDB, issueID int) (*model.IssueRunDisposition, error) {
+	return LatestIssueDispositionStore(store.StoreOn(conn), issueID)
+}
+
+// LatestIssueDispositionStore reads the LAST terminal ruling any run recorded about
 // its work on one issue (DKT-404), or nil when no run ever abandoned it.
 //
 // KEYED BY ISSUE, DELIBERATELY UNBOUNDED BY RUN. The run report answers "what
@@ -1102,17 +1063,19 @@ func scanAbandonRulings(rows *sql.Rows, err error) ([]abandonRuling, error) {
 // and abandoned again, and what a reader must not misread is the CURRENT state.
 // The earlier rulings stay in the event log, which is the right place for a
 // history.
-func LatestIssueDisposition(conn *sql.DB, issueID int) (*model.IssueRunDisposition, error) {
-	rulings, err := scanAbandonRulings(conn.Query(
-		abandonRulingSelect+` AND e.issue_id = ? ORDER BY e.seq DESC LIMIT 1`,
-		EventIssueAbandoned, issueID))
+func LatestIssueDispositionStore(storage store.Store, issueID int) (*model.IssueRunDisposition, error) {
+	conn, err := store.SQLDB(storage)
 	if err != nil {
 		return nil, err
 	}
-	if len(rulings) == 0 {
+	e, found, err := store.StoreOn(conn).LatestIssueEvent(issueID, EventIssueAbandoned)
+	if err != nil {
+		return nil, fmt.Errorf("reading issue dispositions: %w", err)
+	}
+	if !found {
 		return nil, nil
 	}
-	r := rulings[0]
+	r := abandonRulingOf(e)
 	return &model.IssueRunDisposition{
 		RunID:       r.runID,
 		Disposition: DispositionAbandoned,
@@ -1146,14 +1109,14 @@ func abandonNote(routing string) string {
 // rather than editing the old one) and, when route_at routed clusters below
 // its floor, the builtin's own action_results row.
 func complementarityRollup(
-	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
+	conn store.LegacyDB, runID int, defs map[int]*workflow.Definition,
 ) ([]ClusterComplementarity, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := store.StoreOn(conn).ListRunSteps(runID)
 	if err != nil {
 		return nil, err
 	}
 
-	byName := make(map[string][]*db.Step, len(steps))
+	byName := make(map[string][]*store.Step, len(steps))
 	for _, s := range steps {
 		byName[s.StepName] = append(byName[s.StepName], s)
 	}
@@ -1228,13 +1191,13 @@ func complementarityRollup(
 // opposed to a non-nil empty slice) when the newest artifact's payload does
 // not decode as an array of objects.
 func latestAggregatePayload(
-	conn *sql.DB, stepID int, kind string,
+	conn store.LegacyDB, stepID int, kind string,
 ) (payload []map[string]any, ok bool, err error) {
-	artifacts, err := db.ListStepArtifacts(conn, stepID)
+	artifacts, err := store.StoreOn(conn).ListStepArtifacts(stepID)
 	if err != nil {
 		return nil, false, err
 	}
-	var newest *db.Artifact
+	var newest *store.Artifact
 	for _, a := range artifacts {
 		if a.Kind == kind {
 			newest = a
@@ -1257,8 +1220,8 @@ func latestAggregatePayload(
 // Only the highest-ordinal passing row counts, the same newest-record rule
 // latestAggregatePayload applies to the artifact: a retried step's earlier
 // rows describe rounds the newest artifact superseded.
-func recordedBelowFloor(conn *sql.DB, stepID int) ([]map[string]any, error) {
-	outputs, err := db.ActionOutputsFor(conn, stepID, workflow.ActionAggregate)
+func recordedBelowFloor(conn store.LegacyDB, stepID int) ([]map[string]any, error) {
+	outputs, err := store.StoreOn(conn).ActionOutputsFor(stepID, workflow.ActionAggregate)
 	if err != nil {
 		return nil, err
 	}
@@ -1323,7 +1286,7 @@ func complementarityOf(sets ...[]map[string]any) (unique, corroborated int, dist
 // freshly validated workflow, but a restored database is not guaranteed to
 // have passed today's validation.
 func producerInputCount(
-	conn *sql.DB, spec *workflow.Step, issueID int, byName map[string][]*db.Step,
+	conn store.LegacyDB, spec *workflow.Step, issueID int, byName map[string][]*store.Step,
 ) (int, error) {
 	seen := make(map[string]bool)
 	total := 0
@@ -1337,7 +1300,7 @@ func producerInputCount(
 			if producer.IssueID != issueID {
 				continue
 			}
-			n, err := db.StepInputCount(conn, producer.ID)
+			n, err := store.StoreOn(conn).StepInputCount(producer.ID)
 			if err != nil {
 				return 0, err
 			}
@@ -1353,9 +1316,9 @@ func producerInputCount(
 // complementarityRollup reads (a `route_at` split, DKT-593, must not make a
 // below-floor cluster's sources invisible to this report either).
 func sourceAttributionRollup(
-	conn *sql.DB, runID int, defs map[int]*workflow.Definition,
+	conn store.LegacyDB, runID int, defs map[int]*workflow.Definition,
 ) ([]ClusterSourceAttribution, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+	steps, err := store.StoreOn(conn).ListRunSteps(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -1399,10 +1362,7 @@ func sourceAttributionRollup(
 			continue
 		}
 		if executors == nil {
-			executors, err = runStepExecutorsByInstance(conn, runID)
-			if err != nil {
-				return nil, err
-			}
+			executors = executorsByInstance(steps)
 		}
 
 		sources := make([]string, 0, len(counts))
@@ -1459,39 +1419,23 @@ func sourceCounts(field string, sets ...[]map[string]any) map[string]int {
 	return counts
 }
 
-// runStepExecutorsByInstance maps a run's step instances to their declared
-// executor hint, for resolving a source_field value (a step ref) back to WHO
-// produced it. A step with no hint (an action step, or one with neither
-// `executor` nor `fanout`) maps to "", which callers read as unresolved —
+// executorsByInstance maps a run's step instances to their declared executor
+// hint, for resolving a source_field value (a step ref) back to WHO produced
+// it. A step with no hint (an action step, or one with neither `executor` nor
+// `fanout`) maps to "", which callers read as unresolved —
 // ClusterSourceAttribution's `omitempty` never claims an executor core does
 // not know.
-func runStepExecutorsByInstance(conn *sql.DB, runID int) (map[string]string, error) {
-	out := make(map[string]string)
-	rows, err := conn.Query(
-		`SELECT instance, executor FROM steps WHERE run_id = ?`, runID)
-	if err != nil {
-		return nil, fmt.Errorf("reading step executors: %w", err)
+func executorsByInstance(steps []*store.Step) map[string]string {
+	out := make(map[string]string, len(steps))
+	for _, s := range steps {
+		out[s.Instance] = s.Executor
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			instance string
-			executor sql.NullString
-		)
-		if err := rows.Scan(&instance, &executor); err != nil {
-			return nil, fmt.Errorf("reading a step executor: %w", err)
-		}
-		out[instance] = executor.String
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading step executors: %w", err)
-	}
-	return out, nil
+	return out
 }
 
 // artifactIndex is what was produced, never the bodies.
-func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
-	artifacts, err := db.ListRunArtifacts(conn, runID)
+func artifactIndex(conn store.LegacyDB, runID int) ([]ArtifactIndexEntry, error) {
+	artifacts, err := store.StoreOn(conn).ListRunArtifacts(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -1501,29 +1445,15 @@ func artifactIndex(conn *sql.DB, runID int) ([]ArtifactIndexEntry, error) {
 		executor string
 		issueID  int
 	}
-	producers := make(map[int]producerRow)
-	rows, err := conn.Query(
-		`SELECT id, instance, executor, issue_id FROM steps WHERE run_id = ?`, runID)
+	steps, err := store.StoreOn(conn).ListRunSteps(runID)
 	if err != nil {
 		return nil, fmt.Errorf("reading artifact producers: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			id       int
-			instance string
-			executor sql.NullString
-			issueID  int
-		)
-		if err := rows.Scan(&id, &instance, &executor, &issueID); err != nil {
-			return nil, fmt.Errorf("reading an artifact producer: %w", err)
+	producers := make(map[int]producerRow, len(steps))
+	for _, s := range steps {
+		producers[s.ID] = producerRow{
+			instance: s.Instance, executor: s.Executor, issueID: s.IssueID,
 		}
-		producers[id] = producerRow{
-			instance: instance, executor: executor.String, issueID: issueID,
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading artifact producers: %w", err)
 	}
 
 	out := make([]ArtifactIndexEntry, 0, len(artifacts))
@@ -1585,15 +1515,16 @@ type SilentVoteSeat struct {
 // family is a vote-step seat, and anything else in the membership — reap-ack
 // keyed or run-named — is a conversational gate (the extraIDs' two halves,
 // per conversationalRunProposalIDs).
-func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat, error) {
-	rows, err := db.SilentVoteSeatsFor(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID), extraIDs...)
+func silentVoteSeats(conn store.LegacyDB, runID int, extraIDs []int) ([]SilentVoteSeat, error) {
+	st := store.StoreOn(conn)
+	rows, err := st.SilentVoteSeatsFor(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID), extraIDs...)
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}
 
-	keyed, err := db.LookupIdempotencyKeys(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	keyed, err := st.LookupIdempotencyKeys(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1631,9 +1562,10 @@ func silentVoteSeats(conn *sql.DB, runID int, extraIDs []int) ([]SilentVoteSeat,
 // A SealedOpen proposal contributes nothing: the ballot is still secret, and
 // this verb must not be the one read surface that leaks what a seat found
 // before the tally closes. Its rows appear once the status leaves `open`.
-func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error) {
-	keyed, err := db.LookupIdempotencyKeys(
-		conn, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+func castFindings(conn store.LegacyDB, runID int, extraIDs []int) ([]CastFinding, error) {
+	st := store.StoreOn(conn)
+	keyed, err := st.LookupIdempotencyKeys(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1655,7 +1587,7 @@ func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error
 
 	var out []CastFinding
 	for _, id := range ids {
-		proposal, err := db.GetProposal(conn, id)
+		proposal, err := st.GetProposal(id)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s for its findings: %w",
 				model.FormatProposalID(id), err)
@@ -1663,7 +1595,7 @@ func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error
 		if proposal.SealedOpen() {
 			continue
 		}
-		votes, err := db.GetProposalVotes(conn, id)
+		votes, err := st.GetProposalVotes(id)
 		if err != nil {
 			return nil, fmt.Errorf("reading the casts of %s for their findings: %w",
 				model.FormatProposalID(id), err)
@@ -1714,9 +1646,10 @@ func castFindings(conn *sql.DB, runID int, extraIDs []int) ([]CastFinding, error
 // already select their key family by prefix, and the membership test is a set
 // test, so an overlap would be harmless but a second spelling of that family
 // would not.
-func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
-	keyed, err := db.LookupIdempotencyKeys(
-		conn, db.ScopeVoteCreate, reapAckRunPrefix(runID))
+func conversationalRunProposalIDs(conn store.LegacyDB, runID int) ([]int, error) {
+	st := store.StoreOn(conn)
+	keyed, err := st.LookupIdempotencyKeys(
+		store.ScopeVoteCreate, reapAckRunPrefix(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1729,7 +1662,7 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 		}
 	}
 
-	named, err := db.ProposalIDsNaming(conn, model.FormatRunID(runID))
+	named, err := st.ProposalIDsNaming(model.FormatRunID(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -1745,7 +1678,7 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 	// activation-to-terminal window, is the run's too — the structured link
 	// is the attribution, where the text form above relies on the conductor
 	// having written the run id.
-	linked, err := linkedPanelAttributions(conn, db.ProposalRunLinkFilter{RunID: runID})
+	linked, err := linkedPanelAttributions(conn, store.ProposalRunLinkFilter{RunID: runID})
 	if err != nil {
 		return nil, err
 	}
@@ -1764,10 +1697,10 @@ func conversationalRunProposalIDs(conn *sql.DB, runID int) ([]int, error) {
 }
 
 // configuredBudgetDefault reads `budget.default` for the cap source derivation.
-func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
-	entry, err := db.GetConfig(conn, projectID, db.KeyBudgetDefault)
+func configuredBudgetDefault(conn store.LegacyDB, projectID int) (float64, error) {
+	entry, err := store.StoreOn(conn).GetConfig(projectID, store.KeyBudgetDefault)
 	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", db.KeyBudgetDefault, err)
+		return 0, fmt.Errorf("reading %s: %w", store.KeyBudgetDefault, err)
 	}
 	var value float64
 	if _, err := fmt.Sscanf(entry.Value, "%g", &value); err != nil {
@@ -1795,22 +1728,16 @@ func configuredBudgetDefault(conn *sql.DB, projectID int) (float64, error) {
 // malformed row is not worth failing a read verb over, and a resolution
 // recorded before the field existed is genuinely uncountable — reporting it
 // under a guessed authority would restore the ambiguity this ends.
-func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
-	rows, err := tx.Query(
-		`SELECT data FROM events WHERE run_id = ? AND kind IN (?, ?, ?, ?, ?, ?)`,
-		runID, EventStepResolved, EventStepApproved, EventStepRejected,
+func authorityRollupTx(tx store.LegacyReadTx, runID int) ([]AuthorityCount, error) {
+	payloads, err := store.TxOn(tx).RunEventDataTx(runID,
+		EventStepResolved, EventStepApproved, EventStepRejected,
 		EventRunPaused, EventRunAbandoned, EventRunNoteAdded)
 	if err != nil {
 		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
 	}
-	defer rows.Close()
 
 	counts := map[string]int{}
-	for rows.Next() {
-		var data string
-		if err := rows.Scan(&data); err != nil {
-			return nil, fmt.Errorf("reading a resolution: %w", err)
-		}
+	for _, data := range payloads {
 		var payload struct {
 			Authority string `json:"authority"`
 		}
@@ -1821,9 +1748,6 @@ func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
 			continue
 		}
 		counts[payload.Authority]++
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading the run's resolutions: %w", err)
 	}
 
 	var out []AuthorityCount
@@ -1844,21 +1768,14 @@ func authorityRollupTx(tx *sql.Tx, runID int) ([]AuthorityCount, error) {
 // row: each note is its own unit, so there is no earlier ruling to fall back
 // to, and dropping the row would hide that the note was recorded at all. A
 // payload that does not parse is skipped.
-func runNoteRulingsTx(tx *sql.Tx, runID int) ([]RunNoteRuling, error) {
-	rows, err := tx.Query(
-		`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq`,
-		runID, EventRunNoteAdded)
+func runNoteRulingsTx(tx store.LegacyReadTx, runID int) ([]RunNoteRuling, error) {
+	payloads, err := store.TxOn(tx).RunEventDataTx(runID, EventRunNoteAdded)
 	if err != nil {
 		return nil, fmt.Errorf("reading the run's notes: %w", err)
 	}
-	defer rows.Close()
 
 	var out []RunNoteRuling
-	for rows.Next() {
-		var data string
-		if err := rows.Scan(&data); err != nil {
-			return nil, fmt.Errorf("reading a run note: %w", err)
-		}
+	for _, data := range payloads {
 		var payload struct {
 			Note      int    `json:"note"`
 			Authority string `json:"authority"`
@@ -1869,9 +1786,6 @@ func runNoteRulingsTx(tx *sql.Tx, runID int) ([]RunNoteRuling, error) {
 			continue
 		}
 		out = append(out, RunNoteRuling(payload))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading the run's notes: %w", err)
 	}
 	return out, nil
 }
@@ -1887,27 +1801,15 @@ func runNoteRulingsTx(tx *sql.Tx, runID int) ([]RunNoteRuling, error) {
 // ruling recorded before attribution existed carries neither field and
 // annotates nothing — an earlier attributed ruling is not promoted over it,
 // because it is not the last word.
-func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
-	rows, err := tx.Query(
-		`SELECT step_id, kind, data FROM events
-		  WHERE run_id = ? AND step_id IS NOT NULL AND kind IN (?, ?, ?, ?)
-		  ORDER BY seq`,
-		runID, EventStepApproved, EventStepRejected, EventStepResolved, EventLeaseReaped)
+func annotateStepRulings(tx store.LegacyReadTx, runID int, attempts []StepAttempt) error {
+	events, err := store.TxOn(tx).RunStepEventsTx(runID,
+		EventStepApproved, EventStepRejected, EventStepResolved, EventLeaseReaped)
 	if err != nil {
 		return fmt.Errorf("reading the run's rulings: %w", err)
 	}
-	defer rows.Close()
 
 	rulings := make(map[string]*StepRuling)
-	for rows.Next() {
-		var (
-			stepID int
-			kind   string
-			data   string
-		)
-		if err := rows.Scan(&stepID, &kind, &data); err != nil {
-			return fmt.Errorf("reading a ruling: %w", err)
-		}
+	for _, e := range events {
 		var payload struct {
 			Forced bool   `json:"forced"`
 			Actor  string `json:"actor"`
@@ -1915,21 +1817,18 @@ func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
 		}
 		// Core's own payload, and a malformed one is not worth failing a read
 		// verb over: it costs this step's annotation and nothing else.
-		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		if err := json.Unmarshal([]byte(e.Data), &payload); err != nil {
 			continue
 		}
-		if kind == EventLeaseReaped && !payload.Forced {
+		if e.Kind == EventLeaseReaped && !payload.Forced {
 			continue
 		}
-		step := model.FormatStepID(stepID)
+		step := model.FormatStepID(e.StepID)
 		if payload.Actor == "" && payload.Cwd == "" {
 			delete(rulings, step)
 			continue
 		}
-		rulings[step] = &StepRuling{Event: kind, Actor: payload.Actor, Cwd: payload.Cwd}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("reading the run's rulings: %w", err)
+		rulings[step] = &StepRuling{Event: e.Kind, Actor: payload.Actor, Cwd: payload.Cwd}
 	}
 
 	for i := range attempts {
@@ -1955,9 +1854,9 @@ func annotateStepRulings(tx *sql.Tx, runID int, attempts []StepAttempt) error {
 // per-step loop would be N round trips against a single connection to answer a
 // question one join can.
 func annotateVoteOutcomes(
-	tx *sql.Tx, runID int, sched *Scheduler, attempts []StepAttempt,
+	tx store.LegacyReadTx, runID int, sched *Scheduler, attempts []StepAttempt,
 ) error {
-	voteSteps := make(map[string]*db.Step)
+	voteSteps := make(map[string]*store.Step)
 	for _, step := range sched.Steps() {
 		if step.Kind == workflow.TypeVote {
 			voteSteps[model.FormatStepID(step.ID)] = step
@@ -1967,8 +1866,9 @@ func annotateVoteOutcomes(
 		return nil
 	}
 
-	keys, err := db.LookupIdempotencyKeysTx(
-		tx, db.ScopeVoteCreate, voteIdempotencyPrefix(runID))
+	st := store.TxOn(tx)
+	keys, err := st.LookupIdempotencyKeysTx(
+		store.ScopeVoteCreate, voteIdempotencyPrefix(runID))
 	if err != nil {
 		return err
 	}
@@ -1983,7 +1883,7 @@ func annotateVoteOutcomes(
 	for _, id := range keys {
 		ids = append(ids, id)
 	}
-	statuses, err := db.ProposalStatusesTx(tx, ids)
+	statuses, err := st.ProposalStatusesTx(ids)
 	if err != nil {
 		return err
 	}
@@ -2012,8 +1912,8 @@ func annotateVoteOutcomes(
 // falls inside the run's activation-to-terminal window. The window keeps a
 // panel about the same issue under an earlier or later run out of this one.
 // It returns the matching links, narrowed by filter.
-func linkedPanelAttributions(conn *sql.DB, filter db.ProposalRunLinkFilter) ([]db.ProposalRunLink, error) {
-	links, err := db.ProposalRunLinks(conn, filter)
+func linkedPanelAttributions(conn store.LegacyDB, filter store.ProposalRunLinkFilter) ([]store.ProposalRunLink, error) {
+	links, err := store.StoreOn(conn).ProposalRunLinks(filter)
 	if err != nil {
 		return nil, err
 	}
@@ -2022,7 +1922,7 @@ func linkedPanelAttributions(conn *sql.DB, filter db.ProposalRunLinkFilter) ([]d
 		ok       bool
 	}
 	windows := make(map[int]window)
-	var out []db.ProposalRunLink
+	var out []store.ProposalRunLink
 	for _, link := range links {
 		w, cached := windows[link.RunID]
 		if !cached {
@@ -2045,25 +1945,21 @@ func linkedPanelAttributions(conn *sql.DB, filter db.ProposalRunLinkFilter) ([]d
 // runActiveWindowMS is the run's activation-to-terminal window: the first
 // run-activated event's time to the last run-done or run-abandoned event's,
 // open-ended while the run is live. ok is false for a run never activated.
-func runActiveWindowMS(conn *sql.DB, runID int) (from, to int64, ok bool, err error) {
-	var first sql.NullInt64
-	if err := conn.QueryRow(
-		`SELECT MIN(at_ms) FROM events WHERE run_id = ? AND kind = ?`,
-		runID, EventRunActivated).Scan(&first); err != nil {
+func runActiveWindowMS(conn store.LegacyDB, runID int) (from, to int64, ok bool, err error) {
+	st := store.StoreOn(conn)
+	from, _, activated, err := st.RunEventSpanMS(runID, EventRunActivated)
+	if err != nil {
 		return 0, 0, false, fmt.Errorf("reading the run's activation: %w", err)
 	}
-	if !first.Valid {
+	if !activated {
 		return 0, 0, false, nil
 	}
-	var last sql.NullInt64
-	if err := conn.QueryRow(
-		`SELECT MAX(at_ms) FROM events WHERE run_id = ? AND kind IN (?, ?)`,
-		runID, EventRunDone, EventRunAbandoned).Scan(&last); err != nil {
+	_, to, ended, err := st.RunEventSpanMS(runID, EventRunDone, EventRunAbandoned)
+	if err != nil {
 		return 0, 0, false, fmt.Errorf("reading the run's end: %w", err)
 	}
-	to = math.MaxInt64
-	if last.Valid {
-		to = last.Int64
+	if !ended {
+		to = math.MaxInt64
 	}
-	return first.Int64, to, true, nil
+	return from, to, true, nil
 }

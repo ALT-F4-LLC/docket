@@ -9,6 +9,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -60,28 +61,28 @@ func TestNotFound(t *testing.T) {
 	})
 }
 
-// TestIssueArg pins the two outcomes every one of issueArg's 20+ call sites
-// depends on: a valid "DKT-N" source parses to its numeric id, and anything
-// else reports VALIDATION_ERROR rather than a bare parse error.
-func TestIssueArg(t *testing.T) {
+// TestFromVerbRecodesVerbError pins the CLI side of a verb call: a successful
+// result passes through, and a *verb.Error arrives as a *CmdError carrying
+// the verb's code, so Execute renders it rather than a bare error.
+func TestFromVerbRecodesVerbError(t *testing.T) {
 	t.Run("valid issue ID", func(t *testing.T) {
-		id, err := issueArg("DKT-1")
+		id, err := fromVerb(verb.ParseIssueRef("DKT-1"))
 		if err != nil {
-			t.Fatalf("issueArg(%q) error = %v, want nil", "DKT-1", err)
+			t.Fatalf("fromVerb(ParseIssueRef(%q)) error = %v, want nil", "DKT-1", err)
 		}
 		if id != 1 {
-			t.Errorf("issueArg(%q) = %d, want 1", "DKT-1", id)
+			t.Errorf("fromVerb(ParseIssueRef(%q)) = %d, want 1", "DKT-1", id)
 		}
 	})
 
 	t.Run("invalid source reports VALIDATION_ERROR", func(t *testing.T) {
-		_, err := issueArg("abc")
+		_, err := fromVerb(verb.ParseIssueRef("abc"))
 		if err == nil {
-			t.Fatal("issueArg(\"abc\") error = nil, want a VALIDATION_ERROR")
+			t.Fatal("fromVerb(ParseIssueRef(\"abc\")) error = nil, want a VALIDATION_ERROR")
 		}
 		cmdErr, ok := err.(*CmdError)
 		if !ok {
-			t.Fatalf("issueArg(\"abc\") error = %T, want *CmdError", err)
+			t.Fatalf("fromVerb(ParseIssueRef(\"abc\")) error = %T, want *CmdError", err)
 		}
 		if cmdErr.Code != output.ErrValidation {
 			t.Errorf("Code = %q, want %q", cmdErr.Code, output.ErrValidation)

@@ -7,10 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -59,7 +58,6 @@ var docCreateCmd = &cobra.Command{
 	Short: "Create a new document",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
 		title, _ := cmd.Flags().GetString("title")
 		body, _ := cmd.Flags().GetString("description")
@@ -111,33 +109,27 @@ var docCreateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		body = loadedBody
-
-		doc := model.Doc{
-			ProjectID: getProjectID(cmd),
-			Type:      docType,
-			Status:    status,
-			Title:     title,
-			Body:      body,
-			Author:    config.DefaultAuthor(),
-		}
 
 		idempotencyKey, err := idempotencyKeyOf(cmd)
 		if err != nil {
 			return err
 		}
 
-		id, err := db.CreateDocIdempotent(conn, &doc, idempotencyKey)
+		env := verbEnv(cmd)
+		res, err := verb.DocCreate(cmd.Context(), env, verb.DocCreateInput{
+			Title:          title,
+			Body:           loadedBody,
+			Type:           docType,
+			Status:         status,
+			IdempotencyKey: idempotencyKey,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("creating doc: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		created, err := db.GetDoc(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching created doc: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(created, fmt.Sprintf("Created %s: %s", model.FormatDocID(id), created.Title))
+		created := res.Doc
+		w.Success(created, fmt.Sprintf("Created %s: %s", model.FormatDocID(created.ID), created.Title))
 
 		return nil
 	},

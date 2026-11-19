@@ -14,9 +14,8 @@ import (
 type Options struct {
 	Interval time.Duration
 	JSONMode bool
-	// JSONVersion selects the envelope shape when JSONMode is true. The zero
-	// value (JSONNone) is normalized to JSONV1 for a JSON-mode watch, so a
-	// caller that sets only JSONMode keeps emitting the v1 envelope.
+	// JSONVersion is the requested envelope version. The zero value
+	// (JSONNone) is normalized to JSONV2 for a JSON-mode watch.
 	JSONVersion output.JSONVersion
 	QuietMode   bool
 	IsTTY       bool

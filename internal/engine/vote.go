@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -69,7 +68,7 @@ type VoteOutcome struct {
 // routed the other issue's unrelated held cluster too.
 //
 // Issue is the FORMATTED id (model.FormatID), not the raw int, so this key
-// builds identically from a *db.Step (format its IssueID) and from a
+// builds identically from a *store.Step (format its IssueID) and from a
 // rendered model.StepRow (already carries Issue formatted) without either
 // side round-tripping through the other's representation.
 type voteStepKey struct {
@@ -78,7 +77,7 @@ type voteStepKey struct {
 }
 
 // voteStepKeyOf builds a voteStepKey from a step row.
-func voteStepKeyOf(step *db.Step) voteStepKey {
+func voteStepKeyOf(step *store.Step) voteStepKey {
 	return voteStepKey{Issue: model.FormatID(step.IssueID), Instance: step.Instance}
 }
 
@@ -143,7 +142,7 @@ func voteStepRunOf(key string) (int, bool) {
 // be a column that could disagree with it.
 //
 // DORMANT ON A RUN WITH NO VOTE STEPS — no query at all, which is most runs.
-func loadVoteProposalsTx(tx *sql.Tx, runID int, steps []*db.Step) (map[voteStepKey]int, error) {
+func loadVoteProposalsTx(tx store.LegacyTx, runID int, steps []*store.Step) (map[voteStepKey]int, error) {
 	voting := false
 	for _, step := range steps {
 		if step.Kind == workflow.TypeVote {
@@ -156,7 +155,7 @@ func loadVoteProposalsTx(tx *sql.Tx, runID int, steps []*db.Step) (map[voteStepK
 	}
 
 	prefix := voteIdempotencyPrefix(runID)
-	keyed, err := db.LookupIdempotencyKeysTx(tx, db.ScopeVoteCreate, prefix)
+	keyed, err := store.TxOn(tx).LookupIdempotencyKeysTx(store.ScopeVoteCreate, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("reading the proposals of run %d: %w", runID, err)
 	}
@@ -198,13 +197,14 @@ func parseVoteStepKey(prefix, key string) (voteStepKey, bool) {
 // makes a double-invocation produce ONE proposal. No daemon watches for ready
 // vote steps; nothing is scheduled.
 func OpenVoteProposal(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, nowMS int64,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step, nowMS int64,
 ) (int, error) {
 	if spec.Type != workflow.TypeVote {
 		return 0, nil
 	}
 
-	projectID, err := db.RunProjectID(conn, step.RunID)
+	st := store.StoreOn(conn)
+	projectID, err := st.RunProjectID(step.RunID)
 	if err != nil {
 		return 0, err
 	}
@@ -247,8 +247,8 @@ func OpenVoteProposal(
 		CreatedBy:      "docket",
 	}
 
-	proposalID, err := db.CreateProposalIdempotent(
-		conn, proposal, voteIdempotencyKey(step.RunID, step.IssueID, step.Instance))
+	proposalID, err := st.CreateProposalIdempotent(
+		proposal, voteIdempotencyKey(step.RunID, step.IssueID, step.Instance))
 	if err != nil {
 		return 0, fmt.Errorf("opening the proposal for %s: %w", step.Instance, err)
 	}
@@ -256,8 +256,8 @@ func OpenVoteProposal(
 	// The proposal is linked to the step's issue through the EXISTING link
 	// table, which is what makes `vote show` and `vote list` find it without
 	// any engine-specific reader.
-	if err := db.LinkProposalIssue(conn, proposalID, step.IssueID); err != nil &&
-		!errors.Is(err, db.ErrConflict) {
+	if err := st.LinkProposalIssue(proposalID, step.IssueID); err != nil &&
+		!errors.Is(err, store.ErrConflict) {
 		return 0, fmt.Errorf("linking the proposal to %s: %w", step.Instance, err)
 	}
 
@@ -275,7 +275,7 @@ func OpenVoteProposal(
 // It READS. The tally happened inside db.CastVote when the last voter cast, and
 // this does not recompute it — recomputing would be a second implementation of
 // the rule, which is exactly what "used unchanged" forbids.
-func ReadVoteOutcome(conn *sql.DB, step *db.Step, spec *workflow.Step) (*VoteOutcome, error) {
+func ReadVoteOutcome(conn store.LegacyDB, step *store.Step, spec *workflow.Step) (*VoteOutcome, error) {
 	if spec.Type != workflow.TypeVote {
 		return nil, nil
 	}
@@ -297,7 +297,7 @@ func ReadVoteOutcome(conn *sql.DB, step *db.Step, spec *workflow.Step) (*VoteOut
 // `resolvable` test and the parked-vote refusal above it already key off. A
 // step whose kind is not `vote` has no proposal by construction, and reports
 // nothing.
-func ReadStepVoteOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
+func ReadStepVoteOutcome(conn store.LegacyDB, step *store.Step) (*VoteOutcome, error) {
 	if step.Kind != workflow.TypeVote {
 		return nil, nil
 	}
@@ -307,13 +307,13 @@ func ReadStepVoteOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
 // readVoteProposalOutcome is the one read both entry points share: resolve the
 // step's proposal through its idempotency key and observe the status the tally
 // already wrote.
-func readVoteProposalOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) {
+func readVoteProposalOutcome(conn store.LegacyDB, step *store.Step) (*VoteOutcome, error) {
 	proposalID, err := findVoteProposal(conn, step)
 	if err != nil || proposalID == 0 {
 		return nil, err
 	}
 
-	proposal, err := db.GetProposal(conn, proposalID)
+	proposal, err := store.StoreOn(conn).GetProposal(proposalID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the proposal for %s: %w", step.Instance, err)
 	}
@@ -341,9 +341,9 @@ func readVoteProposalOutcome(conn *sql.DB, step *db.Step) (*VoteOutcome, error) 
 
 // findVoteProposal resolves the proposal this step opened, through the
 // idempotency key it was created under.
-func findVoteProposal(conn *sql.DB, step *db.Step) (int, error) {
-	id, found, err := db.LookupIdempotencyKey(
-		conn, db.ScopeVoteCreate, voteIdempotencyKey(step.RunID, step.IssueID, step.Instance))
+func findVoteProposal(conn store.LegacyDB, step *store.Step) (int, error) {
+	id, found, err := store.StoreOn(conn).LookupIdempotencyKey(
+		store.ScopeVoteCreate, voteIdempotencyKey(step.RunID, step.IssueID, step.Instance))
 	if err != nil {
 		return 0, fmt.Errorf("resolving the proposal for %s: %w", step.Instance, err)
 	}
@@ -353,7 +353,12 @@ func findVoteProposal(conn *sql.DB, step *db.Step) (int, error) {
 	return id, nil
 }
 
-// IsVoteStepProposal reports whether a proposal was opened by an engine vote
+// IsVoteStepProposal is IsVoteStepProposalStore on store.StoreOn(conn).
+func IsVoteStepProposal(conn store.LegacyDB, proposalID int) (bool, error) {
+	return IsVoteStepProposalStore(store.StoreOn(conn), proposalID)
+}
+
+// IsVoteStepProposalStore reports whether a proposal was opened by an engine vote
 // step — its create keyed under the vote-step scope prefix.
 //
 // `vote close` (DKT-114) is for CONVERSATIONAL proposals whose decision was
@@ -361,20 +366,33 @@ func findVoteProposal(conn *sql.DB, step *db.Step) (int, error) {
 // closing it underneath the step would not route the step, and the run is
 // moved past an uncast vote with `docket step resolve` instead — so the close
 // verb asks this first and refuses with that guidance.
-func IsVoteStepProposal(conn *sql.DB, proposalID int) (bool, error) {
-	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+func IsVoteStepProposalStore(storage store.Store, proposalID int) (bool, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return false, err
+	}
+	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return false, err
 	}
 	return found && strings.HasPrefix(key, voteStepScopePrefix), nil
 }
 
-// VoteProposalRun returns the run whose vote step opened a proposal. The
+// VoteProposalRun is VoteProposalRunStore on store.StoreOn(conn).
+func VoteProposalRun(conn store.LegacyDB, proposalID int) (int, bool, error) {
+	return VoteProposalRunStore(store.StoreOn(conn), proposalID)
+}
+
+// VoteProposalRunStore returns the run whose vote step opened a proposal. The
 // second return is false for a proposal bound to no run: a conversational
 // ballot, or a caller-forged key whose run part does not parse, which
 // DriveVoteProposal likewise routes nowhere.
-func VoteProposalRun(conn *sql.DB, proposalID int) (int, bool, error) {
-	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+func VoteProposalRunStore(storage store.Store, proposalID int) (int, bool, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return 0, false, err
+	}
+	key, found, err := store.StoreOn(conn).IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil || !found {
 		return 0, false, err
 	}
@@ -414,8 +432,9 @@ type voteRule struct {
 // after the workflow registered. That is a real possibility and it fails
 // loudly rather than silently tallying at some default: a threshold nobody
 // chose is not a threshold.
-func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error) {
-	thresholdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleThresholdKey(name))
+func resolveVoteRule(conn store.LegacyDB, projectID int, name string) (voteRule, error) {
+	st := store.StoreOn(conn)
+	thresholdEntry, err := st.GetConfig(projectID, store.VoteRuleThresholdKey(name))
 	if err != nil {
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
 	}
@@ -430,12 +449,12 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 			"vote rule %q has a malformed threshold %q: %w", name, thresholdEntry.Value, err)
 	}
 
-	criticalityEntry, err := db.GetConfig(conn, projectID, db.VoteRuleCriticalityKey(name))
+	criticalityEntry, err := st.GetConfig(projectID, store.VoteRuleCriticalityKey(name))
 	if err != nil {
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
 	}
 
-	sealedEntry, err := db.GetConfig(conn, projectID, db.VoteRuleSealedKey(name))
+	sealedEntry, err := st.GetConfig(projectID, store.VoteRuleSealedKey(name))
 	if err != nil {
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
 	}
@@ -445,7 +464,7 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 			"vote rule %q has a malformed sealed flag %q: %w", name, sealedEntry.Value, err)
 	}
 
-	holdEntry, err := db.GetConfig(conn, projectID, db.VoteRuleHoldOnDissentKey(name))
+	holdEntry, err := st.GetConfig(projectID, store.VoteRuleHoldOnDissentKey(name))
 	if err != nil {
 		return voteRule{}, fmt.Errorf("resolving vote rule %q: %w", name, err)
 	}
@@ -469,7 +488,7 @@ func resolveVoteRule(conn *sql.DB, projectID int, name string) (voteRule, error)
 
 // recordVoteEvent writes a vote lifecycle event in its own transaction.
 func recordVoteEvent(
-	conn *sql.DB, kind string, step *db.Step, data string, nowMS int64,
+	conn store.LegacyDB, kind string, step *store.Step, data string, nowMS int64,
 ) error {
 	tx, err := conn.Begin()
 	if err != nil {
@@ -482,7 +501,7 @@ func recordVoteEvent(
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // voteTallyDetail renders the `vote-tallied` event's detail: the proposal, the
@@ -503,13 +522,13 @@ func recordVoteEvent(
 // which every dispatch does for every vote step) does not grow a second query
 // to serve an event detail written once — DKT-726's rule about that reader.
 // `RequiredVoters` is free: the proposal that read already loaded carries it.
-func voteTallyDetail(conn *sql.DB, outcome *VoteOutcome) (string, error) {
+func voteTallyDetail(conn store.LegacyDB, outcome *VoteOutcome) (string, error) {
 	score := "none"
 	if outcome.Score != nil {
 		score = strconv.FormatFloat(*outcome.Score, 'f', 2, 64)
 	}
 
-	votes, err := db.GetProposalVotes(conn, outcome.ProposalID)
+	votes, err := store.StoreOn(conn).GetProposalVotes(outcome.ProposalID)
 	if err != nil {
 		return "", fmt.Errorf("reading the casts of %s for its tally event: %w",
 			model.FormatProposalID(outcome.ProposalID), err)
@@ -547,7 +566,7 @@ func voteTallyDetail(conn *sql.DB, outcome *VoteOutcome) (string, error) {
 // belongs to the operator. That park waits on somebody who has not been asked
 // yet, which is not the deadlock V13 forbids.
 func routeVoteStep(
-	conn *sql.DB, step *db.Step, def *workflow.Definition, spec *workflow.Step,
+	conn store.LegacyDB, step *store.Step, def *workflow.Definition, spec *workflow.Step,
 	outcome *VoteOutcome, nowMS int64,
 ) error {
 	// The step this panel was asked about, if any (DKT-1901). Read BEFORE the
@@ -575,12 +594,12 @@ func routeVoteStep(
 			tx, step, triaged, spec, def, outcome, nowMS); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return commitWrite(tx)
 	}
 
 	routing := RoutingPass
 	concernReason := ""
-	var concernClass db.ParkClass
+	var concernClass store.ParkClass
 	// A manual commit is accepted only from approved and casting closes at the
 	// tally, so a committed proposal carries the approved tally's cast set and
 	// is routed as one.
@@ -620,7 +639,7 @@ func routeVoteStep(
 		}
 		if result.Routing != RoutingPass {
 			routing, concernReason = result.Routing, result.Reason
-			concernClass = db.ParkClassThresholdRouted
+			concernClass = store.ParkClassThresholdRouted
 		}
 	}
 
@@ -654,7 +673,7 @@ func routeVoteStep(
 		}
 		if dissentReason != "" {
 			routing, concernReason = workflow.OnFailWaitingHuman, dissentReason
-			concernClass = db.ParkClassDissentHeld
+			concernClass = store.ParkClassDissentHeld
 		}
 	}
 
@@ -670,7 +689,7 @@ func routeVoteStep(
 	// takes the pooled connection, which inside the transaction would deadlock.
 	// A failed tally resolves nothing: it parks the step, and the operator's
 	// own approve is what records a resolution.
-	var routingStep *db.Step
+	var routingStep *store.Step
 	if step.Materialized && routing == RoutingPass {
 		var err error
 		if routingStep, err = routingStepOf(conn, step); err != nil {
@@ -705,7 +724,7 @@ func routeVoteStep(
 	// rejection. An approved tally parks for one of two reasons: a declared
 	// threshold routed it away from `pass` (a threshold park), or the rule's
 	// hold_on_dissent held it on a `reject` cast (a dissent hold).
-	class := db.ParkClassVoteRejected
+	class := store.ParkClassVoteRejected
 	if concernClass != "" {
 		class = concernClass
 	}
@@ -740,7 +759,7 @@ func routeVoteStep(
 	}
 	releasedByPanel := triaged != nil && !mapped
 	if !releasedByPanel {
-		if err := db.SetStepRoutingTx(tx, step.ID,
+		if err := store.TxOn(tx).SetStepRoutingTx(step.ID,
 			routing, reason, status, class, nowMS); err != nil {
 			return err
 		}
@@ -801,10 +820,10 @@ func routeVoteStep(
 		if err := reconcileRun(tx, step.RunID, nowMS); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return commitWrite(tx)
 	}
 	if err := reconcileIssueAndRun(tx, step, def, spec, routing, nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }

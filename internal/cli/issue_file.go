@@ -6,11 +6,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -25,29 +23,17 @@ var fileAddCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
+		res, err := verb.IssueFileAdd(cmd.Context(), verbEnv(cmd), verb.IssueFileAddInput{
+			Issue: args[0],
+			Paths: args[1:],
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-		if err != nil {
-			return err
-		}
-
-		filePaths := args[1:]
-		if err := db.AttachFiles(conn, id, filePaths, config.DefaultAuthor()); err != nil {
-			return cmdErr(fmt.Errorf("attaching files: %w", err), output.ErrGeneral)
-		}
-
-		files, err := db.GetIssueFiles(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(files, fmt.Sprintf("Added file(s) to %s: %s", model.FormatID(id), issue.Title))
+		w.Success(res.Files, fmt.Sprintf("Added file(s) to %s: %s", model.FormatID(res.Issue.ID), res.Issue.Title))
 		return nil
 	},
 }
@@ -58,29 +44,17 @@ var fileRemoveCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
+		res, err := verb.IssueFileRemove(cmd.Context(), verbEnv(cmd), verb.IssueFileRemoveInput{
+			Issue: args[0],
+			Paths: args[1:],
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		issue, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0]))
-		if err != nil {
-			return err
-		}
-
-		filePaths := args[1:]
-		if err := db.DetachFiles(conn, id, filePaths, config.DefaultAuthor()); err != nil {
-			return cmdErr(fmt.Errorf("removing files: %w", err), output.ErrGeneral)
-		}
-
-		files, err := db.GetIssueFiles(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-		}
-
-		w.Success(files, fmt.Sprintf("Removed file(s) from %s: %s", model.FormatID(id), issue.Title))
+		w.Success(res.Files, fmt.Sprintf("Removed file(s) from %s: %s", model.FormatID(res.Issue.ID), res.Issue.Title))
 		return nil
 	},
 }
@@ -91,21 +65,12 @@ var fileListCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
+		listed, err := verb.IssueFileList(cmd.Context(), verbEnv(cmd), verb.IssueFileListInput{Issue: args[0]})
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-
-		if _, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0])); err != nil {
-			return err
-		}
-
-		files, err := db.GetIssueFiles(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-		}
+		id, files := listed.IssueID, listed.Files
 
 		if len(files) == 0 {
 			quiet, _ := cmd.Flags().GetBool("quiet")

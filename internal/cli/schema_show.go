@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -28,20 +28,11 @@ a run validates its payloads against.`,
 }
 
 func runSchemaShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	// The reference grammar is `workflow show`'s: a bare name means "the highest
-	// registered version", which is the read verb's convenience and never what a
-	// `payload` declaration or a pin may mean.
-	name, version, err := model.ParseWorkflowRef(args[0])
+	shown, err := verb.SchemaShow(cmd.Context(), schemaVerbEnv(cmd), verb.SchemaShowInput{Ref: args[0]})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+		return verbErr(err)
 	}
-
-	s, err := db.GetSchema(conn, getProjectID(cmd), name, version)
-	if err != nil {
-		return schemaErr(describeMissingSchema(err, args[0]))
-	}
+	s := shown.Schema
 
 	body, _ := cmd.Flags().GetBool("body")
 	if body {
@@ -65,13 +56,10 @@ func runSchemaShow(cmd *cobra.Command, args []string, w *output.Writer) error {
 	return nil
 }
 
-// describeMissingSchema turns the storage sentinel into an operator-facing
-// message naming what was asked for.
+// describeMissingSchema forwards to verb.DescribeMissingSchema for
+// `schema deprecate`, which has not moved onto internal/verb yet.
 func describeMissingSchema(err error, ref string) error {
-	if err == db.ErrSchemaNotFound {
-		return fmt.Errorf("%w: %s is not registered", db.ErrSchemaNotFound, ref)
-	}
-	return err
+	return verb.DescribeMissingSchema(err, ref)
 }
 
 func renderSchemaShow(s *model.Schema) string {

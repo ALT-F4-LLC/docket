@@ -192,6 +192,56 @@ func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
 		t.Errorf("report = %+v; no comparable scope pair must read as checked-nothing", result5.RoutingLint)
 	}
 
+	// pairRun binds one labelled and one unlabelled issue with the given scope
+	// and attached files, and dry-runs it with no lexicon.
+	pairRun := func(labelledScope string, labelledFiles []string, otherScope string, otherFiles []string) (*ActivateResult, int) {
+		conn := mustDB(t)
+		registerFixture(t, conn)
+		lab := createIssue(t, conn, "Harden the exec resolver", "body", "task", []string{"security"})
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, lab, labelledScope), "declaring scope")
+		testsupport.Must(t, db.AttachFiles(conn, lab, labelledFiles, ""), "attaching files")
+		other := createIssue(t, conn, "Tidy", "typos", "task", nil)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, other, otherScope), "declaring scope")
+		testsupport.Must(t, db.AttachFiles(conn, other, otherFiles, ""), "attaching files")
+		result, err := Activate(conn, startRun(t, conn, lab, other).ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+		testsupport.Must(t, err, "dry-run activate: %v", err)
+		if result.RoutingLint == nil {
+			t.Fatal("a dry run carried no lint report")
+		}
+		return result, other
+	}
+
+	// Both issues scoped `**` but sharing an attached file: the overlap check
+	// compared their files, so the report must count both as comparable.
+	shared := []string{"internal/exec/resolve.go"}
+	result6, other6 := pairRun(`["**"]`, shared, `["**"]`, shared)
+	if len(result6.RoutingWarnings) != 1 || result6.RoutingWarnings[0].Issue != model.FormatID(other6) {
+		t.Errorf("warnings = %+v; want the shared-file overlap flagged", result6.RoutingWarnings)
+	}
+	if lint := result6.RoutingLint; lint.CheckedNothing() || lint.LabelledIssues != 1 || lint.Unscoped != 0 {
+		t.Errorf("report = %+v; a files-only overlap must count both issues as comparable", *lint)
+	}
+
+	// One side compares by files only, the other by a literal-prefix glob only:
+	// the overlap check compares files only when both list them, and skips `**`,
+	// so the pair was never compared, either way round.
+	for _, mixed := range []struct {
+		name                      string
+		labelledScope, otherScope string
+		labelledFiles, otherFiles []string
+	}{
+		{name: "labelled lists files", labelledScope: `["**"]`, labelledFiles: shared, otherScope: `["internal/exec/**"]`},
+		{name: "linted lists files", labelledScope: `["internal/exec/**"]`, otherScope: `["**"]`, otherFiles: shared},
+	} {
+		result, _ := pairRun(mixed.labelledScope, mixed.labelledFiles, mixed.otherScope, mixed.otherFiles)
+		if len(result.RoutingWarnings) != 0 {
+			t.Errorf("%s: unexpected warnings: %+v", mixed.name, result.RoutingWarnings)
+		}
+		if !result.RoutingLint.CheckedNothing() {
+			t.Errorf("%s: report = %+v; an uncomparable pair must read as checked-nothing", mixed.name, *result.RoutingLint)
+		}
+	}
+
 	// A real activation never runs the lint, so it carries no report.
 	conn3 := mustDB(t)
 	real, _, _, _, _ := routingRun(t, conn3)
@@ -199,5 +249,51 @@ func TestDryRunReportsWhatTheLintCouldCheck(t *testing.T) {
 	testsupport.Must(t, err, "activate: %v", err)
 	if result3.RoutingLint != nil {
 		t.Errorf("a real activation carried a lint report: %+v", *result3.RoutingLint)
+	}
+}
+
+// fileOverlapRun binds a security-labelled issue and an unlabelled one whose
+// scope globs intersect, each with the given attached files.
+func fileOverlapRun(t *testing.T, conn *sql.DB, securityFiles, otherFiles []string) (run *model.Run, security, other int) {
+	t.Helper()
+	registerFixture(t, conn)
+	security = createIssue(t, conn, "harden the exec resolver", "path handling", "task", []string{"security"})
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, security, `["internal/exec/**"]`), "declaring scope")
+	testsupport.Must(t, db.AttachFiles(conn, security, securityFiles, ""), "attaching files")
+	other = createIssue(t, conn, "Tidy the exec package", "naming", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, other, `["internal/exec/**"]`), "declaring scope")
+	testsupport.Must(t, db.AttachFiles(conn, other, otherFiles, ""), "attaching files")
+	return startRun(t, conn, security, other), security, other
+}
+
+func TestRoutingLintSkipsGlobOverlapWithNoSharedFile(t *testing.T) {
+	conn := mustDB(t)
+	run, _, other := fileOverlapRun(t, conn,
+		[]string{"internal/exec/resolve.go"}, []string{"internal/exec/names.go"})
+
+	if w, flagged := dryRunWarnings(t, conn, run.ID)[model.FormatID(other)]; flagged {
+		t.Errorf("flagged although the files lists share no path: %+v", w)
+	}
+}
+
+func TestRoutingLintFlagsSharedFileOverlap(t *testing.T) {
+	conn := mustDB(t)
+	run, security, other := fileOverlapRun(t, conn,
+		[]string{"internal/exec/resolve.go"}, []string{"internal/exec/names.go", "internal/exec/resolve.go"})
+
+	w := dryRunWarnings(t, conn, run.ID)[model.FormatID(other)]
+	if len(w.Overlaps) != 1 || w.Overlaps[0] != model.FormatID(security) {
+		t.Errorf("shared file not flagged against %s: %+v", model.FormatID(security), w)
+	}
+}
+
+func TestRoutingLintFallsBackToScopeWithoutFiles(t *testing.T) {
+	conn := mustDB(t)
+	run, security, other := fileOverlapRun(t, conn, []string{"internal/exec/resolve.go"}, nil)
+
+	w := dryRunWarnings(t, conn, run.ID)[model.FormatID(other)]
+	if len(w.Overlaps) != 1 || w.Overlaps[0] != model.FormatID(security) {
+		t.Errorf("intersecting scopes not flagged against %s when one issue lists no files: %+v",
+			model.FormatID(security), w)
 	}
 }

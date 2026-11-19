@@ -1,15 +1,12 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -28,41 +25,23 @@ var voteCommitCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		proposalID, err := model.ParseProposalID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-		}
 
 		outcome, _ := cmd.Flags().GetString("outcome")
 		escalationReason, _ := cmd.Flags().GetString("escalation-reason")
 
-		// A vote step's proposal is routed by its run; committing it out of
-		// band is a conductor's ruling, so a bound run requires its capability.
-		runID, stepOwned, err := engine.VoteProposalRun(conn, proposalID)
+		env := verbEnv(cmd)
+		res, err := verb.VoteCommit(cmd.Context(), env, verb.VoteCommitInput{
+			Proposal:         args[0],
+			Outcome:          outcome,
+			EscalationReason: escalationReason,
+			ConductorToken:   func() string { return optionalToken(os.Stdin) },
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			return cmdErr(err, output.ErrGeneral)
-		}
-		if stepOwned {
-			token := conductorToken(conn, runID, os.Stdin)
-			if err := engine.AuthorizeConductor(conn, runID, token, "vote commit"); err != nil {
-				return runErr(err)
-			}
+			return verbErr(err)
 		}
 
-		err = db.CommitProposal(conn, proposalID, outcome, escalationReason)
-		if err != nil {
-			if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
-				return e
-			}
-			if errors.Is(err, db.ErrConflict) {
-				return cmdErr(err, output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("committing proposal: %w", err), output.ErrGeneral)
-		}
-
-		fmtID := model.FormatProposalID(proposalID)
+		fmtID := model.FormatProposalID(res.ProposalID)
 		msg := fmt.Sprintf("%s committed: %s", fmtID, outcome)
 
 		var escalationReasonPtr *string

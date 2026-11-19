@@ -7,6 +7,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -98,7 +99,7 @@ func TestCastEvidenceResolvesAgainstTheProposalsRun(t *testing.T) {
 
 	// The bare numeric spelling is accepted on the way in...
 	findings := findingsCiting("artifact:"+model.FormatArtifactID(artifactID)[len("ARTIFACT-"):], "gate:build")
-	err := ValidateCastEvidence(conn, proposalID, findings)
+	err := ValidateCastEvidence(store.StoreOn(conn), proposalID, findings)
 	testsupport.Must(t, err, "ValidateCastEvidence: %v", err)
 
 	// ...and canonicalized before anything stores it.
@@ -130,7 +131,7 @@ func TestCastEvidenceRefusesAnotherRunsArtifact(t *testing.T) {
 	firstRun, firstProposal, _ := evidenceRun(t, conn)
 	secondRun, _, secondArtifact := secondEvidenceRun(t, conn)
 
-	err := ValidateCastEvidence(conn, firstProposal,
+	err := ValidateCastEvidence(store.StoreOn(conn), firstProposal,
 		findingsCiting("artifact:"+model.FormatArtifactID(secondArtifact)))
 	if err == nil {
 		t.Fatal("an artifact of another run was accepted as evidence")
@@ -163,7 +164,7 @@ func TestCastEvidenceRefusesWhatDoesNotResolve(t *testing.T) {
 		{"a malformed artifact id", "artifact:ARTIFACT-x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateCastEvidence(conn, proposalID, findingsCiting(tc.ref))
+			err := ValidateCastEvidence(store.StoreOn(conn), proposalID, findingsCiting(tc.ref))
 			if err == nil {
 				t.Fatalf("%q was accepted as evidence", tc.ref)
 			}
@@ -191,7 +192,7 @@ func TestCastEvidenceRefusesAnUnboundProposal(t *testing.T) {
 	})
 	testsupport.Must(t, err, "CreateProposal: %v", err)
 
-	err = ValidateCastEvidence(conn, adHoc, findingsCiting("artifact:"+model.FormatArtifactID(artifactID)))
+	err = ValidateCastEvidence(store.StoreOn(conn), adHoc, findingsCiting("artifact:"+model.FormatArtifactID(artifactID)))
 	if err == nil {
 		t.Fatal("evidence on a proposal bound to no run was accepted")
 	}
@@ -202,7 +203,7 @@ func TestCastEvidenceRefusesAnUnboundProposal(t *testing.T) {
 		t.Errorf("refusal %q does not name the proposal", err)
 	}
 
-	err = ValidateCastEvidence(conn, adHoc+1000, findingsCiting("gate:build"))
+	err = ValidateCastEvidence(store.StoreOn(conn), adHoc+1000,findingsCiting("gate:build"))
 	if code, _ := CodeOf(err); code != CodeNotFound {
 		t.Errorf("a missing proposal returned %v, want %s", err, CodeNotFound)
 	}
@@ -219,7 +220,7 @@ func TestFindingsCitingNothingNeedNoRun(t *testing.T) {
 		{},
 		{Concerns: []model.Finding{{Text: "asserted, not reproduced"}}},
 	} {
-		if err := ValidateCastEvidence(conn, 424242, f); err != nil {
+		if err := ValidateCastEvidence(store.StoreOn(conn), 424242, f); err != nil {
 			t.Errorf("findings %+v citing nothing were refused: %v", f, err)
 		}
 	}

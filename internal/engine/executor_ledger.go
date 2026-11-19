@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -170,10 +169,19 @@ func (l *ledgerTallies) voter(name string, runID int) *voterTally {
 	return t
 }
 
-// LoadExecutorLedger builds the document over every run the options admit.
+// LoadExecutorLedger is LoadExecutorLedgerStore on store.StoreOn(conn).
+func LoadExecutorLedger(conn store.LegacyDB, opts ExecutorLedgerOptions) (*ExecutorLedger, error) {
+	return LoadExecutorLedgerStore(store.StoreOn(conn), opts)
+}
+
+// LoadExecutorLedgerStore builds the document over every run the options admit.
 // IT WRITES NOTHING.
-func LoadExecutorLedger(conn *sql.DB, opts ExecutorLedgerOptions) (*ExecutorLedger, error) {
-	runs, _, err := db.ListRuns(conn, db.RunListOptions{ProjectID: opts.ProjectID})
+func LoadExecutorLedgerStore(storage store.Store, opts ExecutorLedgerOptions) (*ExecutorLedger, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	runs, _, err := store.StoreOn(conn).ListRuns(store.RunListOptions{ProjectID: opts.ProjectID})
 	if err != nil {
 		return nil, err
 	}
@@ -234,13 +242,13 @@ func LoadExecutorLedger(conn *sql.DB, opts ExecutorLedgerOptions) (*ExecutorLedg
 }
 
 // ledgerRun folds one run's facts into the tallies.
-func ledgerRun(conn *sql.DB, runID int, tallies *ledgerTallies) error {
-	steps, err := db.ListRunSteps(conn, runID)
+func ledgerRun(conn store.LegacyDB, runID int, tallies *ledgerTallies) error {
+	steps, err := store.StoreOn(conn).ListRunSteps(runID)
 	if err != nil {
 		return err
 	}
-	byID := make(map[int]*db.Step, len(steps))
-	byKey := make(map[voteStepKey]*db.Step, len(steps))
+	byID := make(map[int]*store.Step, len(steps))
+	byKey := make(map[voteStepKey]*store.Step, len(steps))
 	for _, s := range steps {
 		byID[s.ID] = s
 		byKey[voteStepKeyOf(s)] = s
@@ -275,29 +283,16 @@ func routedFixLoop(routing string) bool {
 // event log, credits the ones on hinted steps, and returns the
 // override-passed step ids for the cast half.
 func ledgerRulings(
-	conn *sql.DB, runID int, byID map[int]*db.Step, tallies *ledgerTallies,
+	conn store.LegacyDB, runID int, byID map[int]*store.Step, tallies *ledgerTallies,
 ) (map[int]bool, error) {
-	rows, err := conn.Query(
-		`SELECT step_id, kind, data FROM events
-		  WHERE run_id = ? AND step_id IS NOT NULL AND kind IN (?, ?)
-		  ORDER BY seq`,
-		runID, EventStepResolved, EventLeaseReaped)
+	events, err := store.StoreOn(conn).RunStepEvents(runID, EventStepResolved, EventLeaseReaped)
 	if err != nil {
 		return nil, fmt.Errorf("reading the rulings of %s: %w", model.FormatRunID(runID), err)
 	}
-	defer rows.Close()
 
 	overridden := make(map[int]bool)
-	for rows.Next() {
-		var (
-			stepID int
-			kind   string
-			data   string
-		)
-		if err := rows.Scan(&stepID, &kind, &data); err != nil {
-			return nil, fmt.Errorf("reading a ruling of %s: %w", model.FormatRunID(runID), err)
-		}
-		step := byID[stepID]
+	for _, e := range events {
+		step := byID[e.StepID]
 		if step == nil {
 			continue
 		}
@@ -307,15 +302,15 @@ func ledgerRulings(
 		}
 		// Core's own payload; a malformed row costs one count, not the read
 		// — the tolerance annotateStepRulings extends to the same rows.
-		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		if err := json.Unmarshal([]byte(e.Data), &payload); err != nil {
 			continue
 		}
-		switch kind {
+		switch e.Kind {
 		case EventStepResolved:
 			if payload.Detail != ResolveOverridePass {
 				continue
 			}
-			overridden[stepID] = true
+			overridden[e.StepID] = true
 			if step.Executor != "" {
 				tallies.executor(step.Executor, runID).OverridePasses++
 			}
@@ -330,16 +325,13 @@ func ledgerRulings(
 			}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading the rulings of %s: %w", model.FormatRunID(runID), err)
-	}
 	return overridden, nil
 }
 
 // ledgerClusters credits each hinted source of every `aggregate` round that
 // declares `source_field` with the clusters it contributed to, over the same
 // emitted-plus-recorded union the run report reads (DKT-2452, DKT-2462).
-func ledgerClusters(conn *sql.DB, runID int, steps []*db.Step, tallies *ledgerTallies) error {
+func ledgerClusters(conn store.LegacyDB, runID int, steps []*store.Step, tallies *ledgerTallies) error {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return err
@@ -370,9 +362,7 @@ func ledgerClusters(conn *sql.DB, runID int, steps []*db.Step, tallies *ledgerTa
 			return err
 		}
 		if executors == nil {
-			if executors, err = runStepExecutorsByInstance(conn, runID); err != nil {
-				return err
-			}
+			executors = executorsByInstance(steps)
 		}
 		for _, set := range [][]map[string]any{emitted, recorded} {
 			for _, cluster := range set {
@@ -415,8 +405,8 @@ func ledgerClusters(conn *sql.DB, runID int, steps []*db.Step, tallies *ledgerTa
 
 // voteStepProposalsOf returns the ids of the proposals the given runs' vote
 // steps opened.
-func voteStepProposalsOf(conn *sql.DB, runIDs []int) (map[int]bool, error) {
-	keyed, err := db.LookupIdempotencyKeys(conn, db.ScopeVoteCreate, voteStepScopePrefix)
+func voteStepProposalsOf(conn store.LegacyDB, runIDs []int) (map[int]bool, error) {
+	keyed, err := store.StoreOn(conn).LookupIdempotencyKeys(store.ScopeVoteCreate, voteStepScopePrefix)
 	if err != nil {
 		return nil, fmt.Errorf("reading the vote-step proposals: %w", err)
 	}
@@ -438,15 +428,16 @@ func voteStepProposalsOf(conn *sql.DB, runIDs []int) (map[int]bool, error) {
 // attributes — and, where the proposal is a vote step's, with what became of
 // that step. A SealedOpen proposal is withheld, as everywhere.
 func ledgerCasts(
-	conn *sql.DB, runID int, byKey map[voteStepKey]*db.Step,
+	conn store.LegacyDB, runID int, byKey map[voteStepKey]*store.Step,
 	overridden map[int]bool, tallies *ledgerTallies,
 ) error {
+	st := store.StoreOn(conn)
 	prefix := voteIdempotencyPrefix(runID)
-	keyed, err := db.LookupIdempotencyKeys(conn, db.ScopeVoteCreate, prefix)
+	keyed, err := st.LookupIdempotencyKeys(store.ScopeVoteCreate, prefix)
 	if err != nil {
 		return fmt.Errorf("reading the proposals of %s: %w", model.FormatRunID(runID), err)
 	}
-	stepOf := make(map[int]*db.Step, len(keyed))
+	stepOf := make(map[int]*store.Step, len(keyed))
 	ids := make([]int, 0, len(keyed))
 	for key, id := range keyed {
 		if k, ok := parseVoteStepKey(prefix, key); ok {
@@ -471,14 +462,14 @@ func ledgerCasts(
 			continue
 		}
 		tallies.creditedProposals[id] = true
-		proposal, err := db.GetProposal(conn, id)
+		proposal, err := st.GetProposal(id)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", model.FormatProposalID(id), err)
 		}
 		if proposal.SealedOpen() {
 			continue
 		}
-		votes, err := db.GetProposalVotes(conn, id)
+		votes, err := st.GetProposalVotes(id)
 		if err != nil {
 			return fmt.Errorf("reading the casts of %s: %w", model.FormatProposalID(id), err)
 		}

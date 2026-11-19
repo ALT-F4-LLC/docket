@@ -38,6 +38,9 @@ func cmdWithDB(conn *sql.DB) *cobra.Command {
 func bufWriter(jsonMode bool) (*output.Writer, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
 	w := &output.Writer{JSONMode: jsonMode, Stdout: buf, Stderr: &bytes.Buffer{}}
+	if jsonMode {
+		w.JSONVersion = output.JSONV2
+	}
 	return w, buf
 }
 

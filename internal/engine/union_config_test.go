@@ -537,7 +537,7 @@ func TestSharedRootPacketResolvesFromALinkedWorktree(t *testing.T) {
 	}
 
 	files, err := resolvePacketFiles(
-		"RUN-1", packetPinsForRun(pins), instanceConfigRoots(),
+		"RUN-1", packetFilePins(pins), instanceConfigRoots(),
 		[]string{"contracts/fix.md"})
 	testsupport.Must(t, err, "a packet file in the shared root did not resolve from a "+
 		"linked worktree — the failure that stranded a claimed step: %v", err)
@@ -564,7 +564,7 @@ func TestRepoRootPacketStillResolves(t *testing.T) {
 	testsupport.Must(t, err, "listing pins: %v", err)
 
 	files, err := resolvePacketFiles(
-		"RUN-1", packetPinsForRun(pins), instanceConfigRoots(),
+		"RUN-1", packetFilePins(pins), instanceConfigRoots(),
 		[]string{"contracts/project.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 	if len(files) != 1 || strings.TrimSpace(files[0].Body) != "this repo's contract" {

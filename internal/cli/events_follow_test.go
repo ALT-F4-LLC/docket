@@ -4,36 +4,43 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ALT-F4-LLC/docket/internal/daemon"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
-// The `--follow` loop's properties.
+// The `--follow` stream's properties, and `--watch`'s polling beside it.
 //
-// EVERY TEST HERE DRIVES followEvents DIRECTLY rather than spawning a process.
-// The cursor discipline and the GONE termination are behaviors of the LOOP, and
-// a test that had to read a subprocess's stdout would be observing the shell
-// between it and the property.
+// The follow tests DRIVE followEvents DIRECTLY rather than spawning a process,
+// over either the real store stream or a fake stream source. The cursor
+// discipline and the GONE termination are behaviors of the follow, and a test
+// that had to read a subprocess's stdout would be observing the shell between
+// it and the property.
 //
 // NOTHING HERE SLEEPS TO MAKE AN ASSERTION TRUE. The interval is set small and
-// the loop is stopped by CANCELLING ITS CONTEXT once the events it was supposed
-// to see have arrived — the repo's standing TTL-flake discipline, applied to a
-// poller.
+// the follow is stopped by CANCELLING ITS CONTEXT once the events it was
+// supposed to see have arrived.
 
 // followTrustEvent writes one event with no run, which is the cheapest event the
 // writer will accept: `events.run_id` is nullable and a trust grant legitimately
 // has none. The feed under test is repo-wide, so what these
 // rows MEAN does not matter — only that they are events with ascending seqs.
-func followTrustEvent(t *testing.T, conn *sql.DB, name string) {
+func followTrustEvent(t *testing.T, conn store.LegacyDB, name string) {
 	t.Helper()
 	sum := sha256.Sum256([]byte(name))
 	err := engine.RecordTrustEvent(
@@ -60,25 +67,39 @@ func followTrustEvent(t *testing.T, conn *sql.DB, name string) {
 func followSeqs(t *testing.T, out string) []int64 {
 	t.Helper()
 	var seqs []int64
+	for _, page := range followPages(t, out) {
+		seqs = append(seqs, page...)
+	}
+	return seqs
+}
+
+// followPages returns the seqs of each printed envelope, one slice per line.
+// A trailing line without its newline is still being written and is skipped.
+func followPages(t *testing.T, out string) [][]int64 {
+	t.Helper()
+	var pages [][]int64
+	out = out[:strings.LastIndex(out, "\n")+1]
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var envelope struct {
 			Data struct {
-				Events []struct {
+				Items []struct {
 					Seq int64 `json:"seq"`
-				} `json:"events"`
+				} `json:"items"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
 			t.Fatalf("a follow cycle emitted invalid JSON: %v\nline: %s", err, line)
 		}
-		for _, e := range envelope.Data.Events {
-			seqs = append(seqs, e.Seq)
+		page := make([]int64, 0, len(envelope.Data.Items))
+		for _, e := range envelope.Data.Items {
+			page = append(page, e.Seq)
 		}
+		pages = append(pages, page)
 	}
-	return seqs
+	return pages
 }
 
 // syncBuffer guards a bytes.Buffer with a mutex so the follow goroutine's
@@ -102,13 +123,14 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func followOpts(conn *sql.DB, stdout, stderr *syncBuffer) followOptions {
+func followOpts(conn store.LegacyDB, stdout, stderr *syncBuffer) followOptions {
 	return followOptions{
 		conn:        conn,
+		stream:      openEventStream(conn, eventHeadWake{conn: conn, every: 5 * time.Millisecond}),
+		retryEvery:  time.Millisecond,
 		query:       engine.EventQuery{Limit: eventsDefaultLimit},
-		interval:    5 * time.Millisecond,
 		jsonMode:    true,
-		jsonVersion: output.JSONV1,
+		jsonVersion: output.JSONV2,
 		stdout:      stdout,
 		stderr:      stderr,
 	}
@@ -380,10 +402,19 @@ func TestFollowTailOnAnEmptyFeedStillFollows(t *testing.T) {
 // what survives — and it is exactly the silent skip the feed contract forbids:
 // the consumer would receive a feed with a hole in it and no indication there was
 // one.
+//
+// This drives the real store stream: a cursor already below the retained
+// minimum makes the stream's first frame a prune marker.
 func TestFollowStopsOnGone(t *testing.T) {
 	conn := newTestDB(t)
 	for i := 0; i < 12; i++ {
 		followTrustEvent(t, conn, fmt.Sprintf("pre-%d", i))
+	}
+	// PRUNE THROUGH PRODUCT CODE, not by hand.
+	if _, err := engine.PruneEvents(conn, engine.PruneQuery{
+		Before: 10, NowMS: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("PruneEvents: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -391,27 +422,10 @@ func TestFollowStopsOnGone(t *testing.T) {
 
 	var stdout, stderr syncBuffer
 	opts := followOpts(conn, &stdout, &stderr)
-	// A LIMIT OF 1 KEEPS THE FOLLOWER BEHIND, which is the situation the clause
-	// is about: a follow that had already caught up would have a cursor above
-	// anything a prune could reasonably remove, and the interesting case —
-	// somebody trims the log out from under a lagging consumer — would never
-	// arise. It drains one event per cycle, so after a couple of cycles its
-	// cursor is a long way below the head.
-	opts.query.Limit = 1
+	opts.query.Since = 2
 
 	done := make(chan error, 1)
 	go func() { done <- followEvents(ctx, opts) }()
-
-	// Let it establish itself, and stay behind, before the ground moves.
-	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 2 })
-
-	// PRUNE THROUGH PRODUCT CODE, not by hand. Before PruneEvents existed, the
-	// only way to reach GONE was a DELETE in a test.
-	if _, err := engine.PruneEvents(conn, engine.PruneQuery{
-		Before: 10, NowMS: time.Now().UnixMilli(),
-	}); err != nil {
-		t.Fatalf("PruneEvents: %v", err)
-	}
 
 	select {
 	case err := <-done:
@@ -420,9 +434,445 @@ func TestFollowStopsOnGone(t *testing.T) {
 			t.Fatalf("a follow whose cursor was pruned away returned %v; want GONE", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("the follow kept polling after its cursor fell below the retained " +
+		t.Fatal("the follow kept running after its cursor fell below the retained " +
 			"minimum: it must stop rather than silently skip")
 	}
+	if seqs := followSeqs(t, stdout.String()); len(seqs) != 0 {
+		t.Errorf("the follow printed %v past a pruned cursor; want nothing", seqs)
+	}
+}
+
+// fakeEventStream sends the given frames, then holds the stream open until
+// its context ends, as a live stream does. opened counts the streams opened.
+type fakeEventStream struct {
+	frames []daemon.StreamFrame
+	opened atomic.Int32
+}
+
+func (f *fakeEventStream) stream(ctx context.Context, _ engine.EventQuery,
+	send func(daemon.StreamFrame) error) error {
+	f.opened.Add(1)
+	for _, frame := range f.frames {
+		if err := send(frame); err != nil {
+			return err
+		}
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func streamedEvent(seq int64) daemon.StreamFrame {
+	return daemon.StreamFrame{Event: &engine.Event{Seq: seq, Kind: engine.EventTrustAdded}}
+}
+
+// TestFollowPrintsTheStreamedSeqs: `--follow` prints what the stream sends
+// and nothing else. The fake's seqs exist nowhere in the store, so a follow
+// that listed the store on an interval would print none of them.
+func TestFollowPrintsTheStreamedSeqs(t *testing.T) {
+	conn := newTestDB(t)
+	// Rows the store holds and the stream does not send: printing them
+	// would mean the follow read the list rather than the stream.
+	followTrustEvent(t, conn, "store-only-1")
+	followTrustEvent(t, conn, "store-only-2")
+
+	want := []int64{101, 205, 333}
+	fake := &fakeEventStream{}
+	for _, seq := range want {
+		fake.frames = append(fake.frames, streamedEvent(seq))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = fake.stream
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+
+	// Stop on the full set, or on the first seq the stream did not send.
+	waitFor(t, func() bool {
+		got := followSeqs(t, stdout.String())
+		return len(got) >= len(want) || (len(got) > 0 && got[0] != want[0])
+	})
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	got := followSeqs(t, stdout.String())
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the follow printed seqs %v, want the streamed seqs %v", got, want)
+	}
+	if n := fake.opened.Load(); n != 1 {
+		t.Errorf("the follow opened the stream %d times, want 1", n)
+	}
+}
+
+// TestFollowStopsOnAStreamPruneMarker: a prune marker arriving mid-follow
+// ends the follow with GONE after the events before it were printed.
+func TestFollowStopsOnAStreamPruneMarker(t *testing.T) {
+	conn := newTestDB(t)
+	fake := &fakeEventStream{frames: []daemon.StreamFrame{
+		streamedEvent(5),
+		{PrunedFloor: 40},
+		streamedEvent(40),
+	}}
+
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = fake.stream
+
+	err := followEvents(context.Background(), opts)
+	if code, ok := engine.CodeOf(err); !ok || code != engine.CodeGone {
+		t.Fatalf("a follow given a prune marker returned %v; want GONE", err)
+	}
+	if !strings.Contains(err.Error(), "resume from seq 39") {
+		t.Errorf("GONE message %q does not name the seq to resume from", err.Error())
+	}
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[5]" {
+		t.Errorf("the follow printed %v, want only the event before the marker [5]", got)
+	}
+}
+
+// awaitWake waits a bounded time for one ring on wake.
+func awaitWake(t *testing.T, wake <-chan struct{}, after string) {
+	t.Helper()
+	select {
+	case <-wake:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the wake never rang after %s", after)
+	}
+}
+
+// TestEventHeadWakeRingsOnlyWhenTheLogGrows: `--follow`'s wake source rings
+// after an append or a prune and stays silent over an idle log, so the stream
+// it wakes lists the store after a change rather than on every period.
+func TestEventHeadWakeRingsOnlyWhenTheLogGrows(t *testing.T) {
+	conn := newTestDB(t)
+	followTrustEvent(t, conn, "before")
+
+	wake, cancel := eventHeadWake{conn: conn, every: time.Millisecond}.Subscribe()
+	defer cancel()
+
+	// A bounded window, not a wait for success: an idle log must never ring,
+	// and fifty periods is ample for a timer-driven wake to show itself.
+	select {
+	case <-wake:
+		t.Fatal("the wake rang over an idle log: the stream would list the store every period")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	followTrustEvent(t, conn, "appended")
+	awaitWake(t, wake, "an append")
+
+	head, err := newestEventSeq(conn)
+	testsupport.Must(t, err, "newestEventSeq: %v", err)
+	if _, err := engine.PruneEvents(conn, engine.PruneQuery{
+		Before: head, NowMS: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("PruneEvents: %v", err)
+	}
+	awaitWake(t, wake, "a prune")
+}
+
+// handWake is an AppendNotifier the test rings by hand. Its channel is
+// unbuffered, so a ring is received only by a stream waiting on it.
+type handWake struct {
+	wake       chan struct{}
+	subscribed atomic.Int32
+}
+
+func (h *handWake) Subscribe() (<-chan struct{}, func()) {
+	h.subscribed.Add(1)
+	return h.wake, func() {}
+}
+
+func (h *handWake) ring(t *testing.T) {
+	t.Helper()
+	select {
+	case h.wake <- struct{}{}:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stream never waited on the notifier it was opened with")
+	}
+}
+
+// TestFollowStreamWaitsOnItsNotifier: the stream openEventStream builds
+// waits on the notifier it is given, and an append reaches the follow after
+// a ring. A source that ignored the notifier would never take the ring.
+func TestFollowStreamWaitsOnItsNotifier(t *testing.T) {
+	conn := newTestDB(t)
+	notify := &handWake{wake: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = openEventStream(conn, notify)
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+
+	notify.ring(t)
+	followTrustEvent(t, conn, "appended")
+	notify.ring(t)
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 1 })
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	if n := notify.subscribed.Load(); n != 1 {
+		t.Errorf("the stream subscribed to its notifier %d times, want 1", n)
+	}
+}
+
+var errStoreBusy = errors.New("database is locked")
+
+// streamOpen is one open of a scriptedEventStream: it sends frames, then
+// fails with err, or holds the stream open until its context ends when err
+// is nil.
+type streamOpen struct {
+	frames []daemon.StreamFrame
+	err    error
+}
+
+// scriptedEventStream plays its opens in order and records the cursor each
+// open started from.
+type scriptedEventStream struct {
+	mu    sync.Mutex
+	opens []streamOpen
+	since []int64
+}
+
+func (s *scriptedEventStream) stream(ctx context.Context, q engine.EventQuery,
+	send func(daemon.StreamFrame) error) error {
+	s.mu.Lock()
+	open := s.opens[len(s.since)]
+	s.since = append(s.since, q.Since)
+	s.mu.Unlock()
+	for _, frame := range open.frames {
+		if err := send(frame); err != nil {
+			return err
+		}
+	}
+	if open.err != nil {
+		return open.err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *scriptedEventStream) cursors() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int64(nil), s.since...)
+}
+
+// TestFollowReopensTheStreamAfterATransientError: a failed stream is reported
+// on stderr and reopened from the cursor, and a delivered event resets the
+// count of failures in a row, so four failures, never three in a row, do not
+// end the follow.
+func TestFollowReopensTheStreamAfterATransientError(t *testing.T) {
+	conn := newTestDB(t)
+	script := &scriptedEventStream{opens: []streamOpen{
+		{frames: []daemon.StreamFrame{streamedEvent(5)}, err: errStoreBusy},
+		{err: errStoreBusy},
+		{frames: []daemon.StreamFrame{streamedEvent(6)}, err: errStoreBusy},
+		{err: errStoreBusy},
+		{frames: []daemon.StreamFrame{streamedEvent(7)}},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = script.stream
+
+	done := make(chan error, 1)
+	go func() { done <- followEvents(ctx, opts) }()
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 3 })
+	cancel()
+	testsupport.Must(t, <-done, "a follow that recovered from transient errors returned an error")
+
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[5 6 7]" {
+		t.Errorf("the follow printed %v, want [5 6 7]", got)
+	}
+	if got := script.cursors(); fmt.Sprint(got) != "[0 5 5 6 6]" {
+		t.Errorf("the stream reopened from cursors %v, want [0 5 5 6 6]", got)
+	}
+	if n := strings.Count(stderr.String(), "Error: "+errStoreBusy.Error()); n != 4 {
+		t.Errorf("stderr reported %d stream errors, want 4:\n%s", n, stderr.String())
+	}
+}
+
+// TestFollowEndsAfterThreeStreamErrorsInARow: three failures with no event
+// between them end the follow with the last error.
+func TestFollowEndsAfterThreeStreamErrorsInARow(t *testing.T) {
+	conn := newTestDB(t)
+	script := &scriptedEventStream{opens: []streamOpen{
+		{frames: []daemon.StreamFrame{streamedEvent(5)}, err: errStoreBusy},
+		{err: errStoreBusy},
+		{err: errStoreBusy},
+		{frames: []daemon.StreamFrame{streamedEvent(6)}},
+	}}
+
+	var stdout, stderr syncBuffer
+	opts := followOpts(conn, &stdout, &stderr)
+	opts.stream = script.stream
+
+	err := followEvents(context.Background(), opts)
+	if !errors.Is(err, errStoreBusy) {
+		t.Fatalf("a follow whose stream failed three times in a row returned %v; want %v",
+			err, errStoreBusy)
+	}
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[5]" {
+		t.Errorf("the follow printed %v, want [5]", got)
+	}
+	if n := len(script.cursors()); n != 3 {
+		t.Errorf("the follow opened the stream %d times, want 3", n)
+	}
+}
+
+// TestEventsListFollowChecksForAppendsOnTheIntervalFlag: `events list
+// --follow` prints what the stream sends, and the stream it opens is woken by
+// an eventHeadWake on the command's connection that checks every --interval.
+func TestEventsListFollowChecksForAppendsOnTheIntervalFlag(t *testing.T) {
+	conn := newTestDB(t)
+	fake := &fakeEventStream{frames: []daemon.StreamFrame{streamedEvent(101), streamedEvent(205)}}
+	var notifiers []daemon.AppendNotifier
+	saved := openEventStream
+	openEventStream = func(_ store.LegacyDB, notify daemon.AppendNotifier) eventStream {
+		notifiers = append(notifiers, notify)
+		return fake.stream
+	}
+	t.Cleanup(func() { openEventStream = saved })
+
+	stdout := pipeStdout(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := eventsListTestCmd(t, ctx, conn, map[string]string{
+		"follow": "true", "json": "true", "all-projects": "true", "interval": "750ms",
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- eventsListCmd.RunE(cmd, nil) }()
+	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 2 })
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled follow returned an error")
+
+	want := eventHeadWake{conn: conn, every: 750 * time.Millisecond}
+	if len(notifiers) != 1 || notifiers[0] != daemon.AppendNotifier(want) {
+		t.Fatalf("events list --follow opened streams woken by %+v, want one woken by %+v",
+			notifiers, want)
+	}
+	if got := followSeqs(t, stdout.String()); fmt.Sprint(got) != "[101 205]" {
+		t.Errorf("events list --follow printed %v, want the streamed seqs [101 205]", got)
+	}
+}
+
+// pipeStdout points os.Stdout at a pipe drained into the returned buffer,
+// for code that writes to os.Stdout directly, and restores it at cleanup.
+func pipeStdout(t *testing.T) *syncBuffer {
+	t.Helper()
+	r, w, err := os.Pipe()
+	testsupport.Must(t, err, "os.Pipe: %v", err)
+	saved := os.Stdout
+	os.Stdout = w
+	var buf syncBuffer
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(drained)
+	}()
+	t.Cleanup(func() {
+		os.Stdout = saved
+		w.Close()
+		<-drained
+		r.Close()
+	})
+	return &buf
+}
+
+// TestEventsListWatchPollsWithoutTheStream: `events list --watch` re-runs the
+// one-shot list on the client interval, each poll a full page from the
+// start of the feed, and never opens the stream.
+func TestEventsListWatchPollsWithoutTheStream(t *testing.T) {
+	conn := newTestDB(t)
+	followTrustEvent(t, conn, "before-1")
+	followTrustEvent(t, conn, "before-2")
+
+	fake := &fakeEventStream{frames: []daemon.StreamFrame{streamedEvent(999)}}
+	saved := openEventStream
+	openEventStream = func(store.LegacyDB, daemon.AppendNotifier) eventStream { return fake.stream }
+	t.Cleanup(func() { openEventStream = saved })
+
+	stdout := pipeStdout(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The feed under test is the whole store, as followOpts' follows read it.
+	cmd := eventsListTestCmd(t, ctx, conn, map[string]string{
+		"watch": "true", "json": "true", "all-projects": "true", "interval": "5ms",
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- eventsListCmd.RunE(cmd, nil) }()
+
+	// One poll lands, then a write, then a later poll must carry it.
+	waitFor(t, func() bool { return len(followPages(t, stdout.String())) >= 1 })
+	followTrustEvent(t, conn, "live")
+	waitFor(t, func() bool {
+		pages := followPages(t, stdout.String())
+		return fake.opened.Load() > 0 || len(pages[len(pages)-1]) == 3
+	})
+	cancel()
+	testsupport.Must(t, <-done, "a cancelled watch returned an error")
+
+	if n := fake.opened.Load(); n != 0 {
+		t.Fatalf("events list --watch opened the event stream %d times; it must poll the list", n)
+	}
+	pages := followPages(t, stdout.String())
+	if len(pages) < 2 {
+		t.Fatalf("events list --watch printed %d pages, want at least 2 polls", len(pages))
+	}
+	first := pages[0][0]
+	for i, page := range pages {
+		if len(page) == 0 || page[0] != first {
+			t.Errorf("poll %d printed %v, want a full list from seq %d: "+
+				"--watch re-reads the list rather than following a cursor", i, page, first)
+		}
+	}
+}
+
+// eventsListTestCmd is a command under ctx carrying `events list`'s flags and
+// the root flags it reads, with values set. It fails when `events list`
+// declares a flag this copy lacks, so the copy cannot drift from init().
+func eventsListTestCmd(t *testing.T, ctx context.Context, conn store.LegacyDB,
+	values map[string]string) *cobra.Command {
+	t.Helper()
+	cmd := cmdWithDB(conn)
+	cmd.SetContext(context.WithValue(ctx, dbKey, conn))
+	cmd.Flags().Duration("interval", 2*time.Second, "")
+	cmd.Flags().Bool("follow", false, "")
+	cmd.Flags().Int64("since", 0, "")
+	cmd.Flags().Int("limit", 0, "")
+	cmd.Flags().Int("tail", 0, "")
+	cmd.Flags().String("kind", "", "")
+	cmd.Flags().String("step", "", "")
+	cmd.Flags().String("run", "", "")
+	cmd.Flags().Bool("all-projects", false, "")
+	eventsListCmd.LocalFlags().VisitAll(func(f *pflag.Flag) {
+		if len(f.Annotations[cobra.FlagSetByCobraAnnotation]) > 0 {
+			return
+		}
+		if got := cmd.Flags().Lookup(f.Name); got == nil || got.Value.Type() != f.Value.Type() {
+			t.Fatalf("eventsListTestCmd lacks events list's --%s (%s)", f.Name, f.Value.Type())
+		}
+	})
+	for name, value := range values {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("Set(%s): %v", name, err)
+		}
+	}
+	return cmd
 }
 
 // TestFollowWritesNothing: reading a log cannot advance a run, and a follow
@@ -469,7 +919,7 @@ func TestFollowWritesNothing(t *testing.T) {
 }
 
 // tableCounts snapshots every table's row count.
-func tableCounts(t *testing.T, conn *sql.DB) map[string]int {
+func tableCounts(t *testing.T, conn store.LegacyDB) map[string]int {
 	t.Helper()
 	rows, err := conn.Query(
 		`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)

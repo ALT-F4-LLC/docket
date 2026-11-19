@@ -6,6 +6,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -18,11 +19,12 @@ import (
 func TestEmptyListStateDistinguishesNoneFromNoneOpen(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	conn := newTestDB(t)
+	st := store.StoreOn(conn)
 	opts := db.ListOptions{ProjectID: db.DefaultProjectID, Limit: 50}
 
 	// A genuinely empty store keeps the create hint: there is nothing hidden,
 	// so "create one" is the true next move.
-	empty := emptyListState(conn, opts, false)
+	empty := emptyListState(st, opts, false)
 	if !strings.Contains(empty, "No issues found.") ||
 		!strings.Contains(empty, "docket issue create") {
 		t.Errorf("an empty store should still say No issues found and offer create:\n%s", empty)
@@ -39,7 +41,7 @@ func TestEmptyListStateDistinguishesNoneFromNoneOpen(t *testing.T) {
 		_ = id
 	}
 
-	hidden := emptyListState(conn, opts, false)
+	hidden := emptyListState(st, opts, false)
 	if strings.Contains(hidden, "No issues found.") {
 		t.Errorf("done issues are being hidden but the hint still claims the "+
 			"store is empty — the exact misread DKT-246 filed:\n%s", hidden)
@@ -53,14 +55,14 @@ func TestEmptyListStateDistinguishesNoneFromNoneOpen(t *testing.T) {
 
 	// --all already includes done, so an empty result under it is genuinely
 	// empty and must not blame a filter that is not applied.
-	withAll := emptyListState(conn, opts, true)
+	withAll := emptyListState(st, opts, true)
 	if !strings.Contains(withAll, "No issues found.") {
 		t.Errorf("under --all the hidden-done hint is a lie:\n%s", withAll)
 	}
 
 	// A filter that matches nothing even WITH done included is not a
 	// hidden-done situation either.
-	filtered := emptyListState(conn, db.ListOptions{
+	filtered := emptyListState(st, db.ListOptions{
 		ProjectID: db.DefaultProjectID,
 		Labels:    []string{"no-such-label"},
 		Limit:     50,

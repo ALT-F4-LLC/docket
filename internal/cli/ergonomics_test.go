@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -105,26 +105,26 @@ func TestIssueListProjectFlagScopesToTheNamedProject(t *testing.T) {
 	cmd.Flags().String("project", "", "")
 	testsupport.Must(t, cmd.Flags().Set("project", "there.git"),
 		"setting --project: %v", err)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, here))
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	testsupport.Must(t, runIssueList(cmd, nil, w), "runIssueList: %v", err)
 
 	var lj listJSON
 	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &lj), "unmarshal: %v", err)
-	if len(lj.Data.Issues) != 1 {
+	if len(lj.Data.Items) != 1 {
 		t.Fatalf("listed %d issues, want the named project's one: %s",
-			len(lj.Data.Issues), buf.String())
+			len(lj.Data.Items), buf.String())
 	}
 	// Rendered in the NAMED project's voice, not the caller's: a listing of
 	// another project's issues under this project's prefix is the same defect
 	// DKT-67 fixed in the event feed.
 	other, err := db.GetProject(conn, there)
 	testsupport.Must(t, err, "reading the other project: %v", err)
-	if !strings.HasPrefix(lj.Data.Issues[0].ID, other.Prefix+"-") {
+	if !strings.HasPrefix(lj.Data.Items[0].ID, other.Prefix+"-") {
 		t.Errorf("issue rendered as %q, want the owning project's prefix %q — "+
 			"the prefix is the only thing on the row that says whose issue it is",
-			lj.Data.Issues[0].ID, other.Prefix)
+			lj.Data.Items[0].ID, other.Prefix)
 	}
 }
 

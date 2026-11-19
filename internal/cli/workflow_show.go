@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -36,19 +36,14 @@ file is the install path's job.`,
 }
 
 func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	name, version, err := model.ParseWorkflowRef(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	wf, err := db.GetWorkflow(conn, getProjectID(cmd), name, version)
-	if err != nil {
-		return workflowErr(describeMissingWorkflow(err, args[0]))
-	}
-
 	source, _ := cmd.Flags().GetBool("source")
+	shown, err := verb.WorkflowShow(cmd.Context(), verbEnv(cmd),
+		verb.WorkflowShowInput{Ref: args[0], Source: source})
+	if err != nil {
+		return verbErr(err)
+	}
+	wf := shown.Workflow
+
 	if source {
 		// The stored TOML, verbatim. In JSON mode it rides in the envelope as
 		// a string so the output stays a single parseable document; in human
@@ -62,14 +57,6 @@ func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error 
 		return nil
 	}
 
-	// DKT-590: the two provenance columns, checked against each other instead
-	// of merely printed. `source_path` and `source_sha256` were reported side
-	// by side while the file at that path had been a different definition for
-	// four versions, and nothing in this output said so. The verdict rides on
-	// the row itself (populated nowhere else), so it reaches the JSON envelope
-	// and the human summary from one place.
-	wf.SourceStatus = engine.CheckWorkflowSource(wf.SourcePath, wf.SourceSHA256)
-
 	var message string
 	if !w.JSONMode {
 		message = renderWorkflowShow(wf)
@@ -78,13 +65,10 @@ func runWorkflowShow(cmd *cobra.Command, args []string, w *output.Writer) error 
 	return nil
 }
 
-// describeMissingWorkflow turns the storage sentinel into an operator-facing
-// message naming what was asked for.
+// describeMissingWorkflow forwards to verb.DescribeMissingWorkflow for
+// `workflow deprecate`, which has not moved onto internal/verb.
 func describeMissingWorkflow(err error, ref string) error {
-	if err == db.ErrWorkflowNotFound {
-		return fmt.Errorf("%w: %s is not registered", db.ErrWorkflowNotFound, ref)
-	}
-	return err
+	return verb.DescribeMissingWorkflow(err, ref)
 }
 
 func renderWorkflowShow(wf *model.Workflow) string {

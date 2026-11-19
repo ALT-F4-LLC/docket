@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket step hold` (DKT-3287): the conductor parks ONE pending step for the
@@ -35,22 +34,31 @@ type HoldOptions struct {
 	NowMS int64
 }
 
-// HoldStep parks one pending step `waiting-human` with park class `held`, and
+// HoldStep is HoldStepStore on store.StoreOn(conn).
+func HoldStep(conn store.LegacyDB, stepID int, opts HoldOptions) error {
+	return HoldStepStore(store.StoreOn(conn), stepID, opts)
+}
+
+// HoldStepStore parks one pending step `waiting-human` with park class `held`, and
 // records one `step-held` event carrying the reason and the actor.
-func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
+func HoldStepStore(storage store.Store, stepID int, opts HoldOptions) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	reason, err := holdReason(opts, "step hold")
 	if err != nil {
 		return err
 	}
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
 		return err
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return fmt.Errorf("holding %s: %w", step.Instance, err)
 	}
@@ -62,11 +70,11 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 	if err := requireHoldableRunTx(tx, step.RunID); err != nil {
 		return err
 	}
-	fresh, err := db.GetStepTx(tx, stepID)
+	fresh, err := store.TxOn(tx).GetStepTx(stepID)
 	if err != nil {
 		return err
 	}
-	if fresh.Status != db.StepPending {
+	if fresh.Status != store.StepPending {
 		return conflictErr(
 			"step %s is %s; `step hold` parks a PENDING step only — a claimed step "+
 				"is force-reaped first (`step reap`), and a parked one is already "+
@@ -75,25 +83,34 @@ func HoldStep(conn *sql.DB, stepID int, opts HoldOptions) error {
 	if err := holdPendingTx(tx, fresh, reason, "step hold", opts); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("holding %s: %w", fresh.Instance, err)
 	}
 	return nil
 }
 
-// HoldIssue parks every pending step of one issue in a run `waiting-human`
+// HoldIssue is HoldIssueStore on store.StoreOn(conn).
+func HoldIssue(conn store.LegacyDB, runID, issueID int, opts HoldOptions) ([]int, error) {
+	return HoldIssueStore(store.StoreOn(conn), runID, issueID, opts)
+}
+
+// HoldIssueStore parks every pending step of one issue in a run `waiting-human`
 // with park class `held` (DKT-4273), ready and staged alike, and records one
 // `step-held` event per step. It refuses, changing nothing, when a step of the
 // issue is in flight (claimed, running, or gated) or when the issue has no
 // pending step to hold, so a hold never reads as covering work it did not
 // stop. The held steps leave the next dispatch's rows and are listed under the
 // manifest's `held`; each releases through `step resolve --as retry`.
-func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error) {
+func HoldIssueStore(storage store.Store, runID, issueID int, opts HoldOptions) ([]int, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	reason, err := holdReason(opts, "run hold-issue")
 	if err != nil {
 		return nil, err
 	}
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return nil, fmt.Errorf("holding %s: %w", model.FormatID(issueID), err)
 	}
@@ -105,7 +122,7 @@ func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error
 	if err := requireHoldableRunTx(tx, runID); err != nil {
 		return nil, err
 	}
-	steps, err := db.ListIssueStepsTx(tx, runID, issueID)
+	steps, err := store.TxOn(tx).ListIssueStepsTx(runID, issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -113,13 +130,13 @@ func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error
 		return nil, notFoundErr(nil, "issue %s has no steps in run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
-	var pending []*db.Step
+	var pending []*store.Step
 	var inFlight []string
 	for _, s := range steps {
 		switch s.Status {
-		case db.StepPending:
+		case store.StepPending:
 			pending = append(pending, s)
-		case db.StepClaimed, db.StepRunning, db.StepGated:
+		case store.StepClaimed, store.StepRunning, store.StepGated:
 			inFlight = append(inFlight, fmt.Sprintf("%s (%s)", s.Instance, s.Status))
 		}
 	}
@@ -140,7 +157,7 @@ func HoldIssue(conn *sql.DB, runID, issueID int, opts HoldOptions) ([]int, error
 		}
 		held = append(held, s.ID)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("holding %s: %w", model.FormatID(issueID), err)
 	}
 	return held, nil
@@ -162,8 +179,8 @@ func holdReason(opts HoldOptions, verb string) (string, error) {
 
 // requireHoldableRunTx refuses a hold under a terminal run: a parked step
 // there could never be resolved back into work.
-func requireHoldableRunTx(tx *sql.Tx, runID int) error {
-	run, err := db.GetRunTx(tx, runID)
+func requireHoldableRunTx(tx store.LegacyTx, runID int) error {
+	run, err := store.TxOn(tx).GetRunTx(runID)
 	if err != nil {
 		return err
 	}
@@ -175,9 +192,9 @@ func requireHoldableRunTx(tx *sql.Tx, runID int) error {
 }
 
 // holdPendingTx parks one pending step and records its step-held event.
-func holdPendingTx(tx *sql.Tx, step *db.Step, reason, via string, opts HoldOptions) error {
-	if err := db.SetStepRoutingWithParkReasonTx(tx, step.ID, "hold", reason,
-		db.StepWaitingHuman, db.ParkClassHeld, reason, opts.NowMS); err != nil {
+func holdPendingTx(tx store.LegacyTx, step *store.Step, reason, via string, opts HoldOptions) error {
+	if err := store.TxOn(tx).SetStepRoutingWithParkReasonTx(step.ID, "hold", reason,
+		store.StepWaitingHuman, store.ParkClassHeld, reason, opts.NowMS); err != nil {
 		return err
 	}
 	data, err := rulingData(opts.By, map[string]any{"reason": reason, "held_by": via})
@@ -201,7 +218,7 @@ type HeldStep struct {
 }
 
 // HeldSteps lists the run's held steps in step order. A pure read.
-func HeldSteps(conn *sql.DB, runID int) ([]HeldStep, error) {
+func HeldSteps(conn store.LegacyDB, runID int) ([]HeldStep, error) {
 	return (&runReads{conn: conn, runID: runID}).heldSteps()
 }
 
@@ -212,7 +229,7 @@ func (r *runReads) heldSteps() ([]HeldStep, error) {
 	}
 	var out []HeldStep
 	for _, s := range steps {
-		if s.Status == db.StepWaitingHuman && s.ParkClass == db.ParkClassHeld {
+		if s.Status == store.StepWaitingHuman && s.ParkClass == store.ParkClassHeld {
 			out = append(out, HeldStep{
 				Step: model.FormatStepID(s.ID), Instance: s.Instance,
 				Issue: model.FormatID(s.IssueID), Reason: s.ParkReason,

@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -68,12 +67,23 @@ type integratePlan struct {
 	chain    []string
 }
 
-// IntegrateSteps cherry-picks each named step's recorded writer chain onto the
+// IntegrateSteps is IntegrateStepsStore on store.StoreOn(conn).
+func (e *Engine) IntegrateSteps(
+	conn store.LegacyDB, stepIDs []int, by Attribution, token string, nowMS int64,
+) ([]StepIntegration, error) {
+	return e.IntegrateStepsStore(store.StoreOn(conn), stepIDs, by, token, nowMS)
+}
+
+// IntegrateStepsStore cherry-picks each named step's recorded writer chain onto the
 // shared checkout and annotates the step with the resulting HEAD. It returns
 // the steps it completed, also on a failure part way through.
-func (e *Engine) IntegrateSteps(
-	conn *sql.DB, stepIDs []int, by Attribution, token string, nowMS int64,
+func (e *Engine) IntegrateStepsStore(
+	storage store.Store, stepIDs []int, by Attribution, token string, nowMS int64,
 ) ([]StepIntegration, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if len(stepIDs) == 0 {
 		return nil, validationErr("name at least one step to integrate")
 	}
@@ -159,10 +169,10 @@ func (e *Engine) IntegrateSteps(
 // command that can. defsByRun caches each run's StepDefinitions across the
 // plans of one verb.
 func (e *Engine) planIntegration(
-	conn *sql.DB, id int, token string, defsByRun map[int]map[int]*workflow.Definition,
+	conn store.LegacyDB, id int, token string, defsByRun map[int]map[int]*workflow.Definition,
 ) (integratePlan, error) {
-	step, err := db.GetStep(conn, id)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(id)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return integratePlan{}, notFoundErr(err, "step %s not found", model.FormatStepID(id))
 	}
 	if err != nil {
@@ -171,7 +181,7 @@ func (e *Engine) planIntegration(
 	if err := authorizeConductor(conn, step.RunID, token, "step integrate"); err != nil {
 		return integratePlan{}, err
 	}
-	if step.Status != db.StepDone {
+	if step.Status != store.StepDone {
 		return integratePlan{}, conflictErr(
 			"step %s is %s; only a done step's work is integrated", step.Instance, step.Status)
 	}

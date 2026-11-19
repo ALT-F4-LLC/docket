@@ -14,6 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -73,25 +74,25 @@ gone.`,
 }
 
 func runDispatchOpen(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := dispatchRunID(cmd)
-	if err != nil {
+	// The run is refused before --limit, as it always was.
+	if _, err := dispatchRunID(cmd); err != nil {
 		return err
 	}
+	run, _ := cmd.Flags().GetString("run")
 	limit, _ := cmd.Flags().GetInt("limit")
 	if err := validateLimit(cmd, limit); err != nil {
 		return err
 	}
-	acks, err := ackSeqs(cmd)
-	if err != nil {
-		return err
-	}
+	acks, _ := cmd.Flags().GetInt64Slice("ack-reap")
 
-	manifest, err := engine.NewEngine().OpenDispatch(conn, runID, limit, acks, model.NowMS())
+	res, err := verb.DispatchOpen(cmd.Context(), verbEnv(cmd), verb.DispatchOpenInput{
+		Run: run, Limit: limit, AckReap: acks,
+	})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	manifest := res.Manifest
 
 	// DKT-193: stale targets warn on stderr for a human AND ride the JSON
 	// envelope (`stale_targets`), the two channels every advisory here uses —
@@ -263,17 +264,14 @@ is not a discrepancy at close.`,
 }
 
 func runDispatchExtend(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	run, _ := cmd.Flags().GetString("run")
 
-	runID, err := dispatchRunID(cmd)
+	res, err := verb.DispatchExtend(cmd.Context(), verbEnv(cmd), verb.DispatchExtendInput{Run: run})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	extension, err := engine.NewEngine().ExtendDispatch(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
+	extension := res.Extension
 
 	// The extend's own reaps and the hold they leave, on the two channels
 	// `dispatch open` uses and for the same reader: the relay about to spawn
@@ -335,19 +333,15 @@ could never fail.`,
 }
 
 func runDispatchVerify(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	run, _ := cmd.Flags().GetString("run")
 
-	runID, err := dispatchRunID(cmd)
+	res, err := verb.DispatchVerify(cmd.Context(), verbEnv(cmd), verb.DispatchVerifyInput{Run: run})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	result, mismatch, err := engine.NewEngine().VerifyDispatch(conn, runID, model.NowMS())
-	if err != nil {
-		return runErr(err)
-	}
-	if mismatch != nil {
-		return mismatchConflict("", result, mismatch)
+	result := res.Verify
+	if res.Mismatch != nil {
+		return mismatchConflict("", result, res.Mismatch)
 	}
 
 	warnStaleTargets(w, result.StaleTargets)
@@ -555,50 +549,48 @@ as a run note. It takes the same conductor token as --skip-integration-check.`,
 }
 
 func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	var in verb.DispatchCloseInput
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.AcceptMissingUsage, _ = cmd.Flags().GetBool("accept-missing-usage")
+	in.SkipIntegrationCheck, _ = cmd.Flags().GetString("skip-integration-check")
+	in.NoConditions, _ = cmd.Flags().GetString("no-conditions")
+	from, _ := cmd.Flags().GetString("backfill-from")
 
-	runID, err := dispatchRunID(cmd)
-	if err != nil {
+	// The run, then a ruling's working directory, are refused before the
+	// batch is read, as they always were. rulingBy names the getwd cause,
+	// which the Env's empty Cwd cannot carry to the verb.
+	if _, err := dispatchRunID(cmd); err != nil {
 		return err
 	}
-	accept, _ := cmd.Flags().GetBool("accept-missing-usage")
-	from, _ := cmd.Flags().GetString("backfill-from")
-	skip := engine.IntegrationSkip{}
-	skip.Reason, _ = cmd.Flags().GetString("skip-integration-check")
-
-	skip.Conditions.Reason, _ = cmd.Flags().GetString("no-conditions")
-	if skip.Conditions.Reason != "" {
-		by, err := rulingBy()
-		if err != nil {
+	if in.NoConditions != "" {
+		if _, err := rulingBy(); err != nil {
 			return err
 		}
-		skip.Conditions.By = by
 	}
 
-	// Only an override reads the conductor token, so a plain close never
-	// touches stdin. `--backfill-from -` carries the usage rows on stdin, so
-	// there the token comes from DOCKET_TOKEN alone.
-	if skip.Reason != "" || skip.Conditions.Reason != "" {
-		stdin := cmd.InOrStdin()
-		if from == "-" {
-			stdin = strings.NewReader("")
-		}
-		skip.Token = conductorToken(conn, runID, stdin)
-		skip.Conditions.Token = skip.Token
+	// The verb reads the token only for an override on a bound run, so a
+	// plain close never touches stdin. `--backfill-from -` carries the usage
+	// rows on stdin, so there the token comes from DOCKET_TOKEN alone.
+	stdin := cmd.InOrStdin()
+	if from == "-" {
+		stdin = strings.NewReader("")
 	}
+	in.ConductorToken = func() string { return optionalToken(stdin) }
 
 	// DKT-580: with `--backfill-from` this verb is the whole wave-close
 	// pipeline. Without it, every line below is what it has always been —
 	// criterion 2 is that the plain close did not change, so the reconcile is a
 	// branch taken on the flag rather than a rewrite of the default path.
 	if from != "" {
-		return runDispatchReconcile(cmd, w, runID, from, accept, skip)
+		return runDispatchReconcile(cmd, w, from, in)
 	}
 
-	outcome, err := engine.NewEngine().CloseDispatch(conn, runID, accept, skip, model.NowMS())
+	res, err := verb.DispatchClose(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	outcome := res.Close
 
 	var message string
 	if !w.JSONMode {
@@ -617,20 +609,23 @@ func runDispatchClose(cmd *cobra.Command, w *output.Writer) error {
 // to point at the wrong journal or skip the verify, and a skipped verify is how
 // a manifest closes over a ready set that moved underneath it.
 func runDispatchReconcile(
-	cmd *cobra.Command, w *output.Writer, runID int, from string, accept bool, skip engine.IntegrationSkip,
+	cmd *cobra.Command, w *output.Writer, from string, in verb.DispatchCloseInput,
 ) error {
 	rows, err := reconcileRows(cmd, from)
 	if err != nil {
 		return err
 	}
-	source, _ := cmd.Flags().GetString("source")
-	onDuplicate, _ := cmd.Flags().GetString("on-duplicate")
+	in.Reconcile = true
+	in.BackfillRows = rows
+	in.Source, _ = cmd.Flags().GetString("source")
+	in.OnDuplicate, _ = cmd.Flags().GetString("on-duplicate")
 
-	outcome, err := engine.NewEngine().ReconcileDispatch(
-		getDB(cmd), runID, rows, source, onDuplicate, accept, skip, model.NowMS())
+	res, err := verb.DispatchClose(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
 		return reconcileErr(err)
 	}
+	outcome := res.Reconcile
 
 	// The same advisories the standalone verbs emit, from the same stages: a
 	// conductor that switched to one invocation must not lose a warning it
@@ -658,15 +653,15 @@ func runDispatchReconcile(
 // DKT-243's verdict block, both carried on the result — so it is rendered
 // through the same function `dispatch verify` renders it with, with the stage
 // named in front. Every other stage failure keeps its own message and its own
-// exit code: StageError unwraps to the stage's error, so runErr's lookup finds
-// the code the standalone verb would have exited with.
+// exit code: StageError unwraps to the stage's error, so the verb's lookup
+// finds the code the standalone verb would have exited with.
 func reconcileErr(err error) error {
 	var stage *engine.StageError
 	if errors.As(err, &stage) && stage.Mismatch != nil {
 		return mismatchConflict(
 			stage.Stage+" stage: ", stage.Verify, stage.Mismatch)
 	}
-	return runErr(err)
+	return verbErr(err)
 }
 
 // reconcileRows reads `--backfill-from`.
@@ -808,24 +803,25 @@ type backfillOutcome struct {
 }
 
 func runDispatchBackfillUsage(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
+	// The run is refused before the batch is read, as it always was.
 	runID, err := dispatchRunID(cmd)
 	if err != nil {
 		return err
 	}
-	rows, err := backfillRows(cmd)
-	if err != nil {
+	in := verb.DispatchBackfillUsageInput{}
+	in.Run, _ = cmd.Flags().GetString("run")
+	if in.Rows, err = backfillRows(cmd); err != nil {
 		return err
 	}
-	source, _ := cmd.Flags().GetString("source")
-	onDuplicate, _ := cmd.Flags().GetString("on-duplicate")
+	in.Source, _ = cmd.Flags().GetString("source")
+	in.OnDuplicate, _ = cmd.Flags().GetString("on-duplicate")
 
-	result, err := engine.NewEngine().BackfillUsage(
-		conn, runID, rows, source, onDuplicate, model.NowMS())
+	res, err := verb.DispatchBackfillUsage(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	result := res.Backfill
 
 	// Every skip is NAMED, not counted. A conductor that asked for skip is
 	// deciding whether a duplicate is the structural cross-wave kind or a real
@@ -984,20 +980,18 @@ crash finishes normally.`,
 }
 
 func runDispatchAbandon(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
+	var in verb.DispatchAbandonInput
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.Reason, _ = cmd.Flags().GetString("reason")
+	stdin := cmd.InOrStdin()
+	in.ConductorToken = func() string { return optionalToken(stdin) }
 
-	runID, err := dispatchRunID(cmd)
+	res, err := verb.DispatchAbandon(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-	reason, _ := cmd.Flags().GetString("reason")
-
-	outcome, err := engine.NewEngine().AbandonDispatchWith(conn, runID, engine.AbandonDispatchOptions{
-		Reason: reason, Token: conductorToken(conn, runID, cmd.InOrStdin()), NowMS: model.NowMS(),
-	})
-	if err != nil {
-		return runErr(err)
-	}
+	outcome := res.Abandon
 
 	var message string
 	if !w.JSONMode {
@@ -1069,33 +1063,35 @@ type waiveTargetOutcome struct {
 }
 
 func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-
+	// The run, then the ruling's working directory, are refused before the
+	// verb runs, as they always were.
 	runID, err := dispatchRunID(cmd)
 	if err != nil {
 		return err
 	}
-	steps, _ := cmd.Flags().GetStringSlice("step")
-	target, _ := cmd.Flags().GetString("target")
-	note, _ := cmd.Flags().GetString("note")
+	in := verb.DispatchWaiveTargetInput{ConductorToken: stdinConductorToken}
+	in.Run, _ = cmd.Flags().GetString("run")
+	in.Steps, _ = cmd.Flags().GetStringSlice("step")
+	in.Target, _ = cmd.Flags().GetString("target")
+	in.Note, _ = cmd.Flags().GetString("note")
 
-	by, err := rulingBy()
+	env, err := rulingEnv(cmd)
 	if err != nil {
 		return err
 	}
-	waivers, err := engine.NewEngine().WaiveStaleTargets(
-		conn, runID, steps, target, note, by, conductorToken(conn, runID, os.Stdin),
-		model.NowMS())
+	res, err := verb.DispatchWaiveTarget(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	waivers := res.Waivers
 
 	outcome := &waiveTargetOutcome{Run: model.FormatRunID(runID), Waivers: waivers}
 	var message string
 	if !w.JSONMode {
 		var b strings.Builder
 		fmt.Fprintf(&b, "Waived the stale-target warning for %.12s on %d step(s):",
-			target, len(waivers))
+			in.Target, len(waivers))
 		for _, wv := range waivers {
 			fmt.Fprintf(&b, "\n  %s (waiver %d)", wv.Instance, wv.ID)
 		}
@@ -1114,7 +1110,7 @@ func runDispatchWaiveTarget(cmd *cobra.Command, w *output.Writer) error {
 // `dispatch abandon` — the destructive one — guess too.
 func dispatchRunID(cmd *cobra.Command) (int, error) {
 	ref, _ := cmd.Flags().GetString("run")
-	return parseRunFlag(ref)
+	return fromVerb(verb.ParseRunRef(ref))
 }
 
 // ackSeqs parses the repeatable `--ack-reap SEQ` flag.

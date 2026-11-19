@@ -67,6 +67,43 @@ cleanup() {
     /tmp/docket-qa-alt /tmp/docket-qa-bin 2>/dev/null || true
 }
 
+# await_detached_saga DOCKET_PATH waits for the saga a recording handed off.
+#
+# A record of a step with completion gates returns once its artifact commits,
+# saying `running detached: STEP-N`; a `step resume` child runs the gates,
+# routing, and the run's lifecycle drive afterwards. A check that reads the
+# step, its gate results, or the next ready set must see what that child did,
+# so every runner waits here before handing back.
+#
+# The child is done when its saga lockfile is gone (it removes it on release,
+# after the lifecycle drive) and the step has left the `recorded` window that
+# precedes the child taking that lock: its stage is cleared or held, or its
+# status is no longer `gated`. A saga that never settles is bounded and noted
+# on CMD_STDERR, so the check reading it fails with the reason.
+await_detached_saga() {
+  local dp="$1" step id lock state waited=0
+  step=$(printf '%s' "$CMD_STDOUT" | grep -o 'running detached: STEP-[0-9]*' | head -1 || true)
+  step="${step##* }"
+  [ -n "$step" ] || return 0
+  id="${step#STEP-}"
+  lock="$dp/saga-$step.lock"
+  while [ "$waited" -lt 1200 ]; do
+    state=$(sqlite3 "$dp/issues.db" \
+      "SELECT status || '|' || COALESCE(saga_stage,'') FROM steps WHERE id=$id;" 2>/dev/null || true)
+    if [ ! -e "$lock" ]; then
+      case "$state" in
+        "gated|" | "gated|held") return 0 ;;
+        "gated|"*) ;;
+        *) return 0 ;;
+      esac
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  CMD_STDERR="${CMD_STDERR:+$CMD_STDERR
+}detached saga for $step did not settle within 120s (status|stage = $state)"
+}
+
 # Run a command, capture stdout, stderr, and exit code.
 # Sets: CMD_STDOUT, CMD_STDERR, CMD_EXIT
 run() {
@@ -84,6 +121,7 @@ run() {
   if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
     qa_wait_detached
   fi
+  await_detached_saga "$DOCKET_PATH"
 }
 
 # qa_wait_detached waits for the detached saga a `step complete` launched.
@@ -98,11 +136,13 @@ run() {
 # so the match is anchored on that path, in both its as-given and
 # symlink-resolved spellings. A saga another suite or a personal docket is
 # running never holds this one up, and this one's child is never mistaken
-# for it. Without pgrep there is no signal at all, and the checks that follow
-# would read mid-flight state as a result: that is a loud failure, not a
-# silent pass. Bounded by QA_DETACHED_WAIT_S (default 30): a child that has
-# not exited by then is reported and the wait fails, so a hung saga is never
-# confused with a finished one. Either failure returns 1, which under the
+# for it. Only pgrep's exit 1 (no match) means the child is gone. Without
+# pgrep, or with one that exits above 1 because it cannot read the process
+# list, there is no signal at all, and the checks that follow would read
+# mid-flight state as a result: that is a loud failure, not a silent pass.
+# Bounded by QA_DETACHED_WAIT_S (default 30): a child that has not exited by
+# then is reported and the wait fails, so a hung saga is never confused with
+# a finished one. Each failure returns 1, which under the
 # suite's `set -e` ends the run at that step rather than letting every later
 # check fail for a reason it cannot name.
 qa_wait_detached() {
@@ -110,7 +150,7 @@ qa_wait_detached() {
     printf "FATAL: pgrep is required to wait for the detached saga a step complete launched\n" >&2
     return 1
   fi
-  local dir base as_given resolved pattern i
+  local dir base as_given resolved pattern i rc err
   dir=$(dirname -- "$DOCKET")
   base=$(basename -- "$DOCKET")
   as_given="$(cd "$dir" && pwd)/$base"
@@ -119,9 +159,16 @@ qa_wait_detached() {
   resolved=$(readlink -f -- "$DOCKET" 2>/dev/null) || resolved="$(cd "$dir" && pwd -P)/$base"
   pattern="^($(qa_regex_escape "$as_given")|$(qa_regex_escape "$resolved")) step resume STEP-"
   for ((i = 0; i < ${QA_DETACHED_WAIT_S:-30} * 10; i++)); do
-    if ! pgrep -f -- "$pattern" >/dev/null 2>&1; then
-      return 0
-    fi
+    rc=0
+    err=$(pgrep -f -- "$pattern" 2>&1 >/dev/null) || rc=$?
+    case "$rc" in
+      0) ;;
+      1) return 0 ;;
+      *)
+        printf "FATAL: pgrep exited %s, so the detached saga cannot be waited for: %s\n" "$rc" "$err" >&2
+        return 1
+        ;;
+    esac
     sleep 0.1
   done
   printf "qa_wait_detached: the detached step resume child of %s is still running after %ss (QA_DETACHED_WAIT_S)\n" \
@@ -152,6 +199,7 @@ run_stdin() {
   if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
     qa_wait_detached
   fi
+  await_detached_saga "$DOCKET_PATH"
 }
 
 # The conductor capability (DKT-2465): the seven operator verbs — step
@@ -192,6 +240,7 @@ run_env() {
   if [ "${1:-}" = "step" ] && [ "${2:-}" = "complete" ]; then
     qa_wait_detached
   fi
+  await_detached_saga "$dp"
 }
 
 # Record a check result. Usage: check SECTION ID PASS|FAIL [details]

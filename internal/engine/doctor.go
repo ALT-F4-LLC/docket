@@ -2,7 +2,6 @@ package engine
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io/fs"
@@ -12,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket doctor` — DKT-1285.
@@ -72,8 +71,8 @@ type DoctorOptions struct {
 	// already opened read-write to reach this verb, re-verified directly.
 	DBPath string
 	// ProjectID is the project the invocation resolved to, as the root hook
-	// decided it: a registered row's id, db.DefaultProjectID on a
-	// single-tenant store, or db.UnregisteredProjectID when Identity has no
+	// decided it: a registered row's id, store.DefaultProjectID on a
+	// single-tenant store, or store.UnregisteredProjectID when Identity has no
 	// row. Doctor reports it and never changes it.
 	ProjectID int
 	// Identity is the invocation's project identity as config resolved it,
@@ -88,10 +87,21 @@ type DoctorOptions struct {
 	NowMS      int64
 }
 
-// Doctor runs all seven checks and reports one row each, without
+// Doctor is DoctorStore on store.StoreOn(conn).
+func Doctor(conn store.LegacyDB, opts DoctorOptions) *DoctorReport {
+	return DoctorStore(store.StoreOn(conn), opts)
+}
+
+// DoctorStore runs all seven checks and reports one row each, without
 // short-circuiting on an early failure (AC1): a conductor deciding whether to
 // attach needs every answer in one call, not the first one that went wrong.
-func Doctor(conn *sql.DB, opts DoctorOptions) *DoctorReport {
+// On a Store with no SQLite handle it reports one FAIL `store` row carrying
+// store.SQLDB's refusal instead.
+func DoctorStore(storage store.Store, opts DoctorOptions) *DoctorReport {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return &DoctorReport{Checks: []DoctorCheck{{Check: "store", Verdict: DoctorFail, Detail: err.Error()}}}
+	}
 	checks := []DoctorCheck{
 		checkDoctorSeat(opts.Cwd),
 		checkDoctorStore(opts.DBPath),
@@ -176,7 +186,7 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 //
 // The root hook resolved the project before this verb ran, and doctor is a
 // read-only leaf verb, so an identity with no row resolves to
-// db.UnregisteredProjectID rather than minting one. That is the case this
+// store.UnregisteredProjectID rather than minting one. That is the case this
 // check exists to make visible: before doctor joined the read verbs, running
 // it from an unbound repository claimed the store's default row for that
 // repository and logged a project-registered event with verb doctor — the
@@ -187,14 +197,14 @@ func checkDoctorStore(dbPath string) DoctorCheck {
 // registers on first write, so `clean` must not read true here. Bound is OK
 // and names the row. On a single-tenant store (Identity "") the default row
 // is the whole store, and the check reports that rather than "unbound".
-func checkDoctorProject(conn *sql.DB, projectID int, identity string) DoctorCheck {
+func checkDoctorProject(conn store.LegacyDB, projectID int, identity string) DoctorCheck {
 	const check = "project"
-	if projectID == db.UnregisteredProjectID {
+	if projectID == store.UnregisteredProjectID {
 		return DoctorCheck{Check: check, Verdict: DoctorFail, Detail: fmt.Sprintf(
 			"no project registered for %s; doctor does not register one — "+
 				"the first writing verb run here does", identity)}
 	}
-	p, err := db.GetProject(conn, db.DefaultProjectIDOr(projectID))
+	p, err := store.StoreOn(conn).GetProject(store.DefaultProjectIDOr(projectID))
 	if err != nil {
 		return DoctorCheck{Check: check, Verdict: DoctorFail,
 			Detail: fmt.Sprintf("resolved project %d: %v", projectID, err)}
@@ -386,7 +396,7 @@ func doctorDirExists(path string) bool {
 // explicit: SKIP, which doctorDisposition then reads as not-clean — a
 // conductor who forgot --run is told so rather than shown a clean report that
 // silently checked six things instead of seven.
-func checkDoctorPins(conn *sql.DB, runID int) DoctorCheck {
+func checkDoctorPins(conn store.LegacyDB, runID int) DoctorCheck {
 	const check = "pins"
 	if runID == 0 {
 		return DoctorCheck{Check: check, Verdict: DoctorSkip, Detail: "no --run given"}
@@ -478,14 +488,25 @@ func isScratchShapedPath(path string) bool {
 	return slices.Contains(strings.Split(path, string(filepath.Separator)), "scratchpad")
 }
 
-// checkDoctorStragglers is check 7: detached worktrees homed under a
-// scratch-shaped path — left behind by a session that never cleaned up after
-// itself (a crash, a killed process). A pre-gate reconstruction worktree
-// (pregate_scratch.go, os.MkdirTemp under os.TempDir with a docket-pregate-
-// prefix) is caught here too, but only when os.TempDir itself is
-// scratch-shaped (e.g. a session whose TMPDIR sits under /tmp/claude-); the
-// default macOS /var/folders/... temp root is not, so a pregate worktree left
-// there goes unreported by this check.
+// checkDoctorStragglers is check 7: scratch trees left behind by a session
+// or claim that never cleaned up after itself (a crash, a killed process).
+// It finds them two ways.
+//
+// REGISTERED: detached worktrees in `git worktree list` homed under a
+// scratch-shaped path. This catches a session's own leftover worktree, and a
+// pre-gate tree an earlier binary made with `git worktree add` when
+// os.TempDir itself is scratch-shaped.
+//
+// RECORDED: the pre-gate and resume scratch trees this binary makes
+// (pregate_scratch.go) are in no git registry. recordedScratchTrees finds
+// them through their sidecars, whose record names this repository's object
+// store. These skip isScratchShapedPath: the record and the ownership checks
+// are the proof of origin, and the temp root they live in (macOS
+// /var/folders/...) is not scratch-shaped. They are listed whether or not
+// their claim is alive, because telling the two apart means taking the
+// sidecar's flock, and doctor takes no locks; a live claim's tree shows here
+// for the length of its measurement. Only this process's os.TempDir() is
+// read, so a tree made under a different TMPDIR is not seen.
 //
 // AC3: THIS IS A REPORT, NEVER A VERDICT that blocks — it reads OK or WARN
 // only, never FAIL, and doctorDisposition excludes it from `clean` on top of
@@ -521,14 +542,29 @@ func checkDoctorStragglers(cwd string) DoctorCheck {
 		}
 	}
 	flush()
+	recorded := recordedScratchTrees(cwd)
 
-	if len(strays) == 0 {
+	tmp := os.TempDir()
+
+	if len(strays) == 0 && len(recorded) == 0 {
 		return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorOK,
-			Detail: "no detached worktrees under a scratch path"}
+			Detail: "no detached worktrees under a scratch path and no recorded scratch trees in " + tmp}
 	}
-	sort.Strings(strays)
-	return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorWarn, Detail: fmt.Sprintf(
-		"%d detached worktree(s) under a scratch path (report only): %v", len(strays), strays)}
+	var parts []string
+	if len(strays) > 0 {
+		sort.Strings(strays)
+		parts = append(parts, fmt.Sprintf(
+			"%d detached worktree(s) under a scratch path: %v", len(strays), strays))
+	}
+	if len(recorded) > 0 {
+		sort.Strings(recorded)
+		parts = append(parts, fmt.Sprintf(
+			"%d recorded scratch tree(s) in %s, which may include a live claim's; "+
+				"the next dispatch open or close removes the dead ones: %v",
+			len(recorded), tmp, recorded))
+	}
+	return DoctorCheck{Check: doctorCheckStragglers, Verdict: DoctorWarn,
+		Detail: strings.Join(parts, "; ") + " (report only)"}
 }
 
 // doctorCanonicalPath resolves symlinks best-effort, mirroring

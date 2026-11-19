@@ -3,9 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -47,16 +46,9 @@ READ-ONLY: no lease, no lock, no event.`,
 }
 
 func runPinShow(cmd *cobra.Command, ref, path string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
+	res, err := verb.PinShow(cmd.Context(), verbEnv(cmd), verb.PinShowInput{Run: ref, Path: path})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	body, err := engine.PinContent(conn, runID, path)
-	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	// THE BYTES GO OUT EXACTLY AS PINNED on the human path — written to Stdout
@@ -65,10 +57,10 @@ func runPinShow(cmd *cobra.Command, ref, path string, w *output.Writer) error {
 	// to the pin, so `docket pin show ... | shasum` has to agree with
 	// `docket run verify-pins`; a trailing byte of framing breaks that.
 	if !w.JSONMode {
-		fmt.Fprint(w.Stdout, body)
+		fmt.Fprint(w.Stdout, res.Body)
 		return nil
 	}
-	w.Success(pinShowPayload{Run: model.FormatRunID(runID), Path: path, Body: body}, "")
+	w.Success(pinShowPayload{Run: res.Run, Path: res.Path, Body: res.Body}, "")
 	return nil
 }
 

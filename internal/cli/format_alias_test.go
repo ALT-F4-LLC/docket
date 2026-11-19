@@ -18,7 +18,6 @@ import (
 func newFormatCmd(jsonVal, formatVal string) *cobra.Command {
 	root := &cobra.Command{Use: "root"}
 	root.PersistentFlags().String("json", "", "")
-	root.PersistentFlags().Lookup("json").NoOptDefVal = "v1"
 	root.PersistentFlags().String("format", "", "")
 
 	cmd := &cobra.Command{Use: "probe"}
@@ -40,7 +39,6 @@ func newFormatCmd(jsonVal, formatVal string) *cobra.Command {
 func newOwnFormatCmd(formatVal string) *cobra.Command {
 	root := &cobra.Command{Use: "root"}
 	root.PersistentFlags().String("json", "", "")
-	root.PersistentFlags().Lookup("json").NoOptDefVal = "v1"
 	root.PersistentFlags().String("format", "", "")
 
 	cmd := &cobra.Command{Use: "export"}
@@ -73,11 +71,6 @@ func TestCommandsOwningFormatOptOutOfTheAlias(t *testing.T) {
 
 // TestFormatAliasSelectsV2 pins the alias: --format json is an alias for
 // --json=v2.
-//
-// The precedence case is the one that matters most. --format must not upgrade
-// an envelope the caller pinned explicitly: a script that says --json=v1 is
-// frozen on that shape, and having a second flag silently promote it to v2
-// would be a compatibility break dressed up as an ergonomic win.
 func TestFormatAliasSelectsV2(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -87,8 +80,7 @@ func TestFormatAliasSelectsV2(t *testing.T) {
 	}{
 		{"format json selects v2", "", "json", output.JSONV2},
 		{"neither flag is human mode", "", "", output.JSONNone},
-		{"json alone is unchanged", "v1", "", output.JSONV1},
-		{"explicit v1 beats the alias", "v1", "json", output.JSONV1},
+		{"json alone is unchanged", "v2", "", output.JSONV2},
 		{"explicit v2 agrees with the alias", "v2", "json", output.JSONV2},
 		{"invalid format does not select json", "", "yaml", output.JSONNone},
 	}

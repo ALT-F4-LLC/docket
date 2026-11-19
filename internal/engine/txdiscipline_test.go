@@ -44,8 +44,9 @@ import (
 // says exactly which function and which call.
 //
 // The check: within a function, the region between a transaction opener
-// (`conn.Begin()`, `conn.BeginTx()`, or a package helper returning *sql.Tx,
-// such as beginReadSnapshot) and the matching `Commit()` is a LIVE
+// (`conn.Begin()`, `conn.BeginTx()`, `db.BeginReadSnapshot()`,
+// `store.BeginSQLiteTx()`, `store.BeginSQLiteReadSnapshot()`, or a package
+// helper returning *sql.Tx) and the matching `Commit()` or `commitWrite()` is a LIVE
 // TRANSACTION, and no call inside that region may touch the pool — neither
 // directly (`conn.Query`) nor by passing `conn` to a helper that might.
 //
@@ -96,8 +97,8 @@ type poolRead struct {
 // commits (the read-only paths, which rely on `defer tx.Rollback()`).
 type liveRegion struct{ from, to token.Pos }
 
-// txOpenerHelpers names the package functions that return a *sql.Tx, such as
-// beginReadSnapshot. Calling one opens a transaction as conn.Begin does.
+// txOpenerHelpers names the package functions that return a *sql.Tx. Calling
+// one opens a transaction as conn.Begin does.
 func txOpenerHelpers(files map[string]*ast.File) map[string]bool {
 	openers := map[string]bool{}
 	for _, file := range files {
@@ -131,6 +132,7 @@ func isSQLTxPointer(expr ast.Expr) bool {
 
 // poolReadsInsideTransactions returns every pool-taking call inside a
 // live-transaction region of fn. A region opens at conn.Begin, conn.BeginTx,
+// db.BeginReadSnapshot, store.BeginSQLiteTx, store.BeginSQLiteReadSnapshot,
 // or a call to one of txOpeners.
 func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []poolRead {
 	// Collect the Begin and Commit positions in source order.
@@ -140,8 +142,13 @@ func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []
 		if !ok {
 			return true
 		}
-		if helper, ok := call.Fun.(*ast.Ident); ok && txOpeners[helper.Name] {
-			begins = append(begins, call.Pos())
+		if helper, ok := call.Fun.(*ast.Ident); ok {
+			switch {
+			case txOpeners[helper.Name]:
+				begins = append(begins, call.Pos())
+			case helper.Name == "commitWrite":
+				commits = append(commits, call.Pos())
+			}
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -153,7 +160,9 @@ func poolReadsInsideTransactions(fn *ast.FuncDecl, txOpeners map[string]bool) []
 			return true
 		}
 		switch {
-		case ident.Name == "conn" && (sel.Sel.Name == "Begin" || sel.Sel.Name == "BeginTx"):
+		case ident.Name == "conn" && (sel.Sel.Name == "Begin" || sel.Sel.Name == "BeginTx"),
+			ident.Name == "db" && sel.Sel.Name == "BeginReadSnapshot",
+			ident.Name == "store" && (sel.Sel.Name == "BeginSQLiteTx" || sel.Sel.Name == "BeginSQLiteReadSnapshot"):
 			begins = append(begins, call.Pos())
 		case strings.HasPrefix(ident.Name, "tx") && sel.Sel.Name == "Commit":
 			commits = append(commits, call.Pos())
@@ -266,6 +275,21 @@ func TestPoolReadsInsideTransactionsOpeners(t *testing.T) {
 			wantLine: 2, wantCall: "conn.QueryRow",
 		},
 		{
+			name:     "db.BeginReadSnapshot",
+			body:     "tx, _ := db.BeginReadSnapshot(conn)\ndefer tx.Rollback()\nlookup(conn)",
+			wantLine: 3, wantCall: "lookup",
+		},
+		{
+			name:     "store.BeginSQLiteTx",
+			body:     "tx, _ := store.BeginSQLiteTx(conn)\nconn.QueryRow(\"q\")\ntx.Commit()",
+			wantLine: 2, wantCall: "conn.QueryRow",
+		},
+		{
+			name:     "store.BeginSQLiteReadSnapshot",
+			body:     "tx, _ := store.BeginSQLiteReadSnapshot(conn)\ndefer tx.Rollback()\nlookup(conn)",
+			wantLine: 3, wantCall: "lookup",
+		},
+		{
 			name:     "package helper returning *sql.Tx",
 			body:     "tx, _ := openSnapshot(conn)\ndefer tx.Rollback()\nlookup(conn)",
 			wantLine: 3, wantCall: "lookup",
@@ -273,6 +297,10 @@ func TestPoolReadsInsideTransactionsOpeners(t *testing.T) {
 		{
 			name: "read after commit",
 			body: "tx, _ := conn.BeginTx(ctx, nil)\ntx.Commit()\nconn.QueryRow(\"q\")",
+		},
+		{
+			name: "read after commitWrite",
+			body: "tx, _ := conn.Begin()\ncommitWrite(tx)\nconn.QueryRow(\"q\")",
 		},
 	}
 	for _, tc := range cases {

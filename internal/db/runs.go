@@ -1,10 +1,15 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -51,19 +56,23 @@ func InsertRunWithContext(db *sql.DB, projectID int, request string, budget floa
 // InsertRunWithContextIdempotent is InsertRunWithContext with an optional
 // idempotency key — `docket run start --idempotency-key`.
 //
-// A repeat call with the same key returns the ORIGINAL run unchanged with
-// inserted=false and creates nothing, the same create-verb replay-protection
-// pattern
-// CreateIssueIdempotent, CreateDocIdempotent, and CreateProposalIdempotent use
-// (internal/db/idempotency.go): a `run start` that commits but dies before its
-// response must be safe to retry, or the key protects nothing. The key record
-// and the insert commit in the SAME transaction, so a crash between them
-// cannot orphan either. The roster (issueIDs, one run_issues row each) commits
-// in that same transaction, so a replay finds the roster the original call
-// wrote; a replay's own issueIDs are ignored, like its other parameters.
-// inserted tells the caller whether this call created the run.
+// A repeat call with the same key and the same request content returns the
+// ORIGINAL run unchanged with inserted=false and creates nothing, the same
+// create-verb replay-protection pattern CreateIssueIdempotent and
+// CreateDocIdempotent use (internal/db/idempotency.go): a `run start` that
+// commits but dies before its response must be safe to retry, or the key
+// protects nothing. The same key with different content returns an error
+// wrapping ErrConflict that names the key. The key record and the insert
+// commit in the SAME transaction, so a crash between them cannot orphan
+// either. The roster (issueIDs, one run_issues row each) commits in that same
+// transaction, so a replay finds the roster the original call wrote. inserted
+// tells the caller whether this call created the run.
 func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, budget float64, nowMS int64, ctx RunContext, idempotencyKey string, issueIDs ...int) (run *model.Run, inserted bool, err error) {
-	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeRunStart, idempotencyKey)
+	fingerprint, err := runStartFingerprint(projectID, request, budget, ctx, issueIDs)
+	if err != nil {
+		return nil, false, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeRunStart, idempotencyKey, fingerprint)
 	if err != nil {
 		return nil, false, err
 	}
@@ -73,23 +82,18 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 	}
 	defer tx.Rollback()
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO runs (project_id, request, status, budget, usage_budget,
 		                   created_at_ms, updated_at_ms, row_version,
 		                   exec_root, branch, commit_sha, hostname)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?) RETURNING id`,
 		projectOrDefault(projectID), request, model.RunPlanning, budget,
 		ctx.UsageBudget, nowMS, nowMS,
 		ctx.ExecRoot, ctx.Branch, ctx.CommitSHA, ctx.Hostname,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return nil, false, fmt.Errorf("creating run: %w", err)
 	}
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return nil, false, fmt.Errorf("reading created run id: %w", err)
-	}
-	id := int(id64)
 
 	for _, issueID := range issueIDs {
 		if _, err := tx.Exec(
@@ -101,7 +105,7 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 	}
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeRunStart, idempotencyKey, id); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeRunStart, idempotencyKey, fingerprint, id); err != nil {
 			return nil, false, err
 		}
 	}
@@ -112,6 +116,26 @@ func InsertRunWithContextIdempotent(db *sql.DB, projectID int, request string, b
 
 	run, err = GetRun(db, id)
 	return run, true, err
+}
+
+// runStartFingerprint is the SHA-256 of a run start's request content: the
+// project, request, budget, context and roster. The roster is a set, so its
+// ids are sorted and deduplicated. The start time is not content: a retry
+// starts later than the call it repeats. Budgets are encoded as strings
+// because JSON has no form for the infinities a budget flag accepts.
+func runStartFingerprint(projectID int, request string, budget float64, ctx RunContext, issueIDs []int) (string, error) {
+	roster := slices.Compact(slices.Sorted(slices.Values(issueIDs)))
+	formatBudget := func(b float64) string { return strconv.FormatFloat(b, 'g', -1, 64) }
+	encoded, err := json.Marshal([]any{
+		projectOrDefault(projectID), request, formatBudget(budget),
+		formatBudget(ctx.UsageBudget), ctx.ExecRoot, ctx.Branch, ctx.CommitSHA, ctx.Hostname,
+		roster,
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting the run start: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // runSelect names the columns in a fixed order so every scan agrees.
@@ -707,6 +731,12 @@ type Pin struct {
 	// would both cost an extra pass and open a window where the two reads
 	// disagree.
 	Bytes int
+	// Content is the pinned file's bytes, persisted so a store opened on
+	// another machine renders the same packet. It is not Valid for a pin
+	// recorded without its bytes, including every pin from before schema v45;
+	// a Valid empty String is an empty file. A string rather than []byte keeps
+	// Pin comparable with ==.
+	Content sql.NullString
 }
 
 // InsertPinTx records a pin. `INSERT OR IGNORE` on the UNIQUE(run_id, kind, ref)
@@ -714,14 +744,63 @@ type Pin struct {
 // rather than a conflict — a run pins a workflow once, however many issues bind
 // to it.
 func InsertPinTx(tx *sql.Tx, p Pin) error {
-	_, err := tx.Exec(
-		`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256) VALUES (?, ?, ?, ?)`,
-		p.RunID, p.Kind, p.Ref, p.SHA256,
+	_, err := AddPinTx(tx, p)
+	return err
+}
+
+// AddPinTx is InsertPinTx reporting how many rows it inserted: 0 when the run
+// already pins the ref, whatever hash it holds.
+func AddPinTx(tx *sql.Tx, p Pin) (int, error) {
+	// Bound as []byte so the column holds a BLOB, never TEXT: pinned files
+	// need not be valid UTF-8.
+	var content []byte
+	if p.Content.Valid {
+		content = []byte(p.Content.String)
+	}
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO pins (run_id, kind, ref, sha256, content) VALUES (?, ?, ?, ?, ?)`,
+		p.RunID, p.Kind, p.Ref, p.SHA256, content,
 	)
 	if err != nil {
-		return fmt.Errorf("pinning %s %s: %w", p.Kind, p.Ref, err)
+		return 0, fmt.Errorf("pinning %s %s: %w", p.Kind, p.Ref, err)
 	}
-	return nil
+	return rowsAffected(res, "pinning "+p.Kind+" "+p.Ref)
+}
+
+// RepinPinTx moves a run's pin of one ref from oldSHA to newSHA and clears its
+// stored bytes, which belong to the old hash. It returns 0 when the run does
+// not hold the ref at oldSHA.
+func RepinPinTx(tx *sql.Tx, runID int, kind, ref, oldSHA, newSHA string) (int, error) {
+	res, err := tx.Exec(
+		`UPDATE pins SET sha256 = ?, content = NULL
+		  WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
+		newSHA, runID, kind, ref, oldSHA,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("repinning %s %s: %w", kind, ref, err)
+	}
+	return rowsAffected(res, "repinning "+kind+" "+ref)
+}
+
+// DropPinTx deletes a run's pin of one ref at oldSHA. It returns 0 when the
+// run does not hold the ref at oldSHA.
+func DropPinTx(tx *sql.Tx, runID int, kind, ref, oldSHA string) (int, error) {
+	res, err := tx.Exec(
+		`DELETE FROM pins WHERE run_id = ? AND kind = ? AND ref = ? AND sha256 = ?`,
+		runID, kind, ref, oldSHA,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("dropping %s %s: %w", kind, ref, err)
+	}
+	return rowsAffected(res, "dropping "+kind+" "+ref)
+}
+
+func rowsAffected(res sql.Result, doing string) (int, error) {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", doing, err)
+	}
+	return int(n), nil
 }
 
 // ListPins returns a run's pins, ordered so the set is stable across reads —
@@ -729,7 +808,7 @@ func InsertPinTx(tx *sql.Tx, p Pin) error {
 // would make the goldens flap.
 func ListPins(db *sql.DB, runID int) ([]Pin, error) {
 	rows, err := db.Query(
-		`SELECT run_id, kind, ref, sha256 FROM pins WHERE run_id = ? ORDER BY kind, ref`,
+		`SELECT run_id, kind, ref, sha256, content FROM pins WHERE run_id = ? ORDER BY kind, ref`,
 		runID,
 	)
 	if err != nil {
@@ -743,7 +822,7 @@ func ListPins(db *sql.DB, runID int) ([]Pin, error) {
 // in-flight run cannot silently adopt an edited workflow.
 func ListPinsTx(tx *sql.Tx, runID int) ([]Pin, error) {
 	rows, err := tx.Query(
-		`SELECT run_id, kind, ref, sha256 FROM pins WHERE run_id = ? ORDER BY kind, ref`,
+		`SELECT run_id, kind, ref, sha256, content FROM pins WHERE run_id = ? ORDER BY kind, ref`,
 		runID,
 	)
 	if err != nil {
@@ -756,7 +835,7 @@ func ListPinsTx(tx *sql.Tx, runID int) ([]Pin, error) {
 // *sql.Tx read the same table through the same shape).
 func scanPin(r *sql.Rows) (Pin, error) {
 	var p Pin
-	if err := r.Scan(&p.RunID, &p.Kind, &p.Ref, &p.SHA256); err != nil {
+	if err := r.Scan(&p.RunID, &p.Kind, &p.Ref, &p.SHA256, &p.Content); err != nil {
 		return Pin{}, fmt.Errorf("reading pin: %w", err)
 	}
 	return p, nil
@@ -777,8 +856,10 @@ type RunFence struct {
 // hash is of the command as it read when the operator approved the plan.
 func InsertFenceTx(tx *sql.Tx, f RunFence) error {
 	_, err := tx.Exec(
-		`INSERT OR REPLACE INTO run_fences (run_id, issue_id, tag, ordinal, command, sha256)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO run_fences (run_id, issue_id, tag, ordinal, command, sha256)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (run_id, issue_id, tag, ordinal)
+		 DO UPDATE SET command = excluded.command, sha256 = excluded.sha256`,
 		f.RunID, f.IssueID, f.Tag, f.Ordinal, f.Command, f.SHA256,
 	)
 	if err != nil {
@@ -789,7 +870,17 @@ func InsertFenceTx(tx *sql.Tx, f RunFence) error {
 
 // ListFences returns a run's harvested commands in a stable order.
 func ListFences(db *sql.DB, runID int) ([]RunFence, error) {
-	rows, err := db.Query(
+	return listFences(db, runID)
+}
+
+// ListFencesTx is ListFences inside the caller's transaction, for a dry run
+// whose harvested rows exist only in the transaction it will discard.
+func ListFencesTx(tx *sql.Tx, runID int) ([]RunFence, error) {
+	return listFences(tx, runID)
+}
+
+func listFences(q rowsQuerier, runID int) ([]RunFence, error) {
+	rows, err := q.Query(
 		`SELECT run_id, issue_id, tag, ordinal, command, sha256
 		   FROM run_fences WHERE run_id = ? ORDER BY issue_id, tag, ordinal`,
 		runID,
@@ -978,4 +1069,228 @@ func IssueScopeGlobsTx(tx *sql.Tx, issueID int) (string, error) {
 		return "", fmt.Errorf("reading scope for issue %d: %w", issueID, err)
 	}
 	return globs.String, nil
+}
+
+// RunWorktreesTx returns the distinct non-empty worktrees a run's steps
+// recorded, sorted. A zero issueID reads the whole run; otherwise only that
+// issue's steps.
+func RunWorktreesTx(tx *sql.Tx, runID, issueID int) ([]string, error) {
+	query := `SELECT DISTINCT work_root FROM steps
+	           WHERE run_id = ? AND work_root != '' ORDER BY work_root`
+	args := []any{runID}
+	if issueID != 0 {
+		query = `SELECT DISTINCT work_root FROM steps
+		          WHERE run_id = ? AND issue_id = ? AND work_root != ''
+		          ORDER BY work_root`
+		args = append(args, issueID)
+	}
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("collecting recorded worktrees: %w", err)
+	}
+	return scanRows(rows, "recorded worktrees", func(r *sql.Rows) (string, error) {
+		var w string
+		if err := r.Scan(&w); err != nil {
+			return "", fmt.Errorf("reading a recorded worktree: %w", err)
+		}
+		return w, nil
+	})
+}
+
+// RunHasIssueTx reports whether the issue is part of the run.
+func RunHasIssueTx(tx *sql.Tx, runID, issueID int) (bool, error) {
+	var n int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM run_issues WHERE run_id = ? AND issue_id = ?`,
+		runID, issueID).Scan(&n); err != nil {
+		return false, fmt.Errorf("checking run membership: %w", err)
+	}
+	return n > 0, nil
+}
+
+// UnfinishedStep names one non-terminal step.
+type UnfinishedStep struct {
+	ID       int
+	Instance string
+	Status   string
+}
+
+// IssueUnfinishedStepsTx returns an issue's non-terminal steps in the run, in
+// id order.
+func IssueUnfinishedStepsTx(tx *sql.Tx, runID, issueID int) ([]UnfinishedStep, error) {
+	rows, err := tx.Query(
+		`SELECT id, instance, status FROM steps
+		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
+		  ORDER BY id`,
+		runID, issueID, StepDone, StepSkipped, StepSuperseded, StepFailedRouted)
+	if err != nil {
+		return nil, fmt.Errorf("collecting %s's remaining steps: %w", model.FormatID(issueID), err)
+	}
+	return scanRows(rows, "remaining steps", func(r *sql.Rows) (UnfinishedStep, error) {
+		var s UnfinishedStep
+		if err := r.Scan(&s.ID, &s.Instance, &s.Status); err != nil {
+			return s, fmt.Errorf("reading a remaining step of %s: %w", model.FormatID(issueID), err)
+		}
+		return s, nil
+	})
+}
+
+// FailRouteIssueStepsTx moves every non-terminal step of an issue in the run to
+// `failed-routed`, stamping `recorded_at_ms` and leaving `routing` as it is. It
+// returns how many steps it moved.
+func FailRouteIssueStepsTx(tx *sql.Tx, runID, issueID int, nowMS int64) (int, error) {
+	res, err := tx.Exec(
+		`UPDATE steps
+		    SET status = ?, updated_at_ms = ?, recorded_at_ms = ?,
+		        row_version = row_version + 1
+		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)`,
+		StepFailedRouted, nowMS, nowMS, runID, issueID,
+		StepDone, StepSkipped, StepSuperseded, StepFailedRouted)
+	if err != nil {
+		return 0, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
+	}
+	return rowsAffected(res, "abandoning "+model.FormatID(issueID))
+}
+
+// RunUnfinishedStepCountTx counts a run's non-terminal steps.
+func RunUnfinishedStepCountTx(tx *sql.Tx, runID int) (int, error) {
+	var n int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM steps
+		  WHERE run_id = ? AND status NOT IN (?, ?, ?, ?)`,
+		runID, StepDone, StepSkipped, StepSuperseded, StepFailedRouted,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting %s's remaining steps: %w", model.FormatRunID(runID), err)
+	}
+	return n, nil
+}
+
+// RunEvent is one run event: its position, time, kind, and payload verbatim.
+type RunEvent struct {
+	Seq  int64
+	AtMS int64
+	Kind string
+	Data string
+}
+
+// RunEventsTx returns a run's events of the given kinds in seq order. A call
+// naming no kind selects no event.
+func RunEventsTx(tx *sql.Tx, runID int, kinds ...string) ([]RunEvent, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(
+		`SELECT seq, at_ms, kind, data FROM events
+		  WHERE run_id = ? AND kind IN (`+makePlaceholders(len(kinds))+`)
+		  ORDER BY seq`, kindArgs(runID, kinds)...)
+	if err != nil {
+		return nil, fmt.Errorf("reading the events of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "run events", func(r *sql.Rows) (RunEvent, error) {
+		var e RunEvent
+		if err := r.Scan(&e.Seq, &e.AtMS, &e.Kind, &e.Data); err != nil {
+			return e, fmt.Errorf("reading an event of %s: %w", model.FormatRunID(runID), err)
+		}
+		return e, nil
+	})
+}
+
+// StepEventSeq locates one step-scoped event in the log.
+type StepEventSeq struct {
+	StepID int
+	Kind   string
+	Seq    int64
+}
+
+// RunStepEventSeqsTx returns every event of a run that names a step, in seq
+// order.
+func RunStepEventSeqsTx(tx *sql.Tx, runID int) ([]StepEventSeq, error) {
+	rows, err := tx.Query(
+		`SELECT step_id, kind, seq FROM events
+		  WHERE run_id = ? AND step_id IS NOT NULL ORDER BY seq`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the step events of %s: %w", model.FormatRunID(runID), err)
+	}
+	return scanRows(rows, "step events", func(r *sql.Rows) (StepEventSeq, error) {
+		var e StepEventSeq
+		if err := r.Scan(&e.StepID, &e.Kind, &e.Seq); err != nil {
+			return e, fmt.Errorf("reading a step event of %s: %w", model.FormatRunID(runID), err)
+		}
+		return e, nil
+	})
+}
+
+// EventDataTx returns the payload of the event at seq verbatim, or
+// ErrNotFound when no event has that seq.
+func EventDataTx(tx *sql.Tx, seq int64) (string, error) {
+	var data string
+	err := tx.QueryRow(`SELECT data FROM events WHERE seq = ?`, seq).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading the event at seq %d: %w", seq, err)
+	}
+	return data, nil
+}
+
+// ClaimAdmittedByDispatchTx reports whether the step is a row of the
+// dispatch's manifest and its newest claimKind event before reapedSeq comes
+// after openedSeq: the claim a reap ended was taken under that dispatch.
+func ClaimAdmittedByDispatchTx(
+	tx *sql.Tx, dispatchID int, openedSeq int64, stepID int, claimKind string, reapedSeq int64,
+) (bool, error) {
+	var admitted bool
+	if err := tx.QueryRow(
+		`SELECT EXISTS(
+		   SELECT 1 FROM dispatch_rows dr
+		    WHERE dr.dispatch_id = ? AND dr.step_id = ?)
+		 AND COALESCE((SELECT MAX(seq) FROM events
+		                WHERE kind = ? AND step_id = ? AND seq < ?), 0) > ?`,
+		dispatchID, stepID, claimKind, stepID, reapedSeq, openedSeq,
+	).Scan(&admitted); err != nil {
+		return false, fmt.Errorf("reading the claim reaped at seq %d: %w", reapedSeq, err)
+	}
+	return admitted, nil
+}
+
+// ProposalExistsTx reports whether a proposal with the id exists.
+func ProposalExistsTx(tx *sql.Tx, proposalID int) (bool, error) {
+	var n int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM proposals WHERE id = ?`, proposalID,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("resolving proposal %s: %w", model.FormatProposalID(proposalID), err)
+	}
+	return n > 0, nil
+}
+
+// VoteIDTx returns the id of the voter's cast on the proposal. found is false
+// when that seat has no cast there.
+func VoteIDTx(tx *sql.Tx, proposalID int, voter string) (id int64, found bool, err error) {
+	err = tx.QueryRow(
+		`SELECT id FROM votes WHERE proposal_id = ? AND voter_name = ?`,
+		proposalID, voter).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolving the %q seat on %s: %w",
+			voter, model.FormatProposalID(proposalID), err)
+	}
+	return id, true, nil
+}
+
+// RunEventDetailExistsTx reports whether the run logged a run-level event (one
+// naming no step) of the kind whose payload's `detail` equals detail.
+func RunEventDetailExistsTx(tx *sql.Tx, runID int, kind, detail string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM events
+		  WHERE run_id = ? AND kind = ? AND step_id IS NULL
+		    AND json_extract(data, '$.detail') = ?)`,
+		runID, kind, detail).Scan(&exists); err != nil {
+		return false, fmt.Errorf("reading %s's %s events: %w", model.FormatRunID(runID), kind, err)
+	}
+	return exists, nil
 }

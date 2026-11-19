@@ -1,15 +1,13 @@
 package cli
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // TokenEnvVar is the environment variable carrying a capability token.
@@ -79,8 +77,8 @@ func optionalToken(stdin io.Reader) string {
 // capability existed. The look here is advisory: the authoritative check runs
 // inside the verb's own transaction, and a run bound after this read refuses
 // the empty token there rather than being ruled on without one.
-func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
-	hash, err := db.RunConductorHash(conn, runID)
+func conductorToken(conn store.LegacyDB, runID int, stdin io.Reader) string {
+	hash, err := store.StoreOn(conn).RunConductorHash(runID)
 	if err != nil || hash == "" {
 		return ""
 	}
@@ -90,8 +88,8 @@ func conductorToken(conn *sql.DB, runID int, stdin io.Reader) string {
 // stepConductorToken is conductorToken for a verb addressed by STEP-N: the
 // step's run is what the capability is bound to. A step that does not exist
 // yields "" and leaves the NOT_FOUND to the engine, which owns that refusal.
-func stepConductorToken(conn *sql.DB, stepID int, stdin io.Reader) string {
-	step, err := db.GetStep(conn, stepID)
+func stepConductorToken(conn store.LegacyDB, stepID int, stdin io.Reader) string {
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return ""
 	}
@@ -108,30 +106,4 @@ func errMissingToken() error {
 		),
 		output.ErrValidation,
 	)
-}
-
-// leaseError maps a lease refusal to its CLI error code, per the lease refusal
-// matrix. Anything else passes through unchanged, as casError does.
-//
-// The error texts never echo the presented token: a token that leaks into a
-// log line or a CI transcript is a live capability.
-func leaseError(err error, label string) error {
-	switch {
-	case errors.Is(err, db.ErrLeaseHeld):
-		return cmdErr(
-			fmt.Errorf("%s is already claimed by another holder", label),
-			output.ErrConflict,
-		)
-	case errors.Is(err, db.ErrNotHolder):
-		return cmdErr(
-			fmt.Errorf("%s: the supplied token does not hold this lease", label),
-			output.ErrAuth,
-		)
-	case errors.Is(err, db.ErrLeaseExpired):
-		return cmdErr(
-			fmt.Errorf("%s: the lease has expired; claim it again to continue", label),
-			output.ErrStaleLease,
-		)
-	}
-	return notFound(err, label)
 }

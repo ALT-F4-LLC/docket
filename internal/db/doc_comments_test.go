@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -44,6 +45,66 @@ func TestCreateDocComment_DocNotFound(t *testing.T) {
 	_, err := CreateDocComment(db, &model.DocComment{DocID: 999, Body: "x", Author: "a"})
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestCreateDocCommentIdempotent_KeyReuseWithDifferentContentConflicts: a key
+// already used for one comment is rejected for a request that differs in its
+// doc target, author or body, and the rejection names the key.
+func TestCreateDocCommentIdempotent_KeyReuseWithDifferentContentConflicts(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	docID := mustCreateDoc(t, db, "d", "tdd", "draft", "body")
+	otherDocID := mustCreateDoc(t, db, "e", "tdd", "draft", "body")
+	original := model.DocComment{DocID: docID, Body: "looks good", Author: "reviewer"}
+
+	_, err := CreateDocCommentIdempotent(db, &original, "key-1")
+	testsupport.Must(t, err, "first CreateDocCommentIdempotent: %v", err)
+
+	for name, changed := range map[string]model.DocComment{
+		"doc":    {DocID: otherDocID, Body: original.Body, Author: original.Author},
+		"author": {DocID: original.DocID, Body: original.Body, Author: "someone-else"},
+		"body":   {DocID: original.DocID, Body: "needs work", Author: original.Author},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := CreateDocCommentIdempotent(db, &changed, "key-1")
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("reusing key-1 with a different %s returned %v, want an ErrConflict", name, err)
+			}
+			if !strings.Contains(err.Error(), "key-1") {
+				t.Errorf("conflict %q does not name the key key-1", err)
+			}
+		})
+	}
+
+	comments, err := ListDocComments(db, docID)
+	testsupport.Must(t, err, "ListDocComments: %v", err)
+	if len(comments) != 1 {
+		t.Errorf("doc has %d comments after the rejected reuses, want 1", len(comments))
+	}
+}
+
+// TestCreateDocCommentIdempotent_KeyReuseWithSameContentReplays: repeating a
+// keyed request with identical content returns the original comment and
+// inserts nothing.
+func TestCreateDocCommentIdempotent_KeyReuseWithSameContentReplays(t *testing.T) {
+	db := mustInitAndMigrate(t)
+	docID := mustCreateDoc(t, db, "d", "tdd", "draft", "body")
+
+	first, err := CreateDocCommentIdempotent(db,
+		&model.DocComment{DocID: docID, Body: "looks good", Author: "reviewer"}, "key-1")
+	testsupport.Must(t, err, "first CreateDocCommentIdempotent: %v", err)
+
+	replay, err := CreateDocCommentIdempotent(db,
+		&model.DocComment{DocID: docID, Body: "looks good", Author: "reviewer"}, "key-1")
+	testsupport.Must(t, err, "replayed CreateDocCommentIdempotent: %v", err)
+	if replay != first {
+		t.Errorf("replay returned comment %d, want the original %d", replay, first)
+	}
+
+	comments, err := ListDocComments(db, docID)
+	testsupport.Must(t, err, "ListDocComments: %v", err)
+	if len(comments) != 1 {
+		t.Errorf("doc has %d comments after the replay, want 1", len(comments))
 	}
 }
 

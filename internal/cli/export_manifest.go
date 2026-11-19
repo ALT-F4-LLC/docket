@@ -1,11 +1,10 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // exportCollection binds one collection of the export document to everything
@@ -32,9 +31,9 @@ type exportCollection struct {
 	// which one.
 	name string
 
-	fetch     func(*sql.DB, int, *model.ExportData) error
+	fetch     func(store.LegacyDB, int, *model.ExportData) error
 	normalize func(*model.ExportData)
-	restore   func(*sql.Tx, *model.ExportData) (imported, skipped int, err error)
+	restore   func(store.LegacyTx, *model.ExportData) (imported, skipped int, err error)
 
 	// count reports how many rows the document currently holds for this
 	// collection. No command needs it; the round-trip test does, to compare a
@@ -55,9 +54,9 @@ type exportCollection struct {
 func collection[T any](
 	name string,
 	field func(*model.ExportData) *[]T,
-	list func(*sql.DB, int) ([]T, error),
+	list func(store.Store, int) ([]T, error),
 	describe func(T) string,
-	insert func(*sql.Tx, T) (bool, error),
+	insert func(store.LegacyTx, T) (bool, error),
 ) exportCollection {
 	return collectionWithFixup(name, field, list, describe, insert, nil)
 }
@@ -69,15 +68,15 @@ func collection[T any](
 func collectionWithFixup[T any](
 	name string,
 	field func(*model.ExportData) *[]T,
-	list func(*sql.DB, int) ([]T, error),
+	list func(store.Store, int) ([]T, error),
 	describe func(T) string,
-	insert func(*sql.Tx, T) (bool, error),
-	afterInsert func(*sql.Tx, []T) error,
+	insert func(store.LegacyTx, T) (bool, error),
+	afterInsert func(store.LegacyTx, []T) error,
 ) exportCollection {
 	return exportCollection{
 		name: name,
-		fetch: func(conn *sql.DB, projectID int, data *model.ExportData) error {
-			rows, err := list(conn, projectID)
+		fetch: func(conn store.LegacyDB, projectID int, data *model.ExportData) error {
+			rows, err := list(store.StoreOn(conn), projectID)
 			if err != nil {
 				return err
 			}
@@ -92,7 +91,7 @@ func collectionWithFixup[T any](
 		count: func(data *model.ExportData) int {
 			return len(*field(data))
 		},
-		restore: func(tx *sql.Tx, data *model.ExportData) (int, int, error) {
+		restore: func(tx store.LegacyTx, data *model.ExportData) (int, int, error) {
 			var imported, skipped int
 			var inserted []T
 			for _, row := range *field(data) {
@@ -119,20 +118,23 @@ func collectionWithFixup[T any](
 	}
 }
 
-// exportCollections is the export document, stated once, in the order an import
-// has to write it: every row's foreign keys point only at collections listed
-// above it. Export reads in the same order because reads are independent of
-// each other, and one order is one fewer thing to keep straight.
+// exportCollections is the export document, stated in the order an import has
+// to write it: every row's foreign keys point only at collections listed above
+// it.
 //
-// A collection added here is exported, imported, and covered by the round-trip
-// test at once. There is no second list to remember.
+// The export command reads through internal/verb's own table; fetch here reads
+// a project back for the import round-trip tests. A collection added to the
+// document must be added to both tables, and each table's coverage test fails
+// until it is.
 var exportCollections = []exportCollection{
 	collection(
 		"labels",
 		func(data *model.ExportData) *[]*model.Label { return &data.Labels },
-		db.ListAllLabelsRaw,
+		store.Store.ListAllLabelsRaw,
 		func(label *model.Label) string { return fmt.Sprintf("label %q", label.Name) },
-		db.InsertLabelWithID,
+		func(tx store.LegacyTx, label *model.Label) (bool, error) {
+			return store.TxOn(tx).InsertLabelWithID(label)
+		},
 	),
 
 	// Issues carry a self-referential parent_id, so a child whose parent sorts
@@ -142,7 +144,7 @@ var exportCollections = []exportCollection{
 	collectionWithFixup(
 		"issues",
 		func(data *model.ExportData) *[]*model.Issue { return &data.Issues },
-		db.ListAllIssues,
+		store.Store.ListAllIssues,
 		func(issue *model.Issue) string { return fmt.Sprintf("issue %s", model.FormatID(issue.ID)) },
 		insertIssueWithoutParent,
 		reattachIssueParents,
@@ -151,139 +153,153 @@ var exportCollections = []exportCollection{
 	collection(
 		"label mappings",
 		func(data *model.ExportData) *[]model.IssueLabelMapping { return &data.IssueLabelMappings },
-		db.ListAllIssueLabelMappings,
+		store.Store.ListAllIssueLabelMappings,
 		func(m model.IssueLabelMapping) string {
 			return fmt.Sprintf("issue-label mapping (issue=%d, label=%d)", m.IssueID, m.LabelID)
 		},
-		func(tx *sql.Tx, m model.IssueLabelMapping) (bool, error) {
+		func(tx store.LegacyTx, m model.IssueLabelMapping) (bool, error) {
 			// A mapping whose issue or label is in neither the export nor
 			// the project is skipped, never a raw foreign-key failure:
 			// the rows it joins were dropped by a filtered export or
 			// deleted since, and the import runs in one transaction, so
 			// failing here would write nothing at all.
-			ok, err := rowsExist(tx, "issues", m.IssueID, "labels", m.LabelID)
+			ok, err := rowsExist(tx, store.ImportIssues, m.IssueID, store.ImportLabels, m.LabelID)
 			if err != nil || !ok {
 				return false, err
 			}
-			return db.InsertIssueLabelMapping(tx, m.IssueID, m.LabelID)
+			return store.TxOn(tx).InsertIssueLabelMapping(m.IssueID, m.LabelID)
 		},
 	),
 
 	collection(
 		"file mappings",
 		func(data *model.ExportData) *[]model.IssueFileMapping { return &data.IssueFileMappings },
-		db.ListAllIssueFileMappings,
+		store.Store.ListAllIssueFileMappings,
 		func(m model.IssueFileMapping) string {
 			return fmt.Sprintf("issue-file mapping (issue=%d, file=%q)", m.IssueID, m.FilePath)
 		},
-		func(tx *sql.Tx, m model.IssueFileMapping) (bool, error) {
-			ok, err := rowsExist(tx, "issues", m.IssueID)
+		func(tx store.LegacyTx, m model.IssueFileMapping) (bool, error) {
+			ok, err := rowsExist(tx, store.ImportIssues, m.IssueID)
 			if err != nil || !ok {
 				return false, err
 			}
-			return db.InsertIssueFileMapping(tx, m.IssueID, m.FilePath)
+			return store.TxOn(tx).InsertIssueFileMapping(m.IssueID, m.FilePath)
 		},
 	),
 
 	collection(
 		"comments",
 		func(data *model.ExportData) *[]*model.Comment { return &data.Comments },
-		db.ListAllComments,
+		store.Store.ListAllComments,
 		func(c *model.Comment) string { return fmt.Sprintf("comment %d", c.ID) },
-		db.InsertCommentWithID,
+		func(tx store.LegacyTx, c *model.Comment) (bool, error) {
+			return store.TxOn(tx).InsertCommentWithID(c)
+		},
 	),
 
 	collection(
 		"relations",
 		func(data *model.ExportData) *[]model.Relation { return &data.Relations },
-		db.GetAllRelations,
+		store.Store.GetAllRelations,
 		func(rel model.Relation) string { return fmt.Sprintf("relation %d", rel.ID) },
-		func(tx *sql.Tx, rel model.Relation) (bool, error) {
-			return db.InsertRelationWithID(tx, &rel)
+		func(tx store.LegacyTx, rel model.Relation) (bool, error) {
+			return store.TxOn(tx).InsertRelationWithID(&rel)
 		},
 	),
 
 	collection(
 		"activity log",
 		func(data *model.ExportData) *[]*model.Activity { return &data.ActivityLog },
-		db.ListAllActivity,
+		store.Store.ListAllActivity,
 		func(a *model.Activity) string { return fmt.Sprintf("activity %d", a.ID) },
-		db.InsertActivityWithID,
+		func(tx store.LegacyTx, a *model.Activity) (bool, error) {
+			return store.TxOn(tx).InsertActivityWithID(a)
+		},
 	),
 
 	collection(
 		"proposals",
 		func(data *model.ExportData) *[]*model.Proposal { return &data.Proposals },
-		db.ListAllProposals,
+		store.Store.ListAllProposals,
 		func(p *model.Proposal) string { return fmt.Sprintf("proposal %s", model.FormatProposalID(p.ID)) },
-		db.InsertProposalWithID,
+		func(tx store.LegacyTx, p *model.Proposal) (bool, error) {
+			return store.TxOn(tx).InsertProposalWithID(p)
+		},
 	),
 
 	collection(
 		"votes",
 		func(data *model.ExportData) *[]*model.Vote { return &data.Votes },
-		db.ListAllVotes,
+		store.Store.ListAllVotes,
 		func(v *model.Vote) string { return fmt.Sprintf("vote %d", v.ID) },
-		db.InsertVoteWithID,
+		func(tx store.LegacyTx, v *model.Vote) (bool, error) {
+			return store.TxOn(tx).InsertVoteWithID(v)
+		},
 	),
 
 	collection(
 		"proposal-issue links",
 		func(data *model.ExportData) *[]model.ProposalIssueLink { return &data.ProposalIssues },
-		db.ListAllProposalIssues,
+		store.Store.ListAllProposalIssues,
 		func(l model.ProposalIssueLink) string {
 			return fmt.Sprintf("proposal-issue link (proposal=%d, issue=%d)", l.ProposalID, l.IssueID)
 		},
-		func(tx *sql.Tx, l model.ProposalIssueLink) (bool, error) {
-			return db.InsertProposalIssueLink(tx, l.ProposalID, l.IssueID)
+		func(tx store.LegacyTx, l model.ProposalIssueLink) (bool, error) {
+			return store.TxOn(tx).InsertProposalIssueLink(l.ProposalID, l.IssueID)
 		},
 	),
 
 	collection(
 		"docs",
 		func(data *model.ExportData) *[]*model.Doc { return &data.Docs },
-		db.ListAllDocs,
+		store.Store.ListAllDocs,
 		func(doc *model.Doc) string { return fmt.Sprintf("doc %s", model.FormatDocID(doc.ID)) },
-		db.InsertDocWithID,
+		func(tx store.LegacyTx, doc *model.Doc) (bool, error) {
+			return store.TxOn(tx).InsertDocWithID(doc)
+		},
 	),
 
 	collection(
 		"doc revisions",
 		func(data *model.ExportData) *[]*model.DocRevision { return &data.DocRevisions },
-		db.ListAllDocRevisions,
+		store.Store.ListAllDocRevisions,
 		func(rev *model.DocRevision) string { return fmt.Sprintf("doc revision %d", rev.ID) },
-		db.InsertDocRevisionWithID,
+		func(tx store.LegacyTx, rev *model.DocRevision) (bool, error) {
+			return store.TxOn(tx).InsertDocRevisionWithID(rev)
+		},
 	),
 
 	collection(
 		"doc comments",
 		func(data *model.ExportData) *[]*model.DocComment { return &data.DocComments },
-		db.ListAllDocComments,
+		store.Store.ListAllDocComments,
 		func(c *model.DocComment) string { return fmt.Sprintf("doc comment %d", c.ID) },
-		db.InsertDocCommentWithID,
+		func(tx store.LegacyTx, c *model.DocComment) (bool, error) {
+			return store.TxOn(tx).InsertDocCommentWithID(c)
+		},
 	),
 
 	collection(
 		"doc-issue links",
 		func(data *model.ExportData) *[]model.DocIssueLink { return &data.DocIssueLinks },
-		db.ListAllDocIssueLinks,
+		store.Store.ListAllDocIssueLinks,
 		func(l model.DocIssueLink) string {
 			return fmt.Sprintf("doc-issue link (doc=%d, issue=%d)", l.DocID, l.IssueID)
 		},
-		func(tx *sql.Tx, l model.DocIssueLink) (bool, error) {
-			return db.InsertDocIssueLink(tx, l.DocID, l.IssueID, l.CreatedAt)
+		func(tx store.LegacyTx, l model.DocIssueLink) (bool, error) {
+			return store.TxOn(tx).InsertDocIssueLink(l.DocID, l.IssueID, l.CreatedAt)
 		},
 	),
 
 	collection(
 		"proposal-doc links",
 		func(data *model.ExportData) *[]model.ProposalDocLink { return &data.ProposalDocs },
-		db.ListAllProposalDocs,
+		store.Store.ListAllProposalDocs,
 		func(l model.ProposalDocLink) string {
 			return fmt.Sprintf("proposal-doc link (proposal=%d, doc=%d)", l.ProposalID, l.DocID)
 		},
-		func(tx *sql.Tx, l model.ProposalDocLink) (bool, error) {
-			return db.InsertProposalDocLink(tx, l.ProposalID, l.DocID, l.CreatedAt)
+		func(tx store.LegacyTx, l model.ProposalDocLink) (bool, error) {
+			return store.TxOn(tx).InsertProposalDocLink(l.ProposalID, l.DocID, l.CreatedAt)
 		},
 	),
 }
@@ -291,12 +307,13 @@ var exportCollections = []exportCollection{
 // rowsExist reports whether every (table, id) pair names a row. It is the
 // guard a join row's insert runs before trusting its foreign keys, so a
 // dangling mapping is counted as skipped instead of aborting the import.
-func rowsExist(tx *sql.Tx, pairs ...any) (bool, error) {
+func rowsExist(tx store.LegacyTx, pairs ...any) (bool, error) {
+	probe := store.TxOn(tx)
 	for i := 0; i+1 < len(pairs); i += 2 {
-		table, id := pairs[i].(string), pairs[i+1].(int)
-		var exists bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM `+table+` WHERE id = ?)`, id).Scan(&exists); err != nil {
-			return false, fmt.Errorf("probing %s id %d: %w", table, id, err)
+		table, id := pairs[i].(store.ImportTable), pairs[i+1].(int)
+		exists, err := probe.ImportRowExistsTx(table, id)
+		if err != nil {
+			return false, err
 		}
 		if !exists {
 			return false, nil
@@ -309,10 +326,10 @@ func rowsExist(tx *sql.Tx, pairs ...any) (bool, error) {
 // the caller's value back the way it found it. The caller owns the export
 // document — a merge that fails partway must not leave the document rewritten,
 // and reattachIssueParents reads the parent back off these same rows.
-func insertIssueWithoutParent(tx *sql.Tx, issue *model.Issue) (bool, error) {
+func insertIssueWithoutParent(tx store.LegacyTx, issue *model.Issue) (bool, error) {
 	parentID := issue.ParentID
 	issue.ParentID = nil
-	inserted, err := db.InsertIssueWithID(tx, issue)
+	inserted, err := store.TxOn(tx).InsertIssueWithID(issue)
 	issue.ParentID = parentID
 	return inserted, err
 }
@@ -326,20 +343,21 @@ func insertIssueWithoutParent(tx *sql.Tx, issue *model.Issue) (bool, error) {
 // from the destination leaves the child at the top level rather than failing
 // the import, which is what makes a filtered export importable at all: a filter
 // that keeps a child and drops its parent is a supported way to export.
-func reattachIssueParents(tx *sql.Tx, issues []*model.Issue) error {
+func reattachIssueParents(tx store.LegacyTx, issues []*model.Issue) error {
+	st := store.TxOn(tx)
 	for _, issue := range issues {
 		if issue.ParentID == nil {
 			continue
 		}
-		var parentExists bool
-		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?)", *issue.ParentID).Scan(&parentExists); err != nil {
+		parentExists, err := st.ImportRowExistsTx(store.ImportIssues, *issue.ParentID)
+		if err != nil {
 			return fmt.Errorf("checking parent for issue %s: %w", model.FormatID(issue.ID), err)
 		}
 		if !parentExists {
 			continue
 		}
-		if _, err := tx.Exec(`UPDATE issues SET parent_id = ? WHERE id = ?`, *issue.ParentID, issue.ID); err != nil {
-			return fmt.Errorf("setting parent_id for issue %s: %w", model.FormatID(issue.ID), err)
+		if err := st.RestoreIssueParentTx(issue.ID, *issue.ParentID); err != nil {
+			return err
 		}
 	}
 	return nil

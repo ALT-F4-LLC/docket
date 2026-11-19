@@ -157,16 +157,25 @@ func NextGateOrdinal(conn *sql.DB, stepID int, gate string) (int, error) {
 	return int(next.Int64) + 1, nil
 }
 
-// HasGateResult reports whether a step+gate has any recorded result.
+// HasGateResult reports whether a step+gate has a result recorded in the
+// step's current claim: a row created at or after the step's latest
+// `step-claimed` event. A step that has no claim event counts every row.
 //
 // This is the at-least-once detector: a `saga_stage` of `gate:<name>`
 // with no result row is a started-but-unrecorded gate — a crash between the
-// `gate-started` commit and the result commit.
+// `gate-started` commit and the result commit. gate_results carries no
+// attempt, so the claim is the boundary: a row an earlier attempt left must
+// not read as the current attempt's result.
 func HasGateResult(conn *sql.DB, stepID int, gate string) (bool, error) {
 	var exists bool
 	err := conn.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM gate_results WHERE step_id = ? AND gate = ?)`,
-		stepID, gate).Scan(&exists)
+		`SELECT EXISTS(
+		   SELECT 1 FROM gate_results
+		    WHERE step_id = ? AND gate = ?
+		      AND created_at_ms >= COALESCE(
+		        (SELECT MAX(at_ms) FROM events
+		          WHERE step_id = ? AND kind = 'step-claimed'), 0))`,
+		stepID, gate, stepID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("probing for a gate result: %w", err)
 	}

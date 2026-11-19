@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -70,7 +69,15 @@ type RefreshedBody struct {
 	Steps []string `json:"steps"`
 }
 
-// RefreshIssueBodyInRun re-reads `issues.description` and overwrites ONE
+// RefreshIssueBodyInRun is RefreshIssueBodyInRunStore on store.StoreOn(conn).
+func RefreshIssueBodyInRun(
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
+) (*RefreshedBody, error) {
+	return RefreshIssueBodyInRunStore(store.StoreOn(conn), runID, issueID, reason, by, token, nowMS)
+}
+
+// RefreshIssueBodyInRunStore re-reads `issues.description` and overwrites ONE
 // run-issue's `body_snapshot` and `body_sha256` (DKT-2291).
 //
 // The unit is (run, issue) for the reason it is there: that is where the
@@ -82,10 +89,14 @@ type RefreshedBody struct {
 // scope refresh does: `issue edit --description` is ungated, so without this
 // check an executor could amend its own issue and then make that amendment
 // reach its own packets.
-func RefreshIssueBodyInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+func RefreshIssueBodyInRunStore(
+	storage store.Store, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedBody, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted body; the event " +
@@ -101,8 +112,9 @@ func RefreshIssueBodyInRun(
 	}
 	defer tx.Rollback()
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -199,7 +211,7 @@ func RefreshIssueBodyInRun(
 		return nil, err
 	}
 	from, to := ri.BodySHA256, workflow.SHA256([]byte(live))
-	if err := db.SetRunIssueBodyTx(tx, runID, issueID, live, to); err != nil {
+	if err := st.SetRunIssueBodyTx(runID, issueID, live, to); err != nil {
 		return nil, err
 	}
 
@@ -223,7 +235,7 @@ func RefreshIssueBodyInRun(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("refreshing the snapshotted body: %w", err)
 	}
 	return &RefreshedBody{
@@ -236,17 +248,11 @@ func RefreshIssueBodyInRun(
 // the value written is the value that was read — an amendment landing between a
 // standalone read and the UPDATE would otherwise be reported as the `to` of an
 // event that wrote something else.
-func liveIssueBodyTx(tx *sql.Tx, issueID int) (string, error) {
-	var description sql.NullString
-	err := tx.QueryRow(
-		`SELECT description FROM issues WHERE id = ?`, issueID).Scan(&description)
-	if err == sql.ErrNoRows {
-		return "", notFoundErr(db.ErrNotFound, "issue %s not found",
+func liveIssueBodyTx(tx store.LegacyTx, issueID int) (string, error) {
+	description, err := store.TxOn(tx).IssueDescriptionTx(issueID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", notFoundErr(store.ErrNotFound, "issue %s not found",
 			model.FormatID(issueID))
 	}
-	if err != nil {
-		return "", fmt.Errorf("reading the live description for %s: %w",
-			model.FormatID(issueID), err)
-	}
-	return description.String, nil
+	return description, err
 }

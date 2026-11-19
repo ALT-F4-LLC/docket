@@ -57,10 +57,7 @@ echo "commit: $(git rev-parse --short HEAD)"
 echo "tree:   $(git status --porcelain | wc -l | tr -d ' ') uncommitted path(s)"
 echo
 
-# go1.26.9 rather than `go`: that is the binary this toolchain provides, and a
-# gate that names a command the environment lacks records "unmatched" and
-# teaches the verifier nothing.
-run build go1.26.9 build ./...
+run build go build ./...
 # Acceptance criteria worded with -count=1 must be settled by a fresh run, not a cached result.
 # -timeout 60m: internal/engine alone took 1380-1570s under concurrent run load
 # (RUN-135), within minutes of the former 1800s cap; 60m leaves headroom over
@@ -68,7 +65,7 @@ run build go1.26.9 build ./...
 # plus the qa checks below, or it kills the gate before they finish: one
 # docket build, then each named qa.sh section (every run re-runs sections B
 # through its target, about 45s for Z and 110s for ZG), then genericity.sh.
-run tests go1.26.9 test -count=1 -timeout 60m ./...
+run tests go test -count=1 -timeout 60m ./...
 
 # Run the scripts/qa checks the issue's acceptance criteria name, so an AC like
 # "`bash scripts/qa.sh <built docket> ZG` reports PASS" is settled by execution.
@@ -157,7 +154,7 @@ fi
 if [ -n "$qa_sections" ]; then
   qa_bin_dir=$(mktemp -d "${TMPDIR:-/tmp}/ac-commands-qa.XXXXXX")
   trap 'rm -rf "$qa_bin_dir"' EXIT
-  run qa-binary go1.26.9 build -o "$qa_bin_dir/docket" ./cmd/docket
+  run qa-binary go build -o "$qa_bin_dir/docket" ./cmd/docket
   for section in $qa_sections; do
     if [ -x "$qa_bin_dir/docket" ]; then
       run "qa.sh-$section" bash scripts/qa.sh "$qa_bin_dir/docket" "$section"

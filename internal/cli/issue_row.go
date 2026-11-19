@@ -11,7 +11,7 @@ import (
 // `next`, `plan`, `board` — and the reason those verbs are usable as pickers
 // at all (DKT-1053, the issue-side twin of DKT-1045).
 //
-// It is the frozen v1 issue shape with exactly one substitution: `description`
+// It is model.Issue's shape with exactly one substitution: `description`
 // is replaced by `description_bytes`. Every other key keeps its name, its
 // position and its conditionality — `issue` mirrors `id` (DKT-452), `scope`
 // appears when declared (DKT-55), `resolution` when set, `size` when declared
@@ -27,7 +27,7 @@ import (
 // empty description from an absent one.
 //
 // It is a CLI-side projection rather than a change to model.Issue's marshaler
-// because that marshaler is the frozen v1 wire format every single-issue verb
+// because that marshaler is the wire format every single-issue verb
 // (`issue show`, `create`, `edit`, `claim`, ...) emits, and those verbs are
 // asked for one issue's whole body.
 type issueRow struct {
@@ -50,9 +50,9 @@ type issueRow struct {
 	UpdatedAt        string         `json:"updated_at"`
 }
 
-// issueRowV2 is the summary row under --json=v2: the v1 row plus the CAS
+// issueRowV2 is the summary row at a collection's items: issueRow plus the CAS
 // version, plus the lease when one is held — the same two additions
-// model.VersionedIssue makes to the full shape, so a v2 consumer that read
+// model.VersionedIssue makes to the full shape, so a consumer that read
 // `version` or `lease` off a full list row reads them off a summary row too.
 type issueRowV2 struct {
 	issueRow
@@ -130,13 +130,14 @@ func summarizeIssuesV2(issues []*model.Issue, nowMS int64) []issueRowV2 {
 	return rows
 }
 
-// issueRowsPayload wraps issues for emission as summary rows: v1 marshals
-// []issueRow, and the v2 collection envelope — which consults output.Versioned
-// on the items CONTAINER, as issueListPayload's comment explains — gets
-// []issueRowV2. It is issueListPayload's summary-shaped twin.
+// issueRowsPayload wraps issues for emission as summary rows: the collection
+// envelope — which consults output.Versioned on the items CONTAINER, as
+// issueListPayload's comment explains — gets []issueRowV2, and a payload that
+// nests it as an ordinary field (a `board` column) marshals []issueRow. It is
+// issueListPayload's summary-shaped twin.
 type issueRowsPayload struct{ issues []*model.Issue }
 
-// MarshalJSON emits the v1 summary-row array. Never null.
+// MarshalJSON emits the unversioned summary-row array. Never null.
 func (p issueRowsPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(summarizeIssues(p.issues))
 }

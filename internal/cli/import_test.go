@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,17 +11,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
 // buildExport reads a whole database into an export document, the way the
 // export command does — through the same table, so a collection the command
 // would carry can never be one this helper leaves behind.
-func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
+func buildExport(t *testing.T, conn store.LegacyDB) *model.ExportData {
 	t.Helper()
 
 	export := &model.ExportData{
@@ -34,6 +36,13 @@ func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
 		testsupport.Must(t, err, "fetching %s: %v", c.name, err)
 	}
 	return export
+}
+
+// doImport restores export into projectID of conn through the import verb's
+// write half, the way the import command does once it has resolved the
+// project and cleared its refusals.
+func doImport(conn store.LegacyDB, export *model.ExportData, replace bool, projectID int) (verb.ImportResult, error) {
+	return verb.RestoreExport(store.StoreOn(conn), export, replace, projectID)
 }
 
 func TestDoImportRoundTripPreservesDocs(t *testing.T) {
@@ -329,7 +338,7 @@ func TestDoImportReplaceClearsThenImports(t *testing.T) {
 	}
 }
 
-func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Status, parentID int) int {
+func createChildIssue(t *testing.T, conn store.LegacyDB, title string, status model.Status, parentID int) int {
 	t.Helper()
 	id, err := db.CreateIssue(conn, &model.Issue{
 		Title:    title,
@@ -344,7 +353,7 @@ func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Sta
 	return id
 }
 
-func runFilteredExport(t *testing.T, conn *sql.DB, statuses []string) *model.ExportData {
+func runFilteredExport(t *testing.T, conn store.LegacyDB, statuses []string) *model.ExportData {
 	t.Helper()
 
 	cmd := &cobra.Command{}
@@ -575,7 +584,7 @@ func TestFilteredExportReplaceImportRollsBackOnFailure(t *testing.T) {
 // fixture: a collection that is empty on both sides round-trips perfectly by
 // doing nothing at all, which is exactly the outcome a dropped collection
 // produces.
-func seedEveryCollection(t *testing.T, conn *sql.DB) {
+func seedEveryCollection(t *testing.T, conn store.LegacyDB) {
 	t.Helper()
 
 	parentID := createIssue(t, conn, "parent issue", model.StatusInProgress, model.PriorityMedium)
@@ -673,7 +682,29 @@ func TestRoundTripPreservesEveryCollection(t *testing.T) {
 // command under test carries the SAME --merge/--replace/--yes registration a
 // real invocation parses; a case that stopped registering --yes would fail
 // here with "unknown flag: --yes" instead of silently testing nothing.
-func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, replace, yes bool) error {
+func runImportCmd(t *testing.T, conn store.LegacyDB, filePath string, jsonMode bool, replace, yes bool) error {
+	t.Helper()
+
+	args := []string{filePath}
+	if jsonMode {
+		// The real --json is a string flag with NoOptDefVal "v1" (root.go),
+		// so a bare "--json" is legal there; this ad-hoc flag has no such
+		// default, and a bare "--json" would swallow the next argv token as
+		// its value instead.
+		args = append(args, "--json=v2")
+	}
+	if replace {
+		args = append(args, "--replace")
+	}
+	if yes {
+		args = append(args, "--yes")
+	}
+	return runImportCmdArgs(t, conn, nil, args...)
+}
+
+// runImportCmdArgs is runImportCmd with the argv spelled out and, when cfg is
+// non-nil, the project identity the root hook would otherwise load.
+func runImportCmdArgs(t *testing.T, conn store.LegacyDB, cfg *config.Config, args ...string) error {
 	t.Helper()
 
 	cmd := newImportCmd()
@@ -687,32 +718,94 @@ func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, re
 	// reads directly on the fresh command.
 	cmd.Flags().String("json", "", "")
 	cmd.Flags().Bool("quiet", false, "")
-
-	args := []string{filePath}
-	if jsonMode {
-		// The real --json is a string flag with NoOptDefVal "v1" (root.go),
-		// so a bare "--json" is legal there; this ad-hoc flag has no such
-		// default, and a bare "--json" would swallow the next argv token as
-		// its value instead.
-		args = append(args, "--json=v1")
-	}
-	if replace {
-		args = append(args, "--replace")
-	}
-	if yes {
-		args = append(args, "--yes")
-	}
 	cmd.SetArgs(args)
 
 	ctx := context.WithValue(context.Background(), dbKey, conn)
+	if cfg != nil {
+		ctx = context.WithValue(ctx, cfgKey, cfg)
+	}
 	return cmd.ExecuteContext(ctx)
+}
+
+// The mutual-exclusion refusal comes before the file is read, so a bad flag
+// pair is reported as such even when the path is also wrong.
+func TestImportRefusesMergeWithReplaceBeforeReadingTheFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	err := runImportCmdArgs(t, newTestDB(t), nil, missing, "--merge", "--replace")
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation ||
+		cmdErr.Error() != "--merge and --replace are mutually exclusive" {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR naming the exclusive flags", err)
+	}
+}
+
+// A caller with no project is refused before the file is read, as when the
+// root hook resolved the project ahead of the command, so the refusal names
+// the missing project even when the path is also wrong.
+func TestImportFromAnUnanchoredCheckoutIsRefusedBeforeReadingTheFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	cfg := &config.Config{Identity: "/tmp/scratch", Anchored: false}
+	err := runImportCmdArgs(t, newTestDB(t), cfg, missing)
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation ||
+		!strings.HasPrefix(cmdErr.Error(), "cannot tell which project") {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR refusing the unanchored checkout", err)
+	}
+}
+
+func TestImportMergeFlagImportsIntoANonEmptyProject(t *testing.T) {
+	filePath := seedAndWriteExportFile(t, newTestDB(t))
+	dst := newTestDB(t)
+	createIssue(t, dst, "existing", model.StatusTodo, model.PriorityHigh)
+
+	if err := runImportCmdArgs(t, dst, nil, filePath, "--merge"); err != nil {
+		t.Fatalf("import --merge into a non-empty project: %v", err)
+	}
+	gotIssues, err := db.ListAllIssues(dst, 0)
+	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
+	if len(gotIssues) != 1 || gotIssues[0].Title != "existing" {
+		t.Fatalf("expected the merge to keep the project's own issue, got %+v", gotIssues)
+	}
+}
+
+// The import command records the project-registered event for a project the
+// import registered, as the root hook did before the verb resolved it.
+func TestImportCommandRecordsTheProjectItRegisters(t *testing.T) {
+	filePath := seedAndWriteExportFile(t, newTestDB(t))
+	dst := newTestDB(t)
+
+	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
+	if err := runImportCmdArgs(t, dst, cfg, filePath); err != nil {
+		t.Fatalf("import from a new anchored identity: %v", err)
+	}
+	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
+		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)
+	}
+}
+
+// A refused import still registers the caller's anchored project, since the
+// project is resolved first, so the command records that registration too.
+func TestImportCommandRecordsTheProjectARefusedImportRegisters(t *testing.T) {
+	badFile := filepath.Join(t.TempDir(), "bad.json")
+	err := os.WriteFile(badFile, []byte("not json"), 0o600)
+	testsupport.Must(t, err, "WriteFile: %v", err)
+	dst := newTestDB(t)
+
+	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
+	var cmdErr *CmdError
+	if err = runImportCmdArgs(t, dst, cfg, badFile); !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR for the malformed file", err)
+	}
+	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
+		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)
+	}
 }
 
 // seedAndWriteExportFile creates one issue ("seed issue") in conn and writes
 // its export to a temp file, returning the file's path. The name says both
 // halves because TestImportReplaceProceedsWithYesInJSONMode asserts on the
 // seeded issue's title, not only on the file it produces.
-func seedAndWriteExportFile(t *testing.T, conn *sql.DB) string {
+func seedAndWriteExportFile(t *testing.T, conn store.LegacyDB) string {
 	t.Helper()
 
 	createIssue(t, conn, "seed issue", model.StatusTodo, model.PriorityMedium)

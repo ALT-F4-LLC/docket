@@ -7,10 +7,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -45,34 +45,18 @@ var logCmd = &cobra.Command{
 }
 
 func runIssueLog(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := issueArg(args[0])
-	if err != nil {
-		return err
-	}
-
-	if _, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0])); err != nil {
-		return err
-	}
-
 	limit, _ := cmd.Flags().GetInt("limit")
-	if err := validateLimit(cmd, limit); err != nil {
-		return err
-	}
-	// v1 silently clamps a non-positive limit to 1. Preserved exactly:
-	// validateLimit has already rejected negatives under v2.
-	limit = max(limit, 1)
-
-	activity, err := db.GetActivity(conn, id, limit)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
+	// v1 silently clamps a non-positive limit to 1, a negative one included;
+	// only --json=v2 refuses a negative limit, which the verb does.
+	if _, version := jsonModeOf(cmd); version != output.JSONV2 {
+		limit = max(limit, 1)
 	}
 
-	entryTotal, err := db.CountActivity(conn, id)
+	logged, err := verb.IssueLog(cmd.Context(), verbEnv(cmd), verb.IssueLogInput{Issue: args[0], Limit: limit})
 	if err != nil {
-		return cmdErr(fmt.Errorf("counting activity: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
+	id, activity := logged.IssueID, logged.Entries
 
 	entries := activity
 	if entries == nil {
@@ -85,8 +69,8 @@ func runIssueLog(cmd *cobra.Command, args []string, w *output.Writer) error {
 		IssueID:    model.FormatID(id),
 		Entries:    entries,
 		Total:      len(entries),
-		entryTotal: entryTotal,
-		limit:      limit,
+		entryTotal: logged.Total,
+		limit:      logged.Limit,
 	}
 
 	if w.JSONMode {

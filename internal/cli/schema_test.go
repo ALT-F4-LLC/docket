@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -71,6 +70,21 @@ func registerSchema(t *testing.T, conn *sql.DB, ref, body string) error {
 
 func schemaCmdWithDB(conn *sql.DB) *cobra.Command { return cmdWithDB(conn) }
 
+// schemaRow builds a schema row in projectID for a test to insert directly.
+func schemaRow(
+	name string, version int, path string, src []byte, ordered string, projectID int,
+) *model.Schema {
+	return &model.Schema{
+		ProjectID:    projectID,
+		Name:         name,
+		Version:      version,
+		SourcePath:   path,
+		SourceSHA256: workflow.SHA256(src),
+		Body:         string(src),
+		Ordered:      ordered,
+	}
+}
+
 func TestSchemaRegisterSucceeds(t *testing.T) {
 	conn := newTestDB(t)
 	err := registerSchema(t, conn, "findings@1", findingsSchema)
@@ -108,22 +122,11 @@ func TestSchemaRegisterSucceeds(t *testing.T) {
 // success and then read back NOT_FOUND from the very cwd that registered it.
 func TestSchemaRegisterLandsInTheCallersProject(t *testing.T) {
 	conn := newTestDB(t)
-
-	// EnsureProject claims the unclaimed default row in place before it
-	// inserts, so two calls are what it takes to get a caller that is NOT the
-	// default project.
-	_, err := db.EnsureProject(conn, "/repo/default", "default", model.NowMS())
-	testsupport.Must(t, err, "claiming the default project: %v", err)
-	caller, err := db.EnsureProject(conn, "/repo/caller", "caller", model.NowMS())
-	testsupport.Must(t, err, "creating the caller's project: %v", err)
-	if caller == db.DefaultProjectID {
-		t.Fatalf("caller project = %d, want a non-default id", caller)
-	}
-
 	cmd := schemaCmdWithDB(conn)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, caller))
+	caller := inCallerProject(t, conn, cmd, "/repo/caller")
+
 	w, _ := bufWriter(true)
-	err = runSchemaRegister(cmd, []string{"findings@1", writeSchema(t, findingsSchema)}, w)
+	err := runSchemaRegister(cmd, []string{"findings@1", writeSchema(t, findingsSchema)}, w)
 	testsupport.Must(t, err, "register: %v", err)
 
 	if _, err := db.GetSchema(conn, caller, "findings", 1); err != nil {
@@ -308,6 +311,8 @@ func TestSchemaConflictNamesBothHashes(t *testing.T) {
 
 // TestSchemaListIsACollection is the list row: a Collection envelope under
 // v2, per the `workflow list` precedent, with a total a limit cannot distort.
+// Row-version coverage for `schema list` is v2 only: items carry row_version,
+// and no test pins the v1 envelope's omission of it.
 func TestSchemaListIsACollection(t *testing.T) {
 	conn := newTestDB(t)
 	err := registerSchema(t, conn, "findings@1", findingsSchema)
@@ -344,18 +349,6 @@ func TestSchemaListIsACollection(t *testing.T) {
 	}
 	if env.Data.Items[0].RowVersion != 1 {
 		t.Errorf("v2 items carry no row_version: %+v", env.Data.Items[0])
-	}
-}
-
-// TestSchemaListV1CarriesNoRowVersion is the dormancy rule at the envelope: the
-// CAS column surfaces under --json=v2 only.
-func TestSchemaListV1CarriesNoRowVersion(t *testing.T) {
-	conn := newTestDB(t)
-	w, buf := bufWriter(true)
-	err := runSchemaList(schemaListCmdWithDB(conn, 50), nil, w)
-	testsupport.Must(t, err, "list: %v", err)
-	if strings.Contains(buf.String(), "row_version") {
-		t.Errorf("v1 output carries row_version: %s", buf.String())
 	}
 }
 

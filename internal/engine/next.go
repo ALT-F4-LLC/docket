@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -83,7 +82,12 @@ type ReadySteps struct {
 	LimitSources map[string]string
 }
 
-// NextSteps computes a run's ready steps, reaping expired leases on the way.
+// NextSteps is NextStepsStore on store.StoreOn(conn).
+func (e *Engine) NextSteps(conn store.LegacyDB, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+	return e.NextStepsStore(store.StoreOn(conn), runID, limit, nowMS)
+}
+
+// NextStepsStore computes a run's ready steps, reaping expired leases on the way.
 //
 // THIS IS ONE OF THE TWO PLACES A READ-SHAPED VERB MAY WRITE ("lazy lease
 // reaping happens here and at claim, and nowhere else"). Every other read verb —
@@ -93,7 +97,11 @@ type ReadySteps struct {
 // The reap and the readiness computation share ONE transaction, and in that
 // order: a step reaped by this call must be offered by this call, or a
 // dispatcher would have to poll twice to see work that is already available.
-func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+func (e *Engine) NextStepsStore(storage store.Store, runID int, limit int, nowMS int64) (*ReadySteps, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
@@ -209,7 +217,7 @@ func (e *Engine) NextSteps(conn *sql.DB, runID int, limit int, nowMS int64) (*Re
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing next: %w", err)
 	}
 
@@ -385,7 +393,7 @@ func offeredClassCaps(caps map[string]ClassCap, rows []model.StepRow) (map[strin
 // that cannot run per its `on_fail`, so anything reaching here is an engine
 // fault — a database the next step would hit too — and reporting it is more
 // useful than continuing over it.
-func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (bool, error) {
+func (e *Engine) driveActionSteps(conn store.LegacyDB, ready []*store.Step, nowMS int64) (bool, error) {
 	routed := false
 	for _, step := range ready {
 		if step.Kind != workflow.ClassAction || step.InSaga() {
@@ -437,7 +445,7 @@ func (e *Engine) driveActionSteps(conn *sql.DB, ready []*db.Step, nowMS int64) (
 // `ready` for real and can un-defer an aggregate that readies a step this
 // call never saw.
 func (e *Engine) driveVoteSteps(
-	conn *sql.DB, defs map[int]*workflow.Definition, candidates, ready []*db.Step,
+	conn store.LegacyDB, defs map[int]*workflow.Definition, candidates, ready []*store.Step,
 	tally holdTally, nowMS int64,
 ) (map[voteStepKey]int, bool, error) {
 	openable := make(map[int]bool, len(ready))
@@ -538,13 +546,13 @@ func (e *Engine) driveVoteSteps(
 // Empty when the run is not active: pause means pause, and widening the sweep
 // past the offer must not start routing decided tallies on a run an operator
 // parked — the same R1 every driving opportunity respected before.
-func pendingVoteSteps(sched *Scheduler) []*db.Step {
+func pendingVoteSteps(sched *Scheduler) []*store.Step {
 	if sched.Run() == nil || sched.Run().Status != model.RunActive {
 		return nil
 	}
-	var out []*db.Step
+	var out []*store.Step
 	for _, step := range sched.Steps() {
-		if step.Kind == workflow.TypeVote && step.Status == db.StepPending {
+		if step.Kind == workflow.TypeVote && step.Status == store.StepPending {
 			out = append(out, step)
 		}
 	}
@@ -555,7 +563,7 @@ func pendingVoteSteps(sched *Scheduler) []*db.Step {
 //
 // The step's rendered STATUS is `ready`, computed — never read from the column,
 // which says `pending` ("`ready` is computed, never stored as intent").
-func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, error) {
+func stepRow(sched *Scheduler, step *store.Step, ttls ttlConfig) (model.StepRow, error) {
 	metadata, err := decodeMetadata(step.Metadata)
 	if err != nil {
 		return model.StepRow{}, err
@@ -616,7 +624,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 		LoopCap:           step.LoopCap,
 		ExpectedCost:      step.ExpectedCost,
 		LeaseTTLS:         int(ttls.forClass(sched.Limit(step.Class), step.Class).Seconds()),
-		Status:            db.StepReady,
+		Status:            store.StepReady,
 		Metadata:          metadata,
 	}
 
@@ -630,7 +638,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 	// claim ran under is in its claim metadata. A terminal run offers
 	// nothing, so its rows never open the pinned file — a done run stays
 	// readable after the corpus its policy.toml was pinned from has moved on.
-	if step.Status == db.StepPending && !sched.run.Status.Terminal() {
+	if step.Status == store.StepPending && !sched.run.Status.Terminal() {
 		policy, err := sched.policy.load()
 		if err != nil {
 			return model.StepRow{}, err
@@ -645,7 +653,7 @@ func stepRow(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, er
 // StepRowFor renders one step's `next row` at its EFFECTIVE status, for the
 // read verbs (`step show`) and for the claim response's `context.step`. It
 // writes nothing.
-func StepRowFor(sched *Scheduler, step *db.Step, ttls ttlConfig) (model.StepRow, error) {
+func StepRowFor(sched *Scheduler, step *store.Step, ttls ttlConfig) (model.StepRow, error) {
 	row, err := stepRow(sched, step, ttls)
 	if err != nil {
 		return model.StepRow{}, err
@@ -703,11 +711,16 @@ type StepListEntry struct {
 	// route itself and which need a panel — a question the reason sentence
 	// beside it cannot be asked programmatically. Empty on every row that is
 	// not parked.
-	ParkClass    db.ParkClass `json:"park_class,omitempty"`
-	ExpectedCost float64      `json:"expected_cost"`
+	ParkClass    store.ParkClass `json:"park_class,omitempty"`
+	ExpectedCost float64         `json:"expected_cost"`
 }
 
-// RunStepList answers `docket step list --run RUN-N`: every step of one run,
+// RunStepList is RunStepListStore on store.StoreOn(conn).
+func RunStepList(conn store.LegacyDB, runID int, nowMS int64) ([]StepListEntry, error) {
+	return RunStepListStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// RunStepListStore answers `docket step list --run RUN-N`: every step of one run,
 // with its EFFECTIVE status and expected cost, in the (issue, id)
 // order ListRunSteps defines.
 //
@@ -719,12 +732,16 @@ type StepListEntry struct {
 // ids, correct exactly as long as the store was quiet. READ-ONLY: the
 // scheduler loads in a transaction that is always rolled back, and no reap
 // runs.
-func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) {
+func RunStepListStore(storage store.Store, runID int, nowMS int64) ([]StepListEntry, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := beginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("listing %s's steps: %w", model.FormatRunID(runID), err)
 	}
@@ -757,7 +774,12 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 	return out, nil
 }
 
-// IssueStepList answers `docket step list --issue ISSUE-N`: every step recorded
+// IssueStepList is IssueStepListStore on store.StoreOn(conn).
+func IssueStepList(conn store.LegacyDB, issueID int, nowMS int64) ([]StepListEntry, error) {
+	return IssueStepListStore(store.StoreOn(conn), issueID, nowMS)
+}
+
+// IssueStepListStore answers `docket step list --issue ISSUE-N`: every step recorded
 // for one issue, across every run that holds one, with the same effective
 // status RunStepList computes.
 //
@@ -768,8 +790,12 @@ func RunStepList(conn *sql.DB, runID int, nowMS int64) ([]StepListEntry, error) 
 // run is scheduled on its own, because readiness is a question about one run's
 // graph; the rows are then concatenated in run order. READ-ONLY, like
 // RunStepList.
-func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, error) {
-	runIDs, err := db.IssueStepRuns(conn, issueID)
+func IssueStepListStore(storage store.Store, issueID int, nowMS int64) ([]StepListEntry, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	runIDs, err := store.StoreOn(conn).IssueStepRuns(issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -789,7 +815,12 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 	return out, nil
 }
 
-// EffectiveStatusCounts rolls one run's steps up by EFFECTIVE status,
+// EffectiveStatusCounts is EffectiveStatusCountsStore on store.StoreOn(conn).
+func EffectiveStatusCounts(conn store.LegacyDB, runID int, nowMS int64) ([]model.StatusCount, error) {
+	return EffectiveStatusCountsStore(store.StoreOn(conn), runID, nowMS)
+}
+
+// EffectiveStatusCountsStore rolls one run's steps up by EFFECTIVE status,
 // for `run status` — the same status LoadStepView and RunStepList report, so
 // the rollup can never contradict `step show`/`step list` (DKT-468).
 //
@@ -802,12 +833,16 @@ func IssueStepList(conn *sql.DB, issueID int, nowMS int64) ([]StepListEntry, err
 // exactly the divergence the effective-status discipline exists to prevent.
 // READ-ONLY, like every effective-status computation: the transaction is always rolled
 // back and no reap runs.
-func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.StatusCount, error) {
+func EffectiveStatusCountsStore(storage store.Store, runID int, nowMS int64) ([]model.StatusCount, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := beginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"counting %s's step statuses: %w", model.FormatRunID(runID), err)
@@ -838,25 +873,25 @@ func EffectiveStatusCounts(conn *sql.DB, runID int, nowMS int64) ([]model.Status
 // step whose lease has LAPSED reads as `pending` — the v6 discipline, computed
 // at read and never written back — so "status never lies because nobody called
 // next" is true for steps as it is for leases. NOTHING HERE WRITES.
-func EffectiveStatus(sched *Scheduler, step *db.Step) string {
+func EffectiveStatus(sched *Scheduler, step *store.Step) string {
 	if sched != nil && sched.Expired(step) {
 		// The lease is gone as far as any reader is concerned, even though the
 		// row still carries the stale owner until someone claims or `next`
 		// reaps it.
 		if ok, _ := sched.readyIfPending(step); ok {
-			return db.StepReady
+			return store.StepReady
 		}
-		return db.StepPending
+		return store.StepPending
 	}
-	if step.Status != db.StepPending {
+	if step.Status != store.StepPending {
 		return step.Status
 	}
 	if sched != nil {
 		if ok, _ := sched.Ready(step); ok {
-			return db.StepReady
+			return store.StepReady
 		}
 	}
-	return db.StepPending
+	return store.StepPending
 }
 
 // BlockedReason names WHY a step is not `ready`, "" for any step EffectiveStatus
@@ -870,7 +905,7 @@ func EffectiveStatus(sched *Scheduler, step *db.Step) string {
 // threshold's routing step recorded a different routing, permanently) saw
 // the same bare `pending` a step one predecessor away from ready shows, with
 // no way to tell "not yet" from "not ever" short of reading the event log.
-func BlockedReason(sched *Scheduler, step *db.Step) string {
+func BlockedReason(sched *Scheduler, step *store.Step) string {
 	if sched == nil {
 		return ""
 	}
@@ -880,7 +915,7 @@ func BlockedReason(sched *Scheduler, step *db.Step) string {
 		}
 		return ""
 	}
-	if step.Status != db.StepPending {
+	if step.Status != store.StepPending {
 		return ""
 	}
 	if ok, cond := sched.Ready(step); !ok {
@@ -892,9 +927,9 @@ func BlockedReason(sched *Scheduler, step *db.Step) string {
 // readyIfPending answers the predicate as though the step were already reaped —
 // the question a READ verb must ask about an expired claim, since it may not
 // perform the reap that would make the answer true for real.
-func (s *Scheduler) readyIfPending(step *db.Step) (bool, ReadyCondition) {
+func (s *Scheduler) readyIfPending(step *store.Step) (bool, ReadyCondition) {
 	probe := *step
-	probe.Status = db.StepPending
+	probe.Status = store.StepPending
 	probe.Owner, probe.TokenHash, probe.ExpiresMS = "", "", 0
 	return s.Ready(&probe)
 }
@@ -939,50 +974,38 @@ func (t ttlConfig) forClass(limit workflow.Limit, class string) time.Duration {
 
 // loadTTLConfig reads the configured TTLs for every class a run's steps carry.
 //
-// It resolves through db.LeaseTTL, which already implements the
+// It resolves through the store's LeaseTTL, which already implements the
 // `lease.ttl.<class>` -> `lease.ttl.default` fallback v6 established — so the
 // config half of the precedence cannot drift from what `issue claim` does.
 //
 // The per-class values are read ONCE per verb rather than per row: a run with
 // four `review` siblings would otherwise issue four identical config lookups,
 // and the values cannot change mid-call anyway.
-func loadTTLConfig(conn *sql.DB, runID int) (ttlConfig, error) {
+func loadTTLConfig(conn store.LegacyDB, runID int) (ttlConfig, error) {
 	// The RUN's project scopes the TTL policy (v12): the same class can carry
 	// different TTLs in different projects, and a verb operating on another
 	// project's run must apply that project's numbers.
-	projectID, err := db.RunProjectID(conn, runID)
+	st := store.StoreOn(conn)
+	projectID, err := st.RunProjectID(runID)
 	if err != nil {
 		return ttlConfig{}, err
 	}
-	fallback, err := db.LeaseTTL(conn, projectID, "")
+	fallback, err := st.LeaseTTL(projectID, "")
 	if err != nil {
 		return ttlConfig{}, fmt.Errorf("reading the default lease TTL: %w", err)
 	}
 
-	rows, err := conn.Query(
-		`SELECT DISTINCT class FROM steps WHERE run_id = ? AND class IS NOT NULL`, runID)
+	classes, err := st.RunStepClasses(runID)
 	if err != nil {
-		return ttlConfig{}, fmt.Errorf("reading step classes: %w", err)
+		return ttlConfig{}, err
 	}
-	defer rows.Close()
 
 	perClass := make(map[string]time.Duration)
-	var classes []string
-	for rows.Next() {
-		var class string
-		if err := rows.Scan(&class); err != nil {
-			return ttlConfig{}, fmt.Errorf("reading step class: %w", err)
-		}
-		if class != "" {
-			classes = append(classes, class)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return ttlConfig{}, fmt.Errorf("reading step classes: %w", err)
-	}
-
 	for _, class := range classes {
-		ttl, err := db.LeaseTTL(conn, projectID, class)
+		if class == "" {
+			continue
+		}
+		ttl, err := st.LeaseTTL(projectID, class)
 		if err != nil {
 			return ttlConfig{}, fmt.Errorf("reading the lease TTL for class %q: %w", class, err)
 		}

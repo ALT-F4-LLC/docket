@@ -1,10 +1,6 @@
 package output
 
-import (
-	"encoding/json"
-	"io"
-	"maps"
-)
+import "maps"
 
 // Collection is implemented by result types that are a list of items, so the
 // v2 envelope can render them uniformly as {items, total, truncated}.
@@ -14,8 +10,6 @@ import (
 // total is only knowable post-limit must compute the true total before
 // truncating rather than implementing this interface dishonestly.
 //
-// The v1 path never consults this interface, which is the dormancy guarantee at
-// the type level: adding an implementation cannot change v1 output.
 // Method names are suffixed to avoid colliding with the Total/Items JSON
 // fields that result structs already carry — a struct cannot have a field and
 // a method of the same name.
@@ -50,8 +44,7 @@ func IsTruncated(limit, total, returned int) bool {
 }
 
 // Versioned is implemented by payloads that carry an optimistic-concurrency
-// version. Under v2 the value is surfaced as `version` in .data; v1 never
-// consults this interface, so the version stays invisible there.
+// version. The value is surfaced as `version` in .data.
 type Versioned interface {
 	// VersionedPayload returns the value to marshal in place of the receiver,
 	// carrying its version field.
@@ -94,16 +87,4 @@ func withSiblings(envelope collectionEnvelope, siblings map[string]any) map[stri
 	merged["total"] = envelope.Total
 	merged["truncated"] = envelope.Truncated
 	return merged
-}
-
-// writeJSONSuccessV2 writes a v2 success envelope to w, with data in its v2
-// form (see shapeV2Data).
-func writeJSONSuccessV2(w io.Writer, data any, message string) {
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	enc.Encode(successEnvelope{
-		OK:      true,
-		Data:    shapeV2Data(data),
-		Message: message,
-	})
 }

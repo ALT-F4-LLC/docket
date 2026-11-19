@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket run fact add` (DKT-2759): the conductor's channel for coordination
@@ -63,14 +62,24 @@ type RunFact struct {
 	Reason   string `json:"reason"`
 }
 
-// RecordRunFact validates and records one conductor-observed fact.
-func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
+// RecordRunFact is RecordRunFactStore on store.StoreOn(conn).
+func RecordRunFact(conn store.LegacyDB, opts RunFactOptions) (*RunFact, error) {
+	return RecordRunFactStore(store.StoreOn(conn), opts)
+}
+
+// RecordRunFactStore validates and records one conductor-observed fact.
+func RecordRunFactStore(storage store.Store, opts RunFactOptions) (*RunFact, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	reason := strings.TrimSpace(opts.Reason)
 	if reason == "" {
 		return nil, validationErr("--reason is required: a fact with no reason " +
 			"tells a retro that something happened but not why")
 	}
-	if _, err := db.GetRun(conn, opts.RunID); err != nil {
+	st := store.StoreOn(conn)
+	if _, err := st.GetRun(opts.RunID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(opts.RunID))
 	}
 
@@ -84,7 +93,7 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 			return nil, validationErr("--kind %s needs --proposal PROPOSAL-N and --voter NAME",
 				opts.Kind)
 		}
-		if _, err := db.GetProposal(conn, opts.ProposalID); err != nil {
+		if _, err := st.GetProposal(opts.ProposalID); err != nil {
 			return nil, notFoundErr(err, "proposal %s not found",
 				model.FormatProposalID(opts.ProposalID))
 		}
@@ -108,8 +117,8 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 			return nil, validationErr("--cause must be %s or %s, got %q",
 				DeferralBudget, DeferralChain, opts.Cause)
 		}
-		step, err := db.GetStep(conn, opts.StepID)
-		if errors.Is(err, db.ErrStepNotFound) {
+		step, err := st.GetStep(opts.StepID)
+		if errors.Is(err, store.ErrStepNotFound) {
 			return nil, notFoundErr(err, "step %s not found", model.FormatStepID(opts.StepID))
 		}
 		if err != nil {
@@ -162,10 +171,15 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 	if err := recordEvent(tx, record); err != nil {
 		return nil, err
 	}
-	if err := tx.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&fact.Seq); err != nil {
+	seq, found, err := store.TxOn(tx).MaxEventSeqTx()
+	if err != nil {
 		return nil, fmt.Errorf("reading the fact's seq: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if !found {
+		return nil, errors.New("reading the fact's seq: the event log is empty after recording the fact")
+	}
+	fact.Seq = seq
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("recording the run fact: %w", err)
 	}
 	return fact, nil
@@ -176,31 +190,14 @@ func RecordRunFact(conn *sql.DB, opts RunFactOptions) (*RunFact, error) {
 // The window opens at that close's `dispatch-closed` event seq, so a deferral
 // filed for a later dispatch is a new fact; with no dispatch closed, any prior
 // filing covers the step.
-func conductorChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
-	var (
-		seq  int64
-		data string
-	)
-	err := tx.QueryRow(
-		`SELECT seq, data FROM events
-		  WHERE run_id = ? AND step_id = ? AND kind = ?
-		    AND json_extract(data, '$.cause') = ?
-		    AND json_extract(data, '$.source') IS NULL
-		    AND seq > COALESCE((
-		        SELECT MAX(seq) FROM events
-		         WHERE run_id = ? AND kind = ?
-		           AND json_extract(data, '$.dispatch') = (
-		               SELECT 'DISPATCH-' || id FROM dispatches
-		                WHERE run_id = ? AND status = ?
-		                ORDER BY closed_at_ms DESC, id DESC LIMIT 1)), 0)
-		  ORDER BY seq LIMIT 1`,
-		runID, stepID, EventStepDeferred, DeferralChain,
-		runID, EventDispatchClosed, runID, db.DispatchClosed).Scan(&seq, &data)
-	if err == sql.ErrNoRows {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("reading the conductor's chain deferral: %w", err)
+func conductorChainFact(tx store.LegacyReadTx, runID, stepID int) (*RunFact, bool, error) {
+	seq, data, found, err := store.TxOn(tx).ConductorChainDeferralTx(store.ChainDeferralQuery{
+		RunID: runID, StepID: stepID,
+		DeferredKind: EventStepDeferred, Cause: DeferralChain,
+		DispatchClosedKind: EventDispatchClosed,
+	})
+	if err != nil || !found {
+		return nil, false, err
 	}
 	var body struct {
 		Reason string `json:"reason"`

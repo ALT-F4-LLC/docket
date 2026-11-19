@@ -198,6 +198,39 @@ func TestAnnotateIntegrationBuildsNoGitCommandFromAMalformedRecordedChain(t *tes
 	}
 }
 
+// TestAnnotateIntegrationJudgesTheStepsOwnRange: the recorded chain base..head
+// holds two commits, but the step's own change is round_base..head, the last
+// one. A pick of that one commit carries the step's change and is accepted; a
+// commit carrying none of it is still refused.
+func TestAnnotateIntegrationJudgesTheStepsOwnRange(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+	latest, err := stepLatestIssueDiff(f.conn, f.stepID)
+	testsupport.Must(t, err, "stepLatestIssueDiff: %v", err)
+	roundBase := gitRun(t, f.shared, "rev-parse", f.head+"^")
+	if roundBase == f.base {
+		t.Fatal("premise: the recorded chain must be longer than the step's own range")
+	}
+	_, err = f.conn.Exec(`UPDATE artifacts SET payload = json_set(payload, '$.base', ?, '$.round_base', ?) WHERE id = ?`,
+		f.base, roundBase, latest.ID)
+	testsupport.Must(t, err, "record the round base: %v", err)
+
+	writeFile(t, f.shared, "internal/unrelated.go", "package unrelated\n")
+	gitRun(t, f.shared, "add", "-A")
+	gitRun(t, f.shared, "commit", "-q", "-m", "unrelated")
+	_, err = f.e.AnnotateIntegration(f.conn, f.stepID, f.sharedHead(t), "", testBy, testConductorToken, nowMS+1)
+	if err == nil || !strings.Contains(err.Error(), "does not carry the writer's patch") {
+		t.Fatalf("unrelated commit: err = %v, want the carried-patch refusal", err)
+	}
+
+	gitRun(t, f.shared, "cherry-pick", f.head)
+	pick := f.sharedHead(t)
+	ann, err := f.e.AnnotateIntegration(f.conn, f.stepID, pick, "", testBy, testConductorToken, nowMS+2)
+	testsupport.Must(t, err, "annotating a pick of the step's own range: %v", err)
+	if ann.IntegratedSHA != pick || f.integratedSHA(t) != pick {
+		t.Errorf("annotation = %+v, row integrated_sha %.12s; want %.12s", ann, f.integratedSHA(t), pick)
+	}
+}
+
 // TestAnnotateIntegrationRefusesALiveStep: a live step's record lands under
 // its holder's token; a side channel into it would bypass that authorization.
 func TestAnnotateIntegrationRefusesALiveStep(t *testing.T) {

@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,8 +14,8 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -226,7 +225,7 @@ type Engine struct {
 	// manifest's CAS. Test-only: it lets a test move the row first and reach
 	// the lost-close-race refusal (DKT-2758), which one transaction on a
 	// single-writer store cannot otherwise lose. nil in production.
-	beforeCloseCAS func(tx *sql.Tx, dispatchID int)
+	beforeCloseCAS func(tx store.LegacyTx, dispatchID int)
 }
 
 // NewEngine builds the production engine: the REAL gate runner, the REAL action
@@ -265,7 +264,12 @@ func NewEngine() *Engine {
 	}
 }
 
-// CompleteStep runs the saga from stage 0, or resumes it from wherever it
+// CompleteStep is CompleteStepStore on store.StoreOn(conn).
+func (e *Engine) CompleteStep(conn store.LegacyDB, stepID int, opts CompleteOptions) error {
+	return e.CompleteStepStore(store.StoreOn(conn), stepID, opts)
+}
+
+// CompleteStepStore runs the saga from stage 0, or resumes it from wherever it
 // stopped.
 //
 // It is safe to call at any time on any step: a step not in the saga starts it
@@ -273,9 +277,13 @@ func NewEngine() *Engine {
 // consulted). That is what makes a crashed worker's saga finish under the next
 // `next`, the next `claim`, or an explicit re-invocation, with no operator
 // action.
-func (e *Engine) CompleteStep(conn *sql.DB, stepID int, opts CompleteOptions) error {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+func (e *Engine) CompleteStepStore(storage store.Store, stepID int, opts CompleteOptions) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -295,8 +303,14 @@ func (e *Engine) CompleteStep(conn *sql.DB, stepID int, opts CompleteOptions) er
 		// routing keeps downstream vote and action steps ready the moment
 		// the record returns. A launch that fails, or no launcher at all,
 		// runs the saga inline, as it always did.
+		//
+		// The handoff event commits BEFORE the launch: a child that dies
+		// before its first gate cannot write its own record, and the parent
+		// returns right after launching. A handoff that cannot be recorded
+		// is never launched; the saga runs inline instead.
 		if LaunchDetachedSaga != nil && detachedSagaLockPath(stepID) != "" &&
-			e.hasCompletionGates(conn, stepID) {
+			e.hasCompletionGates(conn, stepID) &&
+			recordSagaDetachStarted(conn, stepID, opts.NowMS) == nil {
 			if err := LaunchDetachedSaga(stepID); err == nil {
 				if opts.Pending != nil {
 					*opts.Pending = true
@@ -327,9 +341,9 @@ func (e *Engine) CompleteStep(conn *sql.DB, stepID int, opts CompleteOptions) er
 //
 // Idempotent by the same CAS every stage uses: a step already in the saga skips
 // straight to the resume, so two concurrent `next` invocations produce one run.
-func (e *Engine) RunActionStep(conn *sql.DB, stepID int, nowMS int64) error {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+func (e *Engine) RunActionStep(conn store.LegacyDB, stepID int, nowMS int64) error {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -343,7 +357,7 @@ func (e *Engine) RunActionStep(conn *sql.DB, stepID int, nowMS int64) error {
 
 	if !step.InSaga() {
 		if err := e.enterActionSaga(conn, step, nowMS); err != nil {
-			if errors.Is(err, db.ErrSagaStageMoved) {
+			if errors.Is(err, store.ErrSagaStageMoved) {
 				// Lost the race to a concurrent driver, which is a WIN: the saga
 				// is started and the resume below advances whatever is current.
 				return e.ResumeSaga(conn, stepID, nowMS)
@@ -355,17 +369,17 @@ func (e *Engine) RunActionStep(conn *sql.DB, stepID int, nowMS int64) error {
 }
 
 // enterActionSaga commits an action step's stage 1: gated, and recorded.
-func (e *Engine) enterActionSaga(conn *sql.DB, step *db.Step, nowMS int64) error {
+func (e *Engine) enterActionSaga(conn store.LegacyDB, step *store.Step, nowMS int64) error {
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning the action saga: %w", err)
 	}
 	defer tx.Rollback()
 
-	if err := db.SetStepStatusTx(tx, step.ID, db.StepGated, nowMS, nowMS); err != nil {
+	if err := store.TxOn(tx).SetStepStatusTx(step.ID, store.StepGated, nowMS, nowMS); err != nil {
 		return err
 	}
-	if err := db.AdvanceSagaTx(tx, step.ID, "", db.SagaRecorded, nowMS); err != nil {
+	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, "", store.SagaRecorded, nowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
@@ -374,7 +388,7 @@ func (e *Engine) enterActionSaga(conn *sql.DB, step *db.Step, nowMS int64) error
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // stageZero authorizes the holder, validates, and commits stage 1.
@@ -383,16 +397,16 @@ func (e *Engine) enterActionSaga(conn *sql.DB, step *db.Step, nowMS int64) error
 // state of its own to record: its resume point IS stage 1's. Splitting them
 // would create a committed "validated but not recorded" state that nothing can
 // act on and that a resume would have to re-validate anyway.
-func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) error {
+func (e *Engine) stageZero(conn store.LegacyDB, step *store.Step, opts CompleteOptions) error {
 	// ---- Validation, BEFORE the transaction opens. -------------------------
 	//
 	// An artifact over the cap is refused by size, naming both numbers. A
 	// refusal that happens before anything is locked costs nothing and writes
 	// nothing — which is what the version-unchanged assertions check.
-	if len(opts.Artifact) > db.ArtifactMaxBytes {
+	if len(opts.Artifact) > store.ArtifactMaxBytes {
 		return validationErr(
 			"artifact is %d bytes, over the %d-byte cap; reduce it or record a "+
-				"reference instead", len(opts.Artifact), db.ArtifactMaxBytes)
+				"reference instead", len(opts.Artifact), store.ArtifactMaxBytes)
 	}
 
 	// The metadata cap, measured on the RAW INPUT. It sits with the artifact cap
@@ -410,10 +424,10 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// "something is out of scope here" with no content is the
 	// evaporating-residue failure this channel exists to end (DKT-72).
 	for i, gap := range opts.Gaps {
-		if len(gap) > db.ArtifactMaxBytes {
+		if len(gap) > store.ArtifactMaxBytes {
 			return validationErr(
 				"gap %d is %d bytes, over the %d-byte cap; reduce it or record a "+
-					"reference instead", i+1, len(gap), db.ArtifactMaxBytes)
+					"reference instead", i+1, len(gap), store.ArtifactMaxBytes)
 		}
 		if len(strings.TrimSpace(string(gap))) == 0 {
 			return validationErr(
@@ -458,7 +472,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// schema is consulted — and again inside the transaction, which stays the
 	// authority. The read is advisory and the write-side check is unchanged;
 	// what this adds is only the ORDER of two refusals.
-	if err := db.AuthorizeStepRead(conn, step.ID, opts.Token, opts.NowMS); err != nil {
+	if err := store.StoreOn(conn).AuthorizeStepRead(step.ID, opts.Token, opts.NowMS); err != nil {
 		return err
 	}
 
@@ -506,7 +520,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// issues use, so the step matrix cannot drift from the issue one. A second
 	// `complete` is refused for free: a step past stage 1 has no lease, so it
 	// presents a token that holds nothing — AUTH_ERROR.
-	if _, err := db.AuthorizeStepTx(tx, step.ID, opts.Token, opts.NowMS); err != nil {
+	if _, err := store.TxOn(tx).AuthorizeStepTx(step.ID, opts.Token, opts.NowMS); err != nil {
 		return err
 	}
 
@@ -541,7 +555,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 			step.Instance, kind)
 	}
 
-	if _, err := db.InsertArtifactTx(tx, db.Artifact{
+	if _, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: kind,
 		Body:    string(opts.Artifact),
 		Payload: string(opts.Payload),
@@ -568,10 +582,8 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// different cwd entirely, and only a persisted fact survives that gap. The
 	// in-memory copy keeps THIS invocation's diff correct too.
 	if opts.WorkDir != "" {
-		if _, err := tx.Exec(
-			`UPDATE steps SET work_root = ? WHERE id = ?`, opts.WorkDir, step.ID,
-		); err != nil {
-			return fmt.Errorf("recording the worktree for %s: %w", step.Instance, err)
+		if err := store.TxOn(tx).SetStepWorkRootTx(step.ID, opts.WorkDir); err != nil {
+			return err
 		}
 		step.WorkRoot = opts.WorkDir
 	}
@@ -582,7 +594,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// worse than no channel — plus a backlog issue related to this step's own,
 	// so the residue lands where the next planning pass already looks.
 	for _, gap := range opts.Gaps {
-		if _, err := db.InsertArtifactTx(tx, db.Artifact{
+		if _, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 			RunID: step.RunID, StepID: step.ID, Kind: GapArtifactKind,
 			Body:   string(gap),
 			SHA256: workflow.SHA256(gap),
@@ -591,7 +603,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		}
 		// The gap lands in the RUN's project — the backlog the next planning
 		// pass over this work will actually look at.
-		gapProject, err := db.RunProjectIDTx(tx, step.RunID)
+		gapProject, err := store.TxOn(tx).RunProjectIDTx(step.RunID)
 		if err != nil {
 			return err
 		}
@@ -600,7 +612,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		// read, never stripped, so the artifact and the issue keep saying the
 		// same thing.
 		attrs := parseGapHeader(gap)
-		issueID, err := db.InsertGapIssueTx(tx, gapProject, db.GapIssue{
+		issueID, err := store.TxOn(tx).InsertGapIssueTx(gapProject, store.GapIssue{
 			Title:       gapTitle(gap),
 			Description: string(gap),
 			Priority:    attrs.Priority,
@@ -620,7 +632,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 	// Issue comments record beside the declared emit and post in the SAME
 	// transaction (DKT-4272), each keyed by its artifact so none posts twice.
 	for _, comment := range opts.Comments {
-		artifactID, err := db.InsertArtifactTx(tx, db.Artifact{
+		artifactID, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 			RunID: step.RunID, StepID: step.ID, Kind: IssueCommentArtifactKind,
 			Body:   string(comment),
 			SHA256: workflow.SHA256(comment),
@@ -645,19 +657,19 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		if err != nil {
 			return err
 		}
-		if err := db.SetStepMetadataTx(tx, step.ID, merged, opts.NowMS); err != nil {
+		if err := store.TxOn(tx).SetStepMetadataTx(step.ID, merged, opts.NowMS); err != nil {
 			return err
 		}
 	}
 
 	// ---- THE HINGE: the token retires as the artifact records. -------------
-	if err := db.RetireStepTokenTx(tx, step.ID); err != nil {
+	if err := store.TxOn(tx).RetireStepTokenTx(step.ID); err != nil {
 		return err
 	}
-	if err := db.SetStepStatusTx(tx, step.ID, db.StepGated, opts.NowMS, opts.NowMS); err != nil {
+	if err := store.TxOn(tx).SetStepStatusTx(step.ID, store.StepGated, opts.NowMS, opts.NowMS); err != nil {
 		return err
 	}
-	if err := db.AdvanceSagaTx(tx, step.ID, "", db.SagaRecorded, opts.NowMS); err != nil {
+	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, "", store.SagaRecorded, opts.NowMS); err != nil {
 		return err
 	}
 	if err := recordEvent(tx, eventRecord{
@@ -681,7 +693,7 @@ func (e *Engine) stageZero(conn *sql.DB, step *db.Step, opts CompleteOptions) er
 		return err
 	}
 
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // gapTitle derives the materialized issue's title from a gap body: the first
@@ -845,34 +857,27 @@ func parseGapLabels(value string, seen []string) []string {
 // it says (the genericity line). What the engine can know structurally is
 // that a worker who recorded nothing but gaps produced nothing for the
 // pipeline to consume.
-func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, error) {
+func gapOnlyCompletion(conn store.LegacyDB, step *store.Step, spec *workflow.Step) (bool, error) {
 	kind := workflow.ArtifactKind(spec)
 	if kind == "" {
 		return false, nil
 	}
 
-	var gaps int
-	if err := conn.QueryRow(
-		`SELECT COUNT(*) FROM artifacts WHERE step_id = ? AND kind = ?`,
-		step.ID, GapArtifactKind,
-	).Scan(&gaps); err != nil {
-		return false, fmt.Errorf("counting gap artifacts: %w", err)
+	st := store.StoreOn(conn)
+	gaps, err := st.StepArtifactCount(step.ID, GapArtifactKind)
+	if err != nil {
+		return false, err
 	}
 	if gaps == 0 {
 		return false, nil
 	}
 
-	var body string
-	err := conn.QueryRow(
-		`SELECT body FROM artifacts WHERE step_id = ? AND kind = ?
-		  ORDER BY id DESC LIMIT 1`,
-		step.ID, kind,
-	).Scan(&body)
-	if errors.Is(err, sql.ErrNoRows) {
-		return true, nil
-	}
+	body, found, err := st.NewestStepArtifactBody(step.ID, kind)
 	if err != nil {
-		return false, fmt.Errorf("reading the declared emit: %w", err)
+		return false, err
+	}
+	if !found {
+		return true, nil
 	}
 	return strings.TrimSpace(body) == "", nil
 }
@@ -894,29 +899,26 @@ func gapOnlyCompletion(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, 
 // blocker must not park a retry that recorded none. A step that declares no
 // emit, or declares the gap kind itself, has no separate candidate to bound
 // the read, and every gap counts.
-func acBlockingGap(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, error) {
-	query := `SELECT body FROM artifacts WHERE step_id = ? AND kind = ?`
-	args := []any{step.ID, GapArtifactKind}
-	if kind := workflow.ArtifactKind(spec); kind != "" && kind != GapArtifactKind {
-		query += ` AND id > COALESCE(
-			(SELECT MAX(id) FROM artifacts WHERE step_id = ? AND kind = ?), 0)`
-		args = append(args, step.ID, kind)
-	}
-	rows, err := conn.Query(query, args...)
+func acBlockingGap(conn store.LegacyDB, step *store.Step, spec *workflow.Step) (bool, error) {
+	artifacts, err := store.StoreOn(conn).ListStepArtifacts(step.ID)
 	if err != nil {
 		return false, fmt.Errorf("reading gap artifacts: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var body string
-		if err := rows.Scan(&body); err != nil {
-			return false, fmt.Errorf("reading a gap artifact: %w", err)
+	latestCandidate := 0
+	if kind := workflow.ArtifactKind(spec); kind != "" && kind != GapArtifactKind {
+		for _, a := range artifacts {
+			if a.Kind == kind {
+				latestCandidate = max(latestCandidate, a.ID)
+			}
 		}
-		if parseGapHeader([]byte(body)).ACBlocking {
+	}
+	for _, a := range artifacts {
+		if a.Kind == GapArtifactKind && a.ID > latestCandidate &&
+			parseGapHeader([]byte(a.Body)).ACBlocking {
 			return true, nil
 		}
 	}
-	return false, rows.Err()
+	return false, nil
 }
 
 // ResumeSaga advances a step's saga from its recorded resume point, to
@@ -926,7 +928,7 @@ func acBlockingGap(conn *sql.DB, step *db.Step, spec *workflow.Step) (bool, erro
 // expected `saga_stage`, so two concurrent engine invocations resuming the same
 // saga produce exactly one advance; the loser matches zero rows, re-reads, and
 // either finds the work done or advances what is now current.
-func (e *Engine) ResumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
+func (e *Engine) ResumeSaga(conn store.LegacyDB, stepID int, nowMS int64) error {
 	// A detached run is advancing this step: a second resumer would read its
 	// started-but-unrecorded gate as an interrupted one.
 	if sagaHeldElsewhere(stepID) {
@@ -937,7 +939,7 @@ func (e *Engine) ResumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 
 // resumeSaga is ResumeSaga without the detached-run probe — the detached run's
 // own entry, which holds the lock it would otherwise find.
-func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
+func (e *Engine) resumeSaga(conn store.LegacyDB, stepID int, nowMS int64) error {
 	// A bounded loop rather than `for {}`: the saga has a finite stage count
 	// (one per gate, plus routing), and a runaway here would spin against the
 	// database. The bound is generous — no definition has thousands of gates —
@@ -953,7 +955,7 @@ func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 	trees := &gateTreeCache{}
 	defer trees.release()
 	for range maxStages {
-		step, err := db.GetStep(conn, stepID)
+		step, err := store.StoreOn(conn).GetStep(stepID)
 		if err != nil {
 			return err
 		}
@@ -971,7 +973,7 @@ func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 
 		moved, err := e.advanceOneWith(conn, step, nowMS, trees)
 		if err != nil {
-			if errors.Is(err, db.ErrSagaStageMoved) {
+			if errors.Is(err, store.ErrSagaStageMoved) {
 				// Lost the race to a concurrent resumer. Re-read and continue:
 				// either the saga is finished or the next stage is ours.
 				continue
@@ -989,14 +991,14 @@ func (e *Engine) resumeSaga(conn *sql.DB, stepID int, nowMS int64) error {
 
 // advanceOne runs exactly one stage. It reports whether it advanced, so the
 // caller's loop terminates on a saga that has nothing left to do.
-func (e *Engine) advanceOne(conn *sql.DB, step *db.Step, nowMS int64) (bool, error) {
+func (e *Engine) advanceOne(conn store.LegacyDB, step *store.Step, nowMS int64) (bool, error) {
 	return e.advanceOneWith(conn, step, nowMS, nil)
 }
 
 // advanceOneWith is advanceOne with the checkout cache its gate stages share;
 // nil gives every gate stage its own checkout.
 func (e *Engine) advanceOneWith(
-	conn *sql.DB, step *db.Step, nowMS int64, trees *gateTreeCache,
+	conn store.LegacyDB, step *store.Step, nowMS int64, trees *gateTreeCache,
 ) (bool, error) {
 	defs, err := StepDefinitions(conn, step.RunID)
 	if err != nil {
@@ -1018,7 +1020,7 @@ func (e *Engine) advanceOneWith(
 	// `held` is "NO ADVANCE" until the question is answered. Every later
 	// `next`/`claim`/`complete` invocation therefore costs one read and changes
 	// nothing, rather than spinning against the database.
-	if step.SagaStage == db.SagaHeld {
+	if step.SagaStage == store.SagaHeld {
 		resolved, _, err := heldDecision(conn, step)
 		if err != nil {
 			return false, err
@@ -1053,7 +1055,7 @@ func (e *Engine) advanceOneWith(
 			return true, e.resolveInterruptedGate(conn, step, *gate, next, nowMS)
 		}
 		return true, e.runGateStageWith(conn, step, *gate, next, nowMS, trees)
-	case next == db.SagaRouting:
+	case next == store.SagaRouting:
 		return true, e.enterRouting(conn, step, nowMS)
 	default:
 		return true, e.runRoutingStage(conn, step, spec, defs, nowMS)
@@ -1065,16 +1067,16 @@ func (e *Engine) advanceOneWith(
 // The gate ORDER is the definition's declared order, and `pre` gates are
 // excluded: a `pre` gate runs at CLAIM with its results in the
 // context bundle, not in sequence inside `complete`.
-func nextSagaStage(step *db.Step, spec *workflow.Step) (stage string, gate *workflow.Gate) {
+func nextSagaStage(step *store.Step, spec *workflow.Step) (stage string, gate *workflow.Gate) {
 	gates := completionGates(spec)
 
 	switch step.SagaStage {
-	case db.SagaRecorded:
+	case store.SagaRecorded:
 		if len(gates) > 0 {
-			return db.SagaGatePrefix + gates[0].Name, &gates[0]
+			return store.SagaGatePrefix + gates[0].Name, &gates[0]
 		}
-		return db.SagaRouting, nil
-	case db.SagaRouting, db.SagaHeld:
+		return store.SagaRouting, nil
+	case store.SagaRouting, store.SagaHeld:
 		// Routing is the last stage; the next state is complete. `held` never
 		// reaches here — advanceOne handles it before this is consulted — and is
 		// listed so a future reader does not have to prove that it cannot.
@@ -1082,21 +1084,21 @@ func nextSagaStage(step *db.Step, spec *workflow.Step) (stage string, gate *work
 	}
 
 	// Mid-gate: find the gate just recorded and take the one after it.
-	if name, ok := strings.CutPrefix(step.SagaStage, db.SagaGatePrefix); ok {
+	if name, ok := strings.CutPrefix(step.SagaStage, store.SagaGatePrefix); ok {
 		for i, g := range gates {
 			if g.Name != name {
 				continue
 			}
 			if i+1 < len(gates) {
-				return db.SagaGatePrefix + gates[i+1].Name, &gates[i+1]
+				return store.SagaGatePrefix + gates[i+1].Name, &gates[i+1]
 			}
-			return db.SagaRouting, nil
+			return store.SagaRouting, nil
 		}
 	}
 	// An unrecognized stage — a definition edited under a live saga. Routing is
 	// the safe destination: it resolves the step rather than leaving it wedged
 	// in a stage nothing will ever advance.
-	return db.SagaRouting, nil
+	return store.SagaRouting, nil
 }
 
 // completionGates returns the gates that run inside `complete`, in declared
@@ -1118,7 +1120,7 @@ func completionGates(spec *workflow.Step) []workflow.Gate {
 // the stage commits its `gate-started` event, CLOSES THE TRANSACTION, invokes
 // the runner, then opens a NEW transaction to record the result.
 func (e *Engine) runGateStage(
-	conn *sql.DB, step *db.Step, gate workflow.Gate, stage string, nowMS int64,
+	conn store.LegacyDB, step *store.Step, gate workflow.Gate, stage string, nowMS int64,
 ) error {
 	return e.runGateStageWith(conn, step, gate, stage, nowMS, nil)
 }
@@ -1127,7 +1129,7 @@ func (e *Engine) runGateStage(
 // one resume share; nil gives this stage its own checkout, released when the
 // stage settles.
 func (e *Engine) runGateStageWith(
-	conn *sql.DB, step *db.Step, gate workflow.Gate, stage string, nowMS int64,
+	conn store.LegacyDB, step *store.Step, gate workflow.Gate, stage string, nowMS int64,
 	trees *gateTreeCache,
 ) error {
 	// ---- Transaction A: announce the spawn. --------------------------------
@@ -1149,7 +1151,7 @@ func (e *Engine) runGateStageWith(
 		txA.Rollback()
 		return err
 	}
-	if err := txA.Commit(); err != nil {
+	if err := commitWrite(txA); err != nil {
 		return fmt.Errorf("committing the gate announcement: %w", err)
 	}
 
@@ -1210,9 +1212,10 @@ func (e *Engine) runGateStageWith(
 	// another. The writer's worktree stays a containment root (sc.Worktree).
 	//
 	// Once a record is honored there is NO fallback to the live worktree: a
-	// sha the object database no longer holds records a `skipped` row (the
-	// gate could not measure), never a measurement of whatever the worktree
-	// holds now.
+	// sha the object database no longer holds, or one whose checkout fails,
+	// records a `skipped` row (the gate could not measure) that quotes the
+	// checkout's error output when there is any, never a measurement of
+	// whatever the worktree holds now.
 	sc.Worktree = step.WorkRoot
 	var rows []GateResultRow
 	skipRow := func(why string) []GateResultRow {
@@ -1245,10 +1248,14 @@ func (e *Engine) runGateStageWith(
 				tree, releaseTree := trees.checkout(conn, step.RunID, rec.Head)
 				defer releaseTree()
 				if tree.Dir == "" {
+					why := ""
+					if tree.Failure != "" {
+						why = ": " + quoteCheckoutFailure(tree.Failure)
+					}
 					rows, measured = skipRow(fmt.Sprintf(
-						"the commit %.12s this step recorded cannot be checked out, so the "+
+						"the commit %.12s this step recorded cannot be checked out%s, so the "+
 							"gate could not measure it; not measuring the worktree in its place",
-						rec.Head)), true
+						rec.Head, why)), true
 				} else {
 					sc.WorkRoot, sc.CacheRoot = tree.Dir, tree.Cache
 					sc.Base = rec.Base
@@ -1285,24 +1292,24 @@ func (e *Engine) runGateStageWith(
 	if err := recordGateEvents(txB, step, gate.Name, rows); err != nil {
 		return err
 	}
-	if err := db.AdvanceSagaTx(txB, step.ID, step.SagaStage, stage, nowMS); err != nil {
+	if err := store.TxOn(txB).AdvanceSagaTx(step.ID, step.SagaStage, stage, nowMS); err != nil {
 		return err
 	}
-	return txB.Commit()
+	return commitWrite(txB)
 }
 
 // enterRouting moves a step from its last gate to the routing stage.
-func (e *Engine) enterRouting(conn *sql.DB, step *db.Step, nowMS int64) error {
+func (e *Engine) enterRouting(conn store.LegacyDB, step *store.Step, nowMS int64) error {
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("entering routing: %w", err)
 	}
 	defer tx.Rollback()
 
-	if err := db.AdvanceSagaTx(tx, step.ID, step.SagaStage, db.SagaRouting, nowMS); err != nil {
+	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, step.SagaStage, store.SagaRouting, nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // runRoutingStage is stage N+1: ONE TRANSACTION SPANNING step, issue mirror,
@@ -1312,7 +1319,7 @@ func (e *Engine) enterRouting(conn *sql.DB, step *db.Step, nowMS int64) error {
 // way — and a partial commit is a run whose step says `done` while its issue
 // says otherwise, which no later pass can reconcile without guessing.
 func (e *Engine) runRoutingStage(
-	conn *sql.DB, step *db.Step, spec *workflow.Step,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step,
 	defs map[int]*workflow.Definition, nowMS int64,
 ) error {
 	// ---- Outside the transaction: the two subprocess-shaped computations. --
@@ -1510,7 +1517,7 @@ func (e *Engine) runRoutingStage(
 	// `action_results` rows are already recorded, and recomputing would produce
 	// a second result — possibly a second hold — for a question an operator has
 	// just answered. This is the other half of "evaluated exactly once".
-	resumedFromHold := step.SagaStage == db.SagaHeld
+	resumedFromHold := step.SagaStage == store.SagaHeld
 
 	// The action seam, also outside every transaction: the real runner may spawn
 	// a user-trusted command, and "no subprocess ever executes inside a
@@ -1585,7 +1592,7 @@ func (e *Engine) runRoutingStage(
 	var (
 		routing string
 		reason  string
-		class   db.ParkClass
+		class   store.ParkClass
 		cover   *batchCover
 	)
 	switch {
@@ -1596,7 +1603,7 @@ func (e *Engine) runRoutingStage(
 		// spawn a fix step exactly as unimplementable as this one was.
 		routing = workflow.OnFailWaitingHuman
 		reason = "the step recorded only gap artifacts; operator disposes"
-		class = db.ParkClassGapOnly
+		class = store.ParkClassGapOnly
 	case blockingGap:
 		// DKT-4279: the step recorded a candidate AND a gap it marked
 		// `AC-Blocking`. Its own record says an acceptance criterion cannot be
@@ -1610,7 +1617,7 @@ func (e *Engine) runRoutingStage(
 		reason = "the step recorded a candidate and a gap it marked AC-Blocking; " +
 			"its own record says an acceptance criterion cannot be met, so no " +
 			"review is offered until the operator disposes"
-		class = db.ParkClassPartialWithGap
+		class = store.ParkClassPartialWithGap
 	case diffRefused != "":
 		// The commit the gates measured cannot be read back for the diff, so no
 		// diff is recorded and nothing downstream would review the change. Like
@@ -1619,7 +1626,7 @@ func (e *Engine) runRoutingStage(
 		// judgment of the work, so it must not route on `on_fail`.
 		routing = workflow.OnFailWaitingHuman
 		reason = fmt.Sprintf("%s (the gates' verdict was %q, so a failing or skipped gate is not cleared by this park); operator disposes", diffRefused, verdict)
-		class = db.ParkClassGateSkipped
+		class = store.ParkClassGateSkipped
 	case len(unmeasured) > 0:
 		// A GATE THAT MEASURED NOTHING PARKS (DKT-254). It is decided before
 		// the fail case because `skipped` is not-pass and would otherwise be
@@ -1647,7 +1654,7 @@ func (e *Engine) runRoutingStage(
 			"gate(s) %s measured nothing — the tree under review could not be "+
 				"bound, so no verdict about the change was reached; operator disposes",
 			strings.Join(unmeasured, ", "))
-		class = db.ParkClassGateSkipped
+		class = store.ParkClassGateSkipped
 	case verdict == VerdictFail:
 		// A failed gate routes per `on_fail`, not through the threshold: the
 		// threshold asks a question about a RESULT, and a step whose gate
@@ -1667,9 +1674,9 @@ func (e *Engine) runRoutingStage(
 		// move is to restore a trust entry, not to read gate output. An
 		// override the run's operator already granted does not change WHY the
 		// step parked, so a blocked cover keeps the gate's own class.
-		class = db.ParkClassGateFailed
+		class = store.ParkClassGateFailed
 		if unmatched {
-			class = db.ParkClassGateUnmatched
+			class = store.ParkClassGateUnmatched
 		}
 		if cover, err = batchOverrideCover(conn, step, spec); err != nil {
 			return err
@@ -1688,7 +1695,7 @@ func (e *Engine) runRoutingStage(
 		// per the step's effective `on_fail` — never engine errors that abort
 		// the saga. A workflow authoring mistake must not wedge a run.
 		routing, reason, class = spec.EffectiveOnFail(), action.Reason,
-			db.ParkClassActionFailed
+			store.ParkClassActionFailed
 	case holding:
 		// Deferred. Decided inside the transaction, once the lineage is known.
 	default:
@@ -1705,7 +1712,7 @@ func (e *Engine) runRoutingStage(
 			if !approved {
 				routing = spec.EffectiveOnFail()
 				reason = "the held clusters were rejected by an operator"
-				class = db.ParkClassHeldRejected
+				class = store.ParkClassHeldRejected
 				break
 			}
 		}
@@ -1713,7 +1720,7 @@ func (e *Engine) runRoutingStage(
 		if err != nil {
 			return err
 		}
-		class = db.ParkClassThresholdRouted
+		class = store.ParkClassThresholdRouted
 	}
 
 	// Who decides a hold, read BEFORE the transaction opens: it is a config
@@ -1768,7 +1775,7 @@ func (e *Engine) runRoutingStage(
 		if err != nil {
 			return err
 		}
-		class = db.ParkClassThresholdRouted
+		class = store.ParkClassThresholdRouted
 	}
 
 	status := statusForRouting(routing)
@@ -1811,7 +1818,7 @@ func (e *Engine) runRoutingStage(
 				"chain anyway, `--as retry` redoes the round",
 			step.Ordinal, model.FormatID(step.IssueID), unchangedHandBack)
 		status = statusForRouting(routing)
-		class = db.ParkClassUnchangedHandBack
+		class = store.ParkClassUnchangedHandBack
 	}
 
 	// A PASS THAT WOULD LEAVE DECLARED-FLOOR WORK STANDING PARKS INSTEAD
@@ -1845,7 +1852,7 @@ func (e *Engine) runRoutingStage(
 				floor.Standing, step.Instance, spec.PassFloor.Field,
 				spec.PassFloor.At)
 			status = statusForRouting(routing)
-			class = db.ParkClassPassFloor
+			class = store.ParkClassPassFloor
 		}
 	}
 
@@ -1870,7 +1877,7 @@ func (e *Engine) runRoutingStage(
 	}
 
 	if wantsDiff {
-		if _, err := db.InsertArtifactTx(tx, db.Artifact{
+		if _, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 			RunID: step.RunID, StepID: step.ID, Kind: ArtifactKindIssueDiff,
 			Body: diffBody, Payload: diffPayload,
 			SHA256: workflow.SHA256([]byte(diffBody)),
@@ -1883,8 +1890,8 @@ func (e *Engine) runRoutingStage(
 	// superseded lineage's step still finished, still decided something, and
 	// the ledger still attributes it — what a stale lineage loses is its
 	// DOWNSTREAM EFFECT, not its history.
-	if err := db.SetStepRoutingTx(
-		tx, step.ID, routing, reason, status, class, nowMS); err != nil {
+	if err := store.TxOn(tx).SetStepRoutingTx(
+		step.ID, routing, reason, status, class, nowMS); err != nil {
 		return err
 	}
 	// The event carries the reason alongside the routing (DKT-1898): a feed
@@ -1903,7 +1910,7 @@ func (e *Engine) runRoutingStage(
 	// routing is recorded for the ledger too, and an override the ledger carries
 	// must name its authority either way.
 	if cover != nil {
-		if err := db.CoverGateOverrideGrantsTx(tx, cover.grantIDs); err != nil {
+		if err := store.TxOn(tx).CoverGateOverrideGrantsTx(cover.grantIDs); err != nil {
 			return err
 		}
 		if err := recordEvent(tx, eventRecord{
@@ -1949,15 +1956,15 @@ func (e *Engine) runRoutingStage(
 // `saga_stage = 'routing'` forever, resumed by every later engine invocation
 // and re-recording its routing each time. "Inert" means no downstream effect,
 // not unfinished.
-func finishRoutingStage(tx *sql.Tx, step *db.Step, nowMS int64) error {
+func finishRoutingStage(tx store.LegacyTx, step *store.Step, nowMS int64) error {
 	// The CAS guard is the step's OWN current stage, not the literal `routing`.
 	// A step resuming from `held` reaches here with `saga_stage = 'held'`, and a
 	// guard that named `routing` would match zero rows and leave the saga
 	// wedged in a stage every later invocation would re-run.
-	if err := db.AdvanceSagaTx(tx, step.ID, step.SagaStage, "", nowMS); err != nil {
+	if err := store.TxOn(tx).AdvanceSagaTx(step.ID, step.SagaStage, "", nowMS); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 // diffRefusalError is computeIssueDiff declining to read a recorded commit: the
@@ -1989,7 +1996,7 @@ func (e *diffRefusalError) Error() string { return e.msg }
 //
 // With no DiffFn wired there is nothing to measure: both halves come back
 // empty and the caller records that as the truthful first answer.
-func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool) (body, payload string, err error) {
+func (e *Engine) computeIssueDiff(conn store.LegacyDB, step *store.Step, useRecorded bool) (body, payload string, err error) {
 	scope, err := snapshotScope(conn, step.RunID, step.IssueID)
 	if err != nil {
 		return "", "", err
@@ -2082,7 +2089,7 @@ func (e *Engine) computeIssueDiff(conn *sql.DB, step *db.Step, useRecorded bool)
 // isExecutorStep reports whether a step's completion recomputes the issue
 // diff. Fanout siblings and `loop = true` instances count: they are executor
 // steps that change the tree.
-func isExecutorStep(step *db.Step) bool {
+func isExecutorStep(step *store.Step) bool {
 	return step.Kind == workflow.ClassExecutor
 }
 
@@ -2090,29 +2097,29 @@ func isExecutorStep(step *db.Step) bool {
 func statusForRouting(routing string) string {
 	switch routing {
 	case workflow.OnFailWaitingHuman:
-		return db.StepWaitingHuman
+		return store.StepWaitingHuman
 	case workflow.OnFailSkip:
-		return db.StepSkipped
+		return store.StepSkipped
 	case workflow.OnFailAbandonIssue:
-		return db.StepFailedRouted
+		return store.StepFailedRouted
 	case RoutingPass:
-		return db.StepDone
+		return store.StepDone
 	case workflow.OnFailFixLoop:
 		// The loop ENTRY is applyFixLoop's. The step itself is done — its
 		// work recorded and its routing decided — and what the loop adds is
 		// the instantiation the routing calls for, not a different status here.
-		return db.StepDone
+		return store.StepDone
 	}
 	// A step-name routing interposes that step as a successor gate; the
 	// routing step itself is done.
-	return db.StepDone
+	return store.StepDone
 }
 
 // routingRecord is the stored routing string, for the readers that reconstruct
-// one rather than write it. Every WRITE goes through db.SetStepRoutingTx, which
+// one rather than write it. Every WRITE goes through store.SetStepRoutingTx, which
 // glues the same two halves and records a park's reason separately.
 func routingRecord(routing, reason string) string {
-	return db.RoutingRecord(routing, reason)
+	return store.RoutingRecord(routing, reason)
 }
 
 // gateVerdict reads the step's recorded results and reports the overall
@@ -2132,8 +2139,8 @@ func routingRecord(routing, reason string) string {
 // buys is that the CALLER can tell "measured and failed" from "measured
 // nothing" without re-reading the rows, which is what lets the two route
 // differently.
-func gateVerdict(conn *sql.DB, stepID int) (string, []string, bool, error) {
-	rows, err := db.GateResultsForStep(conn, stepID)
+func gateVerdict(conn store.LegacyDB, stepID int) (string, []string, bool, error) {
+	rows, err := store.StoreOn(conn).GateResultsForStep(stepID)
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -2152,18 +2159,18 @@ func gateVerdict(conn *sql.DB, stepID int) (string, []string, bool, error) {
 // them to read output that does not exist. It is reported as a flag rather than
 // a name list because nothing routes on WHICH entry was missing; the reason
 // text, built from the same rows, already names them.
-func verdictOverRows(rows []db.GateResultRow) (string, []string, bool) {
+func verdictOverRows(rows []store.GateResultRow) (string, []string, bool) {
 	verdict := VerdictPass
 	var unmeasured []string
 	unmatched := false
 	for _, r := range routingGateRows(rows) {
-		if r.Verdict != db.GateVerdictPass {
+		if r.Verdict != store.GateVerdictPass {
 			verdict = VerdictFail
 		}
-		if r.Verdict == db.GateVerdictSkipped && !slices.Contains(unmeasured, r.Gate) {
+		if r.Verdict == store.GateVerdictSkipped && !slices.Contains(unmeasured, r.Gate) {
 			unmeasured = append(unmeasured, r.Gate)
 		}
-		if r.Verdict == db.GateVerdictUnmatched {
+		if r.Verdict == store.GateVerdictUnmatched {
 			unmatched = true
 		}
 	}
@@ -2196,8 +2203,8 @@ func verdictOverRows(rows []db.GateResultRow) (string, []string, bool) {
 // judgments of it. The routing verdict, FailedGates, and the batch override
 // cover all read this one reduction, so the gates a caller REPORTS or COVERS
 // are, by construction, the rows the saga ROUTED on (DKT-982).
-func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
-	byGate := make(map[string][]db.GateResultRow)
+func routingGateRows(rows []store.GateResultRow) []store.GateResultRow {
+	byGate := make(map[string][]store.GateResultRow)
 	for _, r := range rows {
 		if r.Pre {
 			continue // a pre-gate row is an input, not a verdict
@@ -2205,13 +2212,13 @@ func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
 		byGate[r.Gate] = append(byGate[r.Gate], r)
 	}
 
-	var routing []db.GateResultRow
+	var routing []store.GateResultRow
 	for _, gateRows := range byGate {
-		slices.SortStableFunc(gateRows, func(a, b db.GateResultRow) int {
+		slices.SortStableFunc(gateRows, func(a, b store.GateResultRow) int {
 			return a.Ordinal - b.Ordinal
 		})
 		latest := gateRows[len(gateRows)-1].CreatedAtMS
-		var execution []db.GateResultRow
+		var execution []store.GateResultRow
 		for _, r := range gateRows {
 			if r.CreatedAtMS == latest {
 				execution = append(execution, r)
@@ -2221,7 +2228,7 @@ func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
 	}
 	// Sorted so the reason a step parks with is the same sentence on every run
 	// over the same rows — map range order is not.
-	slices.SortFunc(routing, func(a, b db.GateResultRow) int {
+	slices.SortFunc(routing, func(a, b store.GateResultRow) int {
 		if c := strings.Compare(a.Gate, b.Gate); c != 0 {
 			return c
 		}
@@ -2233,11 +2240,11 @@ func routingGateRows(rows []db.GateResultRow) []db.GateResultRow {
 // unsupersededAttempts drops, from one execution of one gate in ordinal order,
 // every attempt a flaky re-run superseded: a `fail` directly followed by a row
 // running the same non-nil argv.
-func unsupersededAttempts(execution []db.GateResultRow) []db.GateResultRow {
-	var kept []db.GateResultRow
+func unsupersededAttempts(execution []store.GateResultRow) []store.GateResultRow {
+	var kept []store.GateResultRow
 	for i, r := range execution {
 		retried := i+1 < len(execution) &&
-			r.Verdict == db.GateVerdictFail && r.Argv != nil &&
+			r.Verdict == store.GateVerdictFail && r.Argv != nil &&
 			execution[i+1].Argv != nil && slices.Equal(r.Argv, execution[i+1].Argv)
 		if !retried {
 			kept = append(kept, r)
@@ -2250,7 +2257,7 @@ func unsupersededAttempts(execution []db.GateResultRow) []db.GateResultRow {
 // shape a caller needs to SAY SO: the name, the verdict word, and the exit code
 // the process left behind.
 //
-// Exit is a pointer for db.GateResultRow's reason exactly — an `unmatched` gate
+// Exit is a pointer for store.GateResultRow's reason exactly — an `unmatched` gate
 // never ran, and rendering `exit 0` for a process that does not exist reads as
 // a pass.
 type FailedGate struct {
@@ -2262,7 +2269,12 @@ type FailedGate struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// FailedGates returns the completion gates that did not pass, sorted by name.
+// FailedGates is FailedGatesStore on store.StoreOn(conn).
+func FailedGates(conn store.LegacyDB, stepID int) ([]FailedGate, error) {
+	return FailedGatesStore(store.StoreOn(conn), stepID)
+}
+
+// FailedGatesStore returns the completion gates that did not pass, sorted by name.
 //
 // It is the READ SIDE of the routing decision (DKT-982): a step whose gate
 // failed parks, and until this existed the verb that parked it could name
@@ -2271,8 +2283,12 @@ type FailedGate struct {
 // print time; it had no accessor to say it with.
 //
 // Empty means every completion gate passed, or none ran.
-func FailedGates(conn *sql.DB, stepID int) ([]FailedGate, error) {
-	rows, err := db.GateResultsForStep(conn, stepID)
+func FailedGatesStore(storage store.Store, stepID int) ([]FailedGate, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := store.StoreOn(conn).GateResultsForStep(stepID)
 	if err != nil {
 		return nil, err
 	}
@@ -2281,13 +2297,13 @@ func FailedGates(conn *sql.DB, stepID int) ([]FailedGate, error) {
 
 // failedGatesOverRows is FailedGates over rows already read — pure, so a test
 // can weigh the reduction without a store.
-func failedGatesOverRows(rows []db.GateResultRow) []FailedGate {
+func failedGatesOverRows(rows []store.GateResultRow) []FailedGate {
 	failed := []FailedGate{}
 	for _, r := range routingGateRows(rows) {
 		// Not-pass, in the same sense verdictOverRows uses: `fail`, `unmatched`,
 		// and `skipped` all route as a failure, and a report that named only the
 		// first would be silent about the two the routing acted on.
-		if r.Verdict == db.GateVerdictPass {
+		if r.Verdict == store.GateVerdictPass {
 			continue
 		}
 		entry := FailedGate{Gate: r.Gate, Verdict: r.Verdict, Exit: r.Exit, Reason: r.Reason}
@@ -2310,9 +2326,9 @@ func failedGatesOverRows(rows []db.GateResultRow) []FailedGate {
 // carries several: lower ranks first.
 func parkPrecedence(verdict string) int {
 	switch verdict {
-	case db.GateVerdictSkipped:
+	case store.GateVerdictSkipped:
 		return 0
-	case db.GateVerdictUnmatched:
+	case store.GateVerdictUnmatched:
 		return 1
 	default:
 		return 2
@@ -2359,15 +2375,15 @@ type gateExecutor interface {
 // re-run does not collide with the interrupted attempt's row and the
 // UNIQUE(step_id, gate, ordinal) index holds.
 func recordGateRows(
-	tx *sql.Tx, step *db.Step, gate string, rows []GateResultRow, nowMS int64,
+	tx store.LegacyTx, step *store.Step, gate string, rows []GateResultRow, nowMS int64,
 ) error {
-	base, err := nextGateOrdinalTx(tx, step.ID, gate)
+	base, err := store.TxOn(tx).NextGateOrdinalTx(step.ID, gate)
 	if err != nil {
 		return err
 	}
 
 	for i, r := range rows {
-		if err := db.InsertGateResultTx(tx, db.GateResultRow{
+		if err := store.TxOn(tx).InsertGateResultTx(store.GateResultRow{
 			RunID: step.RunID, StepID: step.ID, Gate: r.Gate,
 			Ordinal: base + i, Argv: r.Argv, Exit: r.Exit,
 			DurationMS: r.DurationMS, Output: r.Output, Truncated: r.Truncated,
@@ -2393,9 +2409,9 @@ func recordGateRows(
 		// spawn — a cache hit that could authorize would make `trust rm` take
 		// effect only after the cache cleared, which is a revocation failure.
 		if r.ArgvSHA256 != "" {
-			if err := db.InsertTrustCacheTx(tx, step.RunID, db.TrustKindGate,
+			if err := store.TxOn(tx).InsertTrustCacheTx(step.RunID, store.TrustKindGate,
 				r.Gate, r.ArgvSHA256,
-				r.TrustEntry, r.Verdict != db.GateVerdictUnmatched, r.Prefix,
+				r.TrustEntry, r.Verdict != store.GateVerdictUnmatched, r.Prefix,
 				nowMS+int64(i)); err != nil {
 				return err
 			}
@@ -2422,7 +2438,7 @@ func recordGateRows(
 // only shape in which "exactly as the saga's" cannot quietly stop being true
 // again.
 func recordGateEvents(
-	tx *sql.Tx, step *db.Step, gate string, rows []GateResultRow,
+	tx store.LegacyTx, step *store.Step, gate string, rows []GateResultRow,
 ) error {
 	for _, r := range rows {
 		kind := ""
@@ -2487,9 +2503,9 @@ func recordGateEvents(
 // `gate_results` (`step gates --json`) and `run report` already render as
 // `stub`, and DKT-983 asks this event to say what those surfaces already say.
 func gateOutcome(rows []GateResultRow) (verdict string, exit *int, pre, stub bool) {
-	execution := make([]db.GateResultRow, len(rows))
+	execution := make([]store.GateResultRow, len(rows))
 	for i, r := range rows {
-		execution[i] = db.GateResultRow{
+		execution[i] = store.GateResultRow{
 			Gate: r.Gate, Ordinal: r.Ordinal, Argv: r.Argv, Exit: r.Exit,
 			Verdict: r.Verdict, Pre: r.Pre, StubEntry: r.StubEntry,
 		}
@@ -2578,21 +2594,6 @@ func gateEventData(gate, verdict string, exit *int, pre, stub bool) (string, err
 	return string(out), nil
 }
 
-// nextGateOrdinalTx is db.NextGateOrdinal inside a transaction.
-func nextGateOrdinalTx(tx *sql.Tx, stepID int, gate string) (int, error) {
-	var next sql.NullInt64
-	err := tx.QueryRow(
-		`SELECT MAX(ordinal) FROM gate_results WHERE step_id = ? AND gate = ?`,
-		stepID, gate).Scan(&next)
-	if err != nil {
-		return 0, fmt.Errorf("reading the gate ordinal: %w", err)
-	}
-	if !next.Valid {
-		return 0, nil
-	}
-	return int(next.Int64) + 1, nil
-}
-
 // stepPayloads returns the payload set a threshold aggregates over: the action
 // runner's result for an action step, or the recorded artifact's payload for
 // any other.
@@ -2606,30 +2607,23 @@ func nextGateOrdinalTx(tx *sql.Tx, stepID int, gate string) (int, error) {
 // cluster's resolution revision (it records under the same kind), so the
 // resumed-from-hold path is unchanged.
 func stepPayloads(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, action *ActionResult,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step, action *ActionResult,
 ) ([]map[string]any, error) {
 	if action != nil {
 		return parsePayload([]byte(action.Payload))
 	}
 
 	// A step with no declared kind records no declared emit; whatever its
-	// latest artifact is (there should be none) keeps the pre-DKT-101 read.
-	query, args := `SELECT payload FROM artifacts WHERE step_id = ?
-		 ORDER BY id DESC LIMIT 1`, []any{step.ID}
-	if kind := workflow.ArtifactKind(spec); kind != "" {
-		query, args = `SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
-			 ORDER BY id DESC LIMIT 1`, []any{step.ID, kind}
+	// latest artifact is (there should be none) keeps the pre-DKT-101 read,
+	// which an empty kind selects.
+	payload, found, err := store.StoreOn(conn).NewestStepPayload(step.ID, workflow.ArtifactKind(spec))
+	if err != nil {
+		return nil, err
 	}
-
-	var payload sql.NullString
-	err := conn.QueryRow(query, args...).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
+	if !found {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("reading the recorded payload: %w", err)
-	}
-	return parsePayload([]byte(payload.String))
+	return parsePayload([]byte(payload))
 }
 
 // inputPayloads is the builtin action's INPUT CHANNEL: the concatenated
@@ -2658,13 +2652,13 @@ func stepPayloads(
 // one — so an aggregate whose `inputs` name a mix gets the clusters from the
 // ones that have them. What it must not do is silently tolerate MALFORMED
 // bytes, and parsePayload still refuses those.
-func inputPayloads(conn *sql.DB, step *db.Step, nowMS int64) ([]map[string]any, error) {
+func inputPayloads(conn store.LegacyDB, step *store.Step, nowMS int64) ([]map[string]any, error) {
 	defs, err := StepDefinitions(conn, step.RunID)
 	if err != nil {
 		return nil, err
 	}
 
-	tx, err := beginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning the input read: %w", err)
 	}
@@ -2678,7 +2672,7 @@ func inputPayloads(conn *sql.DB, step *db.Step, nowMS int64) ([]map[string]any, 
 	}
 	fresh := sched.stepByID[step.ID]
 	if fresh == nil {
-		return nil, notFoundErr(db.ErrStepNotFound,
+		return nil, notFoundErr(store.ErrStepNotFound,
 			"step %s not found", model.FormatStepID(step.ID))
 	}
 	spec := materializedSpec(defs[fresh.WorkflowID], fresh, sched.holdTally)
@@ -2770,7 +2764,7 @@ func unwrapStubPayload(raw []byte) ([]map[string]any, bool) {
 // and can still run, which is a better outcome than wedging a routing stage over
 // a read.
 func (e *Engine) runAction(
-	conn *sql.DB, step *db.Step, spec *workflow.Step, order OrderResolver, nowMS int64,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step, order OrderResolver, nowMS int64,
 ) (*ActionResult, error) {
 	inputs, err := inputPayloads(conn, step, nowMS)
 	if err != nil {
@@ -2810,7 +2804,7 @@ func (e *Engine) runAction(
 // minutes is validated against the document its run agreed to rather than
 // whatever the registry holds when it finishes.
 func declaredPayloadValidator(
-	conn *sql.DB, step *db.Step, spec *workflow.Step,
+	conn store.LegacyDB, step *store.Step, spec *workflow.Step,
 ) func([]byte) error {
 	if spec.Payload == "" {
 		return nil
@@ -2831,7 +2825,7 @@ func declaredPayloadValidator(
 // It is the SAME assembler `step context` uses, called rather than reproduced:
 // two renderings of one bundle would drift, and a command written against the
 // documented shape would silently receive a different one.
-func actionContext(conn *sql.DB, step *db.Step, nowMS int64) []byte {
+func actionContext(conn store.LegacyDB, step *store.Step, nowMS int64) []byte {
 	bundle, err := ReadContext(conn, step.ID, nowMS)
 	if err != nil {
 		return nil
@@ -2851,18 +2845,18 @@ func actionContext(conn *sql.DB, step *db.Step, nowMS int64) []byte {
 // re-entered after a crash does not collide with the interrupted attempt's row
 // and the UNIQUE(step_id, action, ordinal) index holds.
 func recordActionRows(
-	tx *sql.Tx, step *db.Step, rows []ActionResultRow, nowMS int64,
+	tx store.LegacyTx, step *store.Step, rows []ActionResultRow, nowMS int64,
 ) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	base, err := db.NextActionOrdinalTx(tx, step.ID, rows[0].Action)
+	base, err := store.TxOn(tx).NextActionOrdinalTx(step.ID, rows[0].Action)
 	if err != nil {
 		return err
 	}
 
 	for i, r := range rows {
-		if err := db.InsertActionResultTx(tx, db.ActionResultRow{
+		if err := store.TxOn(tx).InsertActionResultTx(store.ActionResultRow{
 			RunID: step.RunID, StepID: step.ID, Action: r.Action,
 			Ordinal: base + i, Argv: r.Argv, Exit: r.Exit,
 			DurationMS: r.DurationMS, Output: r.Output, Truncated: r.Truncated,
@@ -2876,9 +2870,9 @@ func recordActionRows(
 		// authorization shortcut: every action consults the live store on every
 		// execution, for the revocation reason that rule gives.
 		if r.ArgvSHA256 != "" {
-			if err := db.InsertTrustCacheTx(tx, step.RunID, db.TrustKindAction,
+			if err := store.TxOn(tx).InsertTrustCacheTx(step.RunID, store.TrustKindAction,
 				r.Action, r.ArgvSHA256, r.TrustEntry,
-				r.Verdict != db.ActionVerdictUnmatched, r.Prefix,
+				r.Verdict != store.ActionVerdictUnmatched, r.Prefix,
 				nowMS+int64(i)); err != nil {
 				return err
 			}
@@ -2906,14 +2900,14 @@ func recordActionRows(
 // Called inside the caller's own transaction — "one transaction, or a crash
 // leaves a held payload with nobody able to resolve it" holds for both
 // callers, holding or not.
-func recordActionResult(tx *sql.Tx, step *db.Step, action *ActionResult, nowMS int64) error {
+func recordActionResult(tx store.LegacyTx, step *store.Step, action *ActionResult, nowMS int64) error {
 	if err := recordActionRows(tx, step, action.Results, nowMS); err != nil {
 		return err
 	}
 	if action.Failed {
 		return nil
 	}
-	_, err := db.InsertArtifactTx(tx, db.Artifact{
+	_, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: action.Kind,
 		Body: action.Body, Payload: action.Payload,
 		SHA256: artifactSHA256([]byte(action.Body), []byte(action.Payload)),
@@ -2924,22 +2918,18 @@ func recordActionResult(tx *sql.Tx, step *db.Step, action *ActionResult, nowMS i
 // snapshotScope reads an issue's SNAPSHOTTED scope — the scope the diff is
 // computed over, frozen at activation. Reading the live
 // scope here would make the recorded diff depend on a mid-run edit.
-func snapshotScope(conn *sql.DB, runID, issueID int) ([]string, error) {
-	var snapshot sql.NullString
-	err := conn.QueryRow(
-		`SELECT issue_snapshot FROM run_issues WHERE run_id = ? AND issue_id = ?`,
-		runID, issueID,
-	).Scan(&snapshot)
+func snapshotScope(conn store.LegacyDB, runID, issueID int) ([]string, error) {
+	snapshot, err := store.StoreOn(conn).RunIssueSnapshot(runID, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the issue snapshot: %w", err)
 	}
-	if snapshot.String == "" {
+	if snapshot == "" {
 		return nil, nil
 	}
 	var frozen struct {
 		Scope []string `json:"scope"`
 	}
-	if err := json.Unmarshal([]byte(snapshot.String), &frozen); err != nil {
+	if err := json.Unmarshal([]byte(snapshot), &frozen); err != nil {
 		return nil, fmt.Errorf("reading the snapshotted scope: %w", err)
 	}
 	return frozen.Scope, nil
@@ -3190,13 +3180,13 @@ func rawDiff(dir, base string, paths []string) (string, error) {
 // runExecRoot resolves the checkout `sharedCheckoutHead` should read HEAD
 // from — see GitDiff's doc for the DKT-11 rationale this exists to close one
 // level deeper: the RUN's own exec root, captured once at `run start`
-// (db.RunContext), never `resolvePaths().ExecRoot` (this invocation's own
+// (store.RunContext), never `resolvePaths().ExecRoot` (this invocation's own
 // cwd, which under `step record --worktree` is the worktree itself — the
 // same tree `dir` names). A run whose exec root was never recorded (started
 // before this field existed, or outside a checkout) falls back to the
 // invoking process's own exec root, the pre-fix behavior.
-func runExecRoot(conn *sql.DB, runID int) string {
-	run, err := db.GetRun(conn, runID)
+func runExecRoot(conn store.LegacyDB, runID int) string {
+	run, err := store.StoreOn(conn).GetRun(runID)
 	if err == nil && run.ExecRoot != "" {
 		return run.ExecRoot
 	}
@@ -3210,12 +3200,12 @@ func runExecRoot(conn *sql.DB, runID int) string {
 // pinned no gate script, and the invoker's tree is not its baseline. A pin
 // read that fails is an error, never an empty set, which would run every
 // script unchecked.
-func runGateScriptPins(conn *sql.DB, runID int) (string, map[string]string, error) {
-	run, err := db.GetRun(conn, runID)
+func runGateScriptPins(conn store.LegacyDB, runID int) (string, map[string]string, error) {
+	run, err := store.StoreOn(conn).GetRun(runID)
 	if err != nil {
 		return "", nil, fmt.Errorf("reading the run's exec root: %w", err)
 	}
-	pins, err := db.ListPins(conn, runID)
+	pins, err := store.StoreOn(conn).ListPins(runID)
 	if err != nil {
 		return "", nil, fmt.Errorf("reading the run's gate script pins: %w", err)
 	}
@@ -3224,7 +3214,7 @@ func runGateScriptPins(conn *sql.DB, runID int) (string, map[string]string, erro
 
 // runDiffBase resolves the commit GitDiff's base should compare against for
 // step's run: the run's own commit_sha, PINNED ONCE at `docket run start`
-// (db.RunContext, populated via config.GitHead at internal/cli/run_start.go)
+// (store.RunContext, populated via config.GitHead at internal/cli/run_start.go)
 // — never a live HEAD read taken at record time.
 //
 // DKT-20: a live read drifts with the checkout it reads. Late in a long run
@@ -3263,7 +3253,7 @@ func runGateScriptPins(conn *sql.DB, runID int) (string, map[string]string, erro
 // caller resolved it to default `dir`, and passing it in keeps this compare
 // and that defaulting reading ONE value rather than two resolutions that
 // could disagree.
-func runDiffBase(conn *sql.DB, runID, stepID int, dir, execRoot string) (base string, live bool) {
+func runDiffBase(conn store.LegacyDB, runID, stepID int, dir, execRoot string) (base string, live bool) {
 	if dir != "" && dir != execRoot {
 		if fork := worktreeForkPoint(dir, execRoot); fork != "" {
 			return fork, false
@@ -3281,7 +3271,7 @@ func runDiffBase(conn *sql.DB, runID, stepID int, dir, execRoot string) (base st
 			return head, false
 		}
 	}
-	run, err := db.GetRun(conn, runID)
+	run, err := store.StoreOn(conn).GetRun(runID)
 	if err == nil && run.CommitSHA != "" {
 		return run.CommitSHA, false
 	}
@@ -3310,7 +3300,7 @@ func runDiffBase(conn *sql.DB, runID, stepID int, dir, execRoot string) (base st
 //   - a worktree whose fork point cannot be resolved exports nothing rather
 //     than a guess; a range-shaped gate finding the var absent over a clean
 //     tree fails closed, which is the correct direction for a control.
-func gateBaseSHA(conn *sql.DB, runID int, workRoot string) string {
+func gateBaseSHA(conn store.LegacyDB, runID int, workRoot string) string {
 	if workRoot == "" {
 		return ""
 	}
@@ -3923,7 +3913,7 @@ func sharedCheckoutHead(execRoot string) string {
 // pre-existing one: no earlier round recorded a head (`prev == ""`), blocked
 // or not.
 func (e *Engine) appendRoundDelta(
-	conn *sql.DB, step *db.Step, dir, execRoot, base string, liveBase bool, diffBody *string,
+	conn store.LegacyDB, step *store.Step, dir, execRoot, base string, liveBase bool, diffBody *string,
 ) string {
 	record := map[string]string{}
 
@@ -4022,17 +4012,13 @@ func (e *Engine) appendRoundDelta(
 // The recording step's own artifacts are excluded because they are this round,
 // not an earlier one: an issue.diff re-pin (diff_repin.go) recomputes a step
 // that already recorded, and its own earlier head is not the previous round's.
-func latestIssueDiffHead(conn *sql.DB, runID, issueID, exceptStepID int) string {
-	var payload sql.NullString
-	err := conn.QueryRow(
-		`SELECT a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ? AND a.step_id <> ?
-		  ORDER BY a.id DESC LIMIT 1`,
-		runID, issueID, ArtifactKindIssueDiff, exceptStepID).Scan(&payload)
-	if err != nil {
+func latestIssueDiffHead(conn store.LegacyDB, runID, issueID, exceptStepID int) string {
+	payload, found, err := store.StoreOn(conn).NewestIssueArtifactPayloadExcept(
+		runID, issueID, ArtifactKindIssueDiff, exceptStepID)
+	if err != nil || !found {
 		return ""
 	}
-	return handBackHead(payload.String)
+	return handBackHead(payload)
 }
 
 // lastReviewedIssueDiff reads the newest issue.diff a done REVIEWING step of
@@ -4057,26 +4043,13 @@ func latestIssueDiffHead(conn *sql.DB, runID, issueID, exceptStepID int) string 
 // reviewer's verdict was discarded with its round, and a FAILED judge's claim
 // still bound its inputs, so admitting either would name a head no panel read —
 // which is the defect this closes, reproduced one status wider.
-func lastReviewedIssueDiff(conn *sql.DB, runID, issueID int) reviewedIssueDiff {
-	var (
-		reviewed reviewedIssueDiff
-		payload  sql.NullString
-	)
-	err := conn.QueryRow(
-		`SELECT a.id, a.payload FROM step_inputs si
-		   JOIN artifacts a ON a.id = si.artifact_id
-		   JOIN steps s ON s.id = si.step_id
-		  WHERE s.run_id = ? AND s.issue_id = ? AND s.status = ? AND a.kind = ?
-		    AND NOT EXISTS (SELECT 1 FROM artifacts p
-		                     WHERE p.step_id = s.id AND p.kind = a.kind)
-		  ORDER BY a.id DESC LIMIT 1`,
-		runID, issueID, db.StepDone, ArtifactKindIssueDiff).Scan(
-		&reviewed.artifactID, &payload)
-	if err != nil {
+func lastReviewedIssueDiff(conn store.LegacyDB, runID, issueID int) reviewedIssueDiff {
+	artifactID, payload, found, err := store.StoreOn(conn).NewestIssueArtifactConsumedByDoneStep(
+		runID, issueID, ArtifactKindIssueDiff)
+	if err != nil || !found {
 		return reviewedIssueDiff{}
 	}
-	reviewed.head = handBackHead(payload.String)
-	return reviewed
+	return reviewedIssueDiff{artifactID: artifactID, head: handBackHead(payload)}
 }
 
 // reviewedIssueDiff is the issue.diff record a review was handed: its artifact
@@ -4099,29 +4072,22 @@ type reviewedIssueDiff struct {
 // round follows and where it landed come from this one lookup, so the two
 // cannot disagree on what counts as unreviewed.
 func earliestUnreviewedRound(
-	conn *sql.DB, runID, issueID, exceptStepID int, reviewed reviewedIssueDiff,
+	conn store.LegacyDB, runID, issueID, exceptStepID int, reviewed reviewedIssueDiff,
 ) (follows bool, landing string) {
-	var metadata sql.NullString
-	err := conn.QueryRow(
-		`SELECT s.metadata FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
-		    AND a.id > ? AND a.step_id <> ?
-		    AND NOT EXISTS (SELECT 1 FROM artifacts p
-		                     WHERE p.step_id = a.step_id AND p.kind = a.kind
-		                       AND p.id <= ?)
-		  ORDER BY a.id LIMIT 1`,
-		runID, issueID, ArtifactKindIssueDiff,
-		reviewed.artifactID, exceptStepID, reviewed.artifactID).Scan(&metadata)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, ""
-	}
+	metadata, found, err := store.StoreOn(conn).FirstRecorderAfterMetadata(store.FirstRecorderAfterQuery{
+		RunID: runID, IssueID: issueID, Kind: ArtifactKindIssueDiff,
+		AfterArtifactID: reviewed.artifactID, ExceptStepID: exceptStepID,
+	})
 	// An unanswerable lookup keeps the judged head: over-reporting the delta
 	// rather than hiding a round.
 	if err != nil {
 		return true, ""
 	}
+	if !found {
+		return false, ""
+	}
 	var bag map[string]any
-	if metadata.String == "" || json.Unmarshal([]byte(metadata.String), &bag) != nil {
+	if metadata == "" || json.Unmarshal([]byte(metadata), &bag) != nil {
 		return true, ""
 	}
 	// `--metadata` can set the key free-form; only a full commit id reaches git.
@@ -4146,19 +4112,13 @@ func earliestUnreviewedRound(
 // Filtered to the step's NAME, unlike latestIssueDiffHead's read across the issue:
 // the issue's newest head may belong to a different producer entirely, and
 // this comparison is only meaningful between two hand-backs of the same body.
-func priorRoundHandBack(conn *sql.DB, step *db.Step) string {
-	var payload sql.NullString
-	err := conn.QueryRow(
-		`SELECT a.payload FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND s.step_name = ?
-		    AND s.ordinal < ? AND a.kind = ?
-		  ORDER BY a.id DESC LIMIT 1`,
-		step.RunID, step.IssueID, step.StepName, step.Ordinal,
-		ArtifactKindIssueDiff).Scan(&payload)
-	if err != nil {
+func priorRoundHandBack(conn store.LegacyDB, step *store.Step) string {
+	payload, found, err := store.StoreOn(conn).NewestStepNamePayloadBelowOrdinal(
+		step.RunID, step.IssueID, step.StepName, step.Ordinal, ArtifactKindIssueDiff)
+	if err != nil || !found {
 		return ""
 	}
-	return handBackHead(payload.String)
+	return handBackHead(payload)
 }
 
 // handBackHead decodes the `head` out of a round record payload —
@@ -4304,31 +4264,22 @@ func outOfScopeNames(dir, base string, scope []string) []string {
 // snapshot closes "the body cannot inject", and the hash check closes "the
 // stored row cannot be swapped".
 func gateCommands(
-	conn *sql.DB, step *db.Step, gate workflow.Gate,
+	conn store.LegacyDB, step *store.Step, gate workflow.Gate,
 ) (commands, hashes []string, err error) {
 	tag, ok := strings.CutPrefix(gate.Source, "fence:")
 	if !ok {
 		return nil, nil, nil
 	}
 
-	rows, err := conn.Query(
-		`SELECT command, sha256 FROM run_fences
-		  WHERE run_id = ? AND issue_id = ? AND tag = ? ORDER BY ordinal`,
-		step.RunID, step.IssueID, tag)
+	fenced, _, err := store.StoreOn(conn).RunFenceCommands(step.RunID, step.IssueID, tag)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading harvested commands for gate %s: %w", gate.Name, err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var command, sum string
-		if err := rows.Scan(&command, &sum); err != nil {
-			return nil, nil, fmt.Errorf("reading a harvested command: %w", err)
-		}
-		commands = append(commands, command)
-		hashes = append(hashes, sum)
+	for _, c := range fenced {
+		commands = append(commands, c.Command)
+		hashes = append(hashes, c.SHA256)
 	}
-	return commands, hashes, rows.Err()
+	return commands, hashes, nil
 }
 
 // diffRecordsNoChange reports whether a computed diff body carries no change
@@ -4448,23 +4399,17 @@ type issueDiffRecord struct {
 // guard that suppresses writes must fail toward recording. An extra artifact is
 // noise; a lost one is evidence. The flag is separate from the record because
 // an EMPTY recorded body is a real record, and "" alone cannot say which it is.
-func latestIssueDiffRecord(conn *sql.DB, runID, issueID int) (issueDiffRecord, bool) {
-	var rec issueDiffRecord
-	err := conn.QueryRow(
-		`SELECT a.body, COALESCE(a.payload, '') FROM artifacts a
-		  JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
-		  ORDER BY a.id DESC LIMIT 1`,
-		runID, issueID, ArtifactKindIssueDiff).Scan(&rec.body, &rec.payload)
-	if err != nil {
+func latestIssueDiffRecord(conn store.LegacyDB, runID, issueID int) (issueDiffRecord, bool) {
+	body, payload, found, err := store.StoreOn(conn).NewestIssueArtifact(runID, issueID, ArtifactKindIssueDiff)
+	if err != nil || !found {
 		return issueDiffRecord{}, false
 	}
-	return rec, true
+	return issueDiffRecord{body: body, payload: payload}, true
 }
 
 // issueHasRecordedChange reports whether the issue already has an `issue.diff`
 // artifact that carries content.
-func issueHasRecordedChange(conn *sql.DB, runID, issueID int) bool {
+func issueHasRecordedChange(conn store.LegacyDB, runID, issueID int) bool {
 	_, ok := latestRecordedChange(conn, runID, issueID)
 	return ok
 }
@@ -4482,21 +4427,12 @@ func issueHasRecordedChange(conn *sql.DB, runID, issueID int) bool {
 // direction for a guard that suppresses writes: refusing to record because a
 // query failed would lose a real diff over a transient error, while recording
 // an extra empty one is the pre-DKT-259 behavior and merely noisy.
-func latestRecordedChange(conn *sql.DB, runID, issueID int) (string, bool) {
-	rows, err := conn.Query(
-		`SELECT a.body FROM artifacts a JOIN steps s ON s.id = a.step_id
-		  WHERE a.run_id = ? AND s.issue_id = ? AND a.kind = ?
-		  ORDER BY a.id DESC LIMIT 50`,
-		runID, issueID, ArtifactKindIssueDiff)
+func latestRecordedChange(conn store.LegacyDB, runID, issueID int) (string, bool) {
+	bodies, err := store.StoreOn(conn).NewestIssueArtifactBodies(runID, issueID, ArtifactKindIssueDiff, 50)
 	if err != nil {
 		return "", false
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var body string
-		if err := rows.Scan(&body); err != nil {
-			return "", false
-		}
+	for _, body := range bodies {
 		if !diffRecordsNoChange(body) {
 			return body, true
 		}
@@ -4508,14 +4444,12 @@ func latestRecordedChange(conn *sql.DB, runID, issueID int) (string, bool) {
 // the first, so a retry still diffs from before attempt one's commits —
 // the shared checkout's HEAD when that claim was taken (DKT-3300). "" when no
 // claim recorded one.
-func claimHeadOf(conn *sql.DB, stepID int) string {
+func claimHeadOf(conn store.LegacyDB, stepID int) string {
 	if stepID == 0 {
 		return ""
 	}
-	var data string
-	if err := conn.QueryRow(
-		`SELECT data FROM events WHERE kind = ? AND step_id = ? ORDER BY seq ASC LIMIT 1`,
-		EventStepClaimed, stepID).Scan(&data); err != nil {
+	data, found, err := store.StoreOn(conn).FirstStepEventData(stepID, EventStepClaimed)
+	if err != nil || !found {
 		return ""
 	}
 	var payload struct {

@@ -1,13 +1,10 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -23,40 +20,22 @@ var voteLinkCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		proposalID, err := model.ParseProposalID(args[0])
+		issue, _ := cmd.Flags().GetString("issue")
+		env := verbEnv(cmd)
+		res, err := verb.VoteLink(cmd.Context(), env, verb.VoteLinkInput{Proposal: args[0], Issue: issue})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-		}
-
-		issueFlag, _ := cmd.Flags().GetString("issue")
-		issueID, err := issueArg(issueFlag)
-		if err != nil {
-			return err
-		}
-
-		if err := db.LinkProposalIssue(conn, proposalID, issueID); err != nil {
-			if e := notFound(err, "proposal or issue"); e != nil {
-				return e
-			}
-			if errors.Is(err, db.ErrConflict) {
-				return cmdErr(fmt.Errorf("link already exists"), output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("linking proposal to issue: %w", err), output.ErrGeneral)
-		}
-		if err := engine.RecordConductorPanelOpened(conn, proposalID); err != nil {
-			return cmdErr(fmt.Errorf("the link recorded, but recording %s's run events failed: %w",
-				model.FormatProposalID(proposalID), err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
 		result := voteLinkResult{
-			ProposalID: model.FormatProposalID(proposalID),
-			IssueID:    model.FormatID(issueID),
+			ProposalID: model.FormatProposalID(res.ProposalID),
+			IssueID:    model.FormatID(res.IssueID),
 		}
 
 		w.Success(result, fmt.Sprintf("Linked %s to proposal %s",
-			model.FormatID(issueID), model.FormatProposalID(proposalID)))
+			result.IssueID, result.ProposalID))
 		return nil
 	},
 }
@@ -67,33 +46,22 @@ var voteUnlinkCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		proposalID, err := model.ParseProposalID(args[0])
+		issue, _ := cmd.Flags().GetString("issue")
+		env := verbEnv(cmd)
+		res, err := verb.VoteUnlink(cmd.Context(), env, verb.VoteUnlinkInput{Proposal: args[0], Issue: issue})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-		}
-
-		issueFlag, _ := cmd.Flags().GetString("issue")
-		issueID, err := issueArg(issueFlag)
-		if err != nil {
-			return err
-		}
-
-		if err := db.UnlinkProposalIssue(conn, proposalID, issueID); err != nil {
-			if e := notFound(err, "link"); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("unlinking proposal from issue: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
 		result := voteLinkResult{
-			ProposalID: model.FormatProposalID(proposalID),
-			IssueID:    model.FormatID(issueID),
+			ProposalID: model.FormatProposalID(res.ProposalID),
+			IssueID:    model.FormatID(res.IssueID),
 		}
 
 		w.Success(result, fmt.Sprintf("Unlinked %s from proposal %s",
-			model.FormatID(issueID), model.FormatProposalID(proposalID)))
+			result.IssueID, result.ProposalID))
 		return nil
 	},
 }

@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The operator lifecycle verbs — `run pause`, `run resume`, `run abandon` —
@@ -56,7 +55,12 @@ var lifecycleEvents = map[model.RunStatus]string{
 	model.RunAbandoned:    EventRunAbandoned,
 }
 
-// MoveRunWith applies one operator lifecycle transition and records its event
+// MoveRunWith is MoveRunWithStore on store.StoreOn(conn).
+func MoveRunWith(conn store.LegacyDB, opts MoveRunOptions) (*model.Run, []string, error) {
+	return MoveRunWithStore(store.StoreOn(conn), opts)
+}
+
+// MoveRunWithStore applies one operator lifecycle transition and records its event
 // atomically. `Verb` names the CLI verb for the refusal message; `From` is the
 // closed set of statuses the transition may leave.
 //
@@ -84,7 +88,11 @@ var lifecycleEvents = map[model.RunStatus]string{
 // checkout could park or end the run it was working in. The check is inside
 // the transaction, after the run is found and before its status is inspected,
 // so a caller without the capability learns only that the run exists.
-func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error) {
+func MoveRunWithStore(storage store.Store, opts MoveRunOptions) (*model.Run, []string, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	runID, verb, to, from, reason, nowMS :=
 		opts.RunID, opts.Verb, opts.To, opts.From, opts.Reason, opts.NowMS
 	kind, ok := lifecycleEvents[to]
@@ -105,9 +113,10 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		return nil, nil, fmt.Errorf("moving run %s: %w", model.FormatRunID(runID), err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -156,7 +165,7 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		}
 	}
 
-	if err := db.SetRunStatusTx(tx, runID, to, reason, nowMS); err != nil {
+	if err := st.SetRunStatusTx(runID, to, reason, nowMS); err != nil {
 		return nil, nil, err
 	}
 
@@ -173,7 +182,7 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 	if to == model.RunWaitingHuman {
 		origin = model.RunPauseOriginOperator
 	}
-	if err := db.SetRunPauseOriginTx(tx, runID, origin); err != nil {
+	if err := st.SetRunPauseOriginTx(runID, origin); err != nil {
 		return nil, nil, err
 	}
 
@@ -200,12 +209,12 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 		return nil, nil, err
 	}
 
-	updated, err := db.GetRunTx(tx, runID)
+	updated, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, nil, fmt.Errorf("moving run %s: %w", model.FormatRunID(runID), err)
 	}
 	return updated, worktrees, nil
@@ -221,24 +230,8 @@ func MoveRunWith(conn *sql.DB, opts MoveRunOptions) (*model.Run, []string, error
 // walks it has no business running. Naming what was recorded turns "debris
 // standing in five repos with no surface reporting it" into a listed set, and
 // the relay's own sweep remains the authority for the rest.
-func recordedWorktreesTx(tx *sql.Tx, runID, issueID int) ([]string, error) {
-	query := `SELECT DISTINCT work_root FROM steps
-	           WHERE run_id = ? AND work_root != '' ORDER BY work_root`
-	args := []any{runID}
-	if issueID != 0 {
-		query = `SELECT DISTINCT work_root FROM steps
-		          WHERE run_id = ? AND issue_id = ? AND work_root != ''
-		          ORDER BY work_root`
-		args = append(args, issueID)
-	}
-	rows, err := tx.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("collecting recorded worktrees: %w", err)
-	}
-	return scanTxRows(rows, func(r *sql.Rows) (string, error) {
-		var w string
-		return w, r.Scan(&w)
-	})
+func recordedWorktreesTx(tx store.LegacyTx, runID, issueID int) ([]string, error) {
+	return store.TxOn(tx).RunWorktreesTx(runID, issueID)
 }
 
 // AbandonIssueOutcome reports what AbandonIssueInRun did.
@@ -268,7 +261,12 @@ type AbandonIssueOptions struct {
 	NowMS int64
 }
 
-// AbandonIssueInRunWith is the per-issue disposition (DKT-28): every remaining
+// AbandonIssueInRunWith is AbandonIssueInRunWithStore on store.StoreOn(conn).
+func AbandonIssueInRunWith(conn store.LegacyDB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+	return AbandonIssueInRunWithStore(store.StoreOn(conn), opts)
+}
+
+// AbandonIssueInRunWithStore is the per-issue disposition (DKT-28): every remaining
 // step of ONE issue stops, with a reason, and the run and its other issues
 // continue.
 //
@@ -287,16 +285,21 @@ type AbandonIssueOptions struct {
 // It requires the run's conductor capability exactly as the whole-run abandon
 // does (DKT-2465): the per-issue disposition ends a lane's work the same way,
 // and an executor must not be able to end a sibling's.
-func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+func AbandonIssueInRunWithStore(storage store.Store, opts AbandonIssueOptions) (*AbandonIssueOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	runID, issueID, reason, nowMS := opts.RunID, opts.IssueID, opts.Reason, opts.NowMS
 	tx, err := conn.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("abandoning an issue: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -312,34 +315,16 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 			orStatusList([]model.RunStatus{model.RunActive, model.RunWaitingHuman}))
 	}
 
-	var inRun int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM run_issues WHERE run_id = ? AND issue_id = ?`,
-		runID, issueID).Scan(&inRun); err != nil {
-		return nil, fmt.Errorf("checking run membership: %w", err)
+	inRun, err := st.RunHasIssueTx(runID, issueID)
+	if err != nil {
+		return nil, err
 	}
-	if inRun == 0 {
-		return nil, notFoundErr(db.ErrNotFound, "issue %s is not part of run %s",
+	if !inRun {
+		return nil, notFoundErr(store.ErrNotFound, "issue %s is not part of run %s",
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 
-	rows, err := tx.Query(
-		`SELECT id, instance FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
-		  ORDER BY id`,
-		runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted)
-	if err != nil {
-		return nil, fmt.Errorf("collecting the issue's remaining steps: %w", err)
-	}
-	type stepRef struct {
-		id       int
-		instance string
-	}
-	remaining, err := scanTxRows(rows, func(r *sql.Rows) (stepRef, error) {
-		var s stepRef
-		return s, r.Scan(&s.id, &s.instance)
-	})
+	remaining, err := st.IssueUnfinishedStepsTx(runID, issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -349,20 +334,13 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 			model.FormatID(issueID), model.FormatRunID(runID))
 	}
 
-	if _, err := tx.Exec(
-		`UPDATE steps
-		    SET status = ?, updated_at_ms = ?, recorded_at_ms = ?,
-		        row_version = row_version + 1
-		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)`,
-		db.StepFailedRouted, nowMS, nowMS, runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted,
-	); err != nil {
-		return nil, fmt.Errorf("abandoning %s: %w", model.FormatID(issueID), err)
+	if _, err := st.FailRouteIssueStepsTx(runID, issueID, nowMS); err != nil {
+		return nil, err
 	}
 
 	instances := make([]string, 0, len(remaining))
 	for _, s := range remaining {
-		instances = append(instances, s.instance)
+		instances = append(instances, s.Instance)
 	}
 	// The issue's recorded worktrees, named at the same stop (DKT-116) — the
 	// stopped work's checkouts have no later close to sweep them.
@@ -383,7 +361,7 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 	// The same resolution the routing records, for the same reason: the two
 	// paths are one fact about the issue, so they must not leave the tracker
 	// saying different things about it (DKT-245).
-	if err := db.SetIssueResolutionTx(tx, issueID, db.IssueResolutionAbandoned); err != nil {
+	if err := st.SetIssueResolutionTx(issueID, store.IssueResolutionAbandoned); err != nil {
 		return nil, err
 	}
 
@@ -427,11 +405,11 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		return nil, err
 	}
 
-	updated, err := db.GetRunTx(tx, runID)
+	updated, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("abandoning an issue: %w", err)
 	}
 	return &AbandonIssueOutcome{
@@ -439,24 +417,6 @@ func AbandonIssueInRunWith(conn *sql.DB, opts AbandonIssueOptions) (*AbandonIssu
 		Steps: instances, RunStatus: string(updated.Status),
 		Worktrees: worktrees,
 	}, nil
-}
-
-// scanTxRows is scanRows' shape for this package: drain, close, and surface
-// the iteration error once.
-func scanTxRows[T any](rows *sql.Rows, scan func(*sql.Rows) (T, error)) ([]T, error) {
-	defer rows.Close()
-	var out []T
-	for rows.Next() {
-		v, err := scan(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading rows: %w", err)
-	}
-	return out, nil
 }
 
 // orStatusList renders the legal source statuses for a refusal message.

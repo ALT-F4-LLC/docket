@@ -67,6 +67,48 @@ func assertRefreshEventNamesRow(t *testing.T, conn *sql.DB, runID int, dispatch,
 	}
 }
 
+// TestRefreshUnderAnOpenDispatchNamesOnlyTheIssuesRows: with two issues'
+// rows offered in one manifest, the refresh event names the refreshed issue's
+// rows and none of the other issue's.
+func TestRefreshUnderAnOpenDispatchNamesOnlyTheIssuesRows(t *testing.T) {
+	conn := mustDB(t)
+	registerSource(t, conn, []byte(parkingWorkflow), "parks.toml")
+	issue := createIssue(t, conn, "refresh me", "body", "task", nil)
+	other := createIssue(t, conn, "leave me", "body", "task", nil)
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, issue, `["internal/a/**"]`), "declaring scope")
+	testsupport.Must(t, db.SetIssueScopeGlobs(conn, other, `["internal/c/**"]`), "declaring scope")
+	run := startRun(t, conn, issue, other)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	openDispatch(t, conn, run.ID, 0, nowMS)
+
+	rowsOf := func(issueID int) int {
+		var n int
+		testsupport.Must(t, conn.QueryRow(
+			`SELECT COUNT(*) FROM dispatch_rows dr JOIN steps s ON s.id = dr.step_id
+			  WHERE s.issue_id = ?`, issueID).Scan(&n), "counting manifest rows")
+		return n
+	}
+	own, foreign := rowsOf(issue), rowsOf(other)
+	if own == 0 || foreign == 0 {
+		t.Fatalf("premise: the manifest offers %d rows of the issue and %d of the other; want both", own, foreign)
+	}
+
+	widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
+	_, err = refresh(conn, run.ID, issue)
+	testsupport.Must(t, err, "refresh under an open dispatch: %v", err)
+
+	var event struct {
+		RerenderedRows []string `json:"rerendered_rows"`
+	}
+	data := runEventData(t, conn, run.ID, EventIssueScopeRefreshed)
+	testsupport.Must(t, json.Unmarshal([]byte(data), &event), "decoding the refresh event %s", data)
+	if len(event.RerenderedRows) != own {
+		t.Errorf("refresh event %s names %d rows; want the issue's %d, not the other issue's %d",
+			data, len(event.RerenderedRows), own, foreign)
+	}
+}
+
 // A parked (waiting-human) step is refreshable by design: the issue the
 // ruling is about is exactly the one a refresh unblocks. Under an open
 // dispatch its row is named. Verify skips a parked row (it is off the

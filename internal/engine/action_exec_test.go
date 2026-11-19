@@ -90,8 +90,8 @@ func TestActionsUseTheSameTrustPath(t *testing.T) {
 	allowed := map[string]bool{
 		"context": true, "encoding/json": true, "errors": true, "fmt": true,
 		"path/filepath": true, "strings": true, "time": true,
-		"github.com/ALT-F4-LLC/docket/internal/db":       true,
 		"github.com/ALT-F4-LLC/docket/internal/exec":     true,
+		"github.com/ALT-F4-LLC/docket/internal/store":    true,
 		"github.com/ALT-F4-LLC/docket/internal/trust":    true,
 		"github.com/ALT-F4-LLC/docket/internal/workflow": true,
 	}

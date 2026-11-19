@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -93,16 +92,9 @@ decision to report status for and is a VALIDATION_ERROR.`,
 }
 
 func runGateStatus(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
+	status, err := verb.GateStatus(cmd.Context(), verbEnv(cmd), verb.GateStatusInput{Step: args[0]})
 	if err != nil {
-		return err
-	}
-
-	status, err := engine.GateStatus(conn, id, model.NowMS())
-	if err != nil {
-		return stepErr(err, stepLabel(id))
+		return verbErr(err)
 	}
 
 	result := gateStatusResult{

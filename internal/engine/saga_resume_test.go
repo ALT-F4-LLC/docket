@@ -229,6 +229,86 @@ func TestUnmatchedAtResumeParks(t *testing.T) {
 	}
 }
 
+// TestResumeIgnoresPriorAttemptGateRows: a gate interrupted in a step's second
+// attempt is detected even though the first attempt left a result row for it.
+// Reading attempt 1's row as attempt 2's would re-run a gate whose trust entry
+// forbids running it twice.
+func TestResumeIgnoresPriorAttemptGateRows(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	repoRoot := t.TempDir()
+
+	runner := NewExecRunner(testRepoPaths(repoRoot))
+	runner.LoadStore = sandboxTrust(t, fixtureTrustEntries(repoRoot, false)...)
+	counter := &countingRunner{inner: runner, counts: map[string]int{}}
+	e := testEngine()
+	e.Gates = counter
+
+	stepID := stepIDByInstance(t, conn, "implement@0")
+	const gate = "build"
+
+	// Attempt 1 runs every gate and records a result for each. Its clock sits
+	// well before attempt 2's claim, as a real earlier attempt's does.
+	const attemptOneMS int64 = 1_600_000_000_000
+	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: attemptOneMS})
+	testsupport.Must(t, err, "attempt 1 claim: %v", err)
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("summary"), NowMS: attemptOneMS,
+	})
+	testsupport.Must(t, err, "attempt 1 complete: %v", err)
+
+	// Attempt 2: the step is offered again, claimed, and records.
+	_, err = conn.Exec(
+		`UPDATE steps SET status = 'pending', saga_stage = NULL, routing = NULL
+		  WHERE id = ?`, stepID)
+	testsupport.Must(t, err, "re-offering the step: %v", err)
+	claim, err = ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
+	testsupport.Must(t, err, "attempt 2 claim: %v", err)
+	err = e.CompleteStep(conn, stepID, CompleteOptions{
+		Token: claim.Token, Artifact: []byte("summary"), NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "attempt 2 complete: %v", err)
+
+	// The crash window in attempt 2: `build` has its attempt-2 `gate-started`
+	// and no attempt-2 result, while attempt 1's result row survives.
+	_, err = conn.Exec(
+		`DELETE FROM gate_results WHERE step_id = ? AND gate = ? AND created_at_ms = ?`,
+		stepID, gate, nowMS)
+	testsupport.Must(t, err, "reconstructing the attempt-2 crash window: %v", err)
+	var priorRows int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM gate_results WHERE step_id = ? AND gate = ?`,
+		stepID, gate).Scan(&priorRows)
+	testsupport.Must(t, err, "counting attempt 1's rows: %v", err)
+	if priorRows == 0 {
+		t.Fatal("attempt 1 left no result row; the scenario needs one")
+	}
+	_, err = conn.Exec(
+		`UPDATE steps SET saga_stage = ?, status = 'gated', routing = NULL
+		  WHERE id = ?`, db.SagaRecorded, stepID)
+	testsupport.Must(t, err, "rewinding the saga stage: %v", err)
+	before := counter.counts[gate]
+
+	err = e.ResumeSaga(conn, stepID, nowMS)
+	testsupport.Must(t, err, "resuming: %v", err)
+
+	if spawned := counter.counts[gate] - before; spawned != 0 {
+		t.Errorf("gate %q reached the runner %d times on resume, want 0: "+
+			"attempt 1's result row hid attempt 2's interrupted gate", gate, spawned)
+	}
+	final, err := db.GetStep(conn, stepID)
+	testsupport.Must(t, err, "GetStep: %v", err)
+	if final.Attempt != 2 {
+		t.Fatalf("attempt = %d, want 2", final.Attempt)
+	}
+	if final.Status != db.StepWaitingHuman {
+		t.Errorf("status = %q after resume, want %q", final.Status, db.StepWaitingHuman)
+	}
+	if !strings.Contains(final.Routing, gate) {
+		t.Errorf("the park reason does not name the gate: %q", final.Routing)
+	}
+}
+
 // TestSagaStageBoundariesUnchanged is a checkable claim: swapping the gate
 // runner did not move the saga.
 //

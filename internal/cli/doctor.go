@@ -3,12 +3,10 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -30,8 +28,8 @@ type doctorResultJSON struct {
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor [--run RUN-N] [--source PATH]",
-	Short: "Seven read-only environment checks in one call",
-	Long: `Answer the seven checks a conductor clears by hand before the first
+	Short: "Eight read-only environment checks in one call",
+	Long: `Answer the checks a conductor clears by hand before the first
 dispatch of an attach, in one call instead of seven read-only agents: (1) cwd
 is the git toplevel; (2) the store opens read-write from this seat; (3) the cwd
 resolves to a registered project — REPORTED, never registered by this verb, so
@@ -40,7 +38,9 @@ an unbound repository reads FAIL here instead of being bound by the asking;
 --source's ` + "`src/user/docket/{config,bin}`" + `; (5) ` + "`run verify-pins`" + ` for --run, or
 SKIP without it; (6) symlinks under ` + "`<cwd>/.docket/config`" + ` — debris from the
 retired link-farm model, whether or not they still resolve; (7) a report of
-detached worktrees homed under a scratch-shaped path.
+detached worktrees homed under a scratch-shaped path; (8) whether
+` + "`DOCKET_POSTGRES_DSN`" + ` is configured, without printing the DSN, its username, or
+its password, and without connecting.
 
 READ-ONLY, and it WRITES NOTHING — no lease reap, no re-pin, no migration, no
 project registration — beyond what any read verb performs.
@@ -54,8 +54,8 @@ SKIP, or WARN.
 clean report that quietly checked six things instead of seven. --source
 omitted does the same to the install-drift check alone.
 
-The stragglers check (7) never moves ` + "`clean`" + ` — it is a report, not a
-verdict; reclaiming a straggler worktree is ` + "`git worktree prune`" + `'s job, not
+The stragglers (7) and postgres (8) checks never move ` + "`clean`" + ` — they are
+reports, not verdicts; reclaiming a straggler worktree is ` + "`git worktree prune`" + `'s job, not
 this verb's.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -64,32 +64,22 @@ this verb's.`,
 }
 
 func runDoctor(cmd *cobra.Command, w *output.Writer) error {
-	conn := getDB(cmd)
-	cfg := getCfg(cmd)
-
-	runID, err := optionalRunFlag(cmd)
-	if err != nil {
-		return err
-	}
+	run, _ := cmd.Flags().GetString("run")
 	source, _ := cmd.Flags().GetString("source")
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		return cmdErr(fmt.Errorf("resolving the working directory: %w", err), output.ErrGeneral)
 	}
-	// Canonicalize before it reaches the seat check: git reports resolved
-	// paths (macOS: /var vs /private/var) and Getwd does not.
-	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
-		cwd = resolved
-	}
+	env := verbEnv(cmd)
+	env.Cwd = cwd
 
-	// The project is whatever the root hook resolved: doctor is a read-only
-	// leaf verb, so an identity with no row arrives here as the unregistered
-	// sentinel and is reported as such, never registered.
-	report := engine.Doctor(conn, engine.DoctorOptions{
-		Cwd: cwd, DBPath: cfg.DBPath, ProjectID: getProjectID(cmd), Identity: cfg.Identity,
-		RunID: runID, SourceRoot: source, NowMS: model.NowMS(),
+	report, err := verb.Doctor(cmd.Context(), env, verb.DoctorInput{
+		Run: run, Source: source, DBPath: getCfg(cmd).DBPath,
 	})
+	if err != nil {
+		return verbErr(err)
+	}
 
 	result := doctorResultJSON{Clean: report.Clean, Skipped: report.Skipped}
 	for _, c := range report.Checks {
