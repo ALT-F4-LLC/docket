@@ -30,7 +30,11 @@ func (s *Service) WorkflowList(ctx context.Context, req *connect.Request[docketv
 
 // WorkflowRegister registers the definition the request carries.
 func (s *Service) WorkflowRegister(ctx context.Context, req *connect.Request[docketv1.WorkflowRegisterRequest]) (*connect.Response[docketv1.WorkflowRegisterResponse], error) {
-	return unary(ctx, s, req, decodeWorkflowRegister, verb.WorkflowRegister, encodeWorkflowRegister)
+	decode := decodeWorkflowRegister
+	if TransportOf(ctx) == TransportHTTP {
+		decode = decodeWorkflowRegisterOverHTTP
+	}
+	return unary(ctx, s, req, decode, verb.WorkflowRegister, encodeWorkflowRegister)
 }
 
 // WorkflowShow reads one workflow from the caller's project.
@@ -105,6 +109,15 @@ func decodeWorkflowRegister(req *docketv1.WorkflowRegisterRequest) (verb.Workflo
 		Source:     func() ([]byte, error) { return body, nil },
 		SourcePath: req.GetSourcePath(),
 	}, nil
+}
+
+// decodeWorkflowRegisterOverHTTP drops the request's source_path. The daemon
+// later reads a stored source_path from its own filesystem, and an HTTP
+// client's paths name files on its own machine, so the row stores none.
+func decodeWorkflowRegisterOverHTTP(req *docketv1.WorkflowRegisterRequest) (verb.WorkflowRegisterInput, error) {
+	in, err := decodeWorkflowRegister(req)
+	in.SourcePath = ""
+	return in, err
 }
 
 func encodeWorkflowRegister(res verb.WorkflowRegisterResult) *docketv1.WorkflowRegisterResponse {

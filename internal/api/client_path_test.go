@@ -20,8 +20,8 @@ import (
 // TestClientPathFieldsRefusedOverHTTP: a request that names a worktree, a
 // directory the daemon would open on its own filesystem, is refused with
 // InvalidArgument over HTTP before it reaches the engine, and the same request
-// over the socket is served. A source_path is provenance and is accepted over
-// HTTP.
+// over the socket is served. A source_path sent over HTTP is accepted and
+// dropped, so the row stores none.
 func TestClientPathFieldsRefusedOverHTTP(t *testing.T) {
 	ctx := context.Background()
 
@@ -92,8 +92,13 @@ func TestClientPathFieldsRefusedOverHTTP(t *testing.T) {
 			Body: unitWorkflowBody, SourcePath: "/defs/unit.toml",
 		}))
 		requireServed(t, "HTTP WorkflowRegister with source_path", err)
-		if got := res.Msg.GetWorkflow().GetSourcePath(); got != "/defs/unit.toml" {
-			t.Errorf("source_path = %q, want the sent /defs/unit.toml", got)
+		if got := res.Msg.GetWorkflow().GetSourcePath(); got != "" {
+			t.Errorf("registered source_path = %q, want it dropped at HTTP ingress", got)
+		}
+		shown, err := overHTTP.WorkflowShow(ctx, connect.NewRequest(&docketv1.WorkflowShowRequest{Name: "unit"}))
+		requireServed(t, "HTTP WorkflowShow of the registered row", err)
+		if got := shown.Msg.GetWorkflow().GetSourcePath(); got != "" {
+			t.Errorf("shown source_path = %q, want the row to store none", got)
 		}
 	})
 }

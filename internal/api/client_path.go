@@ -11,8 +11,8 @@ import (
 // names a worktree. The engine runs git and gates in a worktree on the
 // daemon's own filesystem, and an HTTP client's checkouts live on its own
 // machine, so any non-empty value, absolute or relative, is refused. Socket
-// clients share the daemon's host and may name one. A source_path is never
-// read here: it is provenance the daemon records.
+// clients share the daemon's host and may name one. A WorkflowRegister
+// source_path sent over HTTP is dropped at ingress and never stored or read.
 func refuseClientWorktreeOverHTTP(ctx context.Context, msg any) error {
 	if TransportOf(ctx) != TransportHTTP {
 		return nil
