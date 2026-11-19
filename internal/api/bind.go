@@ -21,8 +21,8 @@ import (
 // Docket-Cwd are recorded as attribution; the client sets both on every
 // request, and the daemon never supplies either itself. Two uses are inputs
 // rather than attribution: Docket-Project selects the caller's project, the
-// one a verb reads and writes, and Doctor reads Docket-Cwd as the directory it
-// checks.
+// one a verb reads and writes, and over the local socket only, Doctor reads
+// Docket-Cwd as the directory it checks. Doctor is refused over HTTP.
 const (
 	authorHeader  = "Docket-Author"
 	cwdHeader     = "Docket-Cwd"
