@@ -3,6 +3,7 @@ package cli
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
 
@@ -71,6 +73,75 @@ func TestIssueLabelListCountsEachLabelsIssues(t *testing.T) {
 	}
 	if len(labels) != 1 || labels[0].Name != "alpha" || labels[0].IssueCount != 1 {
 		t.Errorf("label list = %s, want alpha on one issue", data)
+	}
+}
+
+// styledTerminal is colorfulTerminal with lipgloss forced onto the ANSI
+// profile, so a styled render's bytes do not depend on whether the test
+// binary's stdout is a terminal.
+func styledTerminal(t *testing.T) {
+	t.Helper()
+	colorfulTerminal(t)
+	t.Setenv("CLICOLOR_FORCE", "1")
+	prev := lipgloss.DefaultRenderer()
+	lipgloss.SetDefaultRenderer(lipgloss.NewRenderer(io.Discard))
+	t.Cleanup(func() { lipgloss.SetDefaultRenderer(prev) })
+	if lipgloss.NewStyle().Bold(true).Render("x") == "x" {
+		t.Fatal("premise: the forced renderer emits no styling")
+	}
+}
+
+func TestIssueLabelListHumanEmptyStateSaysHowToAddOne(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	conn, _ := seedIssue(t)
+
+	out, err := runVoteHuman(t, conn, labelListCmd)
+	testsupport.Must(t, err, "label list: %v", err)
+	want := "No labels found.\nAdd one with: docket issue label add <id> <label>\n"
+	if out != want {
+		t.Errorf("label list printed %q, want %q", out, want)
+	}
+}
+
+func TestIssueLabelListHumanPlainTableHasOneRowPerLabel(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	conn, id := seedIssue(t)
+	_, err := runVoteHuman(t, conn, labelAddCmd, id, "alpha", "beta")
+	testsupport.Must(t, err, "label add: %v", err)
+
+	out, err := runVoteHuman(t, conn, labelListCmd)
+	testsupport.Must(t, err, "label list: %v", err)
+	// The table ends in a newline and the writer adds its own.
+	want := "NAME                 COLOR        ISSUES\n" +
+		"----                 -----        ------\n" +
+		"alpha                -            1\n" +
+		"beta                 -            1\n\n"
+	if out != want {
+		t.Errorf("label list printed %q, want %q", out, want)
+	}
+}
+
+func TestIssueLabelListHumanColoredTableHasOneRowPerLabel(t *testing.T) {
+	styledTerminal(t)
+	conn, id := seedIssue(t)
+	_, err := runVoteHuman(t, conn, labelAddCmd, id, "alpha", "beta")
+	testsupport.Must(t, err, "label add: %v", err)
+
+	out, err := runVoteHuman(t, conn, labelListCmd)
+	testsupport.Must(t, err, "label list: %v", err)
+	gray := func(s string) string { return "\x1b[90m" + s + "\x1b[0m" }
+	header := func(s string) string { return "\x1b[1;97m" + s + "\x1b[0m" }
+	rule := func(left, mid, right string) string {
+		return gray(left) + gray("─────────") + gray(mid) + gray("───────") + gray(mid) + gray("────────") + gray(right) + "\n"
+	}
+	want := rule("┌", "┬", "┐") +
+		gray("│") + " " + header("NAME") + "    " + gray("│") + " " + header("COLOR") + " " + gray("│") + " " + header("ISSUES") + " " + gray("│") + "\n" +
+		rule("├", "┼", "┤") +
+		gray("│") + " " + gray("■") + " alpha " + gray("│") + " -     " + gray("│") + " 1      " + gray("│") + "\n" +
+		gray("│") + " " + gray("■") + " beta  " + gray("│") + " -     " + gray("│") + " 1      " + gray("│") + "\n" +
+		rule("└", "┴", "┘")
+	if out != want {
+		t.Errorf("label list printed %q, want %q", out, want)
 	}
 }
 

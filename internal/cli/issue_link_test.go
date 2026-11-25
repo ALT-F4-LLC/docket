@@ -98,6 +98,33 @@ func TestIssueLinkCommandsReportInHumanModeThroughTheRoot(t *testing.T) {
 	}
 }
 
+// In color, link list puts each relation under a bold Relations header with
+// the arrow of its direction, its relation type, and the other issue in bold.
+// The incoming side names the inverse type, which RelationColor does not
+// know, so it renders in the default white.
+func TestIssueLinkListHumanColoredShowsArrowTypeAndTarget(t *testing.T) {
+	styledTerminal(t)
+	conn, source := seedIssue(t)
+	targetID, err := db.CreateIssue(conn, &model.Issue{
+		Title: "link target", Status: model.StatusBacklog, Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue: %v", err)
+	target := model.FormatID(targetID)
+	_, err = runVoteHuman(t, conn, linkAddCmd, source, "blocks", target)
+	testsupport.Must(t, err, "link add: %v", err)
+
+	for _, tc := range []struct{ issue, want string }{
+		{source, "\x1b[1;97mRelations for " + source + "\x1b[0m\n  → \x1b[91mblocks\x1b[0m \x1b[1m" + target + "\x1b[0m\n\n"},
+		{target, "\x1b[1;97mRelations for " + target + "\x1b[0m\n  ← \x1b[97mblocked_by\x1b[0m \x1b[1m" + source + "\x1b[0m\n\n"},
+	} {
+		out, err := runVoteHuman(t, conn, linkListCmd, tc.issue)
+		testsupport.Must(t, err, "link list %s: %v", tc.issue, err)
+		if out != tc.want {
+			t.Errorf("link list %s printed %q, want %q", tc.issue, out, tc.want)
+		}
+	}
+}
+
 func TestIssueLinkRefusalsKeepTheirCodesAndText(t *testing.T) {
 	conn, source := seedIssue(t)
 
