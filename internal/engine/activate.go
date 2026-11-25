@@ -1586,9 +1586,14 @@ func lintUnresolvableScopes(
 // root while no entry of the same scope matches that sibling.
 //
 // Only literal entries are considered: a glob names no particular file, so it
-// has no particular sibling. A scoped file with no existing test is skipped,
-// because there is no test for the scope to have omitted. A run with no
-// recorded exec root is skipped for lintUnresolvableScopes' reason.
+// has no particular sibling. Only the same-directory F_test.go is F's sibling;
+// a test elsewhere that exercises F is not looked for. A scope that lists the
+// sibling, by literal path or by a glob that matches it, draws no warning.
+//
+// A scoped file with no existing test is skipped, even when the change is
+// expected to add one: the sibling is looked up in the tree, not inferred, so
+// a planned test the scope leaves out draws no warning. A run with no recorded
+// exec root is skipped for lintUnresolvableScopes' reason.
 func lintOmittedSiblingTests(
 	tx store.LegacyTx, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 	execRoot string,

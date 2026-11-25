@@ -2013,7 +2013,7 @@ func TestActivateWarnsWhenScopeOmitsSiblingTest(t *testing.T) {
 			`["internal/engine/activate.go","internal/engine/activate_test.go"]`, repoRoot, false},
 		{"scope admits the sibling by glob",
 			`["internal/engine/activate.go","internal/**/*_test.go"]`, repoRoot, false},
-		{"scoped file has no sibling test",
+		{"planned test not yet written draws no warning",
 			`["internal/engine/lone.go"]`, repoRoot, false},
 		{"run has no exec root",
 			`["internal/engine/activate.go"]`, "", false},
