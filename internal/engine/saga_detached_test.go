@@ -122,7 +122,7 @@ func TestRecordHandsTheGatesToTheDetachedRun(t *testing.T) {
 	step, err := db.GetStep(conn, stepID)
 	testsupport.Must(t, err, "GetStep: %v", err)
 	if !step.InSaga() {
-		t.Fatalf("saga closed inside the recording turn (status %q); the gates ran inline", step.Status)
+		t.Errorf("saga closed inside the recording turn (status %q); the gates ran inline", step.Status)
 	}
 	if n := gateRowCount(t, conn, stepID); n != 0 {
 		t.Fatalf("%d gate rows after record, want 0 — no gate may run in the recording turn", n)
