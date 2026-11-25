@@ -93,6 +93,9 @@ jobs:
   build:
     needs:
       - check
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -106,15 +109,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          audience: sts.amazonaws.com
+          aws-region: us-west-2
+          role-to-assume: arn:aws:iam::677459762413:role/altf4llc-gha-docket-vorpal
+
       - uses: ALT-F4-LLC/setup-vorpal-action@0.2.1
         with:
           registry-backend: s3
           registry-backend-s3-bucket: altf4llc-vorpal-registry
           version: 0.4.1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - run: vorpal build '${{ matrix.artifact }}-shell'
 
