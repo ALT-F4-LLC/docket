@@ -1183,7 +1183,15 @@ func TestRoutingQueriesRunStatusTx(t *testing.T) {
 
 func TestRoutingQueriesTransitionRunStatusTx(t *testing.T) {
 	f := newRoutingFixture(t)
-	f.exec(`UPDATE runs SET status = ? WHERE id = ?`, model.RunActive, f.run)
+	f.exec(`UPDATE runs SET status = ?, reason = 'resumed by the operator' WHERE id = ?`, model.RunActive, f.run)
+	f.exec(`UPDATE runs SET reason = 'parked elsewhere' WHERE id = ?`, f.otherRun)
+	reason := func(id int) string {
+		t.Helper()
+		var r sql.NullString
+		testsupport.Must(t, f.tx.QueryRow(`SELECT reason FROM runs WHERE id = ?`, id).Scan(&r),
+			"reading run %d's reason", id)
+		return r.String
+	}
 	read := func(id int) (status model.RunStatus, updated int64, version int) {
 		t.Helper()
 		testsupport.Must(t, f.tx.QueryRow(
@@ -1204,6 +1212,14 @@ func TestRoutingQueriesTransitionRunStatusTx(t *testing.T) {
 	if _, at, v := read(f.otherRun); at != otherUpdated || v != otherVersion {
 		t.Errorf("the other run moved: (%d, v%d), want (%d, v%d)", at, v, otherUpdated, otherVersion)
 	}
+	if got := reason(f.run); got != "" {
+		t.Errorf("reason = %q after a move into waiting-human, want it cleared", got)
+	}
+	if got := reason(f.otherRun); got != "parked elsewhere" {
+		t.Errorf("the other run's reason = %q, want it untouched", got)
+	}
+
+	f.exec(`UPDATE runs SET reason = 'paused by the operator' WHERE id = ?`, f.run)
 
 	from, moved, err = TransitionRunStatusTx(f.tx, f.run, model.RunWaitingHuman, 8000)
 	if err != nil || moved || from != model.RunWaitingHuman {
@@ -1211,6 +1227,17 @@ func TestRoutingQueriesTransitionRunStatusTx(t *testing.T) {
 	}
 	if _, at, _ := read(f.run); at != 7000 {
 		t.Errorf("an unchanged status wrote updated_at_ms %d, want 7000", at)
+	}
+	if got := reason(f.run); got != "paused by the operator" {
+		t.Errorf("reason = %q after an unchanged status, want the existing one kept", got)
+	}
+
+	from, moved, err = TransitionRunStatusTx(f.tx, f.run, model.RunActive, 8500)
+	if err != nil || !moved || from != model.RunWaitingHuman {
+		t.Fatalf("waiting-human -> active = (%q, %v, %v), want (waiting-human, true, nil)", from, moved, err)
+	}
+	if got := reason(f.run); got != "paused by the operator" {
+		t.Errorf("reason = %q after a move into active, want it kept", got)
 	}
 
 	f.exec(`UPDATE runs SET status = ? WHERE id = ?`, model.RunDone, f.run)

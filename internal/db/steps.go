@@ -1680,6 +1680,11 @@ func RunStatusTx(tx *sql.Tx, runID int) (model.RunStatus, error) {
 // bumping `row_version`, unless the run already has that status or is
 // terminal. It returns the status the run held and whether it moved, or
 // ErrRunNotFound.
+//
+// A move into `waiting-human` clears `reason`. This transition is the
+// rollup's, so no operator typed a reason for the park it records, and a
+// reason left from an earlier pause or resume would report that earlier
+// decision as the current park's.
 func TransitionRunStatusTx(
 	tx *sql.Tx, runID int, to model.RunStatus, nowMS int64,
 ) (from model.RunStatus, moved bool, err error) {
@@ -1690,11 +1695,11 @@ func TransitionRunStatusTx(
 	if from == to || from.Terminal() {
 		return from, false, nil
 	}
-	if _, err := tx.Exec(
-		`UPDATE runs SET status = ?, updated_at_ms = ?, row_version = row_version + 1
-		  WHERE id = ?`,
-		string(to), nowMS, runID,
-	); err != nil {
+	query := `UPDATE runs SET status = ?, updated_at_ms = ?, row_version = row_version + 1`
+	if to == model.RunWaitingHuman {
+		query += `, reason = NULL`
+	}
+	if _, err := tx.Exec(query+` WHERE id = ?`, string(to), nowMS, runID); err != nil {
 		return "", false, fmt.Errorf("updating run %s: %w", model.FormatRunID(runID), err)
 	}
 	return from, true, nil
