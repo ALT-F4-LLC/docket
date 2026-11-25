@@ -1300,6 +1300,50 @@ func runStepAnnotate(cmd *cobra.Command, args []string, w *output.Writer) error 
 	return nil
 }
 
+var stepRepinCmd = &cobra.Command{
+	Use:   "repin STEP-N",
+	Short: "Re-record a done step's issue.diff over the step's own range",
+	Long: `Re-record a DONE step's issue.diff over the range the step itself recorded
+for its head, as a new artifact superseding the step's newest record.
+
+A rerun-gates on a hand-integrated step re-cuts the body for the same head from
+whatever base resolves then — the whole-branch one once the worktree is swept —
+so every downstream packet reviews commits the step never made. This verb takes
+the range from the step's first record of that head (its range_from, else its
+round_base, else its base) and re-renders the patch in the run's shared
+checkout. It reads no worktree, and the step's recorded worktree and head stay
+as they were. A body already identical records nothing.
+
+The success line and the ` + "`issue_diff_repin`" + ` envelope field name the
+range the superseded record pinned and the range re-recorded.
+
+A step that is not done refuses: a parked step is re-pinned with
+` + "`step resolve --worktree`" + `. On a run bound to a conductor capability the
+verb requires that token via DOCKET_TOKEN or stdin (never argv).`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runStepRepin(cmd, args, getWriter(cmd))
+	},
+}
+
+func runStepRepin(cmd *cobra.Command, args []string, w *output.Writer) error {
+	in := verb.StepRepinInput{Step: args[0], ConductorToken: stdinConductorToken}
+	if err := in.Validate(); err != nil {
+		return verbErr(err)
+	}
+	env, err := rulingEnv(cmd)
+	if err != nil {
+		return err
+	}
+	res, err := verb.StepRepin(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
+	if err != nil {
+		return verbErr(err)
+	}
+	renderStepState(w, res.Step, "Re-pinned", nil, res.Repin)
+	return nil
+}
+
 var stepIntegrateCmd = &cobra.Command{
 	Use:   "integrate STEP-N...",
 	Short: "Cherry-pick finished write-class steps onto the shared branch and annotate them",
@@ -1961,6 +2005,9 @@ func renderStepState(
 // at the 12 characters every advisory here prints, and the artifact chain so
 // the original is findable under `step artifacts`.
 func repinClause(r *engine.IssueDiffRepin) string {
+	if r.ToBase != "" {
+		return rangeRepinClause(r)
+	}
 	if r.Unchanged {
 		return fmt.Sprintf("issue.diff already describes %s at %.12s, nothing re-pinned",
 			r.Worktree, r.ToSHA)
@@ -1975,6 +2022,22 @@ func repinClause(r *engine.IssueDiffRepin) string {
 		clause += " supersedes " + r.Supersedes
 	}
 	return clause + ")"
+}
+
+// rangeRepinClause is repinClause for an own-range re-pin, which keeps the
+// head and moves the range's start: both ranges, so the reader sees which
+// base the superseded record was cut from.
+func rangeRepinClause(r *engine.IssueDiffRepin) string {
+	to := fmt.Sprintf("%.12s..%.12s", r.ToBase, r.ToSHA)
+	if r.Unchanged {
+		return fmt.Sprintf("issue.diff already describes %s, nothing re-pinned", to)
+	}
+	from := "(no recorded range)"
+	if r.FromBase != "" {
+		from = fmt.Sprintf("%.12s..%.12s", r.FromBase, r.FromSHA)
+	}
+	return fmt.Sprintf("issue.diff range re-pinned %s -> %s (%s supersedes %s)",
+		from, to, r.Artifact, r.Supersedes)
 }
 
 func init() {
@@ -2079,7 +2142,7 @@ func init() {
 	for _, sub := range []*cobra.Command{
 		stepClaimCmd, stepHeartbeatCmd, stepCompleteCmd, stepFailCmd,
 		stepApproveCmd, stepRejectCmd, stepResolveCmd, stepReapCmd, stepHoldCmd,
-		stepAnnotateCmd, stepIntegrateCmd, stepPreGateCmd, stepResumeCmd,
+		stepAnnotateCmd, stepRepinCmd, stepIntegrateCmd, stepPreGateCmd, stepResumeCmd,
 		stepShowCmd, stepListCmd, stepContextCmd, stepRenderCmd,
 		stepArtifactsCmd, stepArtifactCmd,
 	} {

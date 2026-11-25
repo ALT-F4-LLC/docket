@@ -205,6 +205,9 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// integration mints, most of all. Opaque KV merged onto the finished
 		// step's metadata, event-logged.
 		"annotate",
+		// `repin`: re-records a done step's issue.diff over the range the
+		// step recorded for its head, superseding a whole-branch re-cut.
+		"repin",
 		// `integrate`: the engine's one git write — cherry-pick a finished
 		// writer's recorded chain onto the shared branch with -x, then annotate
 		// the step with the resulting HEAD, as one operation that stops on a

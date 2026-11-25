@@ -688,6 +688,53 @@ func StepAnnotate(ctx context.Context, env Env, in StepAnnotateInput) (StepAnnot
 	return res, err
 }
 
+// StepRepinInput re-records a done step's issue.diff over its own range.
+type StepRepinInput struct {
+	Step string
+	// ConductorToken is as on StepReapInput.
+	ConductorToken func() string
+}
+
+// Validate is as on StepReapInput.
+func (in StepRepinInput) Validate() error {
+	_, err := parseStepRef(in.Step)
+	return err
+}
+
+// StepRepinResult is the re-pinned step and the re-pin it performed.
+type StepRepinResult struct {
+	Step  model.StepRow
+	Repin *engine.IssueDiffRepin
+	// Registered is as on StepClaimResult.
+	Registered *engine.ProjectRegistration
+}
+
+// StepRepin re-records a done step's issue.diff over the step's own range
+// under the run's conductor capability, attributed to env.Author and env.Cwd.
+//
+// It takes its project from the step it is handed, so it is run-addressed.
+func StepRepin(ctx context.Context, env Env, in StepRepinInput) (StepRepinResult, error) {
+	id, err := parseStepRef(in.Step)
+	if err != nil {
+		return StepRepinResult{}, err
+	}
+
+	registered, err := resolveRunAddressedProject(env, "step repin")
+	res := StepRepinResult{Registered: registered}
+	if err != nil {
+		return res, err
+	}
+
+	res.Repin, err = engine.NewEngine().RepinIssueDiffRangeStore(
+		env.Store, id, rulingAttribution(env),
+		stepConductorToken(env, id, in.ConductorToken), model.NowMS())
+	if err != nil {
+		return res, stepError(err, id)
+	}
+	res.Step, err = stepRow(env, id)
+	return res, err
+}
+
 // StepShowInput names the steps to show, in order.
 type StepShowInput struct {
 	Steps []string

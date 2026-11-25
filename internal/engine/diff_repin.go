@@ -60,6 +60,11 @@ type IssueDiffRepin struct {
 	// unchanged head for a done step's own-range re-pin, where it equals
 	// FromSHA.
 	ToSHA string `json:"to_sha"`
+	// FromBase and ToBase are where the previous and the new record's ranges
+	// start, so FromBase..FromSHA is the range the stale record pinned and
+	// ToBase..ToSHA the range re-recorded. Set by the own-range re-pin only.
+	FromBase string `json:"from_base,omitempty"`
+	ToBase   string `json:"to_base,omitempty"`
 	// Artifact is the `ARTIFACT-N` the re-pin recorded, and Supersedes the
 	// step's previous issue.diff artifact it revises. Both empty on an
 	// Unchanged re-pin, which records nothing.
@@ -335,14 +340,8 @@ func (e *Engine) RepinIssueDiffRange(
 			"step %s's issue.diff record ARTIFACT-%d has no readable payload: %v",
 			step.Instance, own.ID, err)
 	}
-	field := func(key string) string { s, _ := fields[key].(string); return s }
-	head, from := field("head"), field("range_from")
-	if from == "" {
-		from = field("round_base")
-	}
-	if from == "" {
-		from = field("base")
-	}
+	head, _ := fields["head"].(string)
+	from := recordRangeStart(fields)
 	if from == "" {
 		return nil, validationErr(
 			"step %s's first record of head %.12s, ARTIFACT-%d, names no range_from, "+
@@ -377,8 +376,15 @@ func (e *Engine) RepinIssueDiffRange(
 	if err != nil {
 		return nil, fmt.Errorf("recording the re-pin of %s: %w", step.Instance, err)
 	}
+	// The newest record's head was read from this payload, so it parses.
+	priorFields := fields
+	if prior != own {
+		priorFields = map[string]any{}
+		_ = json.Unmarshal([]byte(prior.Payload), &priorFields)
+	}
 	repin := &IssueDiffRepin{
 		Worktree: execRoot, FromSHA: head, ToSHA: head,
+		FromBase: recordRangeStart(priorFields), ToBase: from,
 		body: body, payload: string(payload),
 		supersededID: prior.ID, rangeFrom: from,
 		Unchanged: prior.Body == body,
@@ -400,6 +406,28 @@ func (e *Engine) RepinIssueDiffRange(
 		return nil, fmt.Errorf("re-pinning %s: %w", step.Instance, err)
 	}
 	return repin, nil
+}
+
+// RepinIssueDiffRangeStore is RepinIssueDiffRange over a Store.
+func (e *Engine) RepinIssueDiffRangeStore(
+	storage store.Store, stepID int, by Attribution, token string, nowMS int64,
+) (*IssueDiffRepin, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	return e.RepinIssueDiffRange(conn, stepID, by, token, nowMS)
+}
+
+// recordRangeStart is the commit an issue.diff record's range starts after:
+// its range_from, else its round_base, else its base; "" when it names none.
+func recordRangeStart(fields map[string]any) string {
+	for _, key := range []string{"range_from", "round_base", "base"} {
+		if s, _ := fields[key].(string); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // stepLatestIssueDiff is the newest `issue.diff` artifact THIS step recorded,
