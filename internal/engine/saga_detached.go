@@ -71,6 +71,12 @@ var sagaHandoffWait = 5 * time.Second
 // sagaHandoffPoll is how often the record probes the lock while it waits.
 const sagaHandoffPoll = 25 * time.Millisecond
 
+// sagaHandoffConfirmed is the confirmation settleSagaHandoff waits for: a
+// detached child holds the step's saga lock. A variable so a test can stand in
+// a child that confirmed and then stepped aside, which no held lock models: the
+// lock would also keep the test's own resumer out.
+var sagaHandoffConfirmed = sagaHeldElsewhere
+
 // Outcomes of RunDetachedSaga.
 const (
 	// DetachedSagaRan: this invocation held the lock and resumed the saga.
@@ -153,7 +159,7 @@ func (e *Engine) RunDetachedSagaStore(storage store.Store, stepID int, nowMS int
 // before reporting false.
 func (e *Engine) settleSagaHandoff(conn store.LegacyDB, stepID int, nowMS int64) (bool, error) {
 	deadline := time.Now().Add(sagaHandoffWait)
-	for !sagaHeldElsewhere(stepID) {
+	for !sagaHandoffConfirmed(stepID) {
 		if !time.Now().Before(deadline) {
 			return e.runUnconfirmedSaga(conn, stepID, nowMS)
 		}

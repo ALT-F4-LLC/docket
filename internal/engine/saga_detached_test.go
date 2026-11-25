@@ -17,7 +17,19 @@ import (
 // recording turn. These tests inject the launcher, so no process starts.
 
 // installDetachedSagaLauncher sets the launcher for one test and restores it.
+// A launch it accepts counts as confirmed at once, as though the child took
+// the saga lock and stepped aside, so the test drives the saga itself next.
 func installDetachedSagaLauncher(t *testing.T, launch func(stepID int) error) {
+	t.Helper()
+	installUnconfirmedSagaLauncher(t, launch)
+	prev := sagaHandoffConfirmed
+	sagaHandoffConfirmed = func(int) bool { return true }
+	t.Cleanup(func() { sagaHandoffConfirmed = prev })
+}
+
+// installUnconfirmedSagaLauncher sets the launcher for one test and restores
+// it, leaving the handoff to the real saga-lock probe.
+func installUnconfirmedSagaLauncher(t *testing.T, launch func(stepID int) error) {
 	t.Helper()
 	prev := LaunchDetachedSaga
 	LaunchDetachedSaga = launch
@@ -47,7 +59,7 @@ type stubSagaChild struct {
 func installStubSagaChild(t *testing.T) *stubSagaChild {
 	t.Helper()
 	child := &stubSagaChild{}
-	installDetachedSagaLauncher(t, child.launch)
+	installUnconfirmedSagaLauncher(t, child.launch)
 	t.Cleanup(child.exit)
 	return child
 }
@@ -158,7 +170,7 @@ func TestRecordRunsGatesWhenDetachedChildNeverStarts(t *testing.T) {
 	shortenSagaHandoffWait(t)
 	conn, _, stepID, record := detachedSagaWorld(t, "detach-neverstarts.toml")
 	launched := 0
-	installDetachedSagaLauncher(t, func(int) error { launched++; return nil })
+	installUnconfirmedSagaLauncher(t, func(int) error { launched++; return nil })
 
 	var pending bool
 	testsupport.Must(t, record(&pending), "record: %v", nil)
@@ -355,7 +367,7 @@ func TestDetachedSagaChildDeathLeavesARecord(t *testing.T) {
 	// Written before launch: the launcher sees the event already committed.
 	seenAtLaunch := -1
 	child := installStubSagaChild(t)
-	installDetachedSagaLauncher(t, func(id int) error {
+	installUnconfirmedSagaLauncher(t, func(id int) error {
 		seenAtLaunch = countEvents(t, conn, EventSagaDetachStarted)
 		return child.launch(id)
 	})
