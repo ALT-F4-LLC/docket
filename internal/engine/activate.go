@@ -595,8 +595,10 @@ func activateTx(
 	// FIRST activation (re-scanning config, bumping activated_at_ms), because
 	// only `active` runs count as re-activations below. Refuse and name the
 	// right verb instead (DKT-85's family: activate and the run machine
-	// disagreeing about state).
-	if run.Status == model.RunWaitingHuman {
+	// disagreeing about state). A dry run writes nothing and so takes no
+	// decision: it reports the re-activation the run would get once resumed,
+	// so a reviewer can reproduce it without un-parking the run first.
+	if run.Status == model.RunWaitingHuman && !opts.DryRun {
 		return nil, conflictErr(
 			"run %s is waiting-human; resume it with `docket run resume %s` "+
 				"before re-activating", run.Ref(), run.Ref())
@@ -615,7 +617,9 @@ func activateTx(
 			run.Ref())
 	}
 
-	reactivation := run.Status == model.RunActive
+	// A waiting-human run reaching here is a dry run, and resume returns it to
+	// active, so it is projected as the re-activation it would be after resume.
+	reactivation := run.Status == model.RunActive || run.Status == model.RunWaitingHuman
 	result := &ActivateResult{Reactivation: reactivation}
 
 	// Snapshot the run's status/activated_at_ms AS COMMITTED, before stage 7

@@ -1654,6 +1654,74 @@ func TestActivateRefusesWaitingHuman(t *testing.T) {
 	}
 }
 
+// TestDryRunActivateOnAWaitingHumanRun: a dry run of a parked run reports the
+// re-activation the run would get once resumed, and writes nothing, so a panel
+// can reproduce the conductor's dry-run without resuming first. The real
+// activation of the same parked run stays refused.
+func TestDryRunActivateOnAWaitingHumanRun(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "parked", "body", "task", nil)
+	run := startRun(t, conn, issue)
+
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetRunStatus(conn, run.ID, model.RunWaitingHuman, "operator pause", nowMS)
+	testsupport.Must(t, err, "parking the run: %v", err)
+	eventsBefore := eventCount(t, conn)
+
+	parked, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS + 1000, DryRun: true})
+	testsupport.Must(t, err, "dry run on a waiting-human run: %v", err)
+	if !parked.DryRun {
+		t.Error("result is not marked as a dry run")
+	}
+	if !parked.Reactivation {
+		t.Error("dry run on a waiting-human run did not report itself as a reactivation")
+	}
+	if parked.Run.Status != model.RunWaitingHuman {
+		t.Errorf("Run.Status = %q, want %q (the run's real, current state)",
+			parked.Run.Status, model.RunWaitingHuman)
+	}
+
+	committed, err := db.GetRun(conn, run.ID)
+	testsupport.Must(t, err, "reading committed run: %v", err)
+	if committed.Status != model.RunWaitingHuman {
+		t.Errorf("committed run status = %q after a dry run, want %q",
+			committed.Status, model.RunWaitingHuman)
+	}
+	if got := eventCount(t, conn); got != eventsBefore {
+		t.Errorf("event count = %d after a dry run, want %d (unchanged)", got, eventsBefore)
+	}
+
+	_, err = activate(conn, run.ID)
+	if err == nil {
+		t.Fatal("real activation succeeded on a waiting-human run")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("error code = %q, want %q", code, CodeConflict)
+	}
+	if !strings.Contains(err.Error(), "is waiting-human; resume it") {
+		t.Errorf("real activation's refusal is not the waiting-human conflict: %s", err)
+	}
+
+	err = db.SetRunStatus(conn, run.ID, model.RunActive, "resumed", nowMS)
+	testsupport.Must(t, err, "resuming the run: %v", err)
+	resumed, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS + 1000, DryRun: true})
+	testsupport.Must(t, err, "dry run after resume: %v", err)
+
+	// Run is the one field that must differ: each dry run renders the run as
+	// it actually is, parked or resumed.
+	parked.Run, resumed.Run = nil, nil
+	parkedJSON, err := json.Marshal(parked)
+	testsupport.Must(t, err, "marshalling the parked dry run: %v", err)
+	resumedJSON, err := json.Marshal(resumed)
+	testsupport.Must(t, err, "marshalling the resumed dry run: %v", err)
+	if string(parkedJSON) != string(resumedJSON) {
+		t.Errorf("dry run on the parked run differs from the dry run after resume:\nparked:  %s\nresumed: %s",
+			parkedJSON, resumedJSON)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The context-size check
 // ---------------------------------------------------------------------------
