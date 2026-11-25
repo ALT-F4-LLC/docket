@@ -1628,9 +1628,7 @@ func TestReactivationRA5RefusesTerminalRuns(t *testing.T) {
 }
 
 // TestActivateRefusesWaitingHuman: a parked run is resumed by `run resume`,
-// never as a side effect of `run activate` — which would otherwise treat the
-// run as a FIRST activation (re-scanning config, bumping activated_at_ms)
-// because only `active` runs count as re-activations (DKT-85's family).
+// never as a side effect of `run activate` (DKT-85's family).
 func TestActivateRefusesWaitingHuman(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
@@ -1704,7 +1702,8 @@ func TestDryRunActivateOnAWaitingHumanRun(t *testing.T) {
 		t.Errorf("real activation's refusal is not the waiting-human conflict: %s", err)
 	}
 
-	err = db.SetRunStatus(conn, run.ID, model.RunActive, "resumed", nowMS)
+	_, _, err = MoveRun(conn, run.ID, "resume", model.RunActive,
+		[]model.RunStatus{model.RunWaitingHuman}, "", nowMS)
 	testsupport.Must(t, err, "resuming the run: %v", err)
 	resumed, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS + 1000, DryRun: true})
 	testsupport.Must(t, err, "dry run after resume: %v", err)

@@ -110,7 +110,8 @@ type ActivateResult struct {
 	// before it activated (the seat's holder already has the token).
 	ConductorToken string
 	// Reactivation reports whether this was a re-activation of an already
-	// `active` run, so the verb can say "expanded 2 new phases" rather than
+	// `active` run (or, on a dry run, of a `waiting-human` one, as it would
+	// be once resumed), so the verb can say "expanded 2 new phases" rather than
 	// implying a first activation.
 	Reactivation bool
 	// ContextWarnings names every step whose closure exceeded
@@ -591,13 +592,11 @@ func activateTx(
 
 	// A `waiting-human` run is parked on a person's decision, and `run resume`
 	// is that decision's verb. Flipping it back to `active` here would take the
-	// decision as a side effect — and worse, this path would treat the run as a
-	// FIRST activation (re-scanning config, bumping activated_at_ms), because
-	// only `active` runs count as re-activations below. Refuse and name the
-	// right verb instead (DKT-85's family: activate and the run machine
-	// disagreeing about state). A dry run writes nothing and so takes no
-	// decision: it reports the re-activation the run would get once resumed,
-	// so a reviewer can reproduce it without un-parking the run first.
+	// decision as a side effect. Refuse and name the right verb instead
+	// (DKT-85's family: activate and the run machine disagreeing about state).
+	// A dry run writes nothing and so takes no decision: it reports the
+	// re-activation the run would get once resumed, so a reviewer can
+	// reproduce it without un-parking the run first.
 	if run.Status == model.RunWaitingHuman && !opts.DryRun {
 		return nil, conflictErr(
 			"run %s is waiting-human; resume it with `docket run resume %s` "+
