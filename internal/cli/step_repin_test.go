@@ -113,7 +113,8 @@ func TestStepRepinRerecordsADoneStepOverItsOwnRange(t *testing.T) {
 }
 
 // TestStepRepinStatesBothRangesInHumanMode: the success line names the range
-// the rewrite pinned and the range the re-pin pinned.
+// the rewrite pinned and the range the re-pin pinned, and a second re-pin
+// says it found the range already pinned and records nothing.
 func TestStepRepinStatesBothRangesInHumanMode(t *testing.T) {
 	conn := newTestDB(t)
 	r, _, branchBase := rewrittenDoneStep(t, conn)
@@ -132,5 +133,17 @@ func TestStepRepinStatesBothRangesInHumanMode(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, out)
 		}
+	}
+
+	repinned, _, _ := currentIssueDiff(t, conn, r.implementID)
+	w, buf = bufWriter(false)
+	err = runStepRepin(cmdWithDB(conn), []string{model.FormatStepID(r.implementID)}, w)
+	testsupport.Must(t, err, "second step repin: %v\n%s", err, buf.String())
+	want := "issue.diff already describes " + writerBase[:12] + ".." + r.executorSHA[:12] + ", nothing re-pinned"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("second re-pin stdout lacks %q:\n%s", want, buf.String())
+	}
+	if again, _, _ := currentIssueDiff(t, conn, r.implementID); again != repinned {
+		t.Errorf("second re-pin recorded ARTIFACT-%d, want none (current stays ARTIFACT-%d)", again, repinned)
 	}
 }
