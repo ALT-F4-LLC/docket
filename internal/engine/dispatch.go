@@ -891,6 +891,13 @@ const (
 	// RowShifted: the step is still offerable, but renders differently than
 	// it did at open — an attempt or status moved mid-dispatch.
 	RowShifted = "rendering-shifted"
+	// RowRetried: the step is offerable again because a retry resolution was
+	// recorded on it after the manifest opened, and the claim history that
+	// retry carries forward (attempt, its outcome breakdown, and the routing
+	// tier those fields walk) is the only difference from the stored row.
+	// The operator's ruling on that step is what moved it, so it does not
+	// make the verify fail; Stored and Computed still carry both renderings.
+	RowRetried = "retried"
 	// RowMissing: the step is still NON-TERMINAL and yet is no longer
 	// offerable — claimed since the manifest opened, or excluded by a scope
 	// conflict with a row admitted since. The narrower, more alarming case.
@@ -1100,6 +1107,8 @@ func (e *Engine) verifyDispatchTx(
 	}
 	// The first offending row, kept while the sweep continues past it.
 	var mismatch *RowMismatch
+	// Read on the first shifted row only: a manifest with none never asks.
+	var retried map[int]bool
 
 	// The DKT-19 comparison is stageless and derived from `row_json`, so the
 	// stored hash no longer participates in it directly. It still guards the
@@ -1183,8 +1192,25 @@ func (e *Engine) verifyDispatchTx(
 			return nil, nil, nil, err
 		}
 		if gotSum != wantSum {
-			verdict.Verdict = RowShifted
 			verdict.Stored, verdict.Computed = want.RowJSON, raw
+			if retried == nil {
+				if retried, err = retriedSinceOpen(tx, sched, runID, open.OpenedSeq); err != nil {
+					return nil, nil, nil, err
+				}
+			}
+			if retried[want.StepID] {
+				retrySum, currentSum, err := comparableVerifyBytes(
+					withoutClaimHistory(storedRow), withoutClaimHistory(current))
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				if retrySum == currentSum {
+					verdict.Verdict = RowRetried
+					result.Rows = append(result.Rows, verdict)
+					continue
+				}
+			}
+			verdict.Verdict = RowShifted
 			result.Rows = append(result.Rows, verdict)
 			if mismatch == nil {
 				mismatch = &RowMismatch{Position: i, Stored: want.RowJSON, Computed: raw}
@@ -1205,6 +1231,40 @@ func (e *Engine) verifyDispatchTx(
 
 	result.Verified = true
 	return result, nil, candidates, nil
+}
+
+// retriedSinceOpen returns the steps whose latest recorded decision is a retry
+// resolution and which drew a step-resolved event after the manifest opened at
+// openedSeq. Both halves are needed: routing alone holds a retry ruled before
+// the open, and the event alone names any resolution, not only a retry. A
+// resolution after the retry overwrites the routing, so the pair names the
+// retry as the step's last ruling, recorded while this dispatch was open.
+func retriedSinceOpen(
+	tx store.LegacyTx, sched *Scheduler, runID int, openedSeq int64,
+) (map[int]bool, error) {
+	resolved, err := store.TxOn(tx).StepsWithEventKindsSinceTx(
+		runID, openedSeq, []string{EventStepResolved})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]bool, len(resolved))
+	for id := range resolved {
+		if step := sched.stepByID[id]; step != nil && routingIs(step.Routing, ResolveRetry) {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// withoutClaimHistory clears the row fields a retry carries forward rather
+// than resets: Attempt and its outcome breakdown (a retry moves only the
+// budget's base), and Model, Effort, and Variant, which the policy walk keys
+// on those recorded failures.
+func withoutClaimHistory(row model.StepRow) model.StepRow {
+	row.Attempt, row.FailedAttempts, row.ReapedClaims = 0, 0, 0
+	row.PriorAttemptEnd = ""
+	row.Model, row.Effort, row.Variant = "", "", ""
+	return row
 }
 
 // comparableVerifyBytes hashes a stored/computed row pair with the fields the

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -328,4 +329,87 @@ func TestReconcileLeavesTheStandaloneVerbsAlone(t *testing.T) {
 		t.Fatalf("close outcome = %+v, want (%s, %s)",
 			outcome, db.DispatchClosed, db.CloseReasonReconciled)
 	}
+}
+
+// retriedAfterOpen parks implement@0 on a gap-only record after the manifest
+// opened and resolves it --as retry, the RUN-167 STEP-17376 sequence: the
+// step is pending and offered again, rendering one spent claim later than
+// its stored row.
+func retriedAfterOpen(t *testing.T, conn *sql.DB, runID int) {
+	t.Helper()
+	openDispatch(t, conn, runID, 0, nowMS)
+	id := stepIDByInstance(t, conn, "implement@0")
+	parkGapOnly(t, conn, id)
+	testsupport.Must(t, testEngine().ResolveStep(conn, id, ResolveRetry, "run it again", nowMS),
+		"resolve --as retry")
+	if got := statusOf(t, conn, id); got != db.StepPending {
+		t.Fatalf("premise: implement@0 is %q after the retry, want %q", got, db.StepPending)
+	}
+}
+
+// TestVerifyRetriedRowDoesNotFail is DKT-4587. RUN-167 DISPATCH-929's
+// reconcile refused at verify because STEP-17376, retried by the operator
+// mid-dispatch, rendered differently from its stored row — the attempt the
+// retried claim spent. The retry is a recorded ruling on that very step, so
+// the shift is the dispatch working and must not strand the close.
+func TestVerifyRetriedRowDoesNotFail(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+	retriedAfterOpen(t, conn, runID)
+
+	result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+	testsupport.Must(t, err, "verify: %v", err)
+	if got := verdictOf(result, "implement@0"); got != RowRetried {
+		t.Fatalf("the retried row reads %q, want %q: %+v", got, RowRetried, result.Rows)
+	}
+	if mismatch != nil || !result.Verified {
+		t.Fatalf("verify refused a manifest whose only shift is a recorded retry: "+
+			"mismatch %+v, rows %+v", mismatch, result.Rows)
+	}
+}
+
+// TestVerifyUnrelatedShiftStillFails keeps the retry exemption narrow: a shift
+// no recorded retry resolution explains still refuses.
+func TestVerifyUnrelatedShiftStillFails(t *testing.T) {
+	t.Run("a failed claim returned to the pool is not a retry", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := dispatchRun(t, conn)
+		openDispatch(t, conn, runID, 0, nowMS)
+		id := stepIDByInstance(t, conn, "implement@0")
+		claim, err := ClaimStep(conn, id, ClaimOptions{Owner: "worker", NowMS: nowMS})
+		testsupport.Must(t, err, "claim: %v", err)
+		testsupport.Must(t, testEngine().FailStep(conn, id, claim.Token, "went wrong", "", nowMS),
+			"fail")
+		if got := statusOf(t, conn, id); got != db.StepPending {
+			t.Fatalf("premise: implement@0 is %q after a below-budget fail, want %q",
+				got, db.StepPending)
+		}
+
+		result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+		testsupport.Must(t, err, "verify: %v", err)
+		if got := verdictOf(result, "implement@0"); got != RowShifted {
+			t.Errorf("a failed-and-reoffered row reads %q, want %q", got, RowShifted)
+		}
+		if mismatch == nil || result.Verified {
+			t.Errorf("verify passed a shift no retry resolution explains: %+v", result.Rows)
+		}
+	})
+
+	t.Run("a retried row that also shifted elsewhere still refuses", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := dispatchRun(t, conn)
+		retriedAfterOpen(t, conn, runID)
+		testsupport.Must(t, db.SetConfig(conn, 0, db.KeyLeaseTTLDefault, "45m"),
+			"setting the default lease TTL")
+
+		result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+		testsupport.Must(t, err, "verify: %v", err)
+		if got := verdictOf(result, "implement@0"); got != RowShifted {
+			t.Errorf("a retried row whose lease TTL also changed reads %q, want %q",
+				got, RowShifted)
+		}
+		if mismatch == nil || result.Verified {
+			t.Errorf("verify passed a lease-TTL shift on a retried row: %+v", result.Rows)
+		}
+	})
 }
