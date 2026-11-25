@@ -57,25 +57,13 @@ func TestIssueLinkAddListAndRemoveAnswerAsBefore(t *testing.T) {
 // Relations header, and an issue left with no relations says so and how to
 // add one.
 func TestIssueLinkCommandsReportInHumanModeThroughTheRoot(t *testing.T) {
-	clientConfigSandbox(t)
+	abcProjectThroughRoot(t)
 	t.Setenv("NO_COLOR", "1")
-	// The root hook leaves the owner resolver on this test's store, where
-	// issues read as ABC; a later test must not inherit it.
-	t.Cleanup(func() {
-		model.SetDisplayPrefix("DKT")
-		model.SetIssueOwnerPrefixResolver(nil)
-	})
-	_, err := runRootVerb(t, initCmd, "init")
-	testsupport.Must(t, err, "docket init: %v", err)
-	_, err = runRootVerb(t, projectSetPrefixCmd, "project", "set-prefix", "abc")
-	testsupport.Must(t, err, "docket project set-prefix: %v", err)
 	source := createThroughRoot(t, "--title", "link source")
 	target := createThroughRoot(t, "--title", "link target")
 	if !strings.HasPrefix(source, "ABC-") || !strings.HasPrefix(target, "ABC-") {
 		t.Fatalf("created ids = %q, %q; want them under the project's ABC prefix", source, target)
 	}
-	// The prefix the process renders by default must not supply the owner's.
-	model.SetDisplayPrefix("DKT")
 
 	for _, tc := range []struct {
 		cmd  *cobra.Command

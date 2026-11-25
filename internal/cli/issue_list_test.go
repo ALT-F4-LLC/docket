@@ -399,14 +399,14 @@ func TestIssueListPrimaryKeyAlias(t *testing.T) {
 	}
 }
 
-// TestIssueListThroughTheRoot drives the annotated command through the real
-// root, which leaves project resolution to the verb: the checkout's issues
-// are listed under the ids, in their project's own prefix, that `issue
-// create` reported, in both the JSON rows and the table.
-func TestIssueListThroughTheRoot(t *testing.T) {
+// abcProjectThroughRoot initializes a sandboxed store through the real root
+// and gives its project the ABC prefix, while the process's default display
+// prefix stays DKT, so an id a later verb prints under ABC can only come from
+// the issue's owning project. The root hook leaves the owner resolver on this
+// test's store; cleanup removes it so a later test does not inherit it.
+func abcProjectThroughRoot(t *testing.T) {
+	t.Helper()
 	clientConfigSandbox(t)
-	// The root hook leaves the owner resolver on this test's store, where
-	// issues read as ABC; a later test must not inherit it.
 	t.Cleanup(func() {
 		model.SetDisplayPrefix("DKT")
 		model.SetIssueOwnerPrefixResolver(nil)
@@ -415,13 +415,20 @@ func TestIssueListThroughTheRoot(t *testing.T) {
 	testsupport.Must(t, err, "docket init: %v", err)
 	_, err = runRootVerb(t, projectSetPrefixCmd, "project", "set-prefix", "abc")
 	testsupport.Must(t, err, "docket project set-prefix: %v", err)
+	model.SetDisplayPrefix("DKT")
+}
+
+// TestIssueListThroughTheRoot drives the annotated command through the real
+// root, which leaves project resolution to the verb: the checkout's issues
+// are listed under the ids, in their project's own prefix, that `issue
+// create` reported, in both the JSON rows and the table.
+func TestIssueListThroughTheRoot(t *testing.T) {
+	abcProjectThroughRoot(t)
 	parent := createThroughRoot(t, "--title", "listed parent")
 	child := createThroughRoot(t, "--title", "listed child", "--parent", parent)
 	if !strings.HasPrefix(parent, "ABC-") || !strings.HasPrefix(child, "ABC-") {
 		t.Fatalf("created ids = %q, %q; want them under the project's ABC prefix", parent, child)
 	}
-	// The prefix the process renders by default must not supply the owner's.
-	model.SetDisplayPrefix("DKT")
 
 	out, err := runRootVerb(t, listCmd, "issue", "list", "--json")
 	testsupport.Must(t, err, "issue list --json: %v", err)
