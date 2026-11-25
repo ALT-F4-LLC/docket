@@ -1322,8 +1322,14 @@ it started, and the verb exits nonzero without annotating. The engine never
 resets, amends or discards: if the pick lands but the annotation is refused, the
 error names the sha to give ` + "`step annotate --integrated-sha`" + `. A later step
 that fails leaves the earlier steps integrated and annotated, and they are
-reported. Repository hooks do not run from the pick; filters, merge drivers
-and commit signing follow your git configuration.
+reported. Repository hooks do not run from the pick; filters and merge drivers
+follow your git configuration.
+
+The picks land unsigned by design: the engine cherry-picks with
+commit.gpgsign=false. gpg.program and gpg.<format>.program live in shared
+repository config that an executor in a linked worktree can write, so a signed
+pick would run a signing program of the executor's choosing in the conductor's
+session. Sign the picked commits afterwards if the branch requires it.
 
 On a run bound to a conductor capability the verb requires that token via
 DOCKET_TOKEN or stdin (never argv); every named step must belong to a run that
@@ -1363,12 +1369,30 @@ func runStepIntegrate(cmd *cobra.Command, args []string, w *output.Writer) error
 		}
 		return stepErr(err, stepLabel(ids[0]))
 	}
-	var parts []string
-	for _, d := range done {
-		parts = append(parts, fmt.Sprintf("%s -> %.12s (%d commit(s))", d.Step, d.IntegratedSHA, len(d.Picked)))
-	}
-	w.Success(done, "Integrated "+strings.Join(parts, "; "))
+	w.Success(done, integrationSummary(done))
 	return nil
+}
+
+// integrationSummary is the verb's human result: each step with every commit
+// it picked, then whether the picks landed unsigned.
+func integrationSummary(done []engine.StepIntegration) string {
+	lines := make([]string, 0, len(done)+1)
+	unsigned := false
+	for _, d := range done {
+		short := make([]string, len(d.Picked))
+		for i, c := range d.Picked {
+			short[i] = fmt.Sprintf("%.12s", c)
+		}
+		lines = append(lines, fmt.Sprintf("Integrated %s -> %.12s, picked %s",
+			d.Step, d.IntegratedSHA, strings.Join(short, " ")))
+		unsigned = unsigned || d.Unsigned
+	}
+	if unsigned {
+		lines = append(lines, "The picked commits landed unsigned by design: the engine "+
+			"picks with commit.gpgsign=false so no executor-written signing program runs "+
+			"in this session; sign them afterwards if the branch requires it.")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // resolveStepCommandProject resolves the caller's project for a step command

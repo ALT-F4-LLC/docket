@@ -51,6 +51,10 @@ type StepIntegration struct {
 	Step string `json:"step"`
 	// Picked lists the commits added to the shared branch, oldest first.
 	Picked []string `json:"picked"`
+	// Unsigned is true for every pick: the engine cherry-picks with
+	// commit.gpgsign=false (integrateGit), so the picked commits carry no
+	// signature whatever the repository's signing configuration says.
+	Unsigned bool `json:"unsigned"`
 	// IntegratedSHA is the shared checkout's HEAD after the pick, the commit the
 	// step was annotated with.
 	IntegratedSHA string `json:"integrated_sha"`
@@ -158,7 +162,7 @@ func (e *Engine) IntegrateStepsStore(
 				p.instance, len(pick.Picked), pick.Tip, err, model.FormatStepID(p.id), pick.Tip)
 		}
 		done = append(done, StepIntegration{
-			Step: model.FormatStepID(p.id), Picked: pick.Picked,
+			Step: model.FormatStepID(p.id), Picked: pick.Picked, Unsigned: true,
 			IntegratedSHA: pick.Tip, Annotation: ann,
 		})
 	}

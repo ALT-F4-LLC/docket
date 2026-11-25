@@ -618,3 +618,27 @@ func TestIntegrateStepsRefusesAStepWithNoRecordedHead(t *testing.T) {
 	}
 	f.requireNothingLanded(t, before)
 }
+
+// TestIntegrateStepsReportsPicksUnsigned: the engine picks with
+// commit.gpgsign=false, so every integration it returns says its picks are
+// unsigned, in the JSON the verb emits beside picked.
+func TestIntegrateStepsReportsPicksUnsigned(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+
+	got, err := f.integrate(testConductorToken, f.stepID)
+	testsupport.Must(t, err, "integrate: %v", err)
+
+	if len(got) != 1 || !got[0].Unsigned {
+		t.Fatalf("result = %+v, want one integration reported unsigned", got)
+	}
+	raw, err := json.Marshal(got[0])
+	testsupport.Must(t, err, "marshal: %v", err)
+	var fields map[string]any
+	testsupport.Must(t, json.Unmarshal(raw, &fields), "unmarshal")
+	if fields["unsigned"] != true {
+		t.Errorf("integration JSON unsigned = %v, want true:\n%s", fields["unsigned"], raw)
+	}
+	if _, ok := fields["picked"]; !ok {
+		t.Errorf("integration JSON lacks picked:\n%s", raw)
+	}
+}

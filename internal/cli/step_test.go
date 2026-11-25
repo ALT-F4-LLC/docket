@@ -866,3 +866,26 @@ func TestStepClaimCommandDeliversTheTokenOfAnIncompleteClaim(t *testing.T) {
 		t.Errorf("the delivered token does not hold the committed lease: %v", err)
 	}
 }
+
+// TestStepIntegrateSaysPicksLandUnsigned: the verb's human summary names every
+// commit it picked and says the picks landed unsigned by design.
+func TestStepIntegrateSaysPicksLandUnsigned(t *testing.T) {
+	first := strings.Repeat("a", 40)
+	second := strings.Repeat("b", 40)
+	third := strings.Repeat("c", 40)
+	done := []engine.StepIntegration{
+		{Step: "STEP-1", Picked: []string{first, second}, IntegratedSHA: strings.Repeat("d", 40), Unsigned: true},
+		{Step: "STEP-2", Picked: []string{third}, IntegratedSHA: strings.Repeat("e", 40), Unsigned: true},
+	}
+
+	got := integrationSummary(done)
+
+	for _, sha := range []string{first, second, third} {
+		if !strings.Contains(got, sha[:12]) {
+			t.Errorf("summary does not name picked commit %.12s:\n%s", sha, got)
+		}
+	}
+	if !strings.Contains(got, "landed unsigned by design") {
+		t.Errorf("summary does not say the picks landed unsigned by design:\n%s", got)
+	}
+}
