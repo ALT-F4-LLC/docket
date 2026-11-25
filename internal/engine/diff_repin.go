@@ -296,6 +296,17 @@ const ResolutionOwnRange = "own-range"
 func (e *Engine) RepinIssueDiffRange(
 	conn store.LegacyDB, stepID int, by Attribution, token string, nowMS int64,
 ) (*IssueDiffRepin, error) {
+	return e.RepinIssueDiffRangeStore(store.StoreOn(conn), stepID, by, token, nowMS)
+}
+
+// RepinIssueDiffRangeStore is RepinIssueDiffRange over a Store.
+func (e *Engine) RepinIssueDiffRangeStore(
+	storage store.Store, stepID int, by Attribution, token string, nowMS int64,
+) (*IssueDiffRepin, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	const verb = "issue.diff range re-pin"
 	if err := by.require(verb); err != nil {
 		return nil, err
@@ -406,17 +417,6 @@ func (e *Engine) RepinIssueDiffRange(
 		return nil, fmt.Errorf("re-pinning %s: %w", step.Instance, err)
 	}
 	return repin, nil
-}
-
-// RepinIssueDiffRangeStore is RepinIssueDiffRange over a Store.
-func (e *Engine) RepinIssueDiffRangeStore(
-	storage store.Store, stepID int, by Attribution, token string, nowMS int64,
-) (*IssueDiffRepin, error) {
-	conn, err := store.SQLDB(storage)
-	if err != nil {
-		return nil, err
-	}
-	return e.RepinIssueDiffRange(conn, stepID, by, token, nowMS)
 }
 
 // recordRangeStart is the commit an issue.diff record's range starts after:
