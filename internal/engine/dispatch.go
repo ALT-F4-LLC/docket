@@ -1258,12 +1258,14 @@ func retriedSinceOpen(
 
 // withoutClaimHistory clears the row fields a retry carries forward rather
 // than resets: Attempt and its outcome breakdown (a retry moves only the
-// budget's base), and Model, Effort, and Variant, which the policy walk keys
-// on those recorded failures.
+// budget's base), Model, Effort, and Variant, which the policy walk keys on
+// those recorded failures, and Metadata, the bag the spent claim and its
+// record merged onto the step.
 func withoutClaimHistory(row model.StepRow) model.StepRow {
 	row.Attempt, row.FailedAttempts, row.ReapedClaims = 0, 0, 0
 	row.PriorAttemptEnd = ""
 	row.Model, row.Effort, row.Variant = "", "", ""
+	row.Metadata = nil
 	return row
 }
 

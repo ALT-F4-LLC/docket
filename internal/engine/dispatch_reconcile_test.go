@@ -332,14 +332,28 @@ func TestReconcileLeavesTheStandaloneVerbsAlone(t *testing.T) {
 }
 
 // retriedAfterOpen parks implement@0 on a gap-only record after the manifest
-// opened and resolves it --as retry, the RUN-167 STEP-17376 sequence: the
-// step is pending and offered again, rendering one spent claim later than
-// its stored row.
+// opened and resolves it --as retry. Claim and record both pass --metadata, as
+// a real wave's do, so the retried step renders the claim history its spent
+// claim left behind: attempt and the merged metadata bag.
 func retriedAfterOpen(t *testing.T, conn *sql.DB, runID int) {
 	t.Helper()
 	openDispatch(t, conn, runID, 0, nowMS)
 	id := stepIDByInstance(t, conn, "implement@0")
-	parkGapOnly(t, conn, id)
+	claim, err := ClaimStep(conn, id, ClaimOptions{
+		Owner: "worker", Metadata: `{"dispatched_tier":"standard"}`, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "claim: %v", err)
+	testsupport.Must(t, testEngine().CompleteStep(conn, id, CompleteOptions{
+		Token:    claim.Token,
+		Artifact: []byte("   \n"),
+		Gaps:     [][]byte{[]byte("# The fix is out of scope\n\nNothing here to change.")},
+		Metadata: `{"model_resolved":"unknown","effort_resolved":"unknown"}`,
+		NowMS:    nowMS,
+	}), "gap-only record")
+	if got := statusOf(t, conn, id); got != db.StepWaitingHuman {
+		t.Fatalf("premise: implement@0 is %q after a gap-only record, want %q",
+			got, db.StepWaitingHuman)
+	}
 	testsupport.Must(t, testEngine().ResolveStep(conn, id, ResolveRetry, "run it again", nowMS),
 		"resolve --as retry")
 	if got := statusOf(t, conn, id); got != db.StepPending {
@@ -347,11 +361,9 @@ func retriedAfterOpen(t *testing.T, conn *sql.DB, runID int) {
 	}
 }
 
-// TestVerifyRetriedRowDoesNotFail is DKT-4587. RUN-167 DISPATCH-929's
-// reconcile refused at verify because STEP-17376, retried by the operator
-// mid-dispatch, rendered differently from its stored row — the attempt the
-// retried claim spent. The retry is a recorded ruling on that very step, so
-// the shift is the dispatch working and must not strand the close.
+// TestVerifyRetriedRowDoesNotFail pins a retry resolved on a manifest row while
+// its dispatch is open: the operator's ruling on that step is what moved its
+// rendering, so verify reports the row as retried and still verifies.
 func TestVerifyRetriedRowDoesNotFail(t *testing.T) {
 	conn := mustDB(t)
 	runID := dispatchRun(t, conn)
