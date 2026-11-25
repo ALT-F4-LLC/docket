@@ -224,6 +224,10 @@ func RefreshIssueScopeInRunStore(
 	var straddle *refreshStraddleError
 	var terminal *refreshAllTerminalError
 	switch {
+	case errors.As(err, &terminal) && !ri.Expanded():
+		// Not yet expanded, so no step rows exist: the steps expansion creates
+		// will render this snapshot, so the refresh reaches all of them.
+		steps = []string{}
 	case errors.As(err, &straddle):
 		return nil, conflictErr(
 			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
