@@ -493,10 +493,11 @@ func heldDecision(conn store.LegacyDB, step *store.Step) (resolved, approved boo
 
 // heldClusterRows reads every materialized step of one hold — the whole-hold
 // instance (the hold's identity) and its `#<element>` siblings — for
-// heldDecision and parkedByRejectedHold, which ask two DIFFERENT questions of
-// the same rows (heldDecision reduces "resolved, and unanimously approved?";
-// parkedByRejectedHold asks "is a REJECTION what parked this, specifically?")
-// and so keep their own loops; only the read is shared here.
+// heldDecision, heldAnsweredByFixRound, and parkedByRejectedHold, which ask
+// DIFFERENT questions of the same rows (heldDecision reduces "resolved, and
+// unanimously approved?"; heldAnsweredByFixRound asks "did a fix round answer
+// it?"; parkedByRejectedHold asks "is a REJECTION what parked this,
+// specifically?") and so keep their own loops; only the read is shared here.
 func heldClusterRows(conn store.LegacyDB, step *store.Step) ([]store.InstanceStatusRouting, error) {
 	rows, err := store.StoreOn(conn).HoldInstances(step.RunID, step.IssueID, heldStepInstance(step))
 	if err != nil {
@@ -504,6 +505,24 @@ func heldClusterRows(conn store.LegacyDB, step *store.Step) ([]store.InstanceSta
 			step.Instance, err)
 	}
 	return rows, nil
+}
+
+// heldAnsweredByFixRound reports whether an operator answered this hold with
+// `step resolve --as fix-round`, which supersedes the cluster step with a
+// `fix-loop` routing. That resolution has already entered the loop and minted
+// the round that decides the clusters, so it is not a rejection: routing the
+// aggregate per `on_fail` would park the issue over the round it minted.
+func heldAnsweredByFixRound(conn store.LegacyDB, step *store.Step) (bool, error) {
+	rows, err := heldClusterRows(conn, step)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range rows {
+		if r.Status == store.StepSuperseded && routingIs(r.Routing, workflow.OnFailFixLoop) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // heldClusterElements reports the payload indices whose cluster steps were

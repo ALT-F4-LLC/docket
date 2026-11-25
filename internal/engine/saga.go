@@ -1598,6 +1598,10 @@ func (e *Engine) runRoutingStage(
 		reason  string
 		class   store.ParkClass
 		cover   *batchCover
+		// answeredByFixRound marks a hold an operator's fix round answered:
+		// that resolution already entered the loop, so this routing must not
+		// enter it again.
+		answeredByFixRound bool
 	)
 	switch {
 	case gapOnly:
@@ -1714,6 +1718,16 @@ func (e *Engine) runRoutingStage(
 				return err
 			}
 			if !approved {
+				answeredByFixRound, err = heldAnsweredByFixRound(conn, step)
+				if err != nil {
+					return err
+				}
+				if answeredByFixRound {
+					routing = workflow.OnFailFixLoop
+					reason = "an operator answered the held clusters with a fix " +
+						"round; that round's work decides them"
+					break
+				}
 				routing = spec.EffectiveOnFail()
 				reason = "the held clusters were rejected by an operator"
 				class = store.ParkClassHeldRejected
@@ -1865,7 +1879,7 @@ func (e *Engine) runRoutingStage(
 	// bounded to `waiting-human` — decides that status. applyFixLoop re-reads
 	// StaleLineage inside the same transaction, so the outer guard is only an
 	// early-out, never a second opinion.
-	if !stale {
+	if !stale && !answeredByFixRound {
 		var outcome *LoopOutcome
 		routing, outcome, err = applyFixLoop(tx, step, defs[step.WorkflowID], routing, nowMS)
 		if err != nil {

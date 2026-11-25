@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -1208,5 +1209,65 @@ func TestHeldClusterSurvivesNewerEngineArtifacts(t *testing.T) {
 				t.Errorf("a newer %s row on the routing step hid the held cluster", kind)
 			}
 		})
+	}
+}
+
+// TestHeldFixRoundResolutionDoesNotRepark: a fix round answers a parked held
+// cluster with more work, not with a rejection. The aggregate it gates must not
+// park as rejected by an operator, because that park holds the issue and with
+// it the very round the resolution minted.
+func TestHeldFixRoundResolutionDoesNotRepark(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	e := testEngine()
+	configureHoldTally(t, conn, "panel", "alice,bob,carol")
+
+	held := driveHeldVote(t, conn, e, clusteredPayload, model.ProposalStatusRejected)
+
+	err := e.ResolveStep(conn, stepIDByInstance(t, conn, held[0]),
+		ResolveFixRound, "another round", nowMS)
+	testsupport.Must(t, err, "resolving the held cluster --as fix-round: %v", err)
+
+	// The resolution resumes the aggregate itself; routing it again must be
+	// a no-op over the same answer, not a second loop entry.
+	routingID := stepIDByInstance(t, conn, "reconcile@0")
+	err = e.ResumeSaga(conn, routingID, nowMS)
+	testsupport.Must(t, err, "routing reconcile@0: %v", err)
+
+	routing := heldStep(t, conn, "reconcile@0")
+	const rejectedPhrase = "rejected by an operator"
+	if routing.ParkClass == db.ParkClassHeldRejected {
+		t.Errorf("reconcile@0 parked %q after a fix-round resolution; nobody "+
+			"rejected the cluster", routing.ParkClass)
+	}
+	if strings.Contains(routing.ParkReason, rejectedPhrase) ||
+		strings.Contains(routing.Routing, rejectedPhrase) {
+		t.Errorf("reconcile@0 routing %q / park reason %q blames an operator "+
+			"rejection that never happened", routing.Routing, routing.ParkReason)
+	}
+	if routing.Status == db.StepWaitingHuman {
+		t.Errorf("reconcile@0 is %q (%q); a park on the issue holds the round "+
+			"the resolution minted", routing.Status, routing.ParkReason)
+	}
+	if routing.SagaStage != "" {
+		t.Errorf("reconcile@0's saga is %q, want complete", routing.SagaStage)
+	}
+
+	// Exactly the one round the operator authorized.
+	var loopCount, later int
+	countRow(t, conn, `SELECT loop_count FROM run_issues WHERE issue_id = ?`,
+		routing.IssueID, &loopCount)
+	if loopCount != 1 {
+		t.Errorf("loop_count = %d, want 1: one fix round was authorized", loopCount)
+	}
+	countRow(t, conn, `SELECT COUNT(*) FROM steps WHERE ordinal > ?`, 1, &later)
+	if later != 0 {
+		t.Errorf("%d steps beyond ordinal 1; routing the aggregate entered a "+
+			"second loop", later)
+	}
+
+	// The minted round is offered.
+	if ready := readyInstances(t, conn); !contains(ready, "review@1#0") {
+		t.Errorf("ready = %v, want the minted round's review@1#0", ready)
 	}
 }
