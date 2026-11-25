@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
@@ -40,12 +41,35 @@ import (
 // calling `next`; no engine surface reads the event yet. ResumeStrandedSagas
 // stays the recovery and does not consult it. A handoff that cannot be
 // recorded is never launched.
+//
+// THE PARENT CONFIRMS THE HANDOFF BEFORE IT RETURNS. A launch that succeeds
+// proves only that a process started, and a child its parent's sandbox kills
+// first never reaches its first gate. Only a child holding the step's saga lock
+// owns the gates; settleSagaHandoff waits for one, and runs the saga itself
+// when none takes the lock in time.
 
 // LaunchDetachedSaga starts one detached `step resume` for a step whose stage 1
 // just committed. Nil means no launcher is installed and the saga runs inline;
 // the CLI installs it in the binary's real entry point only, for the reason
 // LaunchDetachedPreGates documents.
+//
+// The handoff is confirmed, not trusted. A launcher returns an error when it
+// knows its child cannot outlive this process (the CLI's refuses inside a
+// bubblewrap sandbox, whose pid namespace dies with the command), and the
+// saga then runs inline. A nil return is a start, not a handoff: the record
+// waits up to sagaHandoffWait for the child to take the step's saga lock, and
+// when none does it takes the lock and runs the gates and routing inline. A
+// child the sandbox kills before its first gate therefore leaves no stranded
+// saga behind; one that arrives late finds the lock held and exits.
 var LaunchDetachedSaga func(stepID int) error
+
+// sagaHandoffWait bounds how long a record waits for its launched child to
+// take the step's saga lock: past a healthy child's start (exec, config, store
+// open), short enough that an inline fallback stays inside a recording turn.
+var sagaHandoffWait = 5 * time.Second
+
+// sagaHandoffPoll is how often the record probes the lock while it waits.
+const sagaHandoffPoll = 25 * time.Millisecond
 
 // Outcomes of RunDetachedSaga.
 const (
@@ -121,6 +145,36 @@ func (e *Engine) RunDetachedSagaStore(storage store.Store, stepID int, nowMS int
 	}
 	run.Outcome = DetachedSagaRan
 	return run, nil
+}
+
+// settleSagaHandoff decides who runs a launched step's saga. It reports true
+// when a detached child holds the step's saga lock, so the gates are the
+// child's; otherwise it takes the lock itself and runs the saga to completion
+// before reporting false.
+func (e *Engine) settleSagaHandoff(conn store.LegacyDB, stepID int, nowMS int64) (bool, error) {
+	deadline := time.Now().Add(sagaHandoffWait)
+	for !sagaHeldElsewhere(stepID) {
+		if !time.Now().Before(deadline) {
+			return e.runUnconfirmedSaga(conn, stepID, nowMS)
+		}
+		time.Sleep(sagaHandoffPoll)
+	}
+	return true, nil
+}
+
+// runUnconfirmedSaga runs the saga under its lock after no child confirmed the
+// handoff. A child that takes the lock first still owns the gates.
+func (e *Engine) runUnconfirmedSaga(conn store.LegacyDB, stepID int, nowMS int64) (bool, error) {
+	path := detachedSagaLockPath(stepID)
+	lock, held, err := holdDetachedPreGateLock(path)
+	if err != nil {
+		return false, err
+	}
+	if held {
+		return true, nil
+	}
+	defer releaseDetachedPreGateLock(lock, path)
+	return false, e.resumeSaga(conn, stepID, nowMS)
 }
 
 // recordSagaDetachStarted commits the handoff event for a step about to be

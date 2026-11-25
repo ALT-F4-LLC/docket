@@ -305,17 +305,21 @@ func (e *Engine) CompleteStepStore(storage store.Store, stepID int, opts Complet
 		// runs the saga inline, as it always did.
 		//
 		// The handoff event commits BEFORE the launch: a child that dies
-		// before its first gate cannot write its own record, and the parent
-		// returns right after launching. A handoff that cannot be recorded
-		// is never launched; the saga runs inline instead.
+		// before its first gate cannot write its own record. A handoff that
+		// cannot be recorded is never launched; the saga runs inline instead.
+		//
+		// A launch that succeeds is confirmed before the record returns:
+		// only a child holding the saga lock owns the gates, and when none
+		// takes it in time the record runs the saga under that lock itself.
 		if LaunchDetachedSaga != nil && detachedSagaLockPath(stepID) != "" &&
 			e.hasCompletionGates(conn, stepID) &&
 			recordSagaDetachStarted(conn, stepID, opts.NowMS) == nil {
 			if err := LaunchDetachedSaga(stepID); err == nil {
-				if opts.Pending != nil {
+				detached, err := e.settleSagaHandoff(conn, stepID, opts.NowMS)
+				if detached && opts.Pending != nil {
 					*opts.Pending = true
 				}
-				return nil
+				return err
 			}
 		}
 	}

@@ -12,6 +12,7 @@ import (
 // streams, inherited working directory. The argv carries the step id and
 // nothing else: no token, no shell, no caller input.
 func TestDetachedSagaLauncherComposesADetachedChild(t *testing.T) {
+	stubDetachedChildDeath(t, false)
 	var captured *exec.Cmd
 	prev := startDetachedProcess
 	startDetachedProcess = func(cmd *exec.Cmd) error {
@@ -42,6 +43,35 @@ func TestDetachedSagaLauncherComposesADetachedChild(t *testing.T) {
 	if captured.Dir != "" {
 		t.Errorf("the child's working directory is %q; it must inherit the parent's", captured.Dir)
 	}
+}
+
+// TestDetachedSagaLauncherRefusesWhereTheChildWouldDie: inside a bubblewrap
+// pid namespace the child dies with the recording command, so the launcher
+// starts nothing and returns an error, which sends the engine inline.
+func TestDetachedSagaLauncherRefusesWhereTheChildWouldDie(t *testing.T) {
+	stubDetachedChildDeath(t, true)
+	started := false
+	prev := startDetachedProcess
+	startDetachedProcess = func(*exec.Cmd) error {
+		started = true
+		return nil
+	}
+	t.Cleanup(func() { startDetachedProcess = prev })
+
+	if err := launchDetachedSaga(7); err == nil {
+		t.Error("launchDetachedSaga returned nil for a child that would die with the command")
+	}
+	if started {
+		t.Error("the launcher started a child the sandbox would kill")
+	}
+}
+
+// stubDetachedChildDeath fixes the sandbox probe's answer for one test.
+func stubDetachedChildDeath(t *testing.T, dies bool) {
+	t.Helper()
+	prev := detachedChildDiesWithCommand
+	detachedChildDiesWithCommand = func() bool { return dies }
+	t.Cleanup(func() { detachedChildDiesWithCommand = prev })
 }
 
 // TestStepResumeVerbIsHiddenAndRegistered: the verb is the engine's argv, not
