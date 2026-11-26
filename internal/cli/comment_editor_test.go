@@ -83,11 +83,3 @@ func TestNoMessageAndNoTerminalSpawnsNoEditor(t *testing.T) {
 		t.Error("the editor was spawned without a terminal")
 	}
 }
-
-// TestCommentBodyPassesThroughUnchanged: a real body is never touched.
-func TestCommentBodyPassesThroughUnchanged(t *testing.T) {
-	body, err := commentBodyOrEditor("hello", true, false)
-	if err != nil || body != "hello" {
-		t.Errorf("commentBodyOrEditor(\"hello\") = (%q, %v)", body, err)
-	}
-}

@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -120,43 +120,33 @@ type runNoteListing struct {
 }
 
 func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+	in := verb.RunNoteAddInput{
+		Run: ref,
+		// The verb reads the note only after it accepts the run and the
+		// authority, so a refused authority leaves stdin unconsumed.
+		Text:           func() (string, error) { return runNoteText(cmd) },
+		ConductorToken: stdinConductorToken,
 	}
-	// Parsed before the note or the token is read, so a refused authority
-	// leaves stdin unconsumed.
-	kind, _ := cmd.Flags().GetString("authority")
-	under, err := engine.ParseRunNoteAuthority(kind)
-	if err != nil {
-		return runErr(err)
-	}
-	by, err := rulingBy()
-	if err != nil {
-		return err
-	}
-	text, err := runNoteText(cmd)
-	if err != nil {
-		return err
-	}
+	in.Authority, _ = cmd.Flags().GetString("authority")
 	// Under --file - stdin carries the note, so the capability comes only from
 	// the environment: a stdin read here would take the note as a token, and a
 	// piped token would be recorded as the note.
-	var token string
 	if path, _ := cmd.Flags().GetString("file"); path == "-" {
-		token = strings.TrimSpace(os.Getenv(TokenEnvVar))
-	} else {
-		token = conductorToken(conn, runID, os.Stdin)
+		in.ConductorToken = func() string { return strings.TrimSpace(os.Getenv(TokenEnvVar)) }
 	}
-
-	note, err := engine.AddRunNote(conn, runID, token, by, under, text, model.NowMS())
+	env, err := runRulingEnv(cmd, in.Validate)
 	if err != nil {
-		return runErr(err)
+		return err
 	}
 
-	outcome := runNoteOutcome{Run: model.FormatRunID(runID), Note: *note}
+	res, err := verb.RunNoteAdd(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
+	if err != nil {
+		return verbErr(err)
+	}
+	note := res.Note
+
+	outcome := runNoteOutcome{Run: res.Run, Note: *note}
 	var message string
 	if !w.JSONMode {
 		message = fmt.Sprintf(
@@ -169,7 +159,8 @@ func runRunNoteAdd(cmd *cobra.Command, ref string, w *output.Writer) error {
 
 // runNoteText resolves `--text` or `--file`, refusing both and neither: a
 // note has exactly one source, and a verb that silently preferred one flag
-// over the other would record something the caller did not write.
+// over the other would record something the caller did not write. It is
+// RunNoteAdd's text source, so each failure is a *verb.Error carrying its code.
 func runNoteText(cmd *cobra.Command) (string, error) {
 	text, _ := cmd.Flags().GetString("text")
 	path, _ := cmd.Flags().GetString("file")
@@ -178,11 +169,10 @@ func runNoteText(cmd *cobra.Command) (string, error) {
 
 	switch {
 	case hasText && hasFile:
-		return "", cmdErr(fmt.Errorf("pass --text or --file, not both"), output.ErrValidation)
+		return "", &verb.Error{Code: output.ErrValidation, Err: fmt.Errorf("pass --text or --file, not both")}
 	case !hasText && !hasFile:
-		return "", cmdErr(fmt.Errorf(
-			"a note needs its text: pass --text \"...\" or --file F (\"-\" reads stdin)"),
-			output.ErrValidation)
+		return "", &verb.Error{Code: output.ErrValidation, Err: fmt.Errorf(
+			"a note needs its text: pass --text \"...\" or --file F (\"-\" reads stdin)")}
 	case hasText:
 		return text, nil
 	}
@@ -194,35 +184,27 @@ func runNoteText(cmd *cobra.Command) (string, error) {
 	if path == "-" {
 		raw, err = io.ReadAll(io.LimitReader(os.Stdin, engine.RunNoteMaxBytes+1))
 		if err != nil {
-			return "", cmdErr(fmt.Errorf("reading the note from stdin: %w", err),
-				output.ErrGeneral)
+			return "", &verb.Error{Code: output.ErrGeneral, Err: fmt.Errorf("reading the note from stdin: %w", err)}
 		}
 	} else {
 		raw, err = os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return "", cmdErr(fmt.Errorf("note file %s not found", path), output.ErrNotFound)
+				return "", &verb.Error{Code: output.ErrNotFound, Err: fmt.Errorf("note file %s not found", path)}
 			}
-			return "", cmdErr(fmt.Errorf("reading the note file %s: %w", path, err),
-				output.ErrGeneral)
+			return "", &verb.Error{Code: output.ErrGeneral, Err: fmt.Errorf("reading the note file %s: %w", path, err)}
 		}
 	}
 	return string(raw), nil
 }
 
 func runRunNoteList(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
+	res, err := verb.RunNoteList(cmd.Context(), verbEnv(cmd), verb.RunNoteListInput{Run: ref})
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-	notes, err := engine.ListRunNotes(conn, runID)
-	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
-	listing := runNoteListing{Run: model.FormatRunID(runID), Notes: notes}
+	listing := runNoteListing{Run: res.Run, Notes: res.Notes}
 	var message string
 	if !w.JSONMode {
 		message = renderRunNotes(listing)

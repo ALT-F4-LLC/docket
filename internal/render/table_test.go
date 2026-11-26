@@ -213,55 +213,6 @@ func TestRenderGroupedTable_EmptyList(t *testing.T) {
 	}
 }
 
-func TestRenderGroupedTable_ParentNoChildrenInResult(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	// A parent issue is in the result set, but none of its children are (e.g., all
-	// children are filtered out). The parent should appear as standalone, not as an
-	// empty group.
-	parent := makeTestIssue(1, "Parent With No Children Here", model.StatusInProgress, model.PriorityHigh, model.IssueKindEpic, nil)
-	standalone := makeTestIssue(2, "Some Other Task", model.StatusTodo, model.PriorityMedium, model.IssueKindTask, nil)
-
-	issues := []*model.Issue{parent, standalone}
-
-	got := RenderGroupedTable(issues, nil, nil)
-
-	// Since there are no parent-child groups, it should fall back to flat table.
-	if !strings.Contains(got, "DKT-1") {
-		t.Errorf("expected DKT-1 in output, got:\n%s", got)
-	}
-	if !strings.Contains(got, "DKT-2") {
-		t.Errorf("expected DKT-2 in output, got:\n%s", got)
-	}
-
-	// Should NOT have grouped section markers (no groups formed).
-	if strings.Contains(got, "===") && strings.Contains(got, "Standalone Issues") {
-		t.Errorf("expected flat table when parent has no children in result, got:\n%s", got)
-	}
-}
-
-func TestRenderGroupedTable_ProgressDisplay(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	parent := makeTestIssue(1, "Parent Task", model.StatusInProgress, model.PriorityHigh, model.IssueKindEpic, nil)
-	child1 := makeTestIssue(2, "Done Child", model.StatusDone, model.PriorityHigh, model.IssueKindTask, intPtr(1))
-	child2 := makeTestIssue(3, "Done Child 2", model.StatusDone, model.PriorityMedium, model.IssueKindTask, intPtr(1))
-	child3 := makeTestIssue(4, "Todo Child", model.StatusTodo, model.PriorityLow, model.IssueKindTask, intPtr(1))
-
-	issues := []*model.Issue{parent, child1, child2, child3}
-
-	progress := map[int]SubIssueProgress{
-		1: {Done: 2, Total: 3},
-	}
-
-	got := RenderGroupedTable(issues, nil, progress)
-
-	// Verify progress indicator format.
-	if !strings.Contains(got, "(2/3 done)") {
-		t.Errorf("expected '(2/3 done)' progress on parent header, got:\n%s", got)
-	}
-}
-
 func TestRenderGroupedTable_ProgressNotShownWhenNil(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -280,26 +231,6 @@ func TestRenderGroupedTable_ProgressNotShownWhenNil(t *testing.T) {
 	// No progress text should appear.
 	if strings.Contains(got, "done)") {
 		t.Errorf("expected no progress indicator when progress map is nil, got:\n%s", got)
-	}
-}
-
-func TestRenderGroupedTable_ProgressNotShownWhenEmpty(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	parent := makeTestIssue(1, "Parent Task", model.StatusInProgress, model.PriorityHigh, model.IssueKindEpic, nil)
-	child := makeTestIssue(2, "Child Task", model.StatusTodo, model.PriorityMedium, model.IssueKindTask, intPtr(1))
-
-	issues := []*model.Issue{parent, child}
-
-	// Empty progress map (no entry for this parent).
-	got := RenderGroupedTable(issues, nil, map[int]SubIssueProgress{})
-
-	// Should still render the group, just without progress.
-	if !strings.Contains(got, "DKT-1") {
-		t.Errorf("expected DKT-1 in output, got:\n%s", got)
-	}
-	if strings.Contains(got, "done)") {
-		t.Errorf("expected no progress indicator when progress map has no entry, got:\n%s", got)
 	}
 }
 

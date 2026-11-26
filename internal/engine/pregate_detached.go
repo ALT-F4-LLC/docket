@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +11,8 @@ import (
 	"syscall"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -42,7 +41,9 @@ import (
 // rows keyed by (step, target sha). The claim finds them
 // (reusableDetachedPreGates) and serves them instead of spawning; a target
 // that moved, a run still in flight, or a run that measured nothing leaves the
-// claim on its budgeted path, unchanged. The claim never waits.
+// claim on its budgeted path, where a gate the budget ends before it finishes
+// records a pending row rather than the kill (pendingPastClaimBudget). The
+// claim never waits.
 //
 // WHY THE TARGET IS RECONSTRUCTED EVEN WHEN A WORKTREE STILL STANDS. The row
 // is keyed by the sha, so the sha is what it measures: a live worktree may
@@ -65,10 +66,11 @@ import (
 // costs one child that exits at the lock.
 //
 // THE SCHEDULER HOLDS THE STEP WHILE THE RUN IS IN FLIGHT. The claim never
-// waits, so a claim that arrives while the child is still measuring runs the
-// gate on its budgeted path and records the cut — the exact row this file
-// exists to replace, and for a verify step whose evidence IS that gate's exit, no
-// evidence at all. So a pending pre-gated step whose (step, target) lock is
+// waits, so a claim that arrives while the child is still measuring would run
+// the gate on its budgeted path and, for a gate the budget cannot hold, record
+// a pending row in place of the result the child is about to record — for a
+// verify step whose evidence IS that gate's exit, no evidence at all. So a
+// pending pre-gated step whose (step, target) lock is
 // held right now is not ready (ready.go, CondPreGatePending): `next` and
 // `dispatch open` do not offer it, the staged closure does not stage it, and a
 // claim is refused rather than served a budget-cut row. The hold is the same
@@ -163,7 +165,7 @@ type DetachedPreGateRun struct {
 // detachedPreGateCandidate is one pending step whose pre-gates resolve a
 // target sha right now.
 type detachedPreGateCandidate struct {
-	step  *db.Step
+	step  *store.Step
 	sha   string
 	gates []workflow.Gate
 }
@@ -175,7 +177,7 @@ type detachedPreGateCandidate struct {
 // returns nothing, because housekeeping must not stand between a step and the
 // completion it already has. A launch that fails leaves the claim on its
 // budgeted path, which is where it was before this file existed.
-func (e *Engine) startDetachedPreGates(conn *sql.DB, runID int, nowMS int64) {
+func (e *Engine) startDetachedPreGates(conn store.LegacyDB, runID int, nowMS int64) {
 	if LaunchDetachedPreGates == nil {
 		return
 	}
@@ -183,8 +185,9 @@ func (e *Engine) startDetachedPreGates(conn *sql.DB, runID int, nowMS int64) {
 	if err != nil {
 		return
 	}
+	st := store.StoreOn(conn)
 	for _, c := range candidates {
-		rows, err := db.GateResultsForStep(conn, c.step.ID)
+		rows, err := st.GateResultsForStep(c.step.ID)
 		if err != nil {
 			continue
 		}
@@ -209,7 +212,7 @@ func (e *Engine) startDetachedPreGates(conn *sql.DB, runID int, nowMS int64) {
 // so it is not a candidate; neither is a step that is no longer pending — a
 // claim in flight runs its own phase, and a finished step consumes nothing.
 func detachedPreGateCandidates(
-	conn *sql.DB, runID int, nowMS int64,
+	conn store.LegacyDB, runID int, nowMS int64,
 ) ([]detachedPreGateCandidate, error) {
 	defs, err := StepDefinitions(conn, runID)
 	if err != nil {
@@ -221,7 +224,7 @@ func detachedPreGateCandidates(
 		return nil, nil
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, err
 	}
@@ -245,14 +248,14 @@ func detachedPreGateCandidates(
 // key a run records, the key a claim looks up, and the key the hold probes are
 // one resolution (resolvedTargetFor over the live artifacts).
 func detachablePreGateSteps(
-	tx *sql.Tx, sched *Scheduler, admit func(*db.Step) bool,
+	tx store.LegacyTx, sched *Scheduler, admit func(*store.Step) bool,
 ) ([]detachedPreGateCandidate, error) {
 	var (
-		artifacts []*db.Artifact
+		artifacts []*store.Artifact
 		out       []detachedPreGateCandidate
 	)
 	for _, step := range sched.Steps() {
-		if step.Status != db.StepPending || !isExecutorStep(step) || step.WorkRoot != "" {
+		if step.Status != store.StepPending || !isExecutorStep(step) || step.WorkRoot != "" {
 			continue
 		}
 		spec := materializedSpec(sched.defs[step.WorkflowID], step, sched.holdTally)
@@ -268,7 +271,7 @@ func detachablePreGateSteps(
 		}
 		if artifacts == nil {
 			var err error
-			if artifacts, err = db.ListRunArtifactsTx(tx, step.RunID); err != nil {
+			if artifacts, err = store.TxOn(tx).ListRunArtifactsTx(step.RunID); err != nil {
 				return nil, err
 			}
 		}
@@ -305,7 +308,7 @@ func detachablePreGateSteps(
 // opens the lockfile without O_CREATE, tries the flock non-blocking, and a
 // lock it acquires — a child that died with the file in place — is closed
 // again here. A missing lockfile, or no lock directory at all, is no hold.
-func (s *Scheduler) loadDetachedPreGateHolds(tx *sql.Tx) error {
+func (s *Scheduler) loadDetachedPreGateHolds(tx store.LegacyTx) error {
 	return s.probeDetachedPreGateHolds(tx, s.predecessorsDone)
 }
 
@@ -316,9 +319,9 @@ func (s *Scheduler) loadDetachedPreGateHolds(tx *sql.Tx) error {
 // offer — or admit the claim of — a step whose detached run is in flight,
 // which is the one state the hold exists to refuse. Same guards, same
 // resolution, same probe as the load; only the admission narrows to the step.
-func (s *Scheduler) refreshDetachedPreGateHold(tx *sql.Tx, step *db.Step) error {
+func (s *Scheduler) refreshDetachedPreGateHold(tx store.LegacyTx, step *store.Step) error {
 	delete(s.preGateHolds, step.ID)
-	return s.probeDetachedPreGateHolds(tx, func(c *db.Step) bool { return c.ID == step.ID })
+	return s.probeDetachedPreGateHolds(tx, func(c *store.Step) bool { return c.ID == step.ID })
 }
 
 // preGateHeld reports whether the hold is the ONE condition keeping a step out
@@ -339,7 +342,7 @@ func preGateHeld(s *Scheduler, stepID int) bool {
 // probeDetachedPreGateHolds is the body loadDetachedPreGateHolds and
 // refreshDetachedPreGateHold share: resolve the admitted candidates' targets,
 // probe each (step, target) lock, and record the ones held.
-func (s *Scheduler) probeDetachedPreGateHolds(tx *sql.Tx, admit func(*db.Step) bool) error {
+func (s *Scheduler) probeDetachedPreGateHolds(tx store.LegacyTx, admit func(*store.Step) bool) error {
 	if s.run == nil || s.run.Status != model.RunActive || !declaresDetachablePreGates(s.defs) {
 		return nil
 	}
@@ -376,7 +379,14 @@ func declaresDetachablePreGates(defs map[int]*workflow.Definition) bool {
 	return false
 }
 
-// RunDetachedPreGates is the detached child's whole work: hold the (step,
+// RunDetachedPreGates is RunDetachedPreGatesStore on store.StoreOn(conn).
+func (e *Engine) RunDetachedPreGates(
+	conn store.LegacyDB, stepID int, targetSHA string, nowMS int64,
+) (*DetachedPreGateRun, error) {
+	return e.RunDetachedPreGatesStore(store.StoreOn(conn), stepID, targetSHA, nowMS)
+}
+
+// RunDetachedPreGatesStore is the detached child's whole work: hold the (step,
 // target) lock, confirm the measurement is still wanted, reconstruct the
 // target, run every pre-gate under its entry's own timeout, and record the
 // rows keyed to the target. `step pregate` is its only production caller.
@@ -386,9 +396,13 @@ func declaresDetachablePreGates(defs map[int]*workflow.Definition) bool {
 // step that moved on, a target that moved. Only a target that cannot be
 // reconstructed is an error, because a run that was asked for and could not
 // measure should say so to whoever asked.
-func (e *Engine) RunDetachedPreGates(
-	conn *sql.DB, stepID int, targetSHA string, nowMS int64,
+func (e *Engine) RunDetachedPreGatesStore(
+	storage store.Store, stepID int, targetSHA string, nowMS int64,
 ) (*DetachedPreGateRun, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	targetSHA = strings.ToLower(strings.TrimSpace(targetSHA))
 	if !detachedTargetSHA.MatchString(targetSHA) {
 		return nil, validationErr(
@@ -396,8 +410,9 @@ func (e *Engine) RunDetachedPreGates(
 				"is one", targetSHA)
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	st := store.StoreOn(conn)
+	step, err := st.GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -446,7 +461,7 @@ func (e *Engine) RunDetachedPreGates(
 	// before us; a step nothing can serve — over, claimed, or measuring its
 	// own worktree; a target the step no longer resolves, because a later
 	// round or a re-pin moved it.
-	rows, err := db.GateResultsForStep(conn, stepID)
+	rows, err := st.GateResultsForStep(stepID)
 	if err != nil {
 		return nil, err
 	}
@@ -458,7 +473,7 @@ func (e *Engine) RunDetachedPreGates(
 		}
 		return out, nil
 	}
-	if step.Status != db.StepPending || step.WorkRoot != "" {
+	if step.Status != store.StepPending || step.WorkRoot != "" {
 		out.Outcome = DetachedPreGateClosed
 		return out, nil
 	}
@@ -492,7 +507,7 @@ func (e *Engine) RunDetachedPreGates(
 	// same question is asked again inside the recording transaction, and a
 	// `no` writes nothing and ends the run.
 	var declinedAtRecord string
-	guard := func(tx *sql.Tx) (bool, error) {
+	guard := func(tx store.LegacyTx) (bool, error) {
 		why, err := detachedPreGateWanted(tx, step, defs, targetSHA, nowMS)
 		if err != nil {
 			return false, err
@@ -533,10 +548,10 @@ func (e *Engine) RunDetachedPreGates(
 // stepStillWantsDetachedPreGate is detachedPreGateWanted read from a fresh
 // snapshot of its own: the pre-measurement check.
 func stepStillWantsDetachedPreGate(
-	conn *sql.DB, step *db.Step, defs map[int]*workflow.Definition,
+	conn store.LegacyDB, step *store.Step, defs map[int]*workflow.Definition,
 	targetSHA string, nowMS int64,
 ) (string, error) {
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return "", err
 	}
@@ -551,7 +566,7 @@ func stepStillWantsDetachedPreGate(
 // when so, and otherwise the outcome that names why not — the same answer
 // before the measurement and at the moment of recording.
 func detachedPreGateWanted(
-	tx *sql.Tx, step *db.Step, defs map[int]*workflow.Definition,
+	tx store.LegacyTx, step *store.Step, defs map[int]*workflow.Definition,
 	targetSHA string, nowMS int64,
 ) (string, error) {
 	sched, err := LoadScheduler(tx, step.RunID, defs, nowMS)
@@ -559,7 +574,7 @@ func detachedPreGateWanted(
 		return "", err
 	}
 	fresh := sched.stepByID[step.ID]
-	if fresh == nil || fresh.Status != db.StepPending || fresh.WorkRoot != "" {
+	if fresh == nil || fresh.Status != store.StepPending || fresh.WorkRoot != "" {
 		return DetachedPreGateClosed, nil
 	}
 	spec := materializedSpec(sched.defs[fresh.WorkflowID], fresh, sched.holdTally)
@@ -581,16 +596,16 @@ func detachedPreGateWanted(
 // spawning. Nothing is read for a step with no target sha —
 // such a step measures a tree, never a key.
 func reusableDetachedPreGates(
-	conn *sql.DB, stepID int, gates []workflow.Gate, targetSHA string,
-) (map[string]db.GateResultRow, error) {
+	conn store.LegacyDB, stepID int, gates []workflow.Gate, targetSHA string,
+) (map[string]store.GateResultRow, error) {
 	if targetSHA == "" {
 		return nil, nil
 	}
-	rows, err := db.GateResultsForStep(conn, stepID)
+	rows, err := store.StoreOn(conn).GateResultsForStep(stepID)
 	if err != nil {
 		return nil, err
 	}
-	served := make(map[string]db.GateResultRow)
+	served := make(map[string]store.GateResultRow)
 	for _, gate := range gates {
 		if recorded, ok := recordedDetachedPreGate(rows, gate.Name, targetSHA); ok {
 			served[gate.Name] = recorded
@@ -606,10 +621,10 @@ func reusableDetachedPreGates(
 // beside a later pass is not served alongside it, because one gate is one
 // result in the bundle.
 func recordedDetachedPreGate(
-	rows []db.GateResultRow, gate, targetSHA string,
-) (db.GateResultRow, bool) {
+	rows []store.GateResultRow, gate, targetSHA string,
+) (store.GateResultRow, bool) {
 	var (
-		latest db.GateResultRow
+		latest store.GateResultRow
 		found  bool
 	)
 	if targetSHA == "" {
@@ -628,7 +643,7 @@ func recordedDetachedPreGate(
 
 // detachedPreGatesComplete reports whether every declared pre-gate has a
 // complete detached result for the target.
-func detachedPreGatesComplete(rows []db.GateResultRow, gates []workflow.Gate, targetSHA string) bool {
+func detachedPreGatesComplete(rows []store.GateResultRow, gates []workflow.Gate, targetSHA string) bool {
 	for _, gate := range gates {
 		if _, ok := recordedDetachedPreGate(rows, gate.Name, targetSHA); !ok {
 			return false

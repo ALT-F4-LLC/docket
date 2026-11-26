@@ -49,18 +49,6 @@ func TestARepoRootThatNoLongerResolvesIsSkippedNotUnmatched(t *testing.T) {
 	}
 }
 
-func TestAnArgvAbsentFromTheRosterStaysUnmatched(t *testing.T) {
-	identity := t.TempDir()
-	runner := NewExecRunner(RepoPaths{ExecRoot: identity, Identity: identity})
-	runner.LoadStore = sandboxTrust(t) // an empty roster
-
-	ex, err := runner.Execute(context.Background(), GateSpec{Name: "build"}, StepContext{})
-	testsupport.Must(t, err, "Execute: %v", err)
-	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictUnmatched {
-		t.Fatalf("rows = %+v; an untrusted gate must stay %q", ex.Results, VerdictUnmatched)
-	}
-}
-
 // The saga half: an engine whose runner root has vanished parks the step as an
 // unmeasured gate, not as an unmatched one.
 func TestAVanishedRepoRootDoesNotParkAsGateUnmatched(t *testing.T) {

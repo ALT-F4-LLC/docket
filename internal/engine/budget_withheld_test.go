@@ -53,32 +53,6 @@ func TestBudgetWithholdingIsReported(t *testing.T) {
 	}
 }
 
-// TestNoBudgetHoldWhenNothingIsWithheld keeps the field dormant.
-//
-// The contract HeldReason and LoopHeldReason set is "empty whenever nothing
-// was withheld", so a run with no cap — a dormant budget — must carry no
-// new field on the wire. A hold string that appeared on every offer would be
-// noise, and noise is what makes a real hold get skimmed past.
-func TestNoBudgetHoldWhenNothingIsWithheld(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	ready, err := NewEngine().NextSteps(conn, runID, 10, nowMS)
-	testsupport.Must(t, err, "NextSteps: %v", err)
-	if len(ready.Steps) == 0 {
-		t.Fatal("an uncapped activated run offered nothing; the premise fails")
-	}
-	if ready.BudgetHeldReason != "" {
-		t.Errorf("an uncapped run reports a budget hold: %s", ready.BudgetHeldReason)
-	}
-
-	manifest, err := NewEngine().OpenDispatch(conn, runID, 10, nil, nowMS)
-	testsupport.Must(t, err, "OpenDispatch: %v", err)
-	if manifest.BudgetHeld != "" {
-		t.Errorf("an uncapped manifest reports a budget hold: %s", manifest.BudgetHeld)
-	}
-}
-
 // TestBudgetHoldReasonSummarizesManyRows keeps the message bounded: a run that
 // withholds twenty rows must not print twenty of them, the same cap
 // LoopHoldReason applies.

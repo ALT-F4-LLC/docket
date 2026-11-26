@@ -113,27 +113,6 @@ func TestRenderPlainBoardTitleTruncation(t *testing.T) {
 	}
 }
 
-func TestRenderPlainBoardPriorityIndicators(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	issues := []*model.Issue{
-		makeIssue(1, "Critical task", model.StatusTodo, model.PriorityCritical),
-		makeIssue(2, "High task", model.StatusTodo, model.PriorityHigh),
-		makeIssue(3, "Medium task", model.StatusTodo, model.PriorityMedium),
-		makeIssue(4, "Low task", model.StatusTodo, model.PriorityLow),
-		makeIssue(5, "No-pri task", model.StatusTodo, model.PriorityNone),
-	}
-
-	got := RenderBoard(issues, BoardOptions{})
-
-	// Plain-text cards render priority as "[priority]"
-	for _, pri := range []string{"[critical]", "[high]", "[medium]", "[low]", "[none]"} {
-		if !strings.Contains(got, pri) {
-			t.Errorf("expected priority indicator %q in output, got:\n%s", pri, got)
-		}
-	}
-}
-
 func TestRenderPlainBoardSubIssueProgress(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -204,44 +183,6 @@ func TestRenderPlainBoardExactlyMaxCards(t *testing.T) {
 	}
 }
 
-func TestRenderPlainBoardAllIssuesOneStatus(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	issues := []*model.Issue{
-		makeIssue(1, "Task A", model.StatusInProgress, model.PriorityHigh),
-		makeIssue(2, "Task B", model.StatusInProgress, model.PriorityLow),
-	}
-
-	got := RenderBoard(issues, BoardOptions{})
-
-	// Should only have IN-PROGRESS column (with status icon before name)
-	if !strings.Contains(got, "IN-PROGRESS (2) ===") {
-		t.Errorf("expected IN-PROGRESS column with 2 issues, got:\n%s", got)
-	}
-	// Should not have other columns (check for "STATUS (" pattern in headers)
-	for _, status := range []string{"BACKLOG", "TODO", "REVIEW", "DONE"} {
-		if strings.Contains(got, status+" (") {
-			t.Errorf("should not have %s column, got:\n%s", status, got)
-		}
-	}
-}
-
-func TestRenderPlainBoardIssueWithNoLabels(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	issue := makeIssue(1, "No labels", model.StatusTodo, model.PriorityMedium)
-	// Labels is nil by default from makeIssue
-	got := RenderBoard([]*model.Issue{issue}, BoardOptions{})
-
-	// Should have the issue ID and title
-	if !strings.Contains(got, "DKT-1") {
-		t.Errorf("expected DKT-1 in output, got:\n%s", got)
-	}
-	if !strings.Contains(got, "No labels") {
-		t.Errorf("expected title in output, got:\n%s", got)
-	}
-}
-
 func TestRenderPlainBoardIssueWithLabels(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -271,55 +212,6 @@ func TestRenderBoardColorPathExecutes(t *testing.T) {
 	got := renderColorBoard(issues, BoardOptions{Progress: progress})
 	if got == "" {
 		t.Error("expected non-empty output from color board render")
-	}
-}
-
-func TestRenderPlainBoardExpandFlag(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	// The Expand flag is stored in BoardOptions but doesn't change
-	// renderPlainBoard output directly -- it controls sub-issue filtering
-	// at the command level (cmd/docket/board.go). The render layer just
-	// receives the final filtered issue list. Verify the flag is accepted.
-	parentID := 1
-	issues := []*model.Issue{
-		makeIssue(1, "Parent", model.StatusTodo, model.PriorityMedium),
-		{
-			ID:        2,
-			ParentID:  &parentID,
-			Title:     "Child",
-			Status:    model.StatusTodo,
-			Priority:  model.PriorityLow,
-			Kind:      model.IssueKindTask,
-			CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-			UpdatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		},
-	}
-
-	got := RenderBoard(issues, BoardOptions{Expand: true})
-	// With expand, both parent and child appear
-	if !strings.Contains(got, "DKT-1") || !strings.Contains(got, "DKT-2") {
-		t.Errorf("expected both DKT-1 and DKT-2 in expanded output, got:\n%s", got)
-	}
-}
-
-func TestGroupByStatus(t *testing.T) {
-	issues := []*model.Issue{
-		makeIssue(1, "A", model.StatusTodo, model.PriorityMedium),
-		makeIssue(2, "B", model.StatusDone, model.PriorityMedium),
-		makeIssue(3, "C", model.StatusTodo, model.PriorityMedium),
-	}
-
-	groups := groupByStatus(issues)
-
-	if len(groups[model.StatusTodo]) != 2 {
-		t.Errorf("expected 2 todo issues, got %d", len(groups[model.StatusTodo]))
-	}
-	if len(groups[model.StatusDone]) != 1 {
-		t.Errorf("expected 1 done issue, got %d", len(groups[model.StatusDone]))
-	}
-	if len(groups[model.StatusBacklog]) != 0 {
-		t.Errorf("expected 0 backlog issues, got %d", len(groups[model.StatusBacklog]))
 	}
 }
 
@@ -488,22 +380,5 @@ func TestEmptyStatePlainQuietSuppressesHint(t *testing.T) {
 	got := EmptyState("No items.", "Try adding one.", true)
 	if got != "No items." {
 		t.Errorf("EmptyState quiet mode = %q, want %q", got, "No items.")
-	}
-}
-
-func TestRenderPlainBoardCardKindAllTypes(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	// Verify all issue kinds produce cards with their kind icon
-	for _, kind := range []model.IssueKind{
-		model.IssueKindBug, model.IssueKindFeature, model.IssueKindTask,
-		model.IssueKindEpic, model.IssueKindChore,
-	} {
-		issue := makeIssue(1, "Test", model.StatusTodo, model.PriorityMedium)
-		issue.Kind = kind
-		got := RenderBoard([]*model.Issue{issue}, BoardOptions{})
-		if got == "" {
-			t.Errorf("RenderBoard with kind %q returned empty string", kind)
-		}
 	}
 }

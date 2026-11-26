@@ -1,12 +1,8 @@
 // Package testsupport holds helpers shared across the repo's test packages.
 // It depends on nothing else in the module, so no cycle can arise from
-// importing it. This repo's own suite only exercises the internal-package
-// import path (package foo) today; no package foo_test file exists in this
-// tree to exercise the external-package import path. Nothing in the
-// package's zero-dependency design blocks that import, but that is
-// INFERRED, not observed here — the first downstream issue that adds a
-// package foo_test file importing testsupport should confirm and report
-// back if anything differs.
+// importing it. Both import paths are exercised: internal-package tests
+// (package foo) throughout, and the external-package path (package foo_test)
+// by internal/db's store-contract suite.
 //
 // testsupport is test-only and must never reach the shipped binary: it
 // imports "testing", which registers command-line flags in init(), and

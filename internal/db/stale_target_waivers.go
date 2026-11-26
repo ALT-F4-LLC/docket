@@ -43,19 +43,15 @@ type StaleTargetWaiver struct {
 // operator's ruling covering rows they never listed — or missing rows they
 // did.
 func InsertStaleTargetWaiverTx(tx *sql.Tx, w StaleTargetWaiver) (int, error) {
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO stale_target_waivers
 		   (run_id, step_instance, target_sha, note, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?)`,
-		w.RunID, w.StepInstance, w.TargetSHA, w.Note, w.CreatedAtMS)
-	if err != nil {
+		 VALUES (?, ?, ?, ?, ?) RETURNING id`,
+		w.RunID, w.StepInstance, w.TargetSHA, w.Note, w.CreatedAtMS).Scan(&id); err != nil {
 		return 0, fmt.Errorf("recording the stale-target waiver: %w", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("reading the stale-target waiver id: %w", err)
-	}
-	return int(id), nil
+	return id, nil
 }
 
 // StaleTargetWaiversForRun returns every waiver recorded for one run, in

@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -81,6 +83,7 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 	cmd := docListCmdWithDB(conn)
 	setFlags(t, cmd, map[string]string{"type": "resume-note", "sort": "id:asc"})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList: %v", err)
 	}
@@ -91,7 +94,7 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 
 	var env struct {
 		Data struct {
-			Docs  []map[string]json.RawMessage `json:"docs"`
+			Items []map[string]json.RawMessage `json:"items"`
 			Total int                          `json:"total"`
 		} `json:"data"`
 	}
@@ -99,11 +102,11 @@ func TestDocListJSON_IsSummaryRows(t *testing.T) {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 
-	if len(env.Data.Docs) != 11 || env.Data.Total != 11 {
-		t.Fatalf("docs = %d, total = %d, want 11 and 11", len(env.Data.Docs), env.Data.Total)
+	if len(env.Data.Items) != 11 || env.Data.Total != 11 {
+		t.Fatalf("items = %d, total = %d, want 11 and 11", len(env.Data.Items), env.Data.Total)
 	}
 
-	for i, row := range env.Data.Docs {
+	for i, row := range env.Data.Items {
 		if _, ok := row["body"]; ok {
 			t.Errorf("row %d carries a body key; listings must be body-free", i)
 		}
@@ -139,26 +142,27 @@ func TestDocListJSON_WithBodyRestoresBodies(t *testing.T) {
 		"type": "resume-note", "sort": "id:asc", "with-body": "true",
 	})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList --with-body: %v", err)
 	}
 
 	var env struct {
 		Data struct {
-			Docs []struct {
+			Items []struct {
 				ID   string `json:"id"`
 				Body string `json:"body"`
-			} `json:"docs"`
+			} `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
 
-	if len(env.Data.Docs) != 11 {
-		t.Fatalf("docs = %d, want 11", len(env.Data.Docs))
+	if len(env.Data.Items) != 11 {
+		t.Fatalf("items = %d, want 11", len(env.Data.Items))
 	}
-	for i, row := range env.Data.Docs {
+	for i, row := range env.Data.Items {
 		if row.Body != bodies[i] {
 			t.Errorf("row %d body = %d bytes, want the full %d-byte body",
 				i, len(row.Body), len(bodies[i]))
@@ -176,20 +180,21 @@ func TestDocListJSON_EmptyIsAnArray(t *testing.T) {
 
 	cmd := docListCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runDocList(cmd, nil, w); err != nil {
 		t.Fatalf("runDocList: %v", err)
 	}
 
 	var env struct {
 		Data struct {
-			Docs json.RawMessage `json:"docs"`
+			Items json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if got := string(env.Data.Docs); got != "[]" {
-		t.Errorf("docs = %s, want []", got)
+	if got := string(env.Data.Items); got != "[]" {
+		t.Errorf("items = %s, want []", got)
 	}
 }
 
@@ -285,6 +290,46 @@ func TestDocShowJSON_StillCarriesTheBody(t *testing.T) {
 	}
 	if string(env.Data.Revisions) == "[]" {
 		t.Error("doc show revisions = [], want the create revision")
+	}
+}
+
+// TestDocListScopesToTheConfiguredProject: with the root hook's resolution
+// skipped, the listing's project comes from the invocation's config identity.
+func TestDocListScopesToTheConfiguredProject(t *testing.T) {
+	conn := newTestDB(t)
+	// The first identity registered adopts the default project; the second
+	// gets a row of its own.
+	first, err := db.EnsureProject(conn, "/repos/first", "first", 1)
+	testsupport.Must(t, err, "EnsureProject(first): %v", err)
+	other, err := db.EnsureProject(conn, "/repos/other", "other", 1)
+	testsupport.Must(t, err, "EnsureProject(other): %v", err)
+	for projectID, title := range map[int]string{first: "first doc", other: "other doc"} {
+		_, err := db.CreateDoc(conn, &model.Doc{
+			ProjectID: projectID, Type: "note", Status: "draft", Title: title, Author: "tester",
+		})
+		testsupport.Must(t, err, "CreateDoc(%q): %v", title, err)
+	}
+
+	cmd := docListCmdWithDB(conn)
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey,
+		&config.Config{Identity: "/repos/other", Anchored: true}))
+	w, buf := bufWriter(true)
+	if err := runDocList(cmd, nil, w); err != nil {
+		t.Fatalf("runDocList: %v", err)
+	}
+
+	var env struct {
+		Data struct {
+			Items []struct {
+				Title string `json:"title"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(env.Data.Items) != 1 || env.Data.Items[0].Title != "other doc" {
+		t.Errorf("doc list from /repos/other = %+v, want only [other doc]", env.Data.Items)
 	}
 }
 

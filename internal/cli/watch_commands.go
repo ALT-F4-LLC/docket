@@ -30,7 +30,7 @@ var watchEligible = map[string]bool{
 	// The run-scoped step inventory (DKT-54) is a conductor's polling verb —
 	// the same live-progress question `board` answers for issues.
 	"docket step list": true,
-	// `events list` polls under `--follow` rather than `--watch`, but it uses
+	// `events list` polls under `--watch`, and its `--follow` stream wakes on
 	// the SAME `--interval`. Listing it here
 	// is what keeps that flag visible on the command and validated by the same
 	// floor — the alternative was a second `--interval` shadowing the

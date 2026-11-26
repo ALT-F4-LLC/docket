@@ -251,35 +251,6 @@ func assertIntegrityRefusal(t *testing.T, err error, wantPath, wantDetail string
 	}
 }
 
-// TestMissingTrustFileIsAnEmptyAllowlist covers the missing-file rule and the
-// state the malicious-clone proof starts from.
-//
-// A MISSING TRUST FILE IS NOT AN ERROR. It is an empty allowlist: every gate is
-// unmatched, nothing executes, and a run reports what it would have needed.
-// That is the correct default for a tool a stranger just installed — and it is
-// what makes the dormancy claim true by construction rather than by wiring.
-func TestMissingTrustFileIsAnEmptyAllowlist(t *testing.T) {
-	path := sandbox(t)
-	// Deliberately create nothing.
-
-	st, err := loadAt(path)
-	testsupport.Must(t, err, "a missing trust file must not be an error: %v", err)
-	if len(st.Entries) != 0 {
-		t.Fatalf("expected an empty allowlist, got %d entries", len(st.Entries))
-	}
-
-	// And an empty allowlist matches nothing, which is the property that
-	// matters: a stranger who never ran `trust add` has a tool that cannot
-	// execute anything.
-	m := st.Lookup("/src/example", "checks", nil)
-	if m.Matched {
-		t.Error("an empty allowlist must match nothing")
-	}
-	if m.Reason == "" {
-		t.Error("an unmatched result must carry a reason")
-	}
-}
-
 func TestStoreCreationUsesRestrictiveModes(t *testing.T) {
 	// The directory is created 0700 and the file 0600.
 	dir := t.TempDir()

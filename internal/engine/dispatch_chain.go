@@ -1,12 +1,11 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // FactSourceEngine marks a `step-deferred` event the engine derived itself, in
@@ -24,10 +23,10 @@ const FactSourceEngine = "engine"
 //
 // Rows at stage 0 are unstaged and carry no ordering, so they never qualify.
 func chainDeferredRows(
-	rows []db.DispatchRow, steps []*db.Step, attempted map[int]bool,
-) ([]*db.Step, error) {
+	rows []store.DispatchRow, steps []*store.Step, attempted map[int]bool,
+) ([]*store.Step, error) {
 	status := make(map[int]string, len(steps))
-	byID := make(map[int]*db.Step, len(steps))
+	byID := make(map[int]*store.Step, len(steps))
 	for _, s := range steps {
 		status[s.ID], byID[s.ID] = s.Status, s
 	}
@@ -45,17 +44,17 @@ func chainDeferredRows(
 		manifest = append(manifest, placed{r.StepID, row.Issue, row.Stage})
 	}
 
-	var out []*db.Step
+	var out []*store.Step
 	for _, row := range manifest {
-		if row.issue == "" || row.stage == 0 || status[row.step] != db.StepPending {
+		if row.issue == "" || row.stage == 0 || status[row.step] != store.StepPending {
 			continue
 		}
 		for _, prior := range manifest {
 			if prior.issue != row.issue || prior.stage >= row.stage || !attempted[prior.step] {
 				continue
 			}
-			if st := status[prior.step]; st != db.StepDone && st != db.StepSkipped &&
-				st != db.StepSuperseded {
+			if st := status[prior.step]; st != store.StepDone && st != store.StepSkipped &&
+				st != store.StepSuperseded {
 				out = append(out, byID[row.step])
 				break
 			}
@@ -70,14 +69,15 @@ func chainDeferredRows(
 // step and dispatch is not recorded again. The cause `budget` stays
 // conductor-filed: the engine does not observe a budget hold.
 func recordChainDeferralsTx(
-	tx *sql.Tx, runID int, open *db.Dispatch, steps []*db.Step, nowMS int64,
+	tx store.LegacyTx, runID int, open *store.Dispatch, steps []*store.Step, nowMS int64,
 ) error {
 	dispatchID := open.ID
-	rows, err := db.ListDispatchRowsTx(tx, dispatchID)
+	st := store.TxOn(tx)
+	rows, err := st.ListDispatchRowsTx(dispatchID)
 	if err != nil {
 		return err
 	}
-	attempted, err := attemptedSince(tx, runID, open.OpenedSeq)
+	attempted, err := attemptedSince(st, runID, open.OpenedSeq)
 	if err != nil {
 		return err
 	}
@@ -87,18 +87,15 @@ func recordChainDeferralsTx(
 	}
 	dispatch := FormatDispatchID(dispatchID)
 	for _, step := range deferred {
-		var seen int
-		err := tx.QueryRow(
-			`SELECT 1 FROM events
-			  WHERE run_id = ? AND step_id = ? AND kind = ?
-			    AND json_extract(data, '$.cause') = ?
-			    AND json_extract(data, '$.dispatch') = ?`,
-			runID, step.ID, EventStepDeferred, DeferralChain, dispatch).Scan(&seen)
-		if err == nil {
-			continue
+		seen, err := st.DeferralRecordedForDispatchTx(store.DispatchDeferralQuery{
+			RunID: runID, StepID: step.ID, Kind: EventStepDeferred,
+			Cause: DeferralChain, Dispatch: dispatch,
+		})
+		if err != nil {
+			return err
 		}
-		if err != sql.ErrNoRows {
-			return fmt.Errorf("checking for a recorded chain deferral: %w", err)
+		if seen {
+			continue
 		}
 		data, err := json.Marshal(map[string]any{
 			"step":     model.FormatStepID(step.ID),
@@ -123,54 +120,26 @@ func recordChainDeferralsTx(
 // attemptedSince returns the steps of the run that saw a claim, a refused
 // claim, a failure, or a reap after the manifest opened: the evidence a wave
 // tried the step rather than holding it back.
-func attemptedSince(tx *sql.Tx, runID int, openedSeq int64) (map[int]bool, error) {
-	rows, err := tx.Query(
-		`SELECT DISTINCT step_id FROM events
-		  WHERE run_id = ? AND seq > ? AND step_id IS NOT NULL
-		    AND kind IN (?, ?, ?, ?)`,
-		runID, openedSeq, EventStepClaimed, EventClaimRefused, EventStepFailed,
-		EventLeaseReaped)
-	if err != nil {
-		return nil, fmt.Errorf("reading the steps attempted in the dispatch: %w", err)
-	}
-	defer rows.Close()
-	out := map[int]bool{}
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("reading an attempted step: %w", err)
-		}
-		out[id] = true
-	}
-	return out, rows.Err()
+func attemptedSince(tx store.ReadTx, runID int, openedSeq int64) (map[int]bool, error) {
+	return tx.StepsWithEventKindsSinceTx(runID, openedSeq, []string{
+		EventStepClaimed, EventClaimRefused, EventStepFailed, EventLeaseReaped,
+	})
 }
 
 // engineChainFact returns the engine-derived chain deferral recorded for the
 // step by the run's most recently closed dispatch, if any, as the fact `run
 // fact add` would have returned. A fact from an earlier dispatch does not
 // cover a later one, so it is not returned.
-func engineChainFact(tx *sql.Tx, runID, stepID int) (*RunFact, bool, error) {
-	var (
-		seq  int64
-		data string
-	)
-	err := tx.QueryRow(
-		`SELECT seq, data FROM events
-		  WHERE run_id = ? AND step_id = ? AND kind = ?
-		    AND json_extract(data, '$.cause') = ?
-		    AND json_extract(data, '$.source') = ?
-		    AND json_extract(data, '$.dispatch') = (
-		        SELECT 'DISPATCH-' || id FROM dispatches
-		         WHERE run_id = ? AND status = ?
-		         ORDER BY closed_at_ms DESC, id DESC LIMIT 1)
-		  ORDER BY seq DESC LIMIT 1`,
-		runID, stepID, EventStepDeferred, DeferralChain, FactSourceEngine,
-		runID, db.DispatchClosed).Scan(&seq, &data)
-	if err == sql.ErrNoRows {
-		return nil, false, nil
-	}
+func engineChainFact(tx store.LegacyTx, runID, stepID int) (*RunFact, bool, error) {
+	seq, data, found, err := store.TxOn(tx).LastDispatchDeferralTx(store.SourcedDeferralQuery{
+		RunID: runID, StepID: stepID, Kind: EventStepDeferred,
+		Cause: DeferralChain, Source: FactSourceEngine,
+	})
 	if err != nil {
 		return nil, false, fmt.Errorf("reading the engine's chain deferral: %w", err)
+	}
+	if !found {
+		return nil, false, nil
 	}
 	var body struct {
 		Reason string `json:"reason"`

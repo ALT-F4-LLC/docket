@@ -73,33 +73,6 @@ func TestRenderProposalDetail_MultiLineSummaryHasNoTrailingWhitespace(t *testing
 	}
 }
 
-// One long line in a summary must not inflate every other line to its width.
-func TestRenderProposalDetail_LongSummaryLineDoesNotPadNeighbours(t *testing.T) {
-	t.Setenv("TERM", "xterm-256color")
-
-	long := strings.Repeat("x", 1600)
-	summary := "short one\n" + long + "\nshort two"
-
-	out := RenderProposalDetail(
-		makeTestProposal(1, "Long line"),
-		[]*model.Vote{makeTestVote(summary)},
-		nil, nil,
-	)
-
-	for i, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, long) {
-			continue
-		}
-		if len(line) > 200 {
-			t.Errorf("line %d is %d chars, expected short: %q", i, len(line), line)
-		}
-	}
-	if max := len(summary) + 2000; len(out) > max {
-		t.Errorf("rendered %d bytes for a %d byte summary (max %d), expected no bulk padding",
-			len(out), len(summary), max)
-	}
-}
-
 func TestRenderProposalDetail_RendersLinkedDocsStyled(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 

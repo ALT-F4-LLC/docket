@@ -10,7 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/schema"
 )
 
-const currentSchemaVersion = 44
+const currentSchemaVersion = 47
 
 // schemaDDL contains the CREATE TABLE statements for the initial schema.
 //
@@ -168,6 +168,16 @@ func SchemaVersion(db *sql.DB) (int, error) {
 	return v, nil
 }
 
+// LatestSchemaVersion returns the highest version the migrations map can
+// migrate a SQLite database to.
+func LatestSchemaVersion() int {
+	latest := 0
+	for v := range migrations {
+		latest = max(latest, v)
+	}
+	return latest
+}
+
 // migrations is a list of migration functions keyed by the version they migrate TO.
 // For example, migrations[2] migrates from version 1 to version 2.
 var migrations = map[int]func(tx *sql.Tx) error{
@@ -214,6 +224,9 @@ var migrations = map[int]func(tx *sql.Tx) error{
 	42: migrateV41ToV42,
 	43: migrateV42ToV43,
 	44: migrateV43ToV44,
+	45: migrateV44ToV45,
+	46: migrateV45ToV46,
+	47: migrateV46ToV47,
 }
 
 // migrationsNeedingFKOff names the migrations that REBUILD tables and so must
@@ -3251,6 +3264,103 @@ func migrateV43ToV44(tx *sql.Tx) error {
 	return nil
 }
 
+// v45AddedColumns is v45's whole schema change: `content` on `pins`, the
+// pinned file's bytes, so a store opened on another machine can render the
+// same packet without that machine's checkout. NULL means the pin was
+// recorded without its bytes.
+var v45AddedColumns = []struct{ table, column, ddl string }{
+	{"pins", "content",
+		`ALTER TABLE pins ADD COLUMN content BLOB`},
+}
+
+// v45ColumnSentinels are the columns the rewind guard probes, the v44 form:
+// v45 adds no table and no index, so a database stamped 45 by a binary built
+// mid-change carries every v44 sentinel and `content` never arrives.
+var v45ColumnSentinels = []struct{ table, column string }{
+	{"pins", "content"},
+}
+
+// migrateV44ToV45 adds `pins.content`. It back-fills nothing: the bytes a
+// pre-v45 pin hashed are gone, and reading the file now could store content
+// that no longer matches the pinned hash. It probes before the ALTER, so it
+// stays re-runnable.
+func migrateV44ToV45(tx *sql.Tx) error {
+	for _, col := range v45AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v44 to v45: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v44 to v45: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
+// v46DDL creates the event low watermark: one row holding the highest pruned
+// event seq, 0 when nothing was pruned. GONE detection reads it instead of
+// MIN(seq), because MIN(seq) > 1 also follows from seq values that were
+// allocated and never committed. The seed treats every seq below the lowest
+// surviving row as pruned, which is what MIN(seq) detection assumed before v46.
+const v46DDL = `
+CREATE TABLE IF NOT EXISTS event_low_watermark (
+	id  INTEGER PRIMARY KEY CHECK (id = 1),
+	seq INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO event_low_watermark (id, seq)
+	SELECT 1, COALESCE(MIN(seq) - 1, 0) FROM events;
+`
+
+// migrateV45ToV46 creates and seeds the event low watermark. CREATE IF NOT
+// EXISTS and INSERT OR IGNORE keep it re-runnable.
+func migrateV45ToV46(tx *sql.Tx) error {
+	if _, err := tx.Exec(v46DDL); err != nil {
+		return fmt.Errorf("migrating v45 to v46: %w", err)
+	}
+	return nil
+}
+
+// v47AddedColumns is v47's whole schema change: `fingerprint` on
+// `idempotency_keys`, a digest of the request a key was first recorded for, so
+// a key reused with different content is rejected rather than replayed. NULL
+// means the key was recorded without one.
+var v47AddedColumns = []struct{ table, column, ddl string }{
+	{"idempotency_keys", "fingerprint",
+		`ALTER TABLE idempotency_keys ADD COLUMN fingerprint TEXT`},
+}
+
+// v47ColumnSentinels are the columns the rewind guard probes, the v45 form:
+// v47 adds no table and no index, so a database stamped 47 by a binary built
+// mid-change carries every v46 sentinel and `fingerprint` never arrives.
+var v47ColumnSentinels = []struct{ table, column string }{
+	{"idempotency_keys", "fingerprint"},
+}
+
+// migrateV46ToV47 adds `idempotency_keys.fingerprint`. It back-fills nothing:
+// the request a pre-v47 key was recorded for is gone, so its fingerprint
+// cannot be derived. It probes before the ALTER, so it stays re-runnable.
+func migrateV46ToV47(tx *sql.Tx) error {
+	for _, col := range v47AddedColumns {
+		exists, err := hasColumn(tx, col.table, col.column)
+		if err != nil {
+			return fmt.Errorf("migrating v46 to v47: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.Exec(col.ddl); err != nil {
+			return fmt.Errorf("migrating v46 to v47: adding %s.%s: %w",
+				col.table, col.column, err)
+		}
+	}
+	return nil
+}
+
 // migrateV19ToV20 adds the operator loop-grant column.
 //
 // It BACK-FILLS NOTHING, and zero is the correct value for every existing row:
@@ -3367,11 +3477,27 @@ func hasColumnDB(db *sql.DB, table, column string) (bool, error) {
 	return rows.Next(), rows.Err()
 }
 
+// refuseNewerSchema rejects a store stamped by a newer binary. This binary
+// cannot know what a later migration changed, so reading or writing that store
+// risks silent corruption.
+func refuseNewerSchema(stored int) error {
+	if stored > currentSchemaVersion {
+		return fmt.Errorf(
+			"store schema version %d is newer than this binary supports (%d); upgrade docket to open it",
+			stored, currentSchemaVersion)
+	}
+	return nil
+}
+
 // Migrate checks the current schema version and applies any pending migrations
-// sequentially. It is a no-op when already at the latest version.
+// sequentially. It is a no-op when already at the latest version, and refuses a
+// store whose version is newer than this binary's.
 func Migrate(db *sql.DB) error {
 	version, err := SchemaVersion(db)
 	if err != nil {
+		return err
+	}
+	if err := refuseNewerSchema(version); err != nil {
 		return err
 	}
 
@@ -4136,6 +4262,53 @@ func Migrate(db *sql.DB) error {
 			}
 			if !exists {
 				version = 43
+				break
+			}
+		}
+	}
+
+	// The v45 guard, in the same COLUMN form as v44 and for its reason: v45
+	// adds one column and no table, so a database stamped 45 by a binary built
+	// mid-change carries every v44 sentinel and `pins.content` never arrives.
+	if version >= 45 {
+		for _, col := range v45ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v45 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 44
+				break
+			}
+		}
+	}
+
+	// The v46 guard probes the table v46 creates: a database stamped 46 by a
+	// binary built mid-change has no watermark for GONE detection to read.
+	if version >= 46 {
+		exists, err := tableExists(db, "event_low_watermark")
+		if err != nil {
+			return fmt.Errorf("probing event_low_watermark for the v46 guard: %w", err)
+		}
+		if !exists {
+			version = 45
+		}
+	}
+
+	// The v47 guard, in the COLUMN form of v45 and for its reason: v47 adds one
+	// column and no table, so a database stamped 47 by a binary built
+	// mid-change carries every v46 sentinel and `idempotency_keys.fingerprint`
+	// never arrives.
+	if version >= 47 {
+		for _, col := range v47ColumnSentinels {
+			exists, err := hasColumnDB(db, col.table, col.column)
+			if err != nil {
+				return fmt.Errorf("probing %s.%s for the v47 guard: %w",
+					col.table, col.column, err)
+			}
+			if !exists {
+				version = 46
 				break
 			}
 		}

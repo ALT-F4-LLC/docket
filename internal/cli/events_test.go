@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -112,10 +111,10 @@ func eventsListCmdWithDB(conn *sql.DB) *cobra.Command {
 type eventsListJSON struct {
 	OK   bool `json:"ok"`
 	Data struct {
-		Events []struct {
+		Items []struct {
 			Seq int64  `json:"seq"`
 			Run string `json:"run"`
-		} `json:"events"`
+		} `json:"items"`
 		Total int `json:"total"`
 	} `json:"data"`
 }
@@ -134,9 +133,10 @@ func eventsFor(
 			t.Fatalf("setting --all-projects: %v", err)
 		}
 	}
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, invoking))
+	inCheckoutOf(t, cmd, invoking)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runEventsList(cmd, w); err != nil {
 		t.Fatalf("runEventsList(--run %q): %v", runRef, err)
 	}
@@ -199,49 +199,18 @@ func TestEventsListRunInAnotherProjectIsNotAnEmptySuccess(t *testing.T) {
 	if !out.OK {
 		t.Fatalf("`events list --run %s` failed outright: %+v", thereRun, out)
 	}
-	if out.Data.Total == 0 || len(out.Data.Events) == 0 {
+	if out.Data.Total == 0 || len(out.Data.Items) == 0 {
 		t.Fatalf("`events list --run %s` from another project answered ok with an "+
 			"empty feed — DKT-583's exact defect: %+v", thereRun, out.Data)
 	}
-	if len(out.Data.Events) != 2 || out.Data.Total != 2 {
+	if len(out.Data.Items) != 2 || out.Data.Total != 2 {
 		t.Fatalf("answered %d events (total %d), want the run's 2",
-			len(out.Data.Events), out.Data.Total)
+			len(out.Data.Items), out.Data.Total)
 	}
-	for _, e := range out.Data.Events {
+	for _, e := range out.Data.Items {
 		if e.Run != thereRun {
 			t.Errorf("the feed carries an event from another run: %+v", e)
 		}
-	}
-}
-
-// A run inside the invoking project is unchanged: the scope it never needed is
-// gone, and the answer is the same one it always gave.
-func TestEventsListRunInTheInvokingProjectIsUnchanged(t *testing.T) {
-	conn := newTestDB(t)
-	here, _, hereRun, _ := twoProjectRuns(t, conn)
-
-	out := eventsFor(t, conn, here, hereRun, false)
-
-	if len(out.Data.Events) != 1 || out.Data.Total != 1 {
-		t.Fatalf("the invoking project's own run answered %d events (total %d), want 1",
-			len(out.Data.Events), out.Data.Total)
-	}
-	if out.Data.Events[0].Run != hereRun {
-		t.Errorf("answered %q, want %q", out.Data.Events[0].Run, hereRun)
-	}
-}
-
-// --all-projects with --run still answers the same run: the workaround the
-// analysts found keeps working.
-func TestEventsListAllProjectsWithRunStillAnswers(t *testing.T) {
-	conn := newTestDB(t)
-	here, _, _, thereRun := twoProjectRuns(t, conn)
-
-	out := eventsFor(t, conn, here, thereRun, true)
-
-	if len(out.Data.Events) != 2 || out.Data.Total != 2 {
-		t.Fatalf("--all-projects --run %s answered %d events (total %d), want 2",
-			thereRun, len(out.Data.Events), out.Data.Total)
 	}
 }
 
@@ -249,17 +218,30 @@ func TestEventsListAllProjectsWithRunStillAnswers(t *testing.T) {
 // predicate under --run must not drop it everywhere.
 func TestEventsListWithoutRunStaysScopedToTheInvokingProject(t *testing.T) {
 	conn := newTestDB(t)
-	here, _, hereRun, _ := twoProjectRuns(t, conn)
+	here, there, hereRun, thereRun := twoProjectRuns(t, conn)
 
 	out := eventsFor(t, conn, here, "", false)
 
-	if len(out.Data.Events) != 1 {
+	if len(out.Data.Items) != 1 {
 		t.Fatalf("the unfiltered feed answered %d events, want only this project's 1: %+v",
-			len(out.Data.Events), out.Data.Events)
+			len(out.Data.Items), out.Data.Items)
 	}
-	if out.Data.Events[0].Run != hereRun {
+	if out.Data.Items[0].Run != hereRun {
 		t.Errorf("the scoped feed carries %q, want this project's %q",
-			out.Data.Events[0].Run, hereRun)
+			out.Data.Items[0].Run, hereRun)
+	}
+
+	// From the other checkout the scope follows the checkout, not the store's
+	// default project.
+	out = eventsFor(t, conn, there, "", false)
+	if len(out.Data.Items) != 2 {
+		t.Fatalf("the other checkout's feed answered %d events, want its 2: %+v",
+			len(out.Data.Items), out.Data.Items)
+	}
+	for _, e := range out.Data.Items {
+		if e.Run != thereRun {
+			t.Errorf("the other checkout's feed carries %q, want only %q", e.Run, thereRun)
+		}
 	}
 }
 

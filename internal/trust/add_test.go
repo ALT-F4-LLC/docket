@@ -382,8 +382,8 @@ func TestRemoveOnChangeSeesTheEntryItRemoves(t *testing.T) {
 
 	// The refusal path is NOT the same as add (DKT-2198): the removal is
 	// published before the record, so a failing hook fails the verb over an
-	// entry that is already gone. TestTrustRemoveReportsAnUnrecordedRemoval
-	// pins that surviving shape and why it is the safe direction.
+	// entry that is already gone. The assertions below pin that surviving
+	// shape.
 	boom := errors.New("the record could not be written")
 	removedAnyway, err := removeAt(path, RemoveRequest{
 		Name: "checks", RepoRoot: repoA,

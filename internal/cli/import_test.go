@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,17 +11,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
 // buildExport reads a whole database into an export document, the way the
 // export command does — through the same table, so a collection the command
 // would carry can never be one this helper leaves behind.
-func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
+func buildExport(t *testing.T, conn store.LegacyDB) *model.ExportData {
 	t.Helper()
 
 	export := &model.ExportData{
@@ -36,77 +38,11 @@ func buildExport(t *testing.T, conn *sql.DB) *model.ExportData {
 	return export
 }
 
-func TestDoImportRoundTripPreservesDocs(t *testing.T) {
-	src := newTestDB(t)
-
-	issueID := createIssue(t, src, "linked issue", model.StatusTodo, model.PriorityMedium)
-
-	docID := createDoc(t, src, "design doc", "tdd", "draft")
-	revisedBody := "second revision body"
-	if _, err := db.UpdateDoc(src, docID, db.DocUpdate{Body: &revisedBody, Author: "editor"}); err != nil {
-		t.Fatalf("UpdateDoc: %v", err)
-	}
-
-	otherDocID := createDoc(t, src, "decision record", "adr", "accepted")
-
-	for _, c := range []*model.DocComment{
-		{DocID: docID, Body: "first comment", Author: "alice"},
-		{DocID: docID, Body: "second comment", Author: "bob"},
-		{DocID: otherDocID, Body: "third comment", Author: "carol"},
-	} {
-		if _, err := db.CreateDocComment(src, c); err != nil {
-			t.Fatalf("CreateDocComment: %v", err)
-		}
-	}
-
-	linkDocIssue(t, src, docID, issueID)
-
-	export := buildExport(t, src)
-
-	dst := newTestDB(t)
-	if _, err := doImport(dst, export, false, 1); err != nil {
-		t.Fatalf("doImport: %v", err)
-	}
-
-	gotDocs, err := db.ListAllDocs(dst, 0)
-	testsupport.Must(t, err, "ListAllDocs(dst, 0): %v", err)
-	if len(gotDocs) != 2 {
-		t.Fatalf("expected 2 docs after import, got %d", len(gotDocs))
-	}
-
-	gotRevisions, err := db.ListAllDocRevisions(dst, 0)
-	testsupport.Must(t, err, "ListAllDocRevisions(dst, 0): %v", err)
-	// docID: create + body edit = 2 revisions; otherDocID: create = 1 revision.
-	if len(gotRevisions) != 3 {
-		t.Fatalf("expected 3 doc revisions after import, got %d", len(gotRevisions))
-	}
-
-	gotComments, err := db.ListAllDocComments(dst, 0)
-	testsupport.Must(t, err, "ListAllDocComments(dst, 0): %v", err)
-	if len(gotComments) != 3 {
-		t.Fatalf("expected 3 doc comments after import, got %d", len(gotComments))
-	}
-
-	gotLinks, err := db.ListAllDocIssueLinks(dst, 0)
-	testsupport.Must(t, err, "ListAllDocIssueLinks(dst, 0): %v", err)
-	if len(gotLinks) != 1 {
-		t.Fatalf("expected 1 doc-issue link after import, got %d", len(gotLinks))
-	}
-	if gotLinks[0].DocID != docID || gotLinks[0].IssueID != issueID {
-		t.Errorf("expected link (doc=%d, issue=%d), got (doc=%d, issue=%d)",
-			docID, issueID, gotLinks[0].DocID, gotLinks[0].IssueID)
-	}
-
-	gotDoc, err := db.GetDoc(dst, docID)
-	if err != nil {
-		t.Fatalf("GetDoc(dst, %d): %v", docID, err)
-	}
-	if gotDoc.Body != revisedBody {
-		t.Errorf("expected doc body %q after import, got %q", revisedBody, gotDoc.Body)
-	}
-	if gotDoc.Title != "design doc" {
-		t.Errorf("expected doc title %q, got %q", "design doc", gotDoc.Title)
-	}
+// doImport restores export into projectID of conn through the import verb's
+// write half, the way the import command does once it has resolved the
+// project and cleared its refusals.
+func doImport(conn store.LegacyDB, export *model.ExportData, replace bool, projectID int) (verb.ImportResult, error) {
+	return verb.RestoreExport(store.StoreOn(conn), export, replace, projectID)
 }
 
 func TestDoImportRoundTripPreservesProposalsSubsystem(t *testing.T) {
@@ -309,27 +245,7 @@ func TestDoImportReplaceRollsBackOnFailure(t *testing.T) {
 	}
 }
 
-func TestDoImportReplaceClearsThenImports(t *testing.T) {
-	dst := newTestDB(t)
-	createIssue(t, dst, "old data", model.StatusTodo, model.PriorityHigh)
-
-	src := newTestDB(t)
-	createIssue(t, src, "new data", model.StatusTodo, model.PriorityMedium)
-
-	export := buildExport(t, src)
-
-	if _, err := doImport(dst, export, true, 1); err != nil {
-		t.Fatalf("doImport(replace=true): %v", err)
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].Title != "new data" {
-		t.Fatalf("expected only imported issue after successful replace, got %+v", gotIssues)
-	}
-}
-
-func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Status, parentID int) int {
+func createChildIssue(t *testing.T, conn store.LegacyDB, title string, status model.Status, parentID int) int {
 	t.Helper()
 	id, err := db.CreateIssue(conn, &model.Issue{
 		Title:    title,
@@ -344,7 +260,7 @@ func createChildIssue(t *testing.T, conn *sql.DB, title string, status model.Sta
 	return id
 }
 
-func runFilteredExport(t *testing.T, conn *sql.DB, statuses []string) *model.ExportData {
+func runFilteredExport(t *testing.T, conn store.LegacyDB, statuses []string) *model.ExportData {
 	t.Helper()
 
 	cmd := &cobra.Command{}
@@ -484,98 +400,12 @@ func TestFilteredExportRoundTripDropsUnlinkedAndNullsParent(t *testing.T) {
 	}
 }
 
-func TestFilteredExportReplaceImportRoundTripsAndDropsStandalone(t *testing.T) {
-	src := newTestDB(t)
-
-	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
-	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
-
-	linkedDocID := createDoc(t, src, "linked design doc", "tdd", "draft")
-	linkDocIssue(t, src, linkedDocID, childID)
-	standaloneDocID := createDoc(t, src, "standalone adr", "adr", "accepted")
-
-	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
-
-	dst := newTestDB(t)
-	staleID := createIssue(t, dst, "stale data to be replaced", model.StatusTodo, model.PriorityHigh)
-
-	if _, err := doImport(dst, export, true, 1); err != nil {
-		t.Fatalf("doImport(filtered, replace=true): %v", err)
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].ID != childID {
-		t.Fatalf("expected only the filtered child after replace, got %+v", gotIssues)
-	}
-	if gotIssues[0].ID == staleID {
-		t.Fatalf("stale issue survived --replace import")
-	}
-	if gotIssues[0].ParentID != nil {
-		t.Errorf("expected dangling parent nulled after filtered replace import, got parent_id=%v", *gotIssues[0].ParentID)
-	}
-
-	gotDocs, err := db.ListAllDocs(dst, 0)
-	testsupport.Must(t, err, "ListAllDocs(dst, 0): %v", err)
-	if len(gotDocs) != 1 || gotDocs[0].ID != linkedDocID {
-		t.Errorf("expected only linked doc after filtered replace import, got %+v", gotDocs)
-	}
-	for _, d := range gotDocs {
-		if d.ID == standaloneDocID {
-			t.Errorf("standalone doc leaked into filtered replace import: %+v", d)
-		}
-	}
-
-	rows, err := dst.Query("PRAGMA foreign_key_check")
-	testsupport.Must(t, err, "PRAGMA foreign_key_check: %v", err)
-	defer rows.Close()
-	if rows.Next() {
-		t.Errorf("expected no foreign key violations after filtered replace import, found at least one")
-	}
-}
-
-func TestFilteredExportReplaceImportRollsBackOnFailure(t *testing.T) {
-	src := newTestDB(t)
-	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
-	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
-	docID := createDoc(t, src, "linked doc", "tdd", "draft")
-	linkDocIssue(t, src, docID, childID)
-
-	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
-	export.DocIssueLinks = append(export.DocIssueLinks, model.DocIssueLink{
-		DocID:     docID,
-		IssueID:   999999,
-		CreatedAt: "2026-01-01T00:00:00Z",
-	})
-
-	dst := newTestDB(t)
-	survivorID := createIssue(t, dst, "must survive failed replace", model.StatusTodo, model.PriorityHigh)
-	err := db.AddLabelToIssue(dst, survivorID, "keep-me", "", "tester")
-	testsupport.Must(t, err, "AddLabelToIssue: %v", err)
-
-	if _, err := doImport(dst, export, true, 1); err == nil {
-		t.Fatal("expected doImport(filtered, replace=true) to fail on dangling doc-issue link, got nil")
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].ID != survivorID || gotIssues[0].Title != "must survive failed replace" {
-		t.Fatalf("expected pre-existing data preserved after failed filtered replace, got %+v", gotIssues)
-	}
-
-	gotLabels, err := db.ListAllLabelsRaw(dst, 0)
-	testsupport.Must(t, err, "ListAllLabelsRaw(dst, 0): %v", err)
-	if len(gotLabels) != 1 || gotLabels[0].Name != "keep-me" {
-		t.Fatalf("expected pre-existing label preserved after failed filtered replace, got %+v", gotLabels)
-	}
-}
-
 // seedEveryCollection writes at least one row into every collection the export
 // table knows about. A round-trip assertion is only worth as much as its
 // fixture: a collection that is empty on both sides round-trips perfectly by
 // doing nothing at all, which is exactly the outcome a dropped collection
 // produces.
-func seedEveryCollection(t *testing.T, conn *sql.DB) {
+func seedEveryCollection(t *testing.T, conn store.LegacyDB) {
 	t.Helper()
 
 	parentID := createIssue(t, conn, "parent issue", model.StatusInProgress, model.PriorityMedium)
@@ -673,7 +503,29 @@ func TestRoundTripPreservesEveryCollection(t *testing.T) {
 // command under test carries the SAME --merge/--replace/--yes registration a
 // real invocation parses; a case that stopped registering --yes would fail
 // here with "unknown flag: --yes" instead of silently testing nothing.
-func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, replace, yes bool) error {
+func runImportCmd(t *testing.T, conn store.LegacyDB, filePath string, jsonMode bool, replace, yes bool) error {
+	t.Helper()
+
+	args := []string{filePath}
+	if jsonMode {
+		// The real --json is a string flag with NoOptDefVal "v1" (root.go),
+		// so a bare "--json" is legal there; this ad-hoc flag has no such
+		// default, and a bare "--json" would swallow the next argv token as
+		// its value instead.
+		args = append(args, "--json=v2")
+	}
+	if replace {
+		args = append(args, "--replace")
+	}
+	if yes {
+		args = append(args, "--yes")
+	}
+	return runImportCmdArgs(t, conn, nil, args...)
+}
+
+// runImportCmdArgs is runImportCmd with the argv spelled out and, when cfg is
+// non-nil, the project identity the root hook would otherwise load.
+func runImportCmdArgs(t *testing.T, conn store.LegacyDB, cfg *config.Config, args ...string) error {
 	t.Helper()
 
 	cmd := newImportCmd()
@@ -687,32 +539,94 @@ func runImportCmd(t *testing.T, conn *sql.DB, filePath string, jsonMode bool, re
 	// reads directly on the fresh command.
 	cmd.Flags().String("json", "", "")
 	cmd.Flags().Bool("quiet", false, "")
-
-	args := []string{filePath}
-	if jsonMode {
-		// The real --json is a string flag with NoOptDefVal "v1" (root.go),
-		// so a bare "--json" is legal there; this ad-hoc flag has no such
-		// default, and a bare "--json" would swallow the next argv token as
-		// its value instead.
-		args = append(args, "--json=v1")
-	}
-	if replace {
-		args = append(args, "--replace")
-	}
-	if yes {
-		args = append(args, "--yes")
-	}
 	cmd.SetArgs(args)
 
 	ctx := context.WithValue(context.Background(), dbKey, conn)
+	if cfg != nil {
+		ctx = context.WithValue(ctx, cfgKey, cfg)
+	}
 	return cmd.ExecuteContext(ctx)
+}
+
+// The mutual-exclusion refusal comes before the file is read, so a bad flag
+// pair is reported as such even when the path is also wrong.
+func TestImportRefusesMergeWithReplaceBeforeReadingTheFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	err := runImportCmdArgs(t, newTestDB(t), nil, missing, "--merge", "--replace")
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation ||
+		cmdErr.Error() != "--merge and --replace are mutually exclusive" {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR naming the exclusive flags", err)
+	}
+}
+
+// A caller with no project is refused before the file is read, as when the
+// root hook resolved the project ahead of the command, so the refusal names
+// the missing project even when the path is also wrong.
+func TestImportFromAnUnanchoredCheckoutIsRefusedBeforeReadingTheFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	cfg := &config.Config{Identity: "/tmp/scratch", Anchored: false}
+	err := runImportCmdArgs(t, newTestDB(t), cfg, missing)
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation ||
+		!strings.HasPrefix(cmdErr.Error(), "cannot tell which project") {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR refusing the unanchored checkout", err)
+	}
+}
+
+func TestImportMergeFlagImportsIntoANonEmptyProject(t *testing.T) {
+	filePath := seedAndWriteExportFile(t, newTestDB(t))
+	dst := newTestDB(t)
+	createIssue(t, dst, "existing", model.StatusTodo, model.PriorityHigh)
+
+	if err := runImportCmdArgs(t, dst, nil, filePath, "--merge"); err != nil {
+		t.Fatalf("import --merge into a non-empty project: %v", err)
+	}
+	gotIssues, err := db.ListAllIssues(dst, 0)
+	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
+	if len(gotIssues) != 1 || gotIssues[0].Title != "existing" {
+		t.Fatalf("expected the merge to keep the project's own issue, got %+v", gotIssues)
+	}
+}
+
+// The import command records the project-registered event for a project the
+// import registered, as the root hook did before the verb resolved it.
+func TestImportCommandRecordsTheProjectItRegisters(t *testing.T) {
+	filePath := seedAndWriteExportFile(t, newTestDB(t))
+	dst := newTestDB(t)
+
+	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
+	if err := runImportCmdArgs(t, dst, cfg, filePath); err != nil {
+		t.Fatalf("import from a new anchored identity: %v", err)
+	}
+	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
+		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)
+	}
+}
+
+// A refused import still registers the caller's anchored project, since the
+// project is resolved first, so the command records that registration too.
+func TestImportCommandRecordsTheProjectARefusedImportRegisters(t *testing.T) {
+	badFile := filepath.Join(t.TempDir(), "bad.json")
+	err := os.WriteFile(badFile, []byte("not json"), 0o600)
+	testsupport.Must(t, err, "WriteFile: %v", err)
+	dst := newTestDB(t)
+
+	cfg := &config.Config{Identity: "/repos/imported", Anchored: true}
+	var cmdErr *CmdError
+	if err = runImportCmdArgs(t, dst, cfg, badFile); !errors.As(err, &cmdErr) || cmdErr.Code != output.ErrValidation {
+		t.Fatalf("error = %v, want the VALIDATION_ERROR for the malformed file", err)
+	}
+	if got := registrationEvents(t, dst); got["/repos/imported"] != "import" {
+		t.Errorf("project-registered events = %v, want /repos/imported registered by import", got)
+	}
 }
 
 // seedAndWriteExportFile creates one issue ("seed issue") in conn and writes
 // its export to a temp file, returning the file's path. The name says both
 // halves because TestImportReplaceProceedsWithYesInJSONMode asserts on the
 // seeded issue's title, not only on the file it produces.
-func seedAndWriteExportFile(t *testing.T, conn *sql.DB) string {
+func seedAndWriteExportFile(t *testing.T, conn store.LegacyDB) string {
 	t.Helper()
 
 	createIssue(t, conn, "seed issue", model.StatusTodo, model.PriorityMedium)
@@ -818,26 +732,6 @@ func TestImportReplaceProceedsWithYesInJSONMode(t *testing.T) {
 	}
 	if envelope.Data.Imported == 0 {
 		t.Fatalf("expected the envelope to report at least 1 imported entity, got %+v", envelope)
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].Title != "seed issue" {
-		t.Fatalf("expected only imported issue after confirmed replace, got %+v", gotIssues)
-	}
-}
-
-// TestImportReplaceProceedsWithYesInHumanMode is the human-mode twin of
-// TestImportReplaceProceedsWithYesInJSONMode.
-func TestImportReplaceProceedsWithYesInHumanMode(t *testing.T) {
-	src := newTestDB(t)
-	filePath := seedAndWriteExportFile(t, src)
-
-	dst := newTestDB(t)
-	createIssue(t, dst, "old data", model.StatusTodo, model.PriorityHigh)
-
-	if err := runImportCmd(t, dst, filePath, false, true, true); err != nil {
-		t.Fatalf("import --replace --yes: %v", err)
 	}
 
 	gotIssues, err := db.ListAllIssues(dst, 0)

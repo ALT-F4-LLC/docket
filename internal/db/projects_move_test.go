@@ -16,7 +16,7 @@ import (
 
 func migrationStore(t *testing.T) (conn *sql.DB, one, two int) {
 	t.Helper()
-	c := mustOpen(t)
+	c := mustOpenMigrated(t)
 	if err := Initialize(c); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}

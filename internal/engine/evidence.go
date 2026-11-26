@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // Evidence references on findings (DKT-2451).
@@ -56,20 +55,20 @@ const (
 // (db.CastVote still owns "no such proposal" for it). With evidence present,
 // a missing proposal is NOT_FOUND, a proposal bound to no run and every
 // unresolvable reference is VALIDATION, each naming the reference and why.
-func ValidateCastEvidence(conn *sql.DB, proposalID int, f *model.Findings) error {
+func ValidateCastEvidence(st store.Store, proposalID int, f *model.Findings) error {
 	refs := findingEvidence(f)
 	if len(refs) == 0 {
 		return nil
 	}
 
-	if _, err := db.GetProposal(conn, proposalID); err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+	if _, err := st.GetProposal(proposalID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			return notFoundErr(err, "proposal %s not found", model.FormatProposalID(proposalID))
 		}
 		return fmt.Errorf("reading %s: %w", model.FormatProposalID(proposalID), err)
 	}
 
-	runID, err := proposalRunID(conn, proposalID)
+	runID, err := proposalRunID(st, proposalID)
 	if err != nil {
 		return err
 	}
@@ -82,7 +81,7 @@ func ValidateCastEvidence(conn *sql.DB, proposalID int, f *model.Findings) error
 	}
 
 	for _, ref := range refs {
-		canonical, err := resolveEvidence(conn, runID, proposalID, *ref)
+		canonical, err := resolveEvidence(st, runID, proposalID, *ref)
 		if err != nil {
 			return err
 		}
@@ -110,8 +109,8 @@ func findingEvidence(f *model.Findings) []*string {
 
 // proposalRunID resolves the run a proposal was opened for through the two
 // key families the engine mints, or 0 when it was opened under neither.
-func proposalRunID(conn *sql.DB, proposalID int) (int, error) {
-	key, found, err := db.IdempotencyKeyOf(conn, db.ScopeVoteCreate, proposalID)
+func proposalRunID(st store.Store, proposalID int) (int, error) {
+	key, found, err := st.IdempotencyKeyOf(store.ScopeVoteCreate, proposalID)
 	if err != nil {
 		return 0, fmt.Errorf("resolving the run of %s: %w",
 			model.FormatProposalID(proposalID), err)
@@ -130,7 +129,7 @@ func proposalRunID(conn *sql.DB, proposalID int) (int, error) {
 
 // resolveEvidence checks one reference against the run and returns its
 // canonical spelling.
-func resolveEvidence(conn *sql.DB, runID, proposalID int, ref string) (string, error) {
+func resolveEvidence(st store.Store, runID, proposalID int, ref string) (string, error) {
 	scheme, rest, ok := strings.Cut(ref, ":")
 	if !ok || rest == "" {
 		return "", validationErr(
@@ -143,9 +142,8 @@ func resolveEvidence(conn *sql.DB, runID, proposalID int, ref string) (string, e
 		if err != nil {
 			return "", validationErr("evidence reference %q: %v", ref, err)
 		}
-		var artifactRun int
-		err = conn.QueryRow(`SELECT run_id FROM artifacts WHERE id = ?`, id).Scan(&artifactRun)
-		if errors.Is(err, sql.ErrNoRows) {
+		artifactRun, err := artifactRunOf(st, id)
+		if errors.Is(err, store.ErrNotFound) {
 			return "", validationErr(
 				"evidence reference %q names no recorded artifact", ref)
 		}
@@ -160,14 +158,11 @@ func resolveEvidence(conn *sql.DB, runID, proposalID int, ref string) (string, e
 		}
 		return EvidenceArtifact + ":" + model.FormatArtifactID(id), nil
 	case EvidenceGate:
-		var n int
-		err := conn.QueryRow(
-			`SELECT COUNT(*) FROM gate_results WHERE run_id = ? AND gate = ?`,
-			runID, rest).Scan(&n)
+		recorded, err := runRecordedGate(st, runID, rest)
 		if err != nil {
 			return "", fmt.Errorf("resolving evidence reference %q: %w", ref, err)
 		}
-		if n == 0 {
+		if !recorded {
 			return "", validationErr(
 				"evidence reference %q names no gate result recorded in %s, the run %s was opened for",
 				ref, model.FormatRunID(runID), model.FormatProposalID(proposalID))
@@ -177,4 +172,36 @@ func resolveEvidence(conn *sql.DB, runID, proposalID int, ref string) (string, e
 	return "", validationErr(
 		"evidence reference %q has unknown scheme %q; want %s:%s-N or %s:<name>",
 		ref, scheme, EvidenceArtifact, model.ArtifactIDPrefix, EvidenceGate)
+}
+
+// artifactRunOf reads the run an artifact belongs to, or store.ErrNotFound
+// when no artifact has that id. The store reads one artifact by id only inside
+// a transaction, so this opens a read snapshot for the single lookup.
+func artifactRunOf(st store.Store, artifactID int) (int, error) {
+	snap, err := st.BeginReadSnapshot()
+	if err != nil {
+		return 0, err
+	}
+	defer snap.Rollback()
+	artifact, err := snap.GetArtifactTx(artifactID)
+	if err != nil {
+		return 0, err
+	}
+	return artifact.RunID, nil
+}
+
+// runRecordedGate reports whether the run holds at least one result for gate,
+// from any of its steps. The rollup carries one row per gate name the run
+// recorded, so a matching row is exactly that.
+func runRecordedGate(st store.Store, runID int, gate string) (bool, error) {
+	rollup, err := st.GateRollup(runID)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rollup {
+		if row.Name == gate {
+			return true, nil
+		}
+	}
+	return false, nil
 }

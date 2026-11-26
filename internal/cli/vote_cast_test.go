@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -20,79 +21,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
-
-// TestParseVoteMetadata pins what `vote cast --metadata` accepts and what it
-// refuses, and that every refusal names the flag — the caster reads the
-// message on a command line and needs to know which flag to fix.
-func TestParseVoteMetadata(t *testing.T) {
-	oversized := rawBagOfEncodedSize(t, db.VoteMetadataMaxBytes+1)
-
-	cases := []struct {
-		name string
-		raw  string
-		want map[string]any
-	}{
-		{"an unset flag asserts nothing", "", nil},
-		{"an object decodes whole", `{"a":"b","n":2,"nested":{"k":true}}`, map[string]any{
-			"a":      "b",
-			"n":      float64(2),
-			"nested": map[string]any{"k": true},
-		}},
-		// An explicitly empty object is a caller saying "no keys", and it
-		// stores as NULL like any other empty bag.
-		{"an empty object decodes empty", `{}`, map[string]any{}},
-		// The at-cap accept. Without it nothing tells `>` from `>=`, and a cap
-		// one byte tighter than the constant says would pass every refusal
-		// case below.
-		{"exactly at the cap is accepted", rawBagOfEncodedSize(t, db.VoteMetadataMaxBytes), map[string]any{
-			"blob": strings.Repeat("x", db.VoteMetadataMaxBytes-len(`{"blob":""}`)),
-		}},
-		// The cap measures the ENCODED bag, the quantity the column measures —
-		// not the caller's raw text. Whitespace is insignificant to JSON, so a
-		// padded bag far larger than the cap encodes to nine bytes and is
-		// accepted, exactly as the column would accept it.
-		{"whitespace padding is not part of the size", "{" + strings.Repeat(" ", db.VoteMetadataMaxBytes) + `"a":1}`, map[string]any{
-			"a": float64(1),
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseVoteMetadata(tc.raw)
-			if err != nil {
-				t.Fatalf("parseVoteMetadata(%q) = error %v, want a bag", tc.raw, err)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("parseVoteMetadata(%q) = %#v, want %#v", tc.raw, got, tc.want)
-			}
-		})
-	}
-
-	refusals := []struct {
-		name string
-		raw  string
-	}{
-		{"a JSON array is not a bag", `["a","b"]`},
-		{"a bare scalar is not a bag", `"a"`},
-		{"null is not a bag", `null`},
-		{"malformed JSON", `{"a":`},
-		{"one byte over the cap", oversized},
-		// Escaping grows the encoded bag: encoding/json writes `<` as the six
-		// bytes <, so a bag well under the cap as raw text is over it as
-		// stored. The flag must refuse what the column would refuse.
-		{"escaping pushes an under-cap bag over", `{"a":"` + strings.Repeat("<", db.VoteMetadataMaxBytes/2) + `"}`},
-	}
-	for _, tc := range refusals {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseVoteMetadata(tc.raw)
-			if err == nil {
-				t.Fatalf("parseVoteMetadata accepted %.40q, returning %#v", tc.raw, got)
-			}
-			if !strings.Contains(err.Error(), "--metadata") {
-				t.Errorf("refusal %q does not name the flag", err)
-			}
-		})
-	}
-}
 
 // rawBagOfEncodedSize returns the JSON TEXT of a one-key bag that encodes to
 // exactly n bytes — the quantity both the flag and the column measure. Sizing
@@ -114,7 +42,7 @@ func rawBagOfEncodedSize(t *testing.T, n int) string {
 // TestVoteCastCommandStoresTheMetadataFlag drives the REAL command — cobra
 // parsing, RunE, db.CastVote — and reads the vote back out of the store. It
 // exists because everything either side of the join was already pinned and the
-// join itself was not: parseVoteMetadata is tested as a pure function and
+// join itself was not: the metadata rules are tested at verb.VoteCast and
 // CastVote at the db seam, so a RunE that looked up a flag name nobody
 // registers would silently drop every caster's claim with the whole suite
 // green.
@@ -341,6 +269,106 @@ func TestVoteCastUsageNoteNamesBackfill(t *testing.T) {
 	testsupport.Must(t, err, "vote cast with --usage: %v", err)
 	if strings.Contains(stderr, "note:") {
 		t.Errorf("a seat that DID report usage was noted at anyway; stderr = %q", stderr)
+	}
+}
+
+// TestVoteCastUsageNoteFollowsTheBallotToTheEngine: the no-usage note is
+// printed for every ballot that passed the command's checks and went to the
+// engine, including one the engine then refused, and for none refused before.
+func TestVoteCastUsageNoteFollowsTheBallotToTheEngine(t *testing.T) {
+	conn := newTestDB(t)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "usage note on refusal", RequiredVoters: 5, Threshold: 0.5,
+		Status: model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+	id := model.FormatProposalID(proposalID)
+	base := []string{id, "--voter", "seat-a", "--verdict", "approve", "--domain-relevance", "0.8"}
+
+	err = runVoteCastCmd(t, conn, append(base, "--confidence", "0.9", "--usage", `{"tokens":1}`)...)
+	testsupport.Must(t, err, "first vote cast: %v", err)
+
+	stderr, err := runVoteCastCapturingStderr(t, conn, append(base, "--confidence", "0.9")...)
+	if code := codeOf(t, err); code != output.ErrConflict {
+		t.Fatalf("a second ballot from seat-a returned %s (%v), want %s", code, err, output.ErrConflict)
+	}
+	if !strings.Contains(stderr, "note: this seat reported no --usage") {
+		t.Errorf("a ballot the engine refused was not noted; stderr = %q", stderr)
+	}
+
+	stderr, err = runVoteCastCapturingStderr(t, conn, append(base, "--confidence", "1.5")...)
+	if code := codeOf(t, err); code != output.ErrValidation {
+		t.Fatalf("an out-of-range confidence returned %s (%v), want %s", code, err, output.ErrValidation)
+	}
+	if strings.Contains(stderr, "note:") {
+		t.Errorf("a ballot refused before the engine was noted; stderr = %q", stderr)
+	}
+}
+
+// TestVoteCastRefusesTheProjectAndProposalBeforeItsFlags: an unanchored
+// caller and a malformed proposal ID are refused before any flag check, so a
+// JSON-mode run with no flags reports them, never the missing --verdict.
+func TestVoteCastRefusesTheProjectAndProposalBeforeItsFlags(t *testing.T) {
+	conn := newTestDB(t)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "refusal order", RequiredVoters: 2, Threshold: 0.5,
+		Status: model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	for _, tc := range []struct {
+		name     string
+		cfg      *config.Config
+		proposal string
+		prefix   string
+	}{
+		{"unanchored caller", &config.Config{Identity: "/work/scratch"}, model.FormatProposalID(proposalID),
+			"cannot tell which project this belongs to"},
+		{"malformed proposal ID", nil, "bogus", "invalid proposal ID: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := runLeaseCommandOutput(t, conn, tc.cfg, voteCastCmd, tc.proposal)
+			var cmdError *CmdError
+			if !errors.As(err, &cmdError) || cmdError.Code != output.ErrValidation ||
+				!strings.HasPrefix(cmdError.Error(), tc.prefix) {
+				t.Errorf("vote cast %s with no flags returned %v, want VALIDATION_ERROR %q", tc.proposal, err, tc.prefix)
+			}
+		})
+	}
+	if n := len(votesByVoter(t, conn, proposalID)); n != 0 {
+		t.Errorf("refused invocations stored %d vote(s)", n)
+	}
+}
+
+// TestVoteCastCommandStoresEveryBallotFlag reads back each flag the ballot
+// carries, each with a distinct value, so a dropped or swapped field fails.
+func TestVoteCastCommandStoresEveryBallotFlag(t *testing.T) {
+	conn := newTestDB(t)
+	proposalID, err := db.CreateProposal(conn, &model.Proposal{
+		Description: "every flag", RequiredVoters: 2, Threshold: 0.5,
+		Status: model.ProposalStatusOpen,
+	})
+	testsupport.Must(t, err, "CreateProposal: %v", err)
+
+	err = runVoteCastCmd(t, conn, model.FormatProposalID(proposalID),
+		"--voter", "seat-full", "--role", "security", "--verdict", "approve-with-concerns",
+		"--confidence", "0.7", "--domain-relevance", "0.6",
+		"--findings", "free-text findings", "--findings-json", `{"concerns":["thin auth check"]}`,
+		"--summary", "approve, with one concern", "--usage", `{"tokens":42}`)
+	testsupport.Must(t, err, "vote cast: %v", err)
+
+	v, ok := votesByVoter(t, conn, proposalID)["seat-full"]
+	if !ok {
+		t.Fatal("no vote stored for seat-full")
+	}
+	if v.VoterRole != "security" || v.Verdict != model.VerdictApproveWithConcerns ||
+		v.Confidence != 0.7 || v.DomainRelevance != 0.6 ||
+		v.Findings != "free-text findings" || v.Summary != "approve, with one concern" ||
+		v.Usage["tokens"] != 42 {
+		t.Errorf("stored vote = %+v, want every flag's value", v)
+	}
+	if v.FindingsJSON == nil || len(v.FindingsJSON.Concerns) != 1 || v.FindingsJSON.Concerns[0].Text != "thin auth check" {
+		t.Errorf("stored findings JSON = %+v, want the one concern", v.FindingsJSON)
 	}
 }
 
@@ -708,7 +736,7 @@ func TestVoteCastReportsCommittedCastWhenPanelEventsFail(t *testing.T) {
 		_, ref := panelProposalWithFailingEvents(t, conn)
 
 		stdout := captureStdout(t)
-		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "seat-1", "--json", "v1"}, base...)...)
+		err := runVoteCastCmd(t, conn, append([]string{ref, "--voter", "seat-1", "--json", "v2"}, base...)...)
 		raw := stdout()
 		assertReportedGeneral(t, err)
 		var envelope struct {

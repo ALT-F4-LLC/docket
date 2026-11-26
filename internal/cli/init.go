@@ -7,9 +7,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 
 	"github.com/spf13/cobra"
 )
@@ -34,6 +34,14 @@ var initCmd = &cobra.Command{
 			cfg = config.LocalAt(cwd)
 		}
 
+		clientPath, created, err := ensureClientConfig()
+		if err != nil {
+			return userConfigCmdError(err)
+		}
+		if created {
+			w.Info("Client config created at %s", clientPath)
+		}
+
 		exists, err := cfg.Exists()
 		if err != nil {
 			return cmdErr(fmt.Errorf("checking database: %w", err), output.ErrGeneral)
@@ -42,17 +50,17 @@ var initCmd = &cobra.Command{
 		if exists {
 			w.Warn("Database already exists at %s", cfg.DBPath)
 
-			conn, err := db.Open(cfg.DBPath)
+			st, err := store.OpenSQLite(cfg.DBPath)
 			if err != nil {
 				return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
 			}
-			defer conn.Close()
+			defer st.Close()
 
-			if err := db.Migrate(conn); err != nil {
+			if err := st.Migrate(); err != nil {
 				return cmdErr(fmt.Errorf("migrating database: %w", err), output.ErrGeneral)
 			}
 
-			schemaVersion, err := db.SchemaVersion(conn)
+			schemaVersion, err := st.SchemaVersion()
 			if err != nil {
 				return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 			}
@@ -78,21 +86,21 @@ var initCmd = &cobra.Command{
 			return cmdErr(fmt.Errorf("creating directory: %w", err), output.ErrGeneral)
 		}
 
-		conn, err := db.Open(cfg.DBPath)
+		st, err := store.OpenSQLite(cfg.DBPath)
 		if err != nil {
 			return cmdErr(fmt.Errorf("opening database: %w", err), output.ErrGeneral)
 		}
-		defer conn.Close()
+		defer st.Close()
 
-		if err := db.Initialize(conn); err != nil {
+		if err := st.Initialize(); err != nil {
 			return cmdErr(fmt.Errorf("initializing schema: %w", err), output.ErrGeneral)
 		}
 
-		if err := db.Migrate(conn); err != nil {
+		if err := st.Migrate(); err != nil {
 			return cmdErr(fmt.Errorf("migrating schema: %w", err), output.ErrGeneral)
 		}
 
-		schemaVersion, err := db.SchemaVersion(conn)
+		schemaVersion, err := st.SchemaVersion()
 		if err != nil {
 			return cmdErr(fmt.Errorf("reading schema version: %w", err), output.ErrGeneral)
 		}
@@ -121,6 +129,26 @@ var initCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+// ensureClientConfig creates the client config with no profiles when none
+// exists, and reports whether it did. An existing file is left untouched,
+// unread, so a client config problem never blocks initializing a store.
+func ensureClientConfig() (path string, created bool, err error) {
+	path, err = config.ClientConfigPath()
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return path, false, nil
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("checking the client config %s: %w", path, err)
+	}
+	empty := config.ClientConfig{Version: config.ClientConfigVersion}
+	if err := writePrivateTOML(path, "the client config", empty); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
 }
 
 func init() {

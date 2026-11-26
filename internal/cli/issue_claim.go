@@ -1,13 +1,13 @@
 package cli
 
 import (
-	"database/sql"
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -79,47 +79,28 @@ itself.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
-		if err != nil {
-			return err
-		}
-
-		owner, err := cmd.Flags().GetString("owner")
-		if err != nil || owner == "" {
-			return cmdErr(
-				fmt.Errorf("--owner is required: it identifies the lease holder"),
-				output.ErrValidation,
-			)
-		}
-
+		owner, _ := cmd.Flags().GetString("owner")
 		class, _ := cmd.Flags().GetString("class")
-
-		ttl, err := resolveTTL(cmd, conn, class)
+		ttl, err := ttlFlag(cmd)
 		if err != nil {
 			return err
 		}
 
-		label := fmt.Sprintf("issue %s", model.FormatID(id))
-		token, lease, err := db.ClaimIssue(conn, id, owner, ttl.Milliseconds(), model.NowMS())
+		res, err := verb.IssueClaim(cmd.Context(), verbEnv(cmd), verb.IssueClaimInput{
+			Issue: args[0], Owner: owner, TTL: ttl, Class: class,
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			if e := leaseError(err, label); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("claiming issue: %w", err), output.ErrGeneral)
+			return verbErr(err)
 		}
 
-		version, err := db.GetVersion(conn, "issues", id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("reading issue version: %w", err), output.ErrGeneral)
-		}
-
+		id, token, lease := res.Issue, res.Token, res.Lease
 		resp := claimResponse{
 			Issue:          model.FormatID(id),
 			Token:          token,
 			LeaseExpiresMS: lease.ExpiresMS,
-			version:        version,
+			version:        res.Version,
 			attempt:        lease.Attempt,
 		}
 
@@ -145,29 +126,23 @@ itself.`,
 	},
 }
 
-// resolveTTL returns the lease TTL: an explicit --ttl wins, else the effective
-// per-class configuration (which falls back to lease.ttl.default).
-func resolveTTL(cmd *cobra.Command, conn *sql.DB, class string) (time.Duration, error) {
-	if cmd.Flags().Changed("ttl") {
-		ttl, err := cmd.Flags().GetDuration("ttl")
-		if err != nil {
-			return 0, cmdErr(err, output.ErrValidation)
-		}
-		if ttl <= 0 {
-			return 0, cmdErr(
-				fmt.Errorf("--ttl must be positive, got %s", ttl),
-				output.ErrValidation,
-			)
-		}
-		return ttl, nil
+// ttlFlag returns the explicit --ttl, or nil when it was not given so the
+// verb takes the configured TTL for --class.
+func ttlFlag(cmd *cobra.Command) (*time.Duration, error) {
+	if !cmd.Flags().Changed("ttl") {
+		return nil, nil
 	}
-
-	ttl, err := db.LeaseTTL(conn, getProjectID(cmd), class)
+	ttl, err := cmd.Flags().GetDuration("ttl")
 	if err != nil {
-		return 0, cmdErr(fmt.Errorf("resolving lease TTL: %w", err), output.ErrGeneral)
+		return nil, cmdErr(err, output.ErrValidation)
 	}
-	return ttl, nil
+	return &ttl, nil
 }
+
+// recordProjectRegistration writes nothing: verb.Env.ResolveProject records
+// the project-registered event when it registers a project. Its call sites
+// are dead and await removal.
+func recordProjectRegistration(*cobra.Command, *engine.ProjectRegistration) {}
 
 func init() {
 	claimCmd.Flags().String("owner", "", "Identity of the lease holder (required)")

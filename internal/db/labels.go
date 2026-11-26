@@ -255,16 +255,10 @@ func AddLabelsToIssue(db *sql.DB, issueID int, labelNames []string, color string
 			if color != "" {
 				colorVal = color
 			}
-			res, err := tx.Exec(`INSERT INTO labels (project_id, name, color) VALUES (?, ?, ?)`,
-				issueProject, labelName, colorVal)
-			if err != nil {
+			if err := tx.QueryRow(`INSERT INTO labels (project_id, name, color) VALUES (?, ?, ?) RETURNING id`,
+				issueProject, labelName, colorVal).Scan(&labelID); err != nil {
 				return fmt.Errorf("inserting label: %w", err)
 			}
-			id64, err := res.LastInsertId()
-			if err != nil {
-				return fmt.Errorf("getting label id: %w", err)
-			}
-			labelID = int(id64)
 		} else if err != nil {
 			return fmt.Errorf("querying label: %w", err)
 		} else if color != "" && existingColor.Valid && existingColor.String != color {

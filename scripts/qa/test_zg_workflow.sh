@@ -31,7 +31,7 @@ zg_step_id() {
 zg_ready_instances() {
   run_env "$1" next --run RUN-1 --json >/dev/null 2>&1
   printf '%s' "$CMD_STDOUT" |
-    jq -r '.data.steps[]? | select(.status=="ready") | .instance' 2>/dev/null |
+    jq -r '.data.items[]? | select(.status=="ready") | .instance' 2>/dev/null |
     tr '\n' ' '
 }
 
@@ -380,7 +380,7 @@ TOML
 
   run workflow list --json
   assert_exit "ZG" "ZG5_list_exit" 0
-  assert_json_array_min "ZG" "ZG5_list_v1_shape" ".data.workflows" 4
+  assert_json_array_min "ZG" "ZG5_list_items" ".data.items" 4
 
   run workflow list --json=v2
   assert_exit "ZG" "ZG5_list_v2_exit" 0
@@ -393,11 +393,9 @@ TOML
   assert_json_all "ZG" "ZG5_v2_row_versions" ".data.items" "has(\"row_version\")"
   assert_json_all "ZG" "ZG5_v2_definition_versions" ".data.items" "has(\"version\")"
 
-  # ...and v1 items carry no row_version at all — the dormancy rule at the
-  # envelope, matching the v6 `lease` object's.
+  # Bare --json is v2, so its items carry the row version too.
   run workflow list --json
-  assert_json_all "ZG" "ZG5_v1_no_row_version" ".data.workflows" \
-    "has(\"row_version\") | not"
+  assert_json_all "ZG" "ZG5_bare_row_versions" ".data.items" "has(\"row_version\")"
 
   # The total ignores the limit, so truncation is computable rather than
   # guessed.
@@ -413,11 +411,11 @@ TOML
   assert_json "ZG" "ZG5_name_filter" ".data.total" "1"
 
   # ---------------------------------------------------------------------------
-  # ZG6: v1 output carries no row_version — the dormancy rule at the envelope.
+  # ZG6: `workflow show` carries the row version under bare --json and v2.
   # ---------------------------------------------------------------------------
 
   run workflow show standard-change --json
-  assert_json_null "ZG" "ZG6_v1_no_row_version" ".data.row_version"
+  assert_json "ZG" "ZG6_bare_row_version" ".data.row_version" "1"
   run workflow show standard-change --json=v2
   assert_json "ZG" "ZG6_v2_row_version" ".data.row_version" "1"
 
@@ -885,19 +883,19 @@ SQL
   # work. `--all` is the way back to the full record.
   run_env "$ZG_RUN" run status --json
   assert_exit "ZG" "ZG10_active_exit" 0
-  assert_json_all "ZG" "ZG10_active_excludes_terminal" ".data.runs" \
+  assert_json_all "ZG" "ZG10_active_excludes_terminal" ".data.items" \
     '.status != "done" and .status != "abandoned"'
   run_env "$ZG_RUN" run status --all --json
   assert_exit "ZG" "ZG10_all_exit" 0
-  assert_json_exists "ZG" "ZG10_all_runs" ".data.runs"
+  assert_json_exists "ZG" "ZG10_all_runs" ".data.items"
 
-  # The v2 Collection envelope on the run list.
+  # The v2 Collection envelope on the run list, under both spellings.
   run_env "$ZG_RUN" run status --json=v2
   assert_json_exists "ZG" "ZG10_v2_items" ".data.items"
   assert_json_exists "ZG" "ZG10_v2_total" ".data.total"
   assert_json_all "ZG" "ZG10_v2_row_versions" ".data.items" 'has("row_version")'
   run_env "$ZG_RUN" run status --json
-  assert_json_all "ZG" "ZG10_v1_no_row_version" ".data.runs" 'has("row_version") | not'
+  assert_json_all "ZG" "ZG10_bare_row_versions" ".data.items" 'has("row_version")'
 
   # ---------------------------------------------------------------------------
   # ZG11: fence harvesting through the CLI.
@@ -993,14 +991,13 @@ TOML
   run_env "$ZG_DORM" issue move DKT-1 todo --json
   run_env "$ZG_DORM" issue move DKT-2 todo --json
 
-  local D_NEXT_BEFORE D_LIST_BEFORE D_SHOW_BEFORE D_PLAN_BEFORE D_SHOW2_BEFORE
+  local D_NEXT_BEFORE D_LIST_BEFORE D_SHOW_BEFORE D_PLAN_BEFORE
   run_env "$ZG_DORM" next --json;              D_NEXT_BEFORE="$CMD_STDOUT"
   run_env "$ZG_DORM" issue list --all --json;  D_LIST_BEFORE="$CMD_STDOUT"
   run_env "$ZG_DORM" issue show DKT-1 --json;  D_SHOW_BEFORE="$CMD_STDOUT"
-  run_env "$ZG_DORM" issue show DKT-1 --json=v2; D_SHOW2_BEFORE="$CMD_STDOUT"
   run_env "$ZG_DORM" plan --json;              D_PLAN_BEFORE="$CMD_STDOUT"
 
-  if [ -n "$D_NEXT_BEFORE" ] && [ -n "$D_PLAN_BEFORE" ] && [ -n "$D_SHOW2_BEFORE" ]; then
+  if [ -n "$D_NEXT_BEFORE" ] && [ -n "$D_PLAN_BEFORE" ] && [ -n "$D_SHOW_BEFORE" ]; then
     check "ZG" "ZG12_nonempty" "PASS"
   else
     check "ZG" "ZG12_nonempty" "FAIL" "the pre-registration reads were empty"
@@ -1010,18 +1007,16 @@ TOML
   run_env "$ZG_DORM" workflow register "$FIXTURE" --json
   assert_exit "ZG" "ZG12_register" 0
 
-  local D_NEXT_AFTER D_LIST_AFTER D_SHOW_AFTER D_PLAN_AFTER D_SHOW2_AFTER
+  local D_NEXT_AFTER D_LIST_AFTER D_SHOW_AFTER D_PLAN_AFTER
   run_env "$ZG_DORM" next --json;              D_NEXT_AFTER="$CMD_STDOUT"
   run_env "$ZG_DORM" issue list --all --json;  D_LIST_AFTER="$CMD_STDOUT"
   run_env "$ZG_DORM" issue show DKT-1 --json;  D_SHOW_AFTER="$CMD_STDOUT"
-  run_env "$ZG_DORM" issue show DKT-1 --json=v2; D_SHOW2_AFTER="$CMD_STDOUT"
   run_env "$ZG_DORM" plan --json;              D_PLAN_AFTER="$CMD_STDOUT"
 
   local DORM_DIFFS=""
   [ "$D_NEXT_BEFORE"  = "$D_NEXT_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS next"
   [ "$D_LIST_BEFORE"  = "$D_LIST_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS issue-list"
-  [ "$D_SHOW_BEFORE"  = "$D_SHOW_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS issue-show-v1"
-  [ "$D_SHOW2_BEFORE" = "$D_SHOW2_AFTER" ] || DORM_DIFFS="$DORM_DIFFS issue-show-v2"
+  [ "$D_SHOW_BEFORE"  = "$D_SHOW_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS issue-show-json"
   [ "$D_PLAN_BEFORE"  = "$D_PLAN_AFTER"  ] || DORM_DIFFS="$DORM_DIFFS plan"
 
   check_cond "ZG" "ZG12_registered_but_unactivated" "registering a workflow changed:$DORM_DIFFS" [ -z "$DORM_DIFFS" ]
@@ -1120,10 +1115,10 @@ TOML
   run_env "$ZG_S" next --run RUN-1 --json
   assert_exit "ZG" "ZG13_next" 0
   assert_json "ZG" "ZG13_next_one" \
-    '[.data.steps[] | select(.status=="ready")] | length' "1"
-  assert_json "ZG" "ZG13_next_instance" '.data.steps[0].instance' "implement@0"
+    '[.data.items[] | select(.status=="ready")] | length' "1"
+  assert_json "ZG" "ZG13_next_instance" '.data.items[0].instance' "implement@0"
   # `ready` is COMPUTED — the stored column says `pending`.
-  assert_json "ZG" "ZG13_next_ready" '.data.steps[0].status' "ready"
+  assert_json "ZG" "ZG13_next_ready" '.data.items[0].status' "ready"
   local ZG_STORED
   ZG_STORED=$(sqlite3 "$ZG_S/issues.db" \
     "SELECT status FROM steps WHERE instance='implement@0';")
@@ -1133,7 +1128,7 @@ TOML
   local ZG_KEY
   for ZG_KEY in step instance issue run kind executor class attempt \
                 expected_cost lease_ttl_s status; do
-    assert_json_exists "ZG" "ZG13_row_$ZG_KEY" ".data.steps[0].$ZG_KEY"
+    assert_json_exists "ZG" "ZG13_row_$ZG_KEY" ".data.items[0].$ZG_KEY"
   done
 
   # Claim: token AND the full context bundle in ONE response.
@@ -1241,8 +1236,8 @@ TOML
   # The next steps became ready: the fanout. The chain behind it rides staged.
   run_env "$ZG_S" next --run RUN-1 --json
   assert_json "ZG" "ZG13_fanout_ready" \
-    '[.data.steps[] | select(.status=="ready")] | length' "4"
-  assert_json "ZG" "ZG13_fanout_first" '.data.steps[0].instance' "review@0#0"
+    '[.data.items[] | select(.status=="ready")] | length' "4"
+  assert_json "ZG" "ZG13_fanout_first" '.data.items[0].instance' "review@0#0"
 
   # ---------------------------------------------------------------------------
   # ZG14: the completion refusal matrix, by EXIT CODE and by .code — each
@@ -1528,7 +1523,7 @@ TOML
   # (b) `next --run` re-offers it, and the reap is the write that does it.
   run_env "$ZG_K" next --run RUN-1 --json
   assert_exit "ZG" "ZG16_next_exit" 0
-  assert_json "ZG" "ZG16_reoffered" '.data.steps[0].instance' "implement@0"
+  assert_json "ZG" "ZG16_reoffered" '.data.items[0].instance' "implement@0"
 
   # (c) A SECOND worker claims and completes it. No operator action intervened.
   run_env "$ZG_K" step claim STEP-1 --owner survivor --json=v2
@@ -1549,9 +1544,9 @@ TOML
   while [ "$ZG_ROUNDS" -lt 20 ]; do
     ZG_ROUNDS=$((ZG_ROUNDS + 1))
     run_env "$ZG_K" next --run RUN-1 --json
-    ZG_SID=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step // empty')
+    ZG_SID=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].step // empty')
     [ -z "$ZG_SID" ] && break
-    ZG_KIND=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].kind')
+    ZG_KIND=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].kind')
     if [ "$ZG_KIND" = "human" ]; then
       DOCKET_TOKEN="$ZG_K_CTOK" run_env "$ZG_K" step approve "$ZG_SID" --authority operator --json
       continue
@@ -1611,9 +1606,9 @@ TOML
   while [ "$ZG_G_ROUNDS" -lt 20 ]; do
     ZG_G_ROUNDS=$((ZG_G_ROUNDS + 1))
     run_env "$ZG_G" next --run RUN-1 --json
-    ZG_G_SID=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].step // empty')
+    ZG_G_SID=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].step // empty')
     [ -z "$ZG_G_SID" ] && break
-    ZG_G_KIND=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.steps[0].kind')
+    ZG_G_KIND=$(printf '%s' "$CMD_STDOUT" | jq -r '.data.items[0].kind')
     # STOP at the human gate: this is the state the guard is about.
     [ "$ZG_G_KIND" = "human" ] && break
     run_env "$ZG_G" step claim "$ZG_G_SID" --owner g --json
@@ -1648,21 +1643,22 @@ TOML
     "no \`type=\"human\"\` or \`type=\"vote\"\` step"
 
   # ---------------------------------------------------------------------------
-  # ZG18: phase-3 dormancy — an ACTIVATED run's issues read
-  # byte-identically under --json=v1 and in human mode.
+  # ZG18: an ACTIVATED run's issues read stably under bare --json (v2), and
+  # neither that payload nor human mode carries step internals.
   #
-  # Step and lease data may surface only under --json=v2. This is the phase's
-  # own dormancy proof: a stopped stage is a dormant stage.
+  # The issue verbs expose the issue and its own lease; step rows belong to
+  # `next --run` and the `step` verbs.
   # ---------------------------------------------------------------------------
 
   local ZG_D1 ZG_D2
-  run_env "$ZG_S" issue show DKT-1 --json=v1
+  run_env "$ZG_S" issue show DKT-1 --json
   ZG_D1="$CMD_STDOUT"
-  run_env "$ZG_S" issue show DKT-1 --json=v1
+  run_env "$ZG_S" issue show DKT-1 --json
   ZG_D2="$CMD_STDOUT"
-  check_cond "ZG" "ZG18_v1_stable" "issue show --json=v1 is not stable" [ "$ZG_D1" = "$ZG_D2" ]
+  check_cond "ZG" "ZG18_json_nonempty" "issue show --json was empty" [ -n "$ZG_D1" ]
+  check_cond "ZG" "ZG18_json_stable" "issue show --json is not stable" [ "$ZG_D1" = "$ZG_D2" ]
 
-  # No step vocabulary reaches the v1 payload of an existing verb.
+  # No step vocabulary reaches the issue show payload.
   local ZG_LEAK=""
   local ZG_TERM
   for ZG_TERM in '"step"' '"instance"' '"lease_ttl_s"' '"saga_stage"' '"routing"'; do
@@ -1670,10 +1666,10 @@ TOML
       *"$ZG_TERM"*) ZG_LEAK="$ZG_LEAK $ZG_TERM" ;;
     esac
   done
-  check_cond "ZG" "ZG18_no_step_leak_v1" "issue show --json=v1 leaked:$ZG_LEAK" [ -z "$ZG_LEAK" ]
+  check_cond "ZG" "ZG18_no_step_leak_json" "issue show --json leaked:$ZG_LEAK" [ -z "$ZG_LEAK" ]
 
-  # Human mode likewise — with one DKT-294 carve-out. The live-status mirror's
-  # activity-trail comment ("implement@0 claimed.") is a CORE comment, always
+  # Human mode leaks no step internals — with one DKT-294 carve-out. The
+  # live-status mirror's activity-trail comment ("implement@0 claimed.") is a CORE comment, always
   # rendered regardless of --json=v2 (internal/engine/store.go's
   # commentEngineEvent), and it deliberately names the claiming instance — that
   # IS the trail's content, per reflectIssueOnClaim's own doc comment and
@@ -1693,9 +1689,9 @@ TOML
 
   # And `next` WITHOUT --run is untouched by any of it: the issue-mode verb, on
   # a database with ten steps and an activated run, still lists issues.
-  run_env "$ZG_S" next --json=v1
+  run_env "$ZG_S" next --json
   assert_exit "ZG" "ZG18_next_issue_mode" 0
-  assert_json_exists "ZG" "ZG18_next_issues_key" ".data.issues"
+  assert_json_exists "ZG" "ZG18_next_items_key" ".data.items"
 
 
   # ---------------------------------------------------------------------------
@@ -1852,7 +1848,7 @@ TOML
   printf '[{"status":"met"}]\n' >"$ZG_TMP/met.json"
 
   run_env "$ZG_L" next --run RUN-1 --json
-  assert_json "ZG" "ZG20_first_offer" ".data.steps[0].instance" "implement@0"
+  assert_json "ZG" "ZG20_first_offer" ".data.items[0].instance" "implement@0"
 
   zg_complete_step "$ZG_L" "implement@0" "$ZG_TMP/artifact.txt" ""
   assert_exit "ZG" "ZG20_implement_complete" 0
@@ -2095,7 +2091,7 @@ TOML
   local ZG_L_KINDS ZG_L_UNKNOWN
   ZG_L_KINDS=$(sqlite3 "$ZG_L/issues.db" "SELECT DISTINCT kind FROM events ORDER BY kind;")
   ZG_L_UNKNOWN=$(printf '%s\n' "$ZG_L_KINDS" | grep -vxE \
-    'run-started|run-activated|run-paused|run-resumed|run-abandoned|run-done|step-ready|step-claimed|step-heartbeat|step-recorded|claim-refused|gate-started|gate-recorded|step-routed|step-failed|step-superseded|step-skipped|step-resolved|step-approved|step-rejected|loop-entered|join-completed|lease-reaped|issue-promoted|issue-abandoned|issue-in-progress|issue-review|gate-unmatched|gate-rerun|trust-added|trust-removed|vote-opened|vote-tallied|project-registered' || true)
+    'run-started|run-activated|run-paused|run-resumed|run-abandoned|run-done|step-ready|step-claimed|step-heartbeat|step-recorded|saga-detach-started|claim-refused|gate-started|gate-recorded|step-routed|step-failed|step-superseded|step-skipped|step-resolved|step-approved|step-rejected|loop-entered|join-completed|lease-reaped|issue-promoted|issue-abandoned|issue-in-progress|issue-review|gate-unmatched|gate-rerun|trust-added|trust-removed|vote-opened|vote-tallied|project-registered' || true)
   if [ -z "$ZG_L_UNKNOWN" ]; then
     check "ZG" "ZG21_kinds_are_closed" "PASS"
   else
@@ -2254,8 +2250,9 @@ ZGT3EOF
     "$ZG_D4_ROWS non-tenancy events in a repo that never registered a workflow" \
     [ "$ZG_D4_ROWS" = "0" ]
 
-  # Existing verbs over the LOOPED run: `issue show` at v1 and in human mode
-  # carries no loop, ordinal, or event vocabulary. `next` (issue mode) likewise.
+  # Existing verbs over the LOOPED run: `issue show` under bare --json (v2) and
+  # in human mode carries no loop, ordinal, or event vocabulary. `next` (issue
+  # mode) likewise. The v2 envelope adds version and lease, never step state.
   local ZG_D4_SHOW ZG_D4_HUMAN ZG_D4_NEXT
   run_env "$ZG_L" issue show DKT-1 --json;  ZG_D4_SHOW="$CMD_STDOUT"
   run_env "$ZG_L" issue show DKT-1;         ZG_D4_HUMAN="$CMD_STDOUT"
@@ -2263,7 +2260,7 @@ ZGT3EOF
 
   local ZG_D4_LEAK=""
   for ZG_D4_WORD in loop_count loop-entered superseded ordinal events seq; do
-    printf '%s' "$ZG_D4_SHOW"  | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK show-v1:$ZG_D4_WORD"
+    printf '%s' "$ZG_D4_SHOW"  | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK show-json:$ZG_D4_WORD"
     printf '%s' "$ZG_D4_HUMAN" | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK show-human:$ZG_D4_WORD"
     printf '%s' "$ZG_D4_NEXT"  | grep -q "$ZG_D4_WORD" && ZG_D4_LEAK="$ZG_D4_LEAK next:$ZG_D4_WORD"
   done
@@ -2338,8 +2335,8 @@ ZGT3EOF
 
   run_env "$ZG_SC" schema list --json
   assert_exit "ZG" "ZG24_list" 0
-  assert_json "ZG" "ZG24_list_builtin_ref" '.data.schemas[0].name' "aggregate"
-  assert_json "ZG" "ZG24_list_builtin_marked" '.data.schemas[0].builtin' "true"
+  assert_json "ZG" "ZG24_list_builtin_ref" '.data.items[0].name' "aggregate"
+  assert_json "ZG" "ZG24_list_builtin_marked" '.data.items[0].builtin' "true"
   assert_json "ZG" "ZG24_list_total" ".data.total" "1"
 
   # A real instance schema. It lives in scripts/qa/fixtures/, which the
@@ -2391,13 +2388,14 @@ ZGT3EOF
   assert_exit "ZG" "ZG24_show_body" 0
   check_cond "ZG" "ZG24_show_body_verbatim" "--body is not the registered bytes" [ "$CMD_STDOUT" = "$(cat "$SC_FILE")" ]
 
-  # A Collection under v2, per the `workflow list` precedent.
+  # A Collection under v2, per the `workflow list` precedent, under both
+  # spellings.
   run_env "$ZG_SC" schema list --json=v2
   assert_json "ZG" "ZG24_v2_items" '.data.items | length' "2"
   assert_json "ZG" "ZG24_v2_total" ".data.total" "2"
   assert_json "ZG" "ZG24_v2_row_version" '.data.items[0].row_version' "1"
   run_env "$ZG_SC" schema list --json
-  assert_json_null "ZG" "ZG24_v1_no_row_version" '.data.schemas[0].row_version'
+  assert_json "ZG" "ZG24_bare_row_version" '.data.items[0].row_version' "1"
 
   # --- The refusal matrix. Each row: exit code, .code, and nothing written. ---
   local SC_COUNT_BEFORE
@@ -3434,9 +3432,9 @@ TOML
   # only the pre-existing "zg-gone" is a real row. "zg-gone-renamed" never
   # committed, despite matching the (rolled-back) candidate list above.
   run_env "$ZG_DEL" workflow list --json
-  assert_json "ZG" "ZG32_registry_after_refusal" ".data.workflows | length" "1"
+  assert_json "ZG" "ZG32_registry_after_refusal" ".data.items | length" "1"
   assert_json "ZG" "ZG32_registry_only_old_name" \
-    '.data.workflows | map(select(.name == "zg-gone")) | length' "1"
+    '.data.items | map(select(.name == "zg-gone")) | length' "1"
 
   rm -rf "$ZG_DEL"
 

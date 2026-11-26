@@ -9,6 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -52,34 +53,22 @@ type voteBackfillOutcome struct {
 }
 
 func runVoteBackfillUsage(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	in := verb.VoteBackfillUsageInput{
+		Proposal: args[0],
+		Rows:     func() ([]engine.VoteBackfillRow, error) { return voteBackfillRows(cmd) },
+	}
+	in.Source, _ = cmd.Flags().GetString("source")
 
-	proposalID, err := model.ParseProposalID(args[0])
+	env := verbEnv(cmd)
+	res, err := verb.VoteBackfillUsage(cmd.Context(), env, in)
+	recordRegisteredProject(cmd, env, res.Registered)
 	if err != nil {
-		return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
+		return verbErr(err)
 	}
 
-	rows, err := voteBackfillRows(cmd)
-	if err != nil {
-		return err
-	}
-	source, _ := cmd.Flags().GetString("source")
-
-	if err := engine.NewEngine().BackfillVoteUsage(
-		conn, proposalID, rows, source, model.NowMS()); err != nil {
-		return runErr(err)
-	}
-
-	seen := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		seen[r.Voter] = true
-	}
-	if source == "" {
-		source = engine.UsageSourceBackfilled
-	}
 	outcome := &voteBackfillOutcome{
-		Proposal: model.FormatProposalID(proposalID), Rows: len(rows),
-		Seats: len(seen), Source: source,
+		Proposal: model.FormatProposalID(res.ProposalID), Rows: res.Rows,
+		Seats: res.Seats, Source: res.Source,
 	}
 
 	var message string

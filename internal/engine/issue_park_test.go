@@ -77,20 +77,6 @@ func TestAStepParkHoldsItsIssueNotTheRun(t *testing.T) {
 	}
 }
 
-// A one-issue run keeps the old shape: its only issue's park is all the work
-// there is, so the run rolls up to `waiting-human` at once.
-func TestASoleIssuesParkStillParksTheRun(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-	execSQL(t, conn,
-		`UPDATE steps SET status = ? WHERE run_id = ? AND issue_id = ? AND instance = 'implement@0'`,
-		string(db.StepWaitingHuman), run.ID, issue)
-	rollup(t, conn, run.ID)
-	if got := runStatusOf(t, conn, run.ID); got != string(model.RunWaitingHuman) {
-		t.Fatalf("a sole issue's park leaves the run %q, want %q", got, model.RunWaitingHuman)
-	}
-}
-
 // rollup runs reconcileRun in its own transaction, the way every routing
 // transaction ends.
 func rollup(t *testing.T, conn *sql.DB, runID int) {

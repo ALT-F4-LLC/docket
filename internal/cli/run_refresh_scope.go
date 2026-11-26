@@ -2,12 +2,11 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -75,51 +74,28 @@ for none.`,
 }
 
 func runRunRefreshScope(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	issueRef, _ := cmd.Flags().GetString("issue")
-	if issueRef == "" {
-		return cmdErr(
-			fmt.Errorf("--issue is required: the snapshot is frozen per issue, "+
-				"so a refresh names the one issue whose remaining steps should "+
-				"render the widened scope"),
-			output.ErrValidation)
-	}
-	issueID, err := issueArg(issueRef)
-	if err != nil {
-		return err
-	}
-
+	issue, _ := cmd.Flags().GetString("issue")
 	reason, _ := cmd.Flags().GetString("reason")
-	if reason == "" {
-		return cmdErr(
-			fmt.Errorf("--reason is required to refresh a snapshotted scope; the "+
-				"event trail must say why a live run's packets changed what "+
-				"they declare"),
-			output.ErrValidation)
+	in := verb.RunRefreshScopeInput{
+		Run: ref, Issue: issue, Reason: reason,
+		ConductorToken: func() string { return optionalToken(cmd.InOrStdin()) },
 	}
-
-	by, err := rulingBy()
+	env, err := runRulingEnv(cmd, in.Validate)
 	if err != nil {
 		return err
 	}
-	outcome, err := engine.RefreshIssueScopeInRun(
-		conn, runID, issueID, reason, by, conductorToken(conn, runID, os.Stdin),
-		model.NowMS())
+
+	res, err := verb.RunRefreshScope(cmd.Context(), env, in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = renderRefreshScopeOutcome(outcome)
+		message = renderRefreshScopeOutcome(res.Outcome)
 	}
-	w.Success(outcome, message)
+	w.Success(res.Outcome, message)
 	return nil
 }
 

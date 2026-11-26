@@ -21,7 +21,7 @@ import (
 // mustInitAndMigrate initializes a fresh in-memory DB and runs migrations.
 func mustInitAndMigrate(t *testing.T) *sql.DB {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	err := Initialize(db)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = Migrate(db)
@@ -208,49 +208,6 @@ func TestListProposals(t *testing.T) {
 }
 
 // --- CastVote happy path ---
-
-func TestCastVoteHappyPath(t *testing.T) {
-	db := mustInitAndMigrate(t)
-
-	id, err := CreateProposal(db, &model.Proposal{
-		Description:    "Vote test",
-		Criticality:    model.CriticalityMedium,
-		Status:         model.ProposalStatusOpen,
-		RequiredVoters: 3,
-		Threshold:      0.67,
-	})
-	testsupport.Must(t, err, "CreateProposal: %v", err)
-
-	result, err := CastVote(db, &model.Vote{
-		ProposalID:      id,
-		VoterName:       "voter-1",
-		VoterRole:       "security",
-		Verdict:         model.VerdictApprove,
-		Confidence:      0.9,
-		DomainRelevance: 0.8,
-		Findings:        "Looks good",
-	})
-	testsupport.Must(t, err, "CastVote: %v", err)
-
-	if result.Vote.ID <= 0 {
-		t.Errorf("vote ID = %d, want > 0", result.Vote.ID)
-	}
-	if result.ProposalStatus != model.ProposalStatusOpen {
-		t.Errorf("status = %q, want %q", result.ProposalStatus, model.ProposalStatusOpen)
-	}
-	if result.VotesCast != 1 {
-		t.Errorf("votes_cast = %d, want 1", result.VotesCast)
-	}
-	if result.VotesRequired != 3 {
-		t.Errorf("votes_required = %d, want 3", result.VotesRequired)
-	}
-	if result.QuorumReached {
-		t.Error("quorum_reached = true, want false")
-	}
-	if result.WeightedScore != nil {
-		t.Errorf("weighted_score = %v, want nil", result.WeightedScore)
-	}
-}
 
 // --- CastVote auto-finalization ---
 
@@ -515,43 +472,6 @@ func TestCastVoteProposalNotFound(t *testing.T) {
 
 // --- GetProposalVotes ---
 
-func TestGetProposalVotes(t *testing.T) {
-	db := mustInitAndMigrate(t)
-
-	id, err := CreateProposal(db, &model.Proposal{
-		Description:    "Votes retrieval",
-		Criticality:    model.CriticalityMedium,
-		Status:         model.ProposalStatusOpen,
-		RequiredVoters: 3,
-		Threshold:      0.67,
-	})
-	testsupport.Must(t, err, "CreateProposal: %v", err)
-
-	for _, name := range []string{"alice", "bob"} {
-		_, err := CastVote(db, &model.Vote{
-			ProposalID: id, VoterName: name,
-			Verdict: model.VerdictApprove, Confidence: 0.9, DomainRelevance: 0.8,
-			Findings: "ok from " + name,
-		})
-		testsupport.Must(t, err, "CastVote(%s): %v", name, err)
-	}
-
-	votes, err := GetProposalVotes(db, id)
-	testsupport.Must(t, err, "GetProposalVotes: %v", err)
-	if len(votes) != 2 {
-		t.Fatalf("len(votes) = %d, want 2", len(votes))
-	}
-	if votes[0].VoterName != "alice" {
-		t.Errorf("votes[0].VoterName = %q, want %q", votes[0].VoterName, "alice")
-	}
-	if votes[1].VoterName != "bob" {
-		t.Errorf("votes[1].VoterName = %q, want %q", votes[1].VoterName, "bob")
-	}
-	if votes[0].Findings != "ok from alice" {
-		t.Errorf("votes[0].Findings = %q, want %q", votes[0].Findings, "ok from alice")
-	}
-}
-
 // --- LinkProposalIssue / UnlinkProposalIssue / GetProposalIssues ---
 
 func createTestIssueForProposal(t *testing.T, conn *sql.DB, title string) int {
@@ -592,24 +512,6 @@ func TestLinkAndGetProposalIssues(t *testing.T) {
 	// Sorted by issue_id ASC.
 	if ids[0] != iid1 || ids[1] != iid2 {
 		t.Errorf("ids = %v, want [%d, %d]", ids, iid1, iid2)
-	}
-}
-
-func TestLinkProposalIssueDuplicate(t *testing.T) {
-	db := mustInitAndMigrate(t)
-
-	pid, _ := CreateProposal(db, &model.Proposal{
-		Description: "Dup link", Criticality: model.CriticalityMedium,
-		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
-	})
-	iid := createTestIssueForProposal(t, db, "issue-dup")
-
-	err := LinkProposalIssue(db, pid, iid)
-	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
-
-	err = LinkProposalIssue(db, pid, iid)
-	if !errors.Is(err, ErrConflict) {
-		t.Errorf("expected ErrConflict for duplicate link, got %v", err)
 	}
 }
 
@@ -1224,34 +1126,6 @@ func TestGetIssueProposalsZero(t *testing.T) {
 	testsupport.Must(t, err, "GetIssueProposals: %v", err)
 	if len(proposals) != 0 {
 		t.Errorf("len(proposals) = %d, want 0", len(proposals))
-	}
-}
-
-func TestGetIssueProposalsOne(t *testing.T) {
-	db := mustInitAndMigrate(t)
-	iid := createTestIssueForProposal(t, db, "one-proposal")
-
-	pid, err := CreateProposal(db, &model.Proposal{
-		Description: "Solo proposal", Criticality: model.CriticalityMedium,
-		Status: model.ProposalStatusOpen, RequiredVoters: 1, Threshold: 0.67,
-	})
-	testsupport.Must(t, err, "CreateProposal: %v", err)
-	err = LinkProposalIssue(db, pid, iid)
-	testsupport.Must(t, err, "LinkProposalIssue: %v", err)
-
-	proposals, err := GetIssueProposals(db, iid)
-	testsupport.Must(t, err, "GetIssueProposals: %v", err)
-	if len(proposals) != 1 {
-		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
-	}
-	if proposals[0].ID != pid {
-		t.Errorf("proposals[0].ID = %d, want %d", proposals[0].ID, pid)
-	}
-	if proposals[0].Description != "Solo proposal" {
-		t.Errorf("proposals[0].Description = %q, want 'Solo proposal'", proposals[0].Description)
-	}
-	if proposals[0].Status != model.ProposalStatusOpen {
-		t.Errorf("proposals[0].Status = %q, want %q", proposals[0].Status, model.ProposalStatusOpen)
 	}
 }
 

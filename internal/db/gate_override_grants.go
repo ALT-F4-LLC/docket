@@ -79,21 +79,17 @@ func InsertGateOverrideGrantTx(tx *sql.Tx, g GateOverrideGrant) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("encoding the gate override grant argv: %w", err)
 	}
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO gate_override_grants
 		   (run_id, origin_step_id, gate, exit, reason, fingerprint, argv, note,
 		    covered_steps, created_at_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?) RETURNING id`,
 		g.RunID, g.OriginStepID, g.Gate, exit, g.Reason, g.Fingerprint,
-		string(argv), g.Note, g.CreatedAtMS)
-	if err != nil {
+		string(argv), g.Note, g.CreatedAtMS).Scan(&id); err != nil {
 		return 0, fmt.Errorf("recording the gate override grant: %w", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("reading the gate override grant id: %w", err)
-	}
-	return int(id), nil
+	return id, nil
 }
 
 // GateOverrideGrantsForRun returns every grant recorded for one run, in

@@ -2,17 +2,25 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"time"
 
+	"connectrpc.com/connect"
+
+	"github.com/ALT-F4-LLC/docket/internal/api/client"
+	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -22,12 +30,14 @@ var (
 	buildDate = "unknown"
 )
 
+// Version returns the build version this binary was built with.
+func Version() string { return version }
+
 type contextKey string
 
 const (
 	dbKey       contextKey = "db"
 	cfgKey      contextKey = "cfg"
-	projectKey  contextKey = "project"
 	readerDBKey contextKey = "readerDB"
 )
 
@@ -105,6 +115,52 @@ func emitGuardNotApplicable(cmd *cobra.Command, dbPath string) {
 	if isJSON, _ := jsonModeOf(cmd); !isJSON {
 		fmt.Fprintf(cmd.ErrOrStderr(), "guard: %s\n", reason)
 	}
+}
+
+// checkGuardBinding returns an error when this project is linked to a daemon,
+// or when the link file cannot be read and so whether it is linked is
+// unknown. Nil means no binding. This client routes no guard to a daemon, so a
+// linked project with no local store has engine state the guard cannot
+// consult.
+func checkGuardBinding(cfg *config.Config) error {
+	clientConfigPath, err := config.ClientConfigPath()
+	if err != nil {
+		return fmt.Errorf("locating the link file: %w", err)
+	}
+	links, err := loadLinkFile(linkFilePath(clientConfigPath))
+	if err != nil {
+		return err
+	}
+	entry, ok := links.Links[cfg.Identity]
+	if !ok {
+		return nil
+	}
+	target := "the local daemon socket"
+	if entry.Profile != "" {
+		target = fmt.Sprintf("server profile %q", entry.Profile)
+	}
+	return fmt.Errorf(
+		"project %s is linked to daemon project %d on %s, and this client cannot consult a daemon for guards",
+		cfg.Identity, entry.ProjectID, target)
+}
+
+// guardUnavailable turns a guard failure that is not a verdict into a denial.
+//
+// Hooks block only on exit 2, so a guard that exits 1 because its engine
+// state could not be read fails open. A GENERAL_ERROR or an uncoded error
+// (opening, migrating, or querying the store; reading the link file) means
+// the guard could not consult state, and it denies with an UNAVAILABLE
+// reason. Errors that already carry another code are verdicts or usage
+// errors; for those it returns nil and the error renders unchanged.
+func guardUnavailable(err error) error {
+	var ce *CmdError
+	if errors.As(err, &ce) {
+		if ce.Code != output.ErrGeneral {
+			return nil
+		}
+		err = ce.Err
+	}
+	return fmt.Errorf("UNAVAILABLE: the guard cannot consult engine state, so it denies: %w", err)
 }
 
 var rootCmd = &cobra.Command{
@@ -195,7 +251,13 @@ var rootCmd = &cobra.Command{
 			// surprisingly-permissive hook can see why: `not_applicable` in
 			// the JSON envelope, and a stderr note in human mode. It is not
 			// silent, just not a denial.
+			//
+			// A project linked to a daemon is not "no engine": its state lives
+			// there, so the binding is checked before the allow.
 			if isGuardCmd(cmd) {
+				if err := checkGuardBinding(cfg); err != nil {
+					return err
+				}
 				emitGuardNotApplicable(cmd, cfg.DBPath)
 				return errSkipRun
 			}
@@ -205,36 +267,21 @@ var rootCmd = &cobra.Command{
 			)
 		}
 
-		conn, err := db.Open(cfg.DBPath)
+		conn, err := store.OpenSQLiteDB(cfg.DBPath)
 		if err != nil {
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 
-		if err := db.Migrate(conn); err != nil {
+		st := store.StoreOn(conn)
+		if err := st.Migrate(); err != nil {
 			return fmt.Errorf("failed to migrate database: %w", err)
-		}
-
-		// Resolve this invocation's project (v12): the store is shared, and
-		// which rows this command reads and writes is decided ONCE, here, from
-		// the identity config.Resolve derived — never re-derived downstream.
-		projectID, err := resolveInvocationProject(cmd, conn, cfg)
-		if err != nil {
-			return err
-		}
-
-		// The project's display prefix, installed process-wide before any
-		// command formats an id: `VOR-42` and `DKT-42` are the same issue —
-		// the number is the global identity — but the board reads in the
-		// project's own voice.
-		if prefix, err := db.ProjectPrefix(conn, projectID); err == nil {
-			model.SetDisplayPrefix(prefix)
 		}
 
 		// The store's whole prefix roster, so id PARSING accepts exactly the
 		// prefixes some project holds (DKT-110): `AMS-2` round-trips from a
 		// cross-project listing, while `ANSI-16` — an id-shaped term no
 		// project owns — is refused instead of silently resolving issue 16.
-		if prefixes, err := db.AllProjectPrefixes(conn); err == nil {
+		if prefixes, err := st.AllProjectPrefixes(); err == nil {
 			model.SetKnownProjectPrefixes(prefixes)
 		}
 
@@ -256,26 +303,27 @@ var rootCmd = &cobra.Command{
 		// deep inside engine code — activate, reconcile, and every other
 		// fat-transaction verb format ids into their result and error messages
 		// WHILE their transaction is open, and that transaction already holds
-		// conn's one pooled connection (db.Open caps it at one). Resolving
-		// through conn there self-deadlocks: database/sql has no second
-		// connection to hand the query, and the query is what the open
-		// transaction is waiting on to finish. db.OpenReader's own connection
-		// never contends with it.
+		// conn's one pooled connection (store.OpenSQLiteDB caps it at one).
+		// Resolving through conn there self-deadlocks: database/sql has no
+		// second connection to hand the query, and the query is what the open
+		// transaction is waiting on to finish. store.OpenSQLiteReaderDB's own
+		// connection never contends with it.
 		//
 		// Not concurrency-guarded, for the same reason SetDisplayPrefix is not:
 		// these are per-invocation constants installed before any command runs,
 		// and rendering happens on the command's own goroutine.
-		readerDB, err := db.OpenReader(cfg.DBPath)
+		readerDB, err := store.OpenSQLiteReaderDB(cfg.DBPath)
 		if err != nil {
 			return fmt.Errorf("failed to open reader database connection: %w", err)
 		}
 
+		ownerStore := store.StoreOn(readerDB)
 		owners := map[int]string{}
 		model.SetIssueOwnerPrefixResolver(func(id int) string {
 			if prefix, ok := owners[id]; ok {
 				return prefix
 			}
-			prefix, err := db.IssueOwnerPrefix(readerDB, id)
+			prefix, err := ownerStore.IssueOwnerPrefix(id)
 			if err != nil {
 				prefix = ""
 			}
@@ -285,14 +333,14 @@ var rootCmd = &cobra.Command{
 
 		ctx = context.WithValue(ctx, dbKey, conn)
 		ctx = context.WithValue(ctx, readerDBKey, readerDB)
-		cmd.SetContext(context.WithValue(ctx, projectKey, projectID))
+		cmd.SetContext(ctx)
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-		if readerDB, ok := cmd.Context().Value(readerDBKey).(*sql.DB); ok && readerDB != nil {
+		if readerDB, ok := cmd.Context().Value(readerDBKey).(store.LegacyDB); ok && readerDB != nil {
 			readerDB.Close()
 		}
-		conn, ok := cmd.Context().Value(dbKey).(*sql.DB)
+		conn, ok := cmd.Context().Value(dbKey).(store.LegacyDB)
 		if ok && conn != nil {
 			return conn.Close()
 		}
@@ -301,16 +349,14 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	// --json is a string flag with NoOptDefVal so a bare --json still behaves
-	// like the Bool flag it used to be: it takes the value "v1" and emits the
-	// byte-identical v1 envelope. --json=v2 selects the uniform envelope.
-	// See internal/output.ParseJSONMode for the accepted values.
-	rootCmd.PersistentFlags().String("json", "", "Output in JSON format (--json, or --json=v2)")
-	rootCmd.PersistentFlags().Lookup("json").NoOptDefVal = "v1"
+	// --json is a string flag with NoOptDefVal so a bare --json still parses
+	// like the Bool flag it used to be: it takes the value "v2" and emits the
+	// uniform envelope. See internal/output.ParseJSONMode for the accepted values.
+	rootCmd.PersistentFlags().String("json", "", "Output in JSON format, v2 only (--json or --json=v2)")
+	rootCmd.PersistentFlags().Lookup("json").NoOptDefVal = "v2"
 	// --format is the conventional spelling operators reach for first, and
-	// guessing it cost a retry against `unknown flag`. It selects v2:
-	// a caller writing --format json today wants the current envelope, and v1
-	// stays reachable by its own explicit spelling for the scripts frozen on it.
+	// guessing it cost a retry against `unknown flag`. It selects v2, the
+	// same envelope as --json.
 	rootCmd.PersistentFlags().String(
 		"format", "", "Output format: json (alias for --json=v2)")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "Suppress non-essential output")
@@ -343,9 +389,8 @@ func jsonVersionOf(cmd *cobra.Command) output.JSONVersion {
 	if err != nil {
 		return output.JSONNone
 	}
-	// --format json is an alias for --json=v2. An explicit --json
-	// wins, so a caller who spells out --json=v1 --format=json gets v1 rather
-	// than having the alias silently upgrade their envelope.
+	// --format json is an alias for --json=v2. --json=false and --json=0
+	// read the same as an absent --json, so they do not suppress the alias.
 	if version == output.JSONNone && formatIsJSON(cmd) {
 		return output.JSONV2
 	}
@@ -427,27 +472,110 @@ func getWriter(cmd *cobra.Command) *output.Writer {
 	return output.NewWithVersion(jsonVersionOf(cmd), quietMode)
 }
 
+// daemonHostResolver resolves a daemon host to the addresses checkDaemonURL
+// judges. *net.Resolver satisfies it.
+type daemonHostResolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+// checkDaemonURL refuses a daemon URL that would send requests in plaintext
+// off this host. An https URL is accepted wherever it points. An http URL is
+// accepted only when every address its host resolves to is loopback: the
+// resolved addresses decide, not the host string, so "localhost" mapped to a
+// remote address is refused. Any other scheme, a missing host, or a failed or
+// empty resolution is refused.
+func checkDaemonURL(ctx context.Context, rawURL string, resolver daemonHostResolver) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("daemon URL %q: %w", rawURL, err)
+	}
+	shown := u.Redacted()
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("daemon URL %q has no host", shown)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+	default:
+		return fmt.Errorf("daemon URL %q: scheme %q is not http or https", shown, u.Scheme)
+	}
+
+	var resolved []netip.Addr
+	if literal, err := netip.ParseAddr(host); err == nil {
+		resolved = []netip.Addr{literal}
+	} else if resolved, err = resolver.LookupNetIP(ctx, "ip", host); err != nil {
+		return fmt.Errorf("daemon URL %q: resolving %q: %w", shown, host, err)
+	}
+	if len(resolved) == 0 {
+		return fmt.Errorf("daemon URL %q: %q resolves to no address", shown, host)
+	}
+	for _, addr := range resolved {
+		if !addr.Unmap().IsLoopback() {
+			return fmt.Errorf("daemon URL %q: plaintext http is allowed only to loopback, and %q resolves to %s; use https",
+				shown, host, addr)
+		}
+	}
+	return nil
+}
+
+// daemonDialFunc opens the connection to a daemon address. (*net.Dialer).DialContext
+// satisfies it.
+type daemonDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// newDaemonClient returns a Connect client for the daemon at daemonURL, or
+// checkDaemonURL's refusal before anything is built or dialed. The client
+// applies the same check to every redirect target before following it, and
+// ignores proxy environment variables, so plaintext reaches only the
+// loopback daemon the URL names.
+func newDaemonClient(ctx context.Context, daemonURL string, resolver daemonHostResolver, dial daemonDialFunc, logger *slog.Logger) (docketv1connect.DocketServiceClient, error) {
+	if err := checkDaemonURL(ctx, daemonURL, resolver); err != nil {
+		return nil, err
+	}
+	httpClient := &http.Client{
+		Transport: &http.Transport{DialContext: dial},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := checkDaemonURL(req.Context(), req.URL.String(), resolver); err != nil {
+				return err
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
+	return client.NewClient(httpClient, daemonURL, logger), nil
+}
+
+// connectLocalDaemon connects to the local daemon at baseURL through
+// httpClient. Locally the client and daemon are expected to be one build, so a
+// daemon on another build gets one stderr warning naming both, and the command
+// goes on.
+func connectLocalDaemon(cmd *cobra.Command, httpClient connect.HTTPClient, baseURL string, logger *slog.Logger) (docketv1connect.DocketServiceClient, error) {
+	daemon, meta, err := client.Connect(cmd.Context(), httpClient, baseURL, logger)
+	if err != nil {
+		return nil, err
+	}
+	if daemonBuild := meta.GetDaemonVersion(); daemonBuild != version {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: docket client build %s differs from the local daemon build %s\n",
+			version, daemonBuild)
+	}
+	return daemon, nil
+}
+
 func getCfg(cmd *cobra.Command) *config.Config {
 	cfg, _ := cmd.Context().Value(cfgKey).(*config.Config)
 	return cfg
 }
 
-func getDB(cmd *cobra.Command) *sql.DB {
-	conn, _ := cmd.Context().Value(dbKey).(*sql.DB)
+func getDB(cmd *cobra.Command) store.LegacyDB {
+	conn, _ := cmd.Context().Value(dbKey).(store.LegacyDB)
 	if conn == nil {
 		panic("bug: getDB called on a command with no database connection (missing PersistentPreRunE guard?)")
 	}
 	return conn
-}
-
-// getProjectID returns the invocation's resolved project (v12). Commands built
-// outside the root hook — tests wiring a bare command — fall back to the
-// default project, which is the pre-v12 single-tenant behavior exactly.
-func getProjectID(cmd *cobra.Command) int {
-	if id, ok := cmd.Context().Value(projectKey).(int); ok && id != 0 {
-		return id
-	}
-	return db.DefaultProjectID
 }
 
 // Execute runs the root command and returns an exit code.
@@ -459,7 +587,7 @@ func Execute() int {
 	// completes a step must never find it installed.
 	engine.LaunchDetachedPreGates = launchDetachedPreGates
 	engine.LaunchDetachedSaga = launchDetachedSaga
-	if err := rootCmd.Execute(); err != nil {
+	if cmd, err := rootCmd.ExecuteC(); err != nil {
 		// PersistentPreRunE already wrote this invocation's output and asked
 		// to stop before RunE. Not a failure: exit 0, render nothing.
 		if errors.Is(err, errSkipRun) {
@@ -485,6 +613,15 @@ func Execute() int {
 		}
 		quietMode, _ := rootCmd.PersistentFlags().GetBool("quiet")
 		w := output.NewWithVersion(version, quietMode)
+
+		// The code is UNAVAILABLE but the exit is a guard's deny exit, which
+		// is NOT_FOUND's: UNAVAILABLE's own exit 10 would not block a hook.
+		if isGuardCmd(cmd) {
+			if denial := guardUnavailable(err); denial != nil {
+				w.Error(denial, output.ErrUnavailable)
+				return output.ExitCodeForError(output.ErrNotFound)
+			}
+		}
 
 		var ce *CmdError
 		if errors.As(err, &ce) {

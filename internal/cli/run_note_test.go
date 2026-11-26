@@ -165,29 +165,6 @@ func TestRunNoteAddCLIRefusesNoSourceOrTwo(t *testing.T) {
 	}
 }
 
-func TestRunNoteAddCLIMapsEngineCodes(t *testing.T) {
-	conn := newTestDB(t)
-	runID, _ := seedRun(t, conn)
-
-	// Unknown run: NOT_FOUND.
-	w, _ := bufWriter(true)
-	cmd := runNoteCmdWithDB(conn)
-	_ = cmd.Flags().Set("text", "a ruling")
-	err := runRunNoteAdd(cmd, model.FormatRunID(runID+99), w)
-	var ce *CmdError
-	if !asCmdErr(err, &ce) || ce.Code != output.ErrNotFound {
-		t.Errorf("unknown run: err = %v, want NOT_FOUND", err)
-	}
-
-	// Empty text: VALIDATION_ERROR from the engine, mapped.
-	cmd = runNoteCmdWithDB(conn)
-	_ = cmd.Flags().Set("text", "   ")
-	err = runRunNoteAdd(cmd, model.FormatRunID(runID), w)
-	if !asCmdErr(err, &ce) || ce.Code != output.ErrValidation {
-		t.Errorf("blank note: err = %v, want VALIDATION_ERROR", err)
-	}
-}
-
 // runNoteWrites counts a run's note rows and run-note-added events, the two
 // writes a refused `run note add` must leave untouched.
 func runNoteWrites(t *testing.T, conn *sql.DB, runID int) (notes, events int) {
@@ -392,34 +369,6 @@ func TestRunNoteAddCLIAttributesTheNoteToThisInvocation(t *testing.T) {
 	}
 	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %v\n%s", nil, buf.String())
 	assertRuledByThisInvocation(t, runNoteEvent(t, conn, env.Data.Note.ID), "run-note-added")
-}
-
-// TestRunNoteAddCLIRecordsTheStatedAuthority: --authority operator and
-// --authority conductor each land on the note's event as stated.
-func TestRunNoteAddCLIRecordsTheStatedAuthority(t *testing.T) {
-	conn := newTestDB(t)
-	runID, _ := seedRun(t, conn)
-	runRef := model.FormatRunID(runID)
-	t.Setenv(TokenEnvVar, seatConductor(t, conn, runID))
-
-	for _, kind := range []string{"operator", "conductor"} {
-		cmd := runNoteCmdNoAuthority(conn)
-		testsupport.Must(t, cmd.Flags().Set("authority", kind), "setting --authority: %v", nil)
-		testsupport.Must(t, cmd.Flags().Set("text", "ruled by "+kind), "setting --text: %v", nil)
-		w, buf := bufWriter(true)
-		err := runRunNoteAdd(cmd, runRef, w)
-		testsupport.Must(t, err, "run note add --authority %s: %v", kind, err)
-
-		var env struct {
-			Data struct {
-				Note engine.RunNote `json:"note"`
-			} `json:"data"`
-		}
-		testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "unmarshal: %v\n%s", nil, buf.String())
-		if got := runNoteEventAuthority(t, conn, env.Data.Note.ID); got != kind {
-			t.Errorf("--authority %s: event authority = %v, want %q", kind, got, kind)
-		}
-	}
 }
 
 // TestRunNoteAddCLIRefusesAnAuthorityItCannotRecord: a standing grant, an

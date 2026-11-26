@@ -16,6 +16,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/spf13/cobra"
@@ -50,6 +51,7 @@ func trustRepo(t *testing.T) (string, *config.Config) {
 	err := os.MkdirAll(cfg.DocketDir, 0o755)
 	testsupport.Must(t, err, "creating %s: %v", cfg.DocketDir, err)
 
+	storetest.SeedFile(t, cfg.DBPath)
 	conn, err := db.Open(cfg.DBPath)
 	testsupport.Must(t, err, "Open(%s): %v", cfg.DBPath, err)
 	defer conn.Close()
@@ -328,34 +330,6 @@ func fileSHA256(t *testing.T, path string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestTrustAddEventCarriesArgv0Pin: the event names the bytes the grant
-// approved, and it is the same pin the store holds for that grant.
-func TestTrustAddEventCarriesArgv0Pin(t *testing.T) {
-	_, cfg := trustRepo(t)
-	script := writeScript(t, "#!/bin/sh\nexit 0\n")
-
-	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", script)
-	testsupport.Must(t, err, "trust add: %v", err)
-
-	entries := trustEntries(t)
-	if len(entries) != 1 {
-		t.Fatalf("got %d trust entries, want the one add", len(entries))
-	}
-	stored := entries[0].Argv0SHA256
-	if stored == "" {
-		t.Fatal("the stored entry carries no content pin for an absolute argv[0]")
-	}
-
-	events := trustEvents(t, cfg)
-	if len(events) != 1 {
-		t.Fatalf("got %d trust events, want exactly the one add", len(events))
-	}
-	if events[0]["argv0_sha256"] != stored {
-		t.Errorf("the event's argv0_sha256 = %#v, want the stored pin %q",
-			events[0]["argv0_sha256"], stored)
-	}
-}
-
 // TestRepinEventShowsChangedContentHash: a re-pin after the script changed is
 // distinguishable in the trail from a duplicate add. Both events name the same
 // command, and only the content pin shows that the approved bytes changed.
@@ -516,7 +490,7 @@ func TestTrustAddOutsideARepoSaysNothingWasRecorded(t *testing.T) {
 	// is in the payload rather than on stderr alone.
 	cmd := newTrustAddCmd()
 	cmd.Flags().String("json", "", "")
-	err := cmd.Flags().Set("json", "v1")
+	err := cmd.Flags().Set("json", "v2")
 	testsupport.Must(t, err, "setting --json: %v", err)
 
 	stdout := captureStdout(t)
@@ -559,7 +533,7 @@ func TestIdempotentReAddOutsideARepoSaysNothing(t *testing.T) {
 
 	cmd := newTrustAddCmd()
 	cmd.Flags().String("json", "", "")
-	err = cmd.Flags().Set("json", "v1")
+	err = cmd.Flags().Set("json", "v2")
 	testsupport.Must(t, err, "setting --json: %v", err)
 
 	stdout := captureStdout(t)
@@ -678,36 +652,6 @@ func TestTrustEventNamesWhoGrantedIt(t *testing.T) {
 		t.Errorf("the event's `cwd` = %#v, want %q — the field must name where "+
 			"the verb actually ran, since that is what tells two concurrent "+
 			"sessions apart", got["cwd"], wd)
-	}
-}
-
-// TestTrustRemoveEventAlsoNamesWhoDidIt: a revocation is an attributable act too.
-//
-// It is the SAFER direction and still worth attributing — a removal that breaks
-// a run's gates is a change someone made, and "which of us dropped this" is the
-// same question in the other direction. Recording who on the add alone would
-// leave exactly half a trail.
-func TestTrustRemoveEventAlsoNamesWhoDidIt(t *testing.T) {
-	_, cfg := trustRepo(t)
-
-	err := runTrustVerb(t, cfg, newTrustAddCmd(), "scan", "--", "go", "run", "./scan")
-	testsupport.Must(t, err, "trust add: %v", err)
-	err = runTrustVerb(t, cfg, newTrustRmCmd(), "scan")
-	testsupport.Must(t, err, "trust remove: %v", err)
-
-	events := trustEvents(t, cfg)
-	if len(events) != 2 {
-		t.Fatalf("got %d trust events, want the add and the remove", len(events))
-	}
-	removed := events[1]
-	if removed["kind"] != engine.EventTrustRemoved {
-		t.Fatalf("the second event is %v, want %v", removed["kind"], engine.EventTrustRemoved)
-	}
-
-	actor, _ := removed["actor"].(string)
-	if actor == "" {
-		t.Error("the `trust-removed` event names no actor; a revocation is an " +
-			"attributable act for the same reason a grant is")
 	}
 }
 

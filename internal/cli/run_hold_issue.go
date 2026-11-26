@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +40,18 @@ stdin; a run activated before the capability existed asks for none.`,
 
 func runRunHoldIssue(cmd *cobra.Command, args []string, w *output.Writer) error {
 	conn := getDB(cmd)
+	env := verbEnv(cmd)
+	projectID, created, err := env.ResolveProject(verb.ProjectMayRegister)
+	if err != nil {
+		return verbErr(err)
+	}
+	if created {
+		prefix, _ := env.Store.ProjectPrefix(projectID)
+		recordProjectRegistration(cmd, &engine.ProjectRegistration{
+			ID: projectID, Name: filepath.Base(env.Project.Identity), Identity: env.Project.Identity,
+			Cwd: env.Cwd, Verb: commandPath(cmd), Prefix: prefix,
+		})
+	}
 	runID, err := model.ParseRunID(args[0])
 	if err != nil {
 		return cmdErr(err, output.ErrValidation)
@@ -46,7 +60,7 @@ func runRunHoldIssue(cmd *cobra.Command, args []string, w *output.Writer) error 
 	if err != nil {
 		return cmdErr(fmt.Errorf("invalid issue ID %q: %w", args[1], err), output.ErrValidation)
 	}
-	if _, err := db.GetRun(conn, runID); errors.Is(err, db.ErrRunNotFound) {
+	if _, err := store.StoreOn(conn).GetRun(runID); errors.Is(err, store.ErrRunNotFound) {
 		return cmdErr(fmt.Errorf("run %s not found", model.FormatRunID(runID)), output.ErrNotFound)
 	} else if err != nil {
 		return cmdErr(err, output.ErrGeneral)

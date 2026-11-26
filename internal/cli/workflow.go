@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 	"github.com/spf13/cobra"
 )
@@ -28,9 +28,9 @@ func workflowErr(err error) error {
 		return cmdErr(err, output.ErrValidation)
 	}
 	switch {
-	case errors.Is(err, db.ErrWorkflowConflict):
+	case errors.Is(err, store.ErrWorkflowConflict):
 		return cmdErr(err, output.ErrConflict)
-	case errors.Is(err, db.ErrWorkflowNotFound):
+	case errors.Is(err, store.ErrWorkflowNotFound):
 		return cmdErr(err, output.ErrNotFound)
 	default:
 		return cmdErr(err, output.ErrGeneral)

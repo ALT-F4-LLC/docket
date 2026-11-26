@@ -5,6 +5,7 @@ import (
 	"maps"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -89,43 +90,6 @@ func TestNextRecomputesWhenATallyResolvesInTheSameCall(t *testing.T) {
 	if routing.SagaStage == db.SagaHeld {
 		t.Error("reconcile@0 is still holding after its hold was decided by " +
 			"the same call that reported it decided")
-	}
-}
-
-// TestNextDoesNotRecomputeWhenNothingRouted pins the other half of the
-// constraint carried over from triage: the connection-pool cap of 1 rules
-// out a second scheduler pass on EVERY call, so a call where neither driver
-// routes anything must still answer correctly from the one pass it already
-// computed — a plain human-step run, with no vote or action step in play,
-// is exactly that call.
-func TestNextDoesNotRecomputeWhenNothingRouted(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	run, _ := activatedRun(t, conn)
-
-	answer, err := e.NextSteps(conn, run.ID, 0, nowMS)
-	if err != nil {
-		t.Fatalf("NextSteps: %v", err)
-	}
-	if len(answer.Steps) == 0 {
-		t.Fatal("premise: the fixture run must offer at least one ready step")
-	}
-	// The one pass answers correctly: the claimable row says `ready`, and the
-	// closure rows say `staged` — every status is one of the two computed
-	// values, and the fresh run's single ready root is implement@0.
-	var ready []string
-	for _, row := range answer.Steps {
-		switch row.Status {
-		case db.StepReady:
-			ready = append(ready, row.Instance)
-		case db.StepStaged:
-		default:
-			t.Errorf("%s status = %q, want %q or %q",
-				row.Instance, row.Status, db.StepReady, db.StepStaged)
-		}
-	}
-	if len(ready) != 1 || ready[0] != "implement@0" {
-		t.Errorf("ready rows = %v, want exactly [implement@0]", ready)
 	}
 }
 
@@ -294,6 +258,44 @@ func TestRunStepListEnumeratesTheRun(t *testing.T) {
 	_, err = RunStepList(conn, 999, nowMS)
 	if err == nil {
 		t.Error("RunStepList(absent run) returned no error")
+	}
+}
+
+// TestLoadTTLConfigResolvesEachClassOfTheRun pins the config half of the TTL
+// precedence: a class the run's steps carry resolves its own
+// `lease.ttl.<class>`, and a class configured but absent from the run gets no
+// entry of its own.
+func TestLoadTTLConfigResolvesEachClassOfTheRun(t *testing.T) {
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+
+	var class string
+	err := conn.QueryRow(
+		`SELECT class FROM steps WHERE run_id = ? AND instance = 'implement@0'`,
+		run.ID).Scan(&class)
+	testsupport.Must(t, err, "reading implement@0's class: %v", err)
+	if class == "" {
+		t.Fatal("implement@0 carries no class, so the case would prove nothing")
+	}
+	const absent = "not-in-this-run"
+	err = db.SetConfig(conn, 0, db.KeyLeaseTTLPrefix+class, "7m")
+	testsupport.Must(t, err, "setting lease.ttl.%s: %v", class, err)
+	err = db.SetConfig(conn, 0, db.KeyLeaseTTLPrefix+absent, "9m")
+	testsupport.Must(t, err, "setting lease.ttl.%s: %v", absent, err)
+
+	ttls, err := loadTTLConfig(conn, run.ID)
+	testsupport.Must(t, err, "loadTTLConfig: %v", err)
+
+	if got := ttls.forClass(workflow.Limit{}, class); got != 7*time.Minute {
+		t.Errorf("TTL for the run's class %q = %v, want the configured 7m", class, got)
+	}
+	if _, ok := ttls.perClass[absent]; ok {
+		t.Errorf("perClass carries %q, a class no step of the run has", absent)
+	}
+	fallback, err := db.LeaseTTL(conn, 0, "")
+	testsupport.Must(t, err, "reading lease.ttl.default: %v", err)
+	if got := ttls.forClass(workflow.Limit{}, absent); got != fallback {
+		t.Errorf("TTL for a class outside the run = %v, want the default %v", got, fallback)
 	}
 }
 

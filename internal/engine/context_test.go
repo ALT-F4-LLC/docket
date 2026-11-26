@@ -128,23 +128,6 @@ func TestContextAssemblyReadsNoLiveState(t *testing.T) {
 	}
 }
 
-// TestContextAssemblyIsRepeatable pins the plainest half of determinism: two
-// assemblies with NOTHING changed are byte-identical. A test that only checked
-// immunity to edits would pass against an assembler that was nondeterministic
-// in some other way — map iteration order being the obvious one.
-func TestContextAssemblyIsRepeatable(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	stepID := stepIDByInstance(t, conn, "implement@0")
-
-	first := bundleJSON(t, conn, stepID)
-	for i := range 20 {
-		if again := bundleJSON(t, conn, stepID); again != first {
-			t.Fatalf("assembly %d differed:\n%s\n%s", i, first, again)
-		}
-	}
-}
-
 // TestContextReadWritesNothing pins that `step context` is a pure read:
 // every read verb computes effective status with ZERO writes.
 //

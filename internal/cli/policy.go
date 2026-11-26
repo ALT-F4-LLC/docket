@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -80,37 +80,25 @@ func (r policyResolveResult) CollectionTruncated() bool { return false }
 var _ output.Collection = policyResolveResult{}
 
 func runPolicyResolve(cmd *cobra.Command, args []string, w *output.Writer) error {
-	ref, _ := cmd.Flags().GetString("run")
-	if ref == "" {
-		return cmdErr(fmt.Errorf(
-			"--run is required: name the run whose pinned policy.toml the seats "+
-				"resolve against"), output.ErrValidation)
-	}
-	runID, err := parseRunFlag(ref)
-	if err != nil {
-		return err
-	}
+	run, _ := cmd.Flags().GetString("run")
 	size, _ := cmd.Flags().GetString("size")
-	// Validated as a vote row's frozen Size is, so a typo cannot silently
-	// resolve the unsized roster. The empty default stays unvalidated: an
-	// omitted --size resolves as an unsized row does.
-	if size != "" {
-		if err := model.ValidateSize(model.Size(size)); err != nil {
-			return cmdErr(err, output.ErrValidation)
-		}
-	}
 	labels, _ := cmd.Flags().GetStringSlice("label")
 
-	seats, err := engine.ResolveSeats(getDB(cmd), runID, args, size, labels)
+	resolved, err := verb.PolicyResolve(cmd.Context(), verbEnv(cmd), verb.PolicyResolveInput{
+		Run:    run,
+		Seats:  args,
+		Size:   size,
+		Labels: labels,
+	})
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
 
-	result := policyResolveResult{Seats: seats, Total: len(seats)}
+	result := policyResolveResult{Seats: resolved.Seats, Total: len(resolved.Seats)}
 
 	var message string
 	if !w.JSONMode {
-		message = renderPolicySeats(seats)
+		message = renderPolicySeats(resolved.Seats)
 	}
 	w.Success(result, message)
 	return nil

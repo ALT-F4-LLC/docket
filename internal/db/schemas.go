@@ -91,20 +91,16 @@ func InsertSchemaTx(
 	if s.Builtin {
 		builtin = 1
 	}
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO schemas
 		   (project_id, name, version, source_path, source_sha256, body, ordered, builtin,
 		    created_at_ms, row_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1) RETURNING id`,
 		projectID, s.Name, s.Version, nullable(s.SourcePath), s.SourceSHA256, s.Body,
 		s.Ordered, builtin, nowMS,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return nil, false, fmt.Errorf("inserting schema: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, false, fmt.Errorf("reading inserted schema id: %w", err)
 	}
 
 	inserted, err := getSchemaTx(tx, projectID, s.Name, s.Version)

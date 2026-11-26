@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -39,41 +36,19 @@ it.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
-
-		proposalID, err := model.ParseProposalID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid proposal ID: %w", err), output.ErrValidation)
-		}
 
 		reason, _ := cmd.Flags().GetString("reason")
-		if reason == "" {
-			return cmdErr(
-				fmt.Errorf("--reason is required: a closure without a why is the audit gap this verb exists to close"),
-				output.ErrValidation)
-		}
-
-		stepOwned, err := engine.IsVoteStepProposal(conn, proposalID)
+		env := verbEnv(cmd)
+		res, err := verb.VoteClose(cmd.Context(), env, verb.VoteCloseInput{
+			Proposal: args[0],
+			Reason:   reason,
+		})
+		recordRegisteredProject(cmd, env, res.Registered)
 		if err != nil {
-			return cmdErr(err, output.ErrGeneral)
-		}
-		if stepOwned {
-			return cmdErr(fmt.Errorf(
-				"proposal %s belongs to a vote step; move the run past it with `docket step resolve` — closing the proposal underneath the step would not route it",
-				model.FormatProposalID(proposalID)), output.ErrConflict)
+			return verbErr(err)
 		}
 
-		if err := db.CloseProposal(conn, proposalID, reason); err != nil {
-			if e := notFound(err, fmt.Sprintf("proposal %s", model.FormatProposalID(proposalID))); e != nil {
-				return e
-			}
-			if errors.Is(err, db.ErrConflict) {
-				return cmdErr(err, output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("closing proposal: %w", err), output.ErrGeneral)
-		}
-
-		fmtID := model.FormatProposalID(proposalID)
+		fmtID := model.FormatProposalID(res.ProposalID)
 		data := voteCloseResult{
 			ID:           fmtID,
 			Status:       string(model.ProposalStatusClosed),

@@ -73,33 +73,3 @@ func TestProjectsIsolateIssueLists(t *testing.T) {
 		t.Errorf("GetIssue across projects = (%+v, %v), want project %d", got, err, two)
 	}
 }
-
-func TestProjectConfigOverridesGlobal(t *testing.T) {
-	conn := mustOpen(t)
-	if err := Initialize(conn); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(conn); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	one, _ := EnsureProject(conn, "/repo/one", "one", 1)
-	two, _ := EnsureProject(conn, "/repo/two", "two", 2)
-
-	// A store-wide default, exactly what a legacy DB's existing value is.
-	if err := SetConfig(conn, 0, KeyLeaseTTLDefault, "10m"); err != nil {
-		t.Fatalf("SetConfig global: %v", err)
-	}
-	// One project overrides it.
-	if err := SetConfig(conn, one, KeyLeaseTTLDefault, "2m"); err != nil {
-		t.Fatalf("SetConfig project: %v", err)
-	}
-
-	entry, err := GetConfig(conn, one, KeyLeaseTTLDefault)
-	if err != nil || entry.Value != "2m" {
-		t.Errorf("project one reads %q (%v), want its own 2m", entry.Value, err)
-	}
-	entry, err = GetConfig(conn, two, KeyLeaseTTLDefault)
-	if err != nil || entry.Value != "10m" {
-		t.Errorf("project two reads %q (%v), want the store-wide 10m", entry.Value, err)
-	}
-}

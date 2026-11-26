@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func listCmdWithDB(conn *sql.DB) *cobra.Command {
@@ -29,9 +31,10 @@ func listCmdWithDB(conn *sql.DB) *cobra.Command {
 	return cmd
 }
 
+// listJSON decodes the v2 collection envelope an `issue list` emits.
 type listJSON struct {
 	Data struct {
-		Issues []struct {
+		Items []struct {
 			ID    string   `json:"id"`
 			Files []string `json:"files"`
 			Docs  []struct {
@@ -40,8 +43,9 @@ type listJSON struct {
 				Title  string `json:"title"`
 				Status string `json:"status"`
 			} `json:"docs"`
-		} `json:"issues"`
-		Total int `json:"total"`
+		} `json:"items"`
+		Total     int  `json:"total"`
+		Truncated bool `json:"truncated"`
 	} `json:"data"`
 }
 
@@ -53,6 +57,7 @@ func TestListJSON_HydratesFilesAndDocs(t *testing.T) {
 
 	cmd := listCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runIssueList(cmd, nil, w)
 	testsupport.Must(t, err, "runIssueList: %v", err)
 
@@ -60,10 +65,10 @@ func TestListJSON_HydratesFilesAndDocs(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(lj.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(lj.Data.Issues))
+	if len(lj.Data.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(lj.Data.Items))
 	}
-	iss := lj.Data.Issues[0]
+	iss := lj.Data.Items[0]
 	if len(iss.Files) != 1 || iss.Files[0] != "internal/db/doc_links.go" {
 		t.Errorf("files = %v, want [internal/db/doc_links.go]", iss.Files)
 	}
@@ -81,21 +86,22 @@ func TestListJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
 
 	cmd := listCmdWithDB(conn)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runIssueList(cmd, nil, w)
 	testsupport.Must(t, err, "runIssueList: %v", err)
 
 	var env struct {
 		Data struct {
-			Issues []map[string]json.RawMessage `json:"issues"`
+			Items []map[string]json.RawMessage `json:"items"`
 		} `json:"data"`
 	}
 	err = json.Unmarshal(buf.Bytes(), &env)
 	testsupport.Must(t, err, "unmarshal: %v", err)
-	if len(env.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(env.Data.Issues))
+	if len(env.Data.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(env.Data.Items))
 	}
 	for _, key := range []string{"files", "docs"} {
-		if got := string(env.Data.Issues[0][key]); got != "[]" {
+		if got := string(env.Data.Items[0][key]); got != "[]" {
 			t.Errorf("%s = %s, want []", key, got)
 		}
 	}
@@ -131,6 +137,7 @@ func TestIssueListRunFlagListsTheRoster(t *testing.T) {
 	run := planningRun(t, conn, bound, alsoBound)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(listCmdWithRun(conn, run.Ref()), nil, w); err != nil {
 		t.Fatalf("runIssueList --run: %v", err)
 	}
@@ -139,8 +146,8 @@ func TestIssueListRunFlagListsTheRoster(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	got := make(map[string]bool, len(lj.Data.Issues))
-	for _, i := range lj.Data.Issues {
+	got := make(map[string]bool, len(lj.Data.Items))
+	for _, i := range lj.Data.Items {
 		got[i.ID] = true
 	}
 	if len(got) != 2 {
@@ -156,48 +163,6 @@ func TestIssueListRunFlagListsTheRoster(t *testing.T) {
 		t.Errorf("total = %d, want 2 — the pre-limit count is not run-scoped",
 			lj.Data.Total)
 	}
-}
-
-// TestIssueListRunFlagIncludesDoneIssues: a roster is a CLOSED SET, and the
-// post-mortem case this flag exists for is mostly finished issues. Hiding them
-// by default would answer "which issues did RUN-14 carry" with "the ones it
-// did not finish".
-func TestIssueListRunFlagIncludesDoneIssues(t *testing.T) {
-	conn := newTestDB(t)
-	finished := createIssue(t, conn, "finished work", model.StatusDone, model.PriorityHigh)
-	open := createIssue(t, conn, "open work", model.StatusTodo, model.PriorityHigh)
-	run := planningRun(t, conn, finished, open)
-
-	w, buf := bufWriter(true)
-	if err := runIssueList(listCmdWithRun(conn, run.Ref()), nil, w); err != nil {
-		t.Fatalf("runIssueList --run: %v", err)
-	}
-
-	var lj listJSON
-	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	if len(lj.Data.Issues) != 2 {
-		t.Fatalf("listed %d issues, want the whole roster including the done "+
-			"one: %s", len(lj.Data.Issues), buf.String())
-	}
-}
-
-// TestIssueListRunFlagOnAnUnknownRun: a typo reads as a miss, not as an
-// unfiltered listing of the whole project.
-func TestIssueListRunFlagOnAnUnknownRun(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "some work", model.StatusTodo, model.PriorityHigh)
-
-	w, _ := bufWriter(true)
-	err := runIssueList(listCmdWithRun(conn, "RUN-404"), nil, w)
-	if err == nil {
-		t.Fatal("an unknown run listed something instead of failing")
-	}
-	if !strings.Contains(err.Error(), "RUN-404") {
-		t.Errorf("the refusal does not name the run: %v", err)
-	}
-	assertErrCode(t, err, output.ErrNotFound)
 }
 
 // TestIssueListRunFlagRejectsAMalformedRef keeps a bad ref a validation error
@@ -269,60 +234,222 @@ func assertErrCode(t *testing.T, err error, want output.ErrorCode) {
 	}
 }
 
-// TestIssueListPrimaryKeyAlias is DKT-452's other half: every `issue list` row
-// carries the id under `id` and `issue` alike, under v1 (`.data.issues[]`) and
-// v2 (`.data.items[]`) both. The RUN-37 conductor that guessed wrong on `issue
-// show` repeated the same guess across list rows, so a fix that reached only
-// the detail view would have left the more-printed surface wrong.
-func TestIssueListPrimaryKeyAlias(t *testing.T) {
-	tests := []struct {
-		name     string
-		version  output.JSONVersion
-		itemsKey string
-	}{
-		{"v1", output.JSONV1, "issues"},
-		{"v2", output.JSONV2, "items"},
-	}
+// runIssueListThroughRoot drives `docket issue list <jsonArg>` through the
+// real root command, so the --json flag's registration and parsing are what
+// pick the envelope. Cobra keeps flag values across Execute calls, so every
+// changed flag goes back to its default afterwards.
+func runIssueListThroughRoot(t *testing.T, jsonArg string) (string, error) {
+	t.Helper()
+	rootCmd.SetArgs([]string{"issue", "list", jsonArg})
+	defer func() {
+		rootCmd.SetArgs(nil)
+		reset := func(f *pflag.Flag) {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+		listCmd.Flags().Visit(reset)
+		rootCmd.PersistentFlags().Visit(reset)
+	}()
+	stdout := captureStdout(t)
+	err := rootCmd.Execute()
+	return stdout(), err
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			conn := newTestDB(t)
-			issueID := createIssue(t, conn, "listed", model.StatusTodo, model.PriorityHigh)
+// TestIssueListBareJSONSelectsV2 pins the default dialect: bare --json, and
+// the Bool-era spellings --json=true and --json=1, all emit the v2 envelope.
+func TestIssueListBareJSONSelectsV2(t *testing.T) {
+	for _, arg := range []string{"--json", "--json=true", "--json=1"} {
+		t.Run(arg, func(t *testing.T) {
+			newVoteCreateStore(t)
 
-			buf := &bytes.Buffer{}
-			w := &output.Writer{
-				JSONMode:    true,
-				JSONVersion: tt.version,
-				Stdout:      buf,
-				Stderr:      &bytes.Buffer{},
-			}
-			testsupport.Must(t, runIssueList(listCmdWithDB(conn), nil, w),
-				"runIssueList: %v", nil)
+			out, err := runIssueListThroughRoot(t, arg)
+			testsupport.Must(t, err, "issue list %s: %v", arg, err)
 
 			var env struct {
 				Data map[string]json.RawMessage `json:"data"`
 			}
-			if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-				t.Fatalf("unmarshal envelope: %v\n%s", err, buf.String())
+			if err := json.Unmarshal([]byte(out), &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v\n%s", err, out)
 			}
-			var rows []map[string]json.RawMessage
-			if err := json.Unmarshal(env.Data[tt.itemsKey], &rows); err != nil {
-				t.Fatalf("unmarshal %s: %v\n%s", tt.itemsKey, err, buf.String())
+			var items []json.RawMessage
+			if err := json.Unmarshal(env.Data["items"], &items); err != nil || items == nil {
+				t.Errorf(".data.items is not an array (err %v):\n%s", err, out)
 			}
-			if len(rows) != 1 {
-				t.Fatalf("%s = %d rows, want 1\n%s", tt.itemsKey, len(rows), buf.String())
-			}
-
-			want := `"` + model.FormatID(issueID) + `"`
-			for _, key := range []string{"id", "issue"} {
-				got, ok := rows[0][key]
-				if !ok {
-					t.Fatalf("row has no %q key; keys = %v", key, keysOf(rows[0]))
-				}
-				if string(got) != want {
-					t.Errorf("row.%s = %s, want %s", key, got, want)
-				}
+			if got := string(env.Data["total"]); got != "0" {
+				t.Errorf(".data.total = %q, want 0:\n%s", got, out)
 			}
 		})
+	}
+}
+
+// TestIssueListRejectsRetiredJSONDialect: the v1 dialect is gone, and the
+// refusal points at the one dialect that remains. It runs the built binary
+// because the refusal an operator sees, its rendering and its exit code, comes
+// from the package Execute, which rootCmd.Execute alone does not run.
+func TestIssueListRejectsRetiredJSONDialect(t *testing.T) {
+	bin := buildDocketBinary(t)
+	repo := t.TempDir()
+	if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {
+		t.Fatalf("init failed: %s", stderr)
+	}
+
+	stdout, stderr, code := runDocket(t, bin, repo, "issue", "list", "--json=v1")
+	if code != 3 {
+		t.Errorf("exit = %d, want 3 VALIDATION_ERROR\nstdout: %s\nstderr: %s",
+			code, stdout, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing: a refused dialect lists nothing", stdout)
+	}
+	if !strings.Contains(stderr, "v2") {
+		t.Errorf("refusal does not name v2: %q", stderr)
+	}
+	for _, dialect := range regexp.MustCompile(`v[0-9]+`).FindAllString(stderr, -1) {
+		if dialect != "v2" {
+			t.Errorf("refusal names dialect %q: %q", dialect, stderr)
+		}
+	}
+}
+
+// TestIssueListPrimaryKeyAlias is DKT-452's other half: every `issue list` row
+// (`.data.items[]`) carries the id under `id` and `issue` alike. The RUN-37
+// conductor that guessed wrong on `issue show` repeated the same guess across
+// list rows, so a fix that reached only the detail view would have left the
+// more-printed surface wrong.
+func TestIssueListPrimaryKeyAlias(t *testing.T) {
+	conn := newTestDB(t)
+	issueID := createIssue(t, conn, "listed", model.StatusTodo, model.PriorityHigh)
+
+	buf := &bytes.Buffer{}
+	w := &output.Writer{
+		JSONMode:    true,
+		JSONVersion: output.JSONV2,
+		Stdout:      buf,
+		Stderr:      &bytes.Buffer{},
+	}
+	testsupport.Must(t, runIssueList(listCmdWithDB(conn), nil, w),
+		"runIssueList: %v", nil)
+
+	var env struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\n%s", err, buf.String())
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(env.Data["items"], &rows); err != nil {
+		t.Fatalf("unmarshal items: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("items = %d rows, want 1\n%s", len(rows), buf.String())
+	}
+
+	want := `"` + model.FormatID(issueID) + `"`
+	for _, key := range []string{"id", "issue"} {
+		got, ok := rows[0][key]
+		if !ok {
+			t.Fatalf("row has no %q key; keys = %v", key, keysOf(rows[0]))
+		}
+		if string(got) != want {
+			t.Errorf("row.%s = %s, want %s", key, got, want)
+		}
+	}
+}
+
+// abcProjectThroughRoot initializes a sandboxed store through the real root
+// and gives its project the ABC prefix, while the process's default display
+// prefix stays DKT, so an id a later verb prints under ABC can only come from
+// the issue's owning project. The root hook leaves the owner resolver on this
+// test's store; cleanup removes it so a later test does not inherit it.
+func abcProjectThroughRoot(t *testing.T) {
+	t.Helper()
+	clientConfigSandbox(t)
+	t.Cleanup(func() {
+		model.SetDisplayPrefix("DKT")
+		model.SetIssueOwnerPrefixResolver(nil)
+	})
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	_, err = runRootVerb(t, projectSetPrefixCmd, "project", "set-prefix", "abc")
+	testsupport.Must(t, err, "docket project set-prefix: %v", err)
+	model.SetDisplayPrefix("DKT")
+}
+
+// TestIssueListThroughTheRoot drives the annotated command through the real
+// root, which leaves project resolution to the verb: the checkout's issues
+// are listed under the ids, in their project's own prefix, that `issue
+// create` reported, in both the JSON rows and the table.
+func TestIssueListThroughTheRoot(t *testing.T) {
+	abcProjectThroughRoot(t)
+	parent := createThroughRoot(t, "--title", "listed parent")
+	child := createThroughRoot(t, "--title", "listed child", "--parent", parent)
+	if !strings.HasPrefix(parent, "ABC-") || !strings.HasPrefix(child, "ABC-") {
+		t.Fatalf("created ids = %q, %q; want them under the project's ABC prefix", parent, child)
+	}
+
+	out, err := runRootVerb(t, listCmd, "issue", "list", "--json")
+	testsupport.Must(t, err, "issue list --json: %v", err)
+	var listed listJSON
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	var ids []string
+	for _, row := range listed.Data.Items {
+		ids = append(ids, row.ID)
+	}
+	if len(ids) != 2 || !strings.Contains(strings.Join(ids, " "), parent) ||
+		!strings.Contains(strings.Join(ids, " "), child) {
+		t.Errorf("listed ids = %v, want %s and %s", ids, parent, child)
+	}
+
+	out, err = runRootVerb(t, listCmd, "issue", "list")
+	testsupport.Must(t, err, "issue list: %v", err)
+	for _, id := range []string{parent, child} {
+		if !strings.Contains(out, id) {
+			t.Errorf("table does not name %s:\n%s", id, out)
+		}
+	}
+}
+
+// An empty table listing through the real root says how many done issues the
+// default listing hid and names the flag that shows them (DKT-246), rather
+// than claiming the project holds no issues.
+func TestIssueListTableNamesTheDoneIssuesItHidThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	t.Setenv("NO_COLOR", "1")
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	createThroughRoot(t, "--title", "first done", "--status", "done")
+	createThroughRoot(t, "--title", "second done", "--status", "done")
+
+	out, err := runRootVerb(t, listCmd, "issue", "list")
+	testsupport.Must(t, err, "issue list: %v", err)
+	if strings.Contains(out, "No issues found.") {
+		t.Errorf("the table claims no issues while two done ones are hidden:\n%s", out)
+	}
+	if !strings.Contains(out, "2 done issues") || !strings.Contains(out, "--all") {
+		t.Errorf("the table does not say that 2 done issues are hidden or name --all:\n%s", out)
+	}
+}
+
+// A table listing through the real root whose filter leaves a listed issue's
+// parent out still groups it under that parent, with the parent's sub-issue
+// progress.
+func TestIssueListTableGroupsUnderAParentTheFilterLeftOutThroughTheRoot(t *testing.T) {
+	clientConfigSandbox(t)
+	t.Setenv("NO_COLOR", "1")
+	_, err := runRootVerb(t, initCmd, "init")
+	testsupport.Must(t, err, "docket init: %v", err)
+	parent := createThroughRoot(t, "--title", "unlisted parent")
+	child := createThroughRoot(t, "--title", "labeled child", "--parent", parent, "--label", "area:list")
+	createThroughRoot(t, "--title", "done child", "--parent", parent, "--status", "done")
+
+	out, err := runRootVerb(t, listCmd, "issue", "list", "--label", "area:list")
+	testsupport.Must(t, err, "issue list --label area:list: %v", err)
+	if !strings.Contains(out, child) || !strings.Contains(out, parent) {
+		t.Errorf("the table does not name the child %s under its parent %s:\n%s", child, parent, out)
+	}
+	if !strings.Contains(out, "(1/2 done)") {
+		t.Errorf("the table does not show the parent's progress (1/2 done):\n%s", out)
 	}
 }

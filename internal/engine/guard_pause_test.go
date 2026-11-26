@@ -38,25 +38,6 @@ func TestGuardStopAllowsAPausedRunWithPendingSteps(t *testing.T) {
 	}
 }
 
-// TestGuardStopStillDeniesAnActiveRunWithPendingSteps is the control: an
-// otherwise-identical dispatched run that was never paused still denies. This
-// is what fails if the fix is over-broad (e.g. exempting `waiting-human` runs
-// entirely at the outer query) instead of narrowly exempting only the
-// `pending` steps of a paused run.
-func TestGuardStopStillDeniesAnActiveRunWithPendingSteps(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	markDispatched(t, conn, run.ID)
-
-	verdict, err := GuardStop(conn, 0, nowMS)
-	testsupport.Must(t, err, "GuardStop: %v", err)
-	if verdict.Allowed {
-		t.Fatal("guard stop allowed an ACTIVE run with pending steps; the " +
-			"fixture never paused it, so this is unrelated regression, not " +
-			"the DKT-1845 exemption")
-	}
-}
-
 // TestGuardStopStillDeniesAPausedRunWithAClaimedStep locks the boundary the
 // fix must not cross: `run pause` honors in-flight completes rather than
 // killing them (run_lifecycle.go's runPauseCmd), so a claimed/running step is

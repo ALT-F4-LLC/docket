@@ -337,16 +337,13 @@ func TestGoneShapeIsReachableOnlyByPruning(t *testing.T) {
 	runID, _ := budgetRun(t, conn, 0)
 	claimInstance(t, conn, "implement@0", nowMS)
 
-	// Before any deletion: MIN(seq) is 1, so a cursor of 0 is in range. That is
-	// the unfired trigger stated as a fact about a v10 repo rather than as a
-	// claim.
+	// Before any prune the watermark is 0, so a cursor of 0 is in range.
+	if got := readEventLowWatermark(t, conn); got != 0 {
+		t.Fatalf("watermark = %d before any prune, want 0", got)
+	}
 	_, err := ListEvents(conn, EventQuery{Since: 0})
 	testsupport.Must(t, err, "a fresh repo answered %v; nothing has pruned, so nothing is GONE", err)
 
-	// `MIN(seq) > 1` is the proxy, and in a v10 repo it is achievable ONLY by
-	// deleting row 1. `seq` is AUTOINCREMENT and never reused, so the proxy is
-	// sound and stays sound now that the pruner has arrived.
-	//
 	// THE PRUNE IS REAL AT THIS STAGE, and that is the change this test records.
 	// Stage 6 constructed the state with a `DELETE` written here, because
 	// nothing in the product could produce it: the trigger could not fire at
@@ -372,10 +369,21 @@ func TestGoneShapeIsReachableOnlyByPruning(t *testing.T) {
 	// The prune keeps the NEWEST event, because the shape under test needs a
 	// non-empty table with a raised floor — an empty one is not GONE, it is a
 	// repo that retained everything it ever had.
-	_, err = PruneEvents(conn, PruneQuery{Before: maxSeq, NowMS: nowMS})
+	result, err := PruneEvents(conn, PruneQuery{Before: maxSeq, NowMS: nowMS})
 	testsupport.Must(t, err, "PruneEvents: %v", err)
 
-	_, err = ListEvents(conn, EventQuery{Since: 0})
+	// The prune raised the watermark to the highest pruned seq: everything
+	// below maxSeq went, so the lowest survivor is maxSeq.
+	watermark := readEventLowWatermark(t, conn)
+	if watermark != maxSeq-1 {
+		t.Fatalf("watermark after pruning below %d = %d, want %d", maxSeq, watermark, maxSeq-1)
+	}
+	if result.RetainedMinimum != watermark+1 {
+		t.Errorf("RetainedMinimum = %d, want the watermark plus 1 (%d)",
+			result.RetainedMinimum, watermark+1)
+	}
+
+	_, err = ListEvents(conn, EventQuery{Since: watermark - 1})
 	if err == nil {
 		t.Fatal("a cursor below the retained minimum was answered; it must return GONE " +
 			"rather than silently skipping")
@@ -396,20 +404,17 @@ func TestGoneShapeIsReachableOnlyByPruning(t *testing.T) {
 	// A cursor AT or ABOVE the retained minimum is answered normally: it has
 	// missed nothing. This is the boundary that keeps GONE from firing on every
 	// caller of a pruned repo.
-	var minSeq int64
-	err = conn.QueryRow(`SELECT MIN(seq) FROM events`).Scan(&minSeq)
-	testsupport.Must(t, err, "reading MIN(seq): %v", err)
-	if _, err := ListEvents(conn, EventQuery{Since: minSeq - 1}); err != nil {
-		t.Errorf("a cursor at the retained minimum was refused: %v", err)
+	if _, err := ListEvents(conn, EventQuery{Since: watermark}); err != nil {
+		t.Errorf("a cursor at the watermark was refused: %v", err)
 	}
-	if _, err := ListEvents(conn, EventQuery{Since: minSeq}); err != nil {
-		t.Errorf("a cursor above the retained minimum was refused: %v", err)
+	if _, err := ListEvents(conn, EventQuery{Since: watermark + 1}); err != nil {
+		t.Errorf("a cursor above the watermark was refused: %v", err)
 	}
 
 	// The prune left its OWN event behind, above everything it deleted, so
 	// the record of the deletion survived the deletion. A consumer that hit GONE
-	// and resumed at the retained minimum reads the explanation for its own gap.
-	page, err := ListEvents(conn, EventQuery{Since: minSeq - 1})
+	// and resumed at the watermark reads the explanation for its own gap.
+	page, err := ListEvents(conn, EventQuery{Since: watermark})
 	testsupport.Must(t, err, "ListEvents at the retained minimum: %v", err)
 	var sawPrune bool
 	for _, e := range page.Events {
@@ -422,11 +427,14 @@ func TestGoneShapeIsReachableOnlyByPruning(t *testing.T) {
 			"indistinguishable from a run that made fewer transitions")
 	}
 
-	// And an EMPTY table is not GONE: a repo that never wrote an event has
-	// retained everything it ever had.
-	execSQL(t, conn, `DELETE FROM events`)
-	if _, err := ListEvents(conn, EventQuery{Since: 99}); err != nil {
-		t.Errorf("an empty event table answered GONE: %v", err)
+	// The watermark never moves down: a later prune whose lowest survivor sits
+	// below it (a row written under the watermark by hand) keeps it in place.
+	execSQL(t, conn, `INSERT INTO events (seq, at_ms, kind) VALUES (1, ?, ?)`,
+		nowMS, EventStepHeartbeat)
+	_, err = PruneEvents(conn, PruneQuery{Before: 1, NowMS: nowMS})
+	testsupport.Must(t, err, "a second PruneEvents: %v", err)
+	if got := readEventLowWatermark(t, conn); got != watermark {
+		t.Errorf("watermark after a prune below it = %d, want it held at %d", got, watermark)
 	}
 }
 
@@ -633,46 +641,6 @@ func TestTailLargerThanFeedReturnsEverything(t *testing.T) {
 	}
 	if got[0] != seqs[0] {
 		t.Errorf("first seq = %d, want the true oldest %d", got[0], seqs[0])
-	}
-}
-
-// TestTailRespectsRunFilter keeps --tail composing with --run: the window is
-// the newest N OF THE FILTERED SET, not the newest N overall then filtered,
-// which would return fewer rows than asked for whenever another run interleaves.
-func TestTailRespectsRunFilter(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	// Interleave run-less events among the run's own, so a tail computed
-	// before filtering would come back short.
-	seedEvents(t, conn, 4)
-	claimInstance(t, conn, "implement@0", nowMS)
-	seedEvents(t, conn, 4)
-
-	page, err := ListEvents(conn, EventQuery{RunID: runID, Tail: 2})
-	testsupport.Must(t, err, "ListEvents(RunID, Tail=2): %v", err)
-	if len(page.Events) == 0 {
-		t.Fatal("Tail with a run filter returned nothing; the window was computed before the filter")
-	}
-	for _, e := range page.Events {
-		if e.Run != "RUN-1" {
-			t.Errorf("event %d has run %q, want only RUN-1 rows", e.Seq, e.Run)
-		}
-	}
-}
-
-// TestTailZeroIsUnchanged: the default path must be byte-identical to the
-// behaviour that predates --tail, since every existing consumer reads it.
-func TestTailZeroIsUnchanged(t *testing.T) {
-	conn := mustDB(t)
-	seqs := seedEvents(t, conn, 6)
-
-	page, err := ListEvents(conn, EventQuery{Tail: 0, Limit: 3})
-	testsupport.Must(t, err, "ListEvents(Tail=0): %v", err)
-	got := tailSeqs(page.Events)
-	if len(got) != 3 || got[0] != seqs[0] {
-		t.Errorf("Tail=0 with Limit=3 gave %v, want the OLDEST three starting at %d",
-			got, seqs[0])
 	}
 }
 

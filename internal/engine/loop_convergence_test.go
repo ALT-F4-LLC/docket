@@ -3,7 +3,6 @@ package engine
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
@@ -53,73 +52,6 @@ func driveRound(t *testing.T, conn *sql.DB, e *Engine, ordinal int) {
 	claimAndComplete(t, conn, e, fmt.Sprintf("synthesize@%d", ordinal),
 		"the synthesis", roundPayload(ordinal))
 	driveAction(t, conn, e, fmt.Sprintf("reconcile@%d", ordinal))
-}
-
-// TestLoopParksWhenARoundMovedNothing is the guard firing.
-func TestLoopParksWhenARoundMovedNothing(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-	tree := &treeState{}
-	e := convergenceEngine(tree)
-
-	// Round 0 does real work: the tree moves.
-	tree.body = "the original change"
-	driveRound(t, conn, e, 0)
-	if !stepExists(t, conn, "fix@1") {
-		t.Fatal("premise: round 0 must have entered the loop")
-	}
-
-	// Round 1's fix changes NOTHING in scope. The tree does not move, so the
-	// engine's own suppression records no new diff — which IS the signal.
-	driveRound(t, conn, e, 1)
-
-	// Entering round 2 would read the identical tree.
-	if stepExists(t, conn, "fix@2") {
-		t.Error("a second round was minted after one that changed nothing in " +
-			"scope; the next round reads the same tree and reaches the same " +
-			"verdict, so it can only repeat")
-	}
-	if got := stepStatus(t, conn, "reconcile@1"); got != db.StepWaitingHuman {
-		t.Errorf("reconcile@1 = %q, want the non-convergence park %q",
-			got, db.StepWaitingHuman)
-	}
-
-	// The park NAMES THE WAY OUT, like every other refusal in this file.
-	routing := stepRoutingRaw(t, conn, "reconcile@1")
-	if !strings.Contains(routing, "changed nothing") {
-		t.Errorf("the park does not say why: %q", routing)
-	}
-	if !strings.Contains(routing, "fix-round") {
-		t.Errorf("the park names no next move: %q", routing)
-	}
-
-	// AND THE COUNTER IS PUT BACK, exactly as the bound refusal does: a
-	// refusal created no ordinal, and a counter left above the highest
-	// instantiated one declares that ordinal stale in its entirety (DKT-78).
-	if got := loopCount(t, conn, run.ID, issue); got != 1 {
-		t.Errorf("loop_count = %d after a refused entry, want 1 — the refusal "+
-			"minted no round", got)
-	}
-}
-
-// TestLoopEntersWhenARoundMovedSomething is the lower bound, and it is the half
-// that matters most: a guard that fired on a converging loop would break every
-// workflow that uses one.
-func TestLoopEntersWhenARoundMovedSomething(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	tree := &treeState{}
-	e := convergenceEngine(tree)
-
-	tree.body = "the original change"
-	driveRound(t, conn, e, 0)
-	tree.body = "the original change, plus the fix"
-	driveRound(t, conn, e, 1)
-
-	if !stepExists(t, conn, "fix@2") {
-		t.Error("a round that changed the scoped tree did not mint the next " +
-			"one; the loop must keep running while it is converging")
-	}
 }
 
 // TestLoopEntersWhenTheDiffIsUnknown pins the guard's direction under

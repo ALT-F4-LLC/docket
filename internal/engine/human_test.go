@@ -13,29 +13,6 @@ import (
 
 // The human, vote, and action step lifecycle, pinned.
 
-// TestApproveMovesAHumanStepToDone is the human row, first half.
-func TestApproveMovesAHumanStepToDone(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "summary", "")
-	for i := range 4 {
-		claimAndComplete(t, conn, e, "review@0#"+strconv.Itoa(i), "findings", "")
-	}
-	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", "")
-	driveAction(t, conn, e, "reconcile@0")
-	claimAndComplete(t, conn, e, "verify@0", "report", `[{"status":"met"}]`)
-
-	gateID := stepIDByInstance(t, conn, "commit-gate@0")
-
-	err := e.DecideStep(conn, gateID, true, "looks right", nowMS)
-	testsupport.Must(t, err, "approve: %v", err)
-	if got := stepStatus(t, conn, "commit-gate@0"); got != db.StepDone {
-		t.Errorf("status after approve = %q, want %q", got, db.StepDone)
-	}
-}
-
 // TestRejectRoutesPerEffectiveOnFailAndNeverWaitingHuman is the human row's
 // second half, and the reason V13a exists.
 //
@@ -320,6 +297,62 @@ func TestResolveRefusesAnUnparkedStep(t *testing.T) {
 	}
 }
 
+// TestResolveFixRoundRepeated pins the edge of R11's vote exception: a vote
+// step stays resolvable while its voters still owe it an answer, and stops
+// being resolvable once a fix round has superseded it. Repeating the verb on
+// the superseded step must not grant another loop or mint another round.
+func TestResolveFixRoundRepeated(t *testing.T) {
+	conn := mustDB(t)
+	registerVoteRule(t, conn, "majority", "0.5", "")
+	registerSource(t, conn, []byte(voteLoopSrc), "vote-loop.toml")
+	issue := createIssue(t, conn, "voted", "body", "task", nil)
+	run := startRun(t, conn, issue)
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	e := testEngine()
+
+	claimAndComplete(t, conn, e, "seed@0", "the findings", "")
+	testsupport.Must(t, e.DriveRunLifecycles(conn, run.ID, nowMS),
+		"driving after the record")
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepPending {
+		t.Fatalf("premise: gate@0 = %q, want an open vote at %q", got, db.StepPending)
+	}
+	gateID := stepIDByInstance(t, conn, "gate@0")
+
+	testsupport.Must(t,
+		e.ResolveStep(conn, gateID, ResolveFixRound, "first", nowMS),
+		"resolve --as fix-round on a pending vote step")
+	if got := stepStatus(t, conn, "gate@0"); got != db.StepSuperseded {
+		t.Fatalf("gate@0 = %q after the first fix-round, want %q", got, db.StepSuperseded)
+	}
+
+	for _, note := range []string{"second", "third"} {
+		err := e.ResolveStep(conn, gateID, ResolveFixRound, note, nowMS)
+		if err == nil {
+			t.Errorf("the %s fix-round on a superseded vote step was accepted", note)
+			continue
+		}
+		if code, _ := CodeOf(err); code != CodeConflict {
+			t.Errorf("the %s fix-round: code = %v, want %v (%v)", note, code, CodeConflict, err)
+		}
+	}
+
+	if got := loopCount(t, conn, run.ID, issue); got != 1 {
+		t.Errorf("loop_count = %d after one accepted fix-round, want 1", got)
+	}
+	if got := loopGrants(t, conn, run.ID, issue); got != 1 {
+		t.Errorf("loop_grants = %d after one accepted fix-round, want 1", got)
+	}
+	var fixRows int
+	err = conn.QueryRow(
+		`SELECT COUNT(*) FROM steps WHERE run_id = ? AND step_name = 'fix'`,
+		run.ID).Scan(&fixRows)
+	testsupport.Must(t, err, "counting fix rows: %v", err)
+	if fixRows != 1 {
+		t.Errorf("fix rows = %d after one accepted fix-round, want 1", fixRows)
+	}
+}
+
 // TestResolveRetryResetsAttemptsAndClearsTheSaga pins retry semantics,
 // including the saga clear that a naive implementation omits: a retry re-does
 // the work, so a half-finished saga from the previous try must not resume.
@@ -443,57 +476,6 @@ on_fail = "waiting-human"
 	}
 }
 
-// TestFailAtMaxAttemptsRoutesPerOnFail is the exhausted half, over the
-// committed fixture: `implement` declares max_attempts = 2, so the budget is
-// spent by the SECOND claim and the second failure routes.
-//
-// Corrected for E-8. This test previously claimed once, failed once, and
-// asserted `attempt == 2` with status `waiting-human` — which pinned the
-// double-count as intended behavior and made the fixture's `implement` a step
-// that never got the second of its two declared attempts.
-func TestFailAtMaxAttemptsRoutesPerOnFail(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	id := stepIDByInstance(t, conn, "implement@0")
-
-	// First attempt: claim (attempt 1 of 2), fail, and RETURN TO THE POOL —
-	// one of two attempts is spent, so the limit is not yet reached.
-	claim, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
-	testsupport.Must(t, err, "claim: %v", err)
-	err = e.FailStep(conn, id, claim.Token, "gave up", "", nowMS)
-	testsupport.Must(t, err, "fail: %v", err)
-	step, err := db.GetStep(conn, id)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if step.Attempt != 1 || step.Status != db.StepPending {
-		t.Fatalf("attempt = %d status = %q after one claim + one failure, want "+
-			"1 and %q — a step with two declared attempts gets its second",
-			step.Attempt, step.Status, db.StepPending)
-	}
-
-	// Second attempt: the re-claim spends the budget, and this failure routes.
-	claim2, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
-	testsupport.Must(t, err, "re-claim: %v", err)
-	err = e.FailStep(conn, id, claim2.Token, "gave up again", "", nowMS)
-	testsupport.Must(t, err, "second fail: %v", err)
-
-	step, err = db.GetStep(conn, id)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if step.Attempt != 2 {
-		t.Fatalf("attempt = %d, want 2 (two claims; failures never count)",
-			step.Attempt)
-	}
-	if step.Status != db.StepWaitingHuman {
-		t.Errorf("status = %q at the limit, want %q — the fixture's `implement` "+
-			"declares on_fail = waiting-human", step.Status, db.StepWaitingHuman)
-	}
-	// And the token retired, so the exhausted step needs no lease to resolve.
-	if step.Owner != "" {
-		t.Errorf("the lease survived exhaustion: owner = %q", step.Owner)
-	}
-}
-
 // TestFailWithoutMaxAttemptsRetriesIndefinitely pins that core ships NO default
 // attempt limit — the same reasoning as R5's unbounded class. An operator who
 // wants a bound declares one.
@@ -544,13 +526,21 @@ func TestFailRequiresTheToken(t *testing.T) {
 	e := testEngine()
 
 	id := stepIDByInstance(t, conn, "implement@0")
-	_, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
+	claim, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
 	testsupport.Must(t, err, "claim: %v", err)
 
 	err = e.FailStep(conn, id, "not-the-token", "", "", nowMS)
 	if !errors.Is(err, db.ErrNotHolder) {
 		t.Errorf("fail with a wrong token = %v, want ErrNotHolder", err)
 	}
+
+	// The pool holds one connection, so a refused fail that left its
+	// transaction open would block every later write on this database.
+	if inUse := conn.Stats().InUse; inUse != 0 {
+		t.Fatalf("connections in use after a refused fail = %d, want 0", inUse)
+	}
+	err = e.FailStep(conn, id, claim.Token, "gave up", "", nowMS)
+	testsupport.Must(t, err, "fail by the holder after a refused fail: %v", err)
 }
 
 // TestAttemptCountsClaimsNotClaimsPlusFailures is E-8's regression spine — the

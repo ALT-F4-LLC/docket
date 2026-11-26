@@ -153,3 +153,70 @@ func setIssueSteps(t *testing.T, conn *sql.DB, runID, issueID int, status string
 	mustExec(t, conn, `UPDATE steps SET status = ? WHERE run_id = ? AND issue_id = ?`,
 		status, runID, issueID)
 }
+
+// TestRefreshScopeOnAnUnexpandedIssue: an issue that is bound but not yet
+// expanded has a snapshot and no step rows, so its first packets render the
+// snapshot at expansion and a refresh reaches them. An issue whose steps all
+// exist and are terminal is still refused.
+func TestRefreshScopeOnAnUnexpandedIssue(t *testing.T) {
+	t.Run("unexpanded", func(t *testing.T) {
+		conn := mustDB(t)
+		registerSource(t, conn, []byte(parkingWorkflow), "parks.toml")
+		root := createIssue(t, conn, "root", "body", "task", nil)
+		next := createIssue(t, conn, "next", "body", "task", nil)
+		dependsOn(t, conn, next, root)
+		testsupport.Must(t, db.SetIssueScopeGlobs(conn, next, `["internal/a/**"]`),
+			"declaring scope")
+		run := startRun(t, conn, root, next)
+		_, err := activate(conn, run.ID)
+		testsupport.Must(t, err, "activate: %v", err)
+
+		ri := runIssueOf(t, conn, run.ID, next)
+		var rows int
+		testsupport.Must(t, conn.QueryRow(
+			`SELECT COUNT(*) FROM steps WHERE run_id = ? AND issue_id = ?`,
+			run.ID, next).Scan(&rows), "counting steps")
+		if ri.IssueSnapshot == "" || ri.Expanded() || rows != 0 {
+			t.Fatalf("premise: want a snapshotted, unexpanded issue with no step rows; "+
+				"snapshot %q, expanded %v, %d row(s)", ri.IssueSnapshot, ri.Expanded(), rows)
+		}
+
+		widen(t, conn, next, `["internal/a/**","internal/b/**"]`)
+		_, err = refresh(conn, run.ID, next)
+		testsupport.Must(t, err, "refreshing an unexpanded issue: %v", err)
+
+		scope, err := snapshotScope(conn, run.ID, next)
+		testsupport.Must(t, err, "reading the snapshot scope: %v", err)
+		if want := []string{"internal/a/**", "internal/b/**"}; !slices.Equal(scope, want) {
+			t.Errorf("snapshot scope = %v, want %v", scope, want)
+		}
+		var events int
+		testsupport.Must(t, conn.QueryRow(
+			`SELECT COUNT(*) FROM events WHERE kind = ? AND run_id = ? AND issue_id = ?`,
+			EventIssueScopeRefreshed, run.ID, next).Scan(&events), "counting events")
+		if events != 1 {
+			t.Errorf("%d %s event(s), want 1", events, EventIssueScopeRefreshed)
+		}
+	})
+
+	t.Run("every step terminal", func(t *testing.T) {
+		conn := mustDB(t)
+		runID, issue, _ := scopedIssueInRun(t, conn, `["internal/a/**"]`)
+		widen(t, conn, issue, `["internal/a/**","internal/b/**"]`)
+		setIssueSteps(t, conn, runID, issue, db.StepDone)
+
+		_, err := refresh(conn, runID, issue)
+		if code, ok := CodeOf(err); !ok || code != CodeConflict {
+			t.Fatalf("error = %v (code %v), want CONFLICT", err, code)
+		}
+		if !strings.Contains(err.Error(), "every step of") ||
+			!strings.Contains(err.Error(), "is terminal") {
+			t.Errorf("refusal lacks the all-terminal wording:\n%s", err)
+		}
+		scope, err := snapshotScope(conn, runID, issue)
+		testsupport.Must(t, err, "reading the snapshot scope: %v", err)
+		if want := []string{"internal/a/**"}; !slices.Equal(scope, want) {
+			t.Errorf("snapshot scope = %v after a refusal, want %v", scope, want)
+		}
+	})
+}

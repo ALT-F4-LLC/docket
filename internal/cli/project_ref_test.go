@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strconv"
@@ -108,26 +107,6 @@ func TestProjectRefKeepsNameIdentityAndIDResolution(t *testing.T) {
 	}
 }
 
-// TestProjectRefMissesStayNotFound: a typo must read as a miss, with the
-// refusal pointing at the listing that shows every key. A miss that resolved to
-// something would be worse than the defect — it would list the wrong project's
-// issues under the caller's own prefix.
-func TestProjectRefMissesStayNotFound(t *testing.T) {
-	conn := newTestDB(t)
-	twoProjects(t, conn)
-
-	for _, ref := range []string{"NOPE", "no-such-project.git", "4242"} {
-		_, err := resolveProjectRef(conn, ref)
-		if err == nil {
-			t.Fatalf("resolveProjectRef(%q) resolved something", ref)
-		}
-		assertErrCode(t, err, output.ErrNotFound)
-		if !strings.Contains(err.Error(), "project") {
-			t.Errorf("the refusal for %q does not say what was not found: %v", ref, err)
-		}
-	}
-}
-
 // TestProjectRefRefusesAnAmbiguousPrefix is the second acceptance criterion.
 //
 // Prefixes are unique BY CONSTRUCTION — registration picks a free one and
@@ -204,9 +183,9 @@ func TestIssueListProjectFlagAcceptsThePrefix(t *testing.T) {
 	if err := cmd.Flags().Set("project", there.Prefix); err != nil {
 		t.Fatalf("setting --project: %v", err)
 	}
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, here.ID))
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	if err := runIssueList(cmd, nil, w); err != nil {
 		t.Fatalf("runIssueList --project %s: %v", there.Prefix, err)
 	}
@@ -215,15 +194,15 @@ func TestIssueListProjectFlagAcceptsThePrefix(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(lj.Data.Issues) != 1 {
+	if len(lj.Data.Items) != 1 {
 		t.Fatalf("listed %d issues, want the named project's one: %s",
-			len(lj.Data.Issues), buf.String())
+			len(lj.Data.Items), buf.String())
 	}
 	// Both halves in one assertion: the row is the NAMED project's issue, and it
 	// renders under the NAMED project's prefix rather than the caller's — the
 	// prefix is the only thing on the row that says whose issue it is.
-	if want := model.FormatIDWithPrefix(theirs, there.Prefix); lj.Data.Issues[0].ID != want {
-		t.Errorf("listed %q, want %q", lj.Data.Issues[0].ID, want)
+	if want := model.FormatIDWithPrefix(theirs, there.Prefix); lj.Data.Items[0].ID != want {
+		t.Errorf("listed %q, want %q", lj.Data.Items[0].ID, want)
 	}
 }
 

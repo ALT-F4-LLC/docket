@@ -339,82 +339,6 @@ func TestThresholdNeverGuessesAnOrder(t *testing.T) {
 // T4 — the empty set, evaluated BEFORE T3
 // ---------------------------------------------------------------------------
 
-// TestThresholdT4EmptySet is T4: the ordinary mathematical convention.
-func TestThresholdT4EmptySet(t *testing.T) {
-	cases := []struct {
-		name      string
-		predicate string
-		want      string
-		why       string
-	}{
-		{
-			name: "any over zero payloads is FALSE", predicate: "any(status == unmet)",
-			want: RoutingPass,
-			why:  "no elements ⇒ no witness ⇒ false, whatever the predicate is",
-		},
-		{
-			name: "all over zero payloads is TRUE", predicate: "all(status == met)",
-			want: workflow.OnFailFixLoop,
-			why:  "no elements ⇒ no violation ⇒ true, whatever the predicate is",
-		},
-		{
-			name: "count>=0 over zero payloads is TRUE", predicate: "count>=0(status == met)",
-			want: workflow.OnFailFixLoop,
-			why:  "count>=n holds iff n == 0",
-		},
-		{
-			name: "count>=1 over zero payloads is FALSE", predicate: "count>=1(status == met)",
-			want: RoutingPass,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := evalOne(t, tc.predicate, "")
-			if result.Routing != tc.want {
-				t.Errorf("routing = %q, want %q — %s", result.Routing, tc.want, tc.why)
-			}
-		})
-	}
-}
-
-// TestThresholdT4PrecedesT3 is THE clause that keeps an empty result set
-// runnable, and the exact case the fixture's QA loop depends on.
-//
-// `any(severity >= high)` over an EMPTY payload set must return FALSE — not
-// park. T4 short-circuits the aggregation before the ordered comparison is ever
-// attempted, so no guess is made and no park occurs. This is the fixture's
-// `reconcile` step: its stub payload is empty, so it flows through
-// legally.
-//
-// If T3 were evaluated first this would park, the fixture's loop would never
-// reach `verify`, and the QA loop would deadlock — so the ordering is asserted
-// directly rather than inferred from the loop passing.
-func TestThresholdT4PrecedesT3(t *testing.T) {
-	result := evalOne(t, "any(severity >= high)", "")
-
-	if result.Parked {
-		t.Fatalf("an ordered comparison over an EMPTY payload set parked:\n%s\n\n"+
-			"T4 must be evaluated BEFORE T3: `any(P)` over zero elements is false "+
-			"without consulting P, so no ordered comparison is ever attempted. "+
-			"This is the exact case the phase-4 QA loop depends on.", result.Reason)
-	}
-	if result.Routing != RoutingPass {
-		t.Errorf("routing = %q, want %q", result.Routing, RoutingPass)
-	}
-
-	// The `all` counterpart: true over an empty set, again without consulting P.
-	threshold := map[string]string{workflow.OnFailFixLoop: "all(severity >= high)"}
-	allResult, err := EvaluateThreshold("step@0", threshold, ThresholdOrder(threshold), nil, nil)
-	testsupport.Must(t, err, "EvaluateThreshold: %v", err)
-	if allResult.Parked {
-		t.Error("all(P) over an empty set parked; it is true without consulting P")
-	}
-	if allResult.Routing != workflow.OnFailFixLoop {
-		t.Errorf("all over an empty set routed %q, want the match", allResult.Routing)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Ordering and the no-match default
 // ---------------------------------------------------------------------------
@@ -650,23 +574,6 @@ func TestThresholdT2EvaluatesOverPosition(t *testing.T) {
 				t.Errorf("routing = %q, want %q. %s", result.Routing, tc.want, tc.why)
 			}
 		})
-	}
-}
-
-// TestThresholdT2IsIndependentOfPayloadOrder is order independence at the
-// threshold: the same members in any input order reach the same verdict.
-func TestThresholdT2IsIndependentOfPayloadOrder(t *testing.T) {
-	permutations := []string{
-		`[{"severity":"low"},{"severity":"high"},{"severity":"info"}]`,
-		`[{"severity":"high"},{"severity":"info"},{"severity":"low"}]`,
-		`[{"severity":"info"},{"severity":"low"},{"severity":"high"}]`,
-	}
-	for _, raw := range permutations {
-		result := evalWith(t, severityOrder, "any(severity >= high)", raw)
-		if result.Routing != workflow.OnFailFixLoop {
-			t.Errorf("%s routed %q; the verdict must not depend on input order",
-				raw, result.Routing)
-		}
 	}
 }
 

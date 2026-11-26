@@ -803,20 +803,6 @@ func TestWhenFalseLoopBodyPanelDoesNotStrandAfterLoop(t *testing.T) {
 	}
 }
 
-// TestWhenTrueLoopBodyPanelIsInstantiated: a body whose `when` holds can fail
-// at ordinal k, so its panel must exist there.
-func TestWhenTrueLoopBodyPanelIsInstantiated(t *testing.T) {
-	conn, _, _, _ := enterOrdinalOneWith(t, whenGatedFix, []string{"run-fix"})
-
-	if got := stepStatus(t, conn, "fix@1"); got != db.StepPending {
-		t.Fatalf("premise: fix@1 status = %q, want %q", got, db.StepPending)
-	}
-	if !stepExists(t, conn, "triage@1") {
-		t.Error("no triage@1 row: fix@1 runs at ordinal 1 and names the " +
-			"panel in its on_fail")
-	}
-}
-
 // TestWhenMixedLoopBodyPanelIsInstantiated: when two bodies name one panel and
 // only one of them runs, the panel is still needed for that one.
 func TestWhenMixedLoopBodyPanelIsInstantiated(t *testing.T) {

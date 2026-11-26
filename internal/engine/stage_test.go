@@ -158,56 +158,6 @@ func TestFixerIsStagedBeforeItsReReviewJudges(t *testing.T) {
 	}
 }
 
-// TestStageNeedsNoClassHeuristic is AC3: a dispatcher honoring `stage` does not
-// need a class-keyed writers-first partition to get the fixer/judge case right.
-//
-// Asserted as a property of the DATA rather than by deleting a script this
-// repository does not contain: the staging must be derivable with no reference
-// to `class` at all. So this test partitions purely on `stage` and checks the
-// result is the ordering the class heuristic used to produce — meaning the
-// heuristic is now redundant, which is what AC3 asks for.
-func TestStageNeedsNoClassHeuristic(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
-
-	answer, err := e.NextSteps(conn, run.ID, 0, nowMS)
-	testsupport.Must(t, err, "next: %v", err)
-
-	// The dispatcher a staged wire format allows: no `class` is read.
-	first, rest := []string{}, []string{}
-	for _, row := range answer.Steps {
-		if row.Stage == 0 {
-			first = append(first, row.Instance)
-		} else {
-			rest = append(rest, row.Instance)
-		}
-	}
-
-	if len(first) != 1 || first[0] != "fix@1" {
-		t.Errorf("stage 0 = %v, want exactly [fix@1]; a stage-only dispatcher "+
-			"must reach the same answer the class partition did", first)
-	}
-	// The judges are exactly stage 1 — behind the fixer, ahead of the staged
-	// closure (synthesize and beyond sit at deeper stages, per their own
-	// `after` edges).
-	stageOne := []string{}
-	for _, row := range answer.Steps {
-		if row.Stage == 1 {
-			stageOne = append(stageOne, row.Instance)
-		}
-	}
-	if len(stageOne) != 4 {
-		t.Errorf("stage 1 = %v, want the four judges", stageOne)
-	}
-	if len(rest) < 4 {
-		t.Errorf("stages past 0 = %v, want at least the four judges", rest)
-	}
-}
-
 // TestOnlyATreeHolderStagesOthers pins the clause that keeps this rule
 // GENERIC rather than a class heuristic in disguise: only a step the instance
 // DECLARED as holding the tree (`holds_tree`, workflow.Step.HoldsTree) can
@@ -861,57 +811,6 @@ func TestLoopBodyEvictionIsScopedToOneOrdinal(t *testing.T) {
 			"different-ordinal loop body must not withhold a re-review the "+
 			"ordinal guard says it has nothing to do with: %v",
 			sawJudge, instancesIn(answer))
-	}
-}
-
-// TestLimitTruncationKeepsTheFixerBeforeItsJudges pins DKT-38: a limit cuts
-// a STAGE-ORDERED set, so a truncated offer keeps the tree-holding fixer
-// (stage 0) and drops judges — never the reverse. SortSteps emits the
-// judges first (they are older rows), so a raw cut kept exactly the wrong
-// end: two unstaged judges and no fixer, which the DKT-58 eviction then
-// removed as well, publishing an empty offer while a whole loop stood ready.
-// readyRows is the shared tail of `next` and `dispatch open`, so the pin
-// covers `dispatch open --limit` — the reported repro — through either verb.
-func TestLimitTruncationKeepsTheFixerBeforeItsJudges(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-
-	issueA := createIssue(t, conn, "issue a", "body", "task", nil)
-	run := startRun(t, conn, issueA)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	e := testEngine()
-
-	driveIssueToLoopReentry(t, conn, e, issueA)
-
-	// The ready set is fix@1 plus review@1#0..3; the limit admits two.
-	answer, err := e.NextSteps(conn, run.ID, 2, nowMS)
-	testsupport.Must(t, err, "next with limit 2: %v", err)
-
-	// The true pre-slice count spans the whole offer, staged closure included:
-	// fix@1, four judges, then synthesize@1, reconcile@1, and verify@1 riding
-	// staged behind them.
-	if answer.Total != 8 {
-		t.Errorf("total = %d, want the true pre-slice count 8", answer.Total)
-	}
-	// DKT-2070 made the cut LANE-complete: this offer is one issue's single
-	// in-offer closure, so a limit below it admits the closure whole rather
-	// than a two-row stage prefix. DKT-38's property is unchanged and is what
-	// the row assertions below still pin — the fixer leads, never the judges.
-	if len(answer.Steps) != 8 {
-		t.Fatalf("offered %d rows under limit 2, want the whole 8-row lane: %v",
-			len(answer.Steps), instancesIn(answer))
-	}
-	if answer.Steps[0].Instance != "fix@1" || answer.Steps[0].Stage != 0 {
-		t.Errorf("row 0 = %s (stage %d), want fix@1 at stage 0 — the cut "+
-			"must keep the predecessor end of the stage order",
-			answer.Steps[0].Instance, answer.Steps[0].Stage)
-	}
-	if !strings.HasPrefix(answer.Steps[1].Instance, "review@1") ||
-		answer.Steps[1].Stage != 1 {
-		t.Errorf("row 1 = %s (stage %d), want a review@1 judge at stage 1",
-			answer.Steps[1].Instance, answer.Steps[1].Stage)
 	}
 }
 

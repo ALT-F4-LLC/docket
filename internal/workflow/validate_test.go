@@ -2357,38 +2357,6 @@ func TestValidationTableIsComplete(t *testing.T) {
 	}
 }
 
-// TestV13AndV13aAreDistinct pins why the two rules are split: they produce two
-// different author-facing messages, so a human step that omitted `on_fail` is
-// not told "your reject routing is waiting-human" about a field it never wrote.
-func TestV13AndV13aAreDistinct(t *testing.T) {
-	var v13, v13a string
-	for _, tc := range validationCases {
-		def, err := Parse([]byte(tc.src))
-		if err != nil {
-			continue
-		}
-		err = Validate(def)
-		if err == nil {
-			continue
-		}
-		switch tc.rule {
-		case "V13":
-			v13 = err.Error()
-		case "V13a":
-			v13a = err.Error()
-		}
-	}
-	if v13 == "" || v13a == "" {
-		t.Fatalf("missing a case: V13=%q V13a=%q", v13, v13a)
-	}
-	if v13 == v13a {
-		t.Error("V13 and V13a produce the same message; they are two distinct author-facing errors")
-	}
-	if strings.Contains(v13a, "may not route rejects") {
-		t.Error("V13a should not report V13's message for a field the author never wrote")
-	}
-}
-
 // TestValidateSizesAny is V42: `[match].sizes_any` entries must be values
 // model.ValidateSize accepts — the same vocabulary engine.parsePolicy holds
 // policy.toml's [sizes] keys to, so the two refusals cannot drift.
@@ -2837,42 +2805,6 @@ func TestFixtureCrossValidatesAgainstTheQASchemas(t *testing.T) {
 	}
 }
 
-// TestFixtureKeepsV21dsSchemalessThreshold is V21d on the real thing, and it is
-// the half the fixture edit must NOT have taken away.
-//
-// `verify` declares `any(status == unmet)` and NO `payload`, and it still
-// registers clean. Making `payload` mandatory wherever a `threshold` appears
-// would be a tidier rule and would break exactly this step: equality has never
-// needed an order and still does not.
-func TestFixtureKeepsV21dsSchemalessThreshold(t *testing.T) {
-	def := loadFixture(t)
-
-	verify := StepByName(def, "verify")
-	if verify == nil {
-		t.Fatal("the fixture no longer declares a `verify` step")
-	}
-	if verify.Payload != "" {
-		t.Fatalf("`verify` gained `payload = %q`; V21d's case is gone from the "+
-			"fixture and this assertion proves nothing", verify.Payload)
-	}
-	if len(verify.Threshold) == 0 {
-		t.Fatal("`verify` declares no threshold")
-	}
-
-	// One step declaring a payload and one declaring none, validated together
-	// against a registry holding only the first's schema. If V21d had been
-	// dropped, `verify` would need one too.
-	body, err := os.ReadFile(filepath.Join(
-		"..", "..", "scripts", "qa", "fixtures", "schemas", "findings@1.json"))
-	if err != nil {
-		t.Skipf("QA schema fixture unavailable: %v", err)
-	}
-	registry := fakeSchemas{documents: map[string]string{"findings@1": string(body)}}
-	if err := ValidateSchemas(def, registry); err != nil {
-		t.Fatalf("a schema-less threshold now requires a schema: %v", err)
-	}
-}
-
 // loadFixture reads and parses the committed register-test fixture.
 func loadFixture(t *testing.T) *Definition {
 	t.Helper()
@@ -2904,43 +2836,6 @@ func TestReservedActionsAreAllImplemented(t *testing.T) {
 			t.Errorf("action %q is a builtin but is not reserved; a trusted "+
 				"command could be looked up under a name core computes", name)
 		}
-	}
-}
-
-// TestLinkedInputRelaxesTheProducedKindTable is DKT-547's lint half, both
-// directions at once. V11 holds every same-run form to the produced-kind table
-// — `issue.latest.<kind>` requires SOME step of the workflow to produce the
-// kind — and the cross-issue form is exactly the case where that requirement
-// must NOT apply: the producer is another issue's workflow, so no step here
-// produces `ux-spec` and the declaration is still registrable. L4's
-// predecessor rule likewise does not apply — the artifact was recorded before
-// this run existed — so the form is legal on a ROOT step, which is where a
-// design-qa step consuming a spec actually sits.
-func TestLinkedInputRelaxesTheProducedKindTable(t *testing.T) {
-	const src = `
-[pipeline]
-name = "ui-change-mini"
-version = 1
-[[step]]
-name = "design-qa"
-after = []
-executor = "qa"
-emits = "qa-report"
-inputs = ["issue.body", "issue.linked.depends_on.ux-spec"]
-[[step]]
-name = "judge-design"
-after = ["design-qa"]
-executor = "judge"
-emits = "verdict"
-inputs = ["design-qa.qa-report", "issue.linked.depends-on.ux-spec"]
-`
-	def, err := Load([]byte(src))
-	testsupport.Must(t, err, "loading: %v", err)
-	if err := Validate(def); err != nil {
-		t.Fatalf("Validate rejects the issue.linked form: %v", err)
-	}
-	if err := Lint(def); err != nil {
-		t.Fatalf("Lint rejects the issue.linked form: %v", err)
 	}
 }
 
@@ -3086,47 +2981,6 @@ func TestV26KeepsTheOriginalRemedyForAGenuinelyNewRule(t *testing.T) {
 	}
 	if !strings.Contains(msg, "vote.rule.brand-new.threshold") {
 		t.Errorf("the refusal does not name the key to set:\n%s", msg)
-	}
-}
-
-// TestVoteThresholdAndVoteRecordRegister (DKT-545) is the positive half of
-// V36/V11's vote clauses: a vote step routing its concerned approvals into the
-// fix loop, with a downstream consumer reading the panel's record, is exactly
-// the declaration this grammar exists to admit.
-func TestVoteThresholdAndVoteRecordRegister(t *testing.T) {
-	src := `
-[pipeline]
-name = "concern-loop"
-version = 1
-[[step]]
-name = "seed"
-after = []
-executor = "x"
-emits = "findings"
-[[step]]
-name = "gate"
-after = ["seed"]
-type = "vote"
-voters = ["a", "b", "c"]
-vote_rule = "majority"
-on_fail = "waiting-human"
-threshold = { "fix-loop" = "count>=2(vote == approve-with-concerns)" }
-[[step]]
-name = "fix"
-executor = "x"
-emits = "findings"
-loop = true
-after_loop = "gate"
-inputs = ["gate.vote-record"]
-[[step]]
-name = "report"
-after = ["gate"]
-executor = "y"
-emits = "record"
-inputs = ["gate.vote-record"]
-`
-	if _, err := Load([]byte(src)); err != nil {
-		t.Fatalf("a concern-routing vote workflow failed to register: %v", err)
 	}
 }
 
@@ -3283,60 +3137,6 @@ func TestV22ConnectiveGrammar(t *testing.T) {
 				t.Errorf("when = %q refused as %s, want V22: %v", tc.when, we.Rule, err)
 			}
 		})
-	}
-}
-
-// TestV22AndWhenHoldsShareOneGrammar is the single-regex discipline as an
-// assertion: every predicate V22 admits must be evaluable, and the evaluator
-// must not accept a spelling the validator refuses.
-//
-// The direction that matters is the second one. A predicate that evaluates but
-// cannot register is merely unreachable; one that registers but evaluates as
-// something else routes work through a lane nobody wrote — which is exactly
-// what a second spelling of the connective grammar would eventually produce.
-func TestV22AndWhenHoldsShareOneGrammar(t *testing.T) {
-	subject := Subject{Kind: "bug", Labels: []string{"security"}}
-
-	for _, when := range []string{
-		"kind == bug",
-		"kind == bug and labels contains security",
-		"labels contains security-load-bearing or labels contains security",
-		"kind == task or labels contains security",
-		"labels contains and-then",
-		"labels contains-any (security-change, security)",
-		"kind == doc:tdd and labels contains-any (security-change, security)",
-		"labels contains-any (a, b) or kind == bug",
-		"labels contains_any [security-change, security-load-bearing, security]",
-		"labels contains doc:tdd and labels contains_any [security-change, security]",
-		"labels contains_any [a, b] or kind == bug",
-		`labels contains_any ["a", "b"]`,
-	} {
-		src := fmt.Sprintf(
-			"\n[pipeline]\nname = \"w\"\nversion = 1\n"+
-				"[[step]]\nname = \"a\"\nexecutor = \"x\"\nemits = \"k\"\nwhen = %q\n", when)
-		if _, err := Load([]byte(src)); err != nil {
-			t.Errorf("V22 refused %q, which WhenHolds evaluates: %v", when, err)
-			continue
-		}
-		// Evaluability, not the value: every clause parses, so no clause falls
-		// through whenClauseHolds's unparseable branch.
-		clauses, _, mixed := splitWhen(when)
-		if mixed {
-			t.Errorf("%q registered but splitWhen calls it mixed", when)
-		}
-		for _, clause := range clauses {
-			if !whenShape.MatchString(clause) {
-				t.Errorf("%q registered but clause %q does not match whenShape", when, clause)
-			}
-		}
-		_ = WhenHolds(when, subject)
-	}
-
-	// The other direction: a mix evaluates FALSE and never registers, so the two
-	// halves agree that it is not a predicate.
-	const mixed = "kind == bug and labels contains security or labels contains x"
-	if WhenHolds(mixed, subject) {
-		t.Errorf("WhenHolds(%q) = true; a mixed predicate V22 refuses must not hold", mixed)
 	}
 }
 

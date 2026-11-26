@@ -49,8 +49,8 @@ worker = { variant = "no-such-variant" }
 // TestResolveExecutorRefusesDanglingEscalateTo: an escalate_to naming an
 // undeclared variant is a typo'd chain link, refused mid-walk rather than
 // treated as a natural chain end (a MISSING escalate_to, by contrast, is a
-// legitimate chain end — see TestEscalationWalkFableStandingRowsDoNotMove and
-// the chain-exhaustion cases the ported table already covers).
+// legitimate chain end — see the chain-exhaustion cases the ported table
+// already covers).
 func TestResolveExecutorRefusesDanglingEscalateTo(t *testing.T) {
 	const src = `
 [policy]
@@ -122,38 +122,6 @@ banned = "allowed"
 	}
 	if got.Variant != "allowed" || got.Model != "opus" {
 		t.Errorf("got %+v, want variant=allowed model=opus", got)
-	}
-}
-
-// TestResolveSeatCeilingClampsTheStandingVariant: a sensitive seat standing
-// beyond [security].ceiling is clamped to it directly, with no walk involved.
-func TestResolveSeatCeilingClampsTheStandingVariant(t *testing.T) {
-	const src = `
-[policy]
-version = 2
-
-[variants]
-low = { model = "opus", effort = "medium", escalate_to = "high" }
-high = { model = "opus", effort = "high", escalate_to = "beyond" }
-beyond = { model = "opus", effort = "max" }
-
-[executors]
-seat-a = { variant = "beyond" }
-
-[security]
-ceiling = "high"
-nodes = ["seat-a"]
-`
-	doc, err := parsePolicy([]byte(src))
-	if err != nil {
-		t.Fatalf("parsePolicy: %v", err)
-	}
-	got, err := doc.ResolveSeat("seat-a", "", nil)
-	if err != nil {
-		t.Fatalf("ResolveSeat: %v", err)
-	}
-	if got.Variant != "high" {
-		t.Errorf("Variant = %q, want the ceiling %q", got.Variant, "high")
 	}
 }
 

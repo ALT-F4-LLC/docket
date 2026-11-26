@@ -1,11 +1,10 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/schema"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -17,8 +16,8 @@ import (
 // at the verb: a repo whose definitions declare no payload cannot tell v9 from
 // v8 here.
 func validateDeclaredPayload(
-	conn *sql.DB,
-	step *db.Step,
+	conn store.LegacyDB,
+	step *store.Step,
 	spec *workflow.Step,
 	payload []byte,
 ) error {
@@ -81,21 +80,22 @@ func validateDeclaredPayload(
 // registry someone edited underneath a run, which cannot happen through any verb
 // — `name@version` is frozen — and the refusal says so rather than validating
 // against bytes the run never agreed to.
-func pinnedSchema(conn *sql.DB, runID int, ref string) (*schema.Registered, error) {
-	pins, err := db.ListPins(conn, runID)
+func pinnedSchema(conn store.LegacyDB, runID int, ref string) (*schema.Registered, error) {
+	st := store.StoreOn(conn)
+	pins, err := st.ListPins(runID)
 	if err != nil {
 		return nil, err
 	}
 	// The RUN's project scopes the registry read — a pinned ref resolves in
 	// the project that pinned it, never the invoking process's.
-	projectID, err := db.RunProjectID(conn, runID)
+	projectID, err := st.RunProjectID(runID)
 	if err != nil {
 		return nil, err
 	}
 
 	var pinnedHash string
 	for _, p := range pins {
-		if p.Kind == db.PinKindSchema && p.Ref == ref {
+		if p.Kind == store.PinKindSchema && p.Ref == ref {
 			pinnedHash = p.SHA256
 			break
 		}
@@ -112,8 +112,8 @@ func pinnedSchema(conn *sql.DB, runID int, ref string) (*schema.Registered, erro
 		return nil, validationErr("schema reference %q: %v", ref, err)
 	}
 
-	row, err := db.GetSchema(conn, projectID, name, version)
-	if errors.Is(err, db.ErrSchemaNotFound) {
+	row, err := st.GetSchema(projectID, name, version)
+	if errors.Is(err, store.ErrSchemaNotFound) {
 		return nil, validationErr(
 			"schema %s is pinned by this run but is no longer registered", ref)
 	}

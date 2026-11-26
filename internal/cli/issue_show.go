@@ -1,17 +1,14 @@
 package cli
 
 import (
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -71,23 +68,16 @@ type showResultJSON struct {
 	LinkedProposals []string         `json:"linked_proposals"`
 	Comments        []*model.Comment `json:"comments"`
 	Activity        []model.Activity `json:"activity"`
-	// Scope reaches v1 WHEN DECLARED (DKT-55 amendment): nil emits no key, so
-	// a scope-less issue's v1 output stays byte-identical to the frozen shape.
+	// Scope appears WHEN DECLARED (DKT-55 amendment): nil emits no key.
 	// showResultV2 shadows this with its always-present tri-state field.
 	Scope *[]string `json:"scope,omitempty"`
-	// Resolution reaches v1 WHEN SET, the same DKT-55 shape and for the same
-	// reason: an unresolved issue's output stays byte-identical, while an
-	// abandoned one stops being indistinguishable from a finished one
-	// (DKT-245).
+	// Resolution appears WHEN SET, so an abandoned issue is distinguishable
+	// from a finished one (DKT-245).
 	Resolution string `json:"resolution,omitempty"`
-	// Size reaches v1 WHEN SET, the same DKT-55 shape a third time: an issue
-	// with no declared size stays byte-identical to the pre-Size output.
+	// Size appears WHEN SET.
 	Size string `json:"size,omitempty"`
-	// RunDisposition reaches v1 WHEN A RUN ABANDONED ITS WORK, the same DKT-55
-	// shape for the third time: an issue no run gave up on emits no key and
-	// keeps the frozen v1 output byte-identical, while an abandoned one stops
-	// forcing its reader through `events list` to learn which run stopped, when
-	// and why (DKT-404).
+	// RunDisposition appears WHEN A RUN ABANDONED ITS WORK, so a reader learns
+	// which run stopped, when and why without `events list` (DKT-404).
 	RunDisposition *runDispositionJSON `json:"run_disposition,omitempty"`
 }
 
@@ -125,8 +115,8 @@ func runDispositionWire(d *model.IssueRunDisposition) *runDispositionJSON {
 	}
 }
 
-// showResultV2 is the v2 payload: the v1 flattened shape plus the CAS version,
-// plus the lease when one is held.
+// showResultV2 is the single-issue payload: the flattened shape plus the CAS
+// version, plus the lease when one is held.
 //
 // Lease is omitempty so an unclaimed issue emits no `lease` key at all — the
 // field appears exactly when there is a lease to report.
@@ -147,17 +137,13 @@ type showResultV2 struct {
 }
 
 // VersionedPayload implements output.Versioned, surfacing the issue's CAS
-// version and lease under --json=v2 only. The v1 marshaler below is frozen.
+// version and lease when a single issue is shown.
 //
 // The lease's `live` flag is computed here from the current clock, per read:
 // effective status is computed at read time with no write, so
 // an expired lease reads as dead without anyone having called claim.
 func (s showResult) VersionedPayload() any {
-	base, err := s.marshalJSONStruct()
-	if err != nil {
-		// Fall back to the v1 shape; the marshaler will surface the error.
-		return s
-	}
+	base := s.wire()
 	version := 0
 	var lease any
 	if s.Issue != nil {
@@ -184,15 +170,13 @@ func (s showResult) VersionedPayload() any {
 	}
 }
 
+// MarshalJSON emits the flattened shape without version or lease: each element
+// of a batch `issue show` array marshals through it.
 func (s showResult) MarshalJSON() ([]byte, error) {
-	j, err := s.marshalJSONStruct()
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(j)
+	return json.Marshal(s.wire())
 }
 
-func (s showResult) marshalJSONStruct() (showResultJSON, error) {
+func (s showResult) wire() showResultJSON {
 	i := s.Issue
 
 	labels := i.Labels
@@ -258,10 +242,9 @@ func (s showResult) marshalJSONStruct() (showResultJSON, error) {
 		j.ParentID = &pid
 	}
 
-	// DKT-55: a DECLARED scope reaches v1. A declared-but-empty scope must
-	// marshal as `[]`, not be collapsed into absence, so the pointer is taken
-	// from a non-nil slice; an undeclared scope stays a nil pointer and emits
-	// no key at all.
+	// DKT-55: a declared-but-empty scope must marshal as `[]`, not be collapsed
+	// into absence, so the pointer is taken from a non-nil slice; an undeclared
+	// scope stays a nil pointer and emits no key at all.
 	if s.ScopeDeclared {
 		globs := s.Scope
 		if globs == nil {
@@ -270,7 +253,7 @@ func (s showResult) marshalJSONStruct() (showResultJSON, error) {
 		j.Scope = &globs
 	}
 
-	return j, nil
+	return j
 }
 
 var showCmd = &cobra.Command{
@@ -304,130 +287,50 @@ is calling that getter on the id string.`,
 	},
 }
 
-// fetchIssueDetail loads one issue's full show detail: the issue itself plus
-// every hydrated collection showResult carries. It is the single-id body
-// runIssueShow calls once per argument, so batch and single-id show stay
-// byte-identical per issue.
-func fetchIssueDetail(conn *sql.DB, source string) (*model.Issue, showResult, error) {
-	id, err := issueArg(source)
-	if err != nil {
-		return nil, showResult{}, err
+// showResultOf is the show payload for one verb.IssueDetail.
+func showResultOf(d verb.IssueDetail) showResult {
+	return showResult{
+		Issue:           d.Issue,
+		SubIssues:       d.SubIssues,
+		Relations:       d.Relations,
+		LinkedProposals: d.LinkedProposals,
+		Comments:        d.Comments,
+		Activity:        d.Activity,
+		RunDisposition:  d.RunDisposition,
+		Scope:           d.Scope,
+		ScopeDeclared:   d.ScopeDeclared,
 	}
+}
 
-	issue, err := db.GetIssue(conn, id)
-	if err != nil {
-		if e := notFound(err, fmt.Sprintf("issue %s", source)); e != nil {
-			return nil, showResult{}, e
-		}
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
-	}
-
-	// Hydrate labels.
-	issue.Labels, err = db.GetIssueLabels(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
-	}
-
-	// Hydrate files.
-	issue.Files, err = db.GetIssueFiles(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
-	}
-
-	if err := db.HydrateDocs(conn, []*model.Issue{issue}); err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching linked docs: %w", err), output.ErrGeneral)
-	}
-
-	subIssues, err := db.GetSubIssues(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching sub-issues: %w", err), output.ErrGeneral)
-	}
-
-	relations, err := db.GetIssueRelations(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-	}
-
-	linkedProposals, err := db.GetIssueProposals(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching linked proposals: %w", err), output.ErrGeneral)
-	}
-
-	comments, err := db.ListComments(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
-
-	activity, err := db.GetActivity(conn, id, 10)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching activity: %w", err), output.ErrGeneral)
-	}
-
-	// The last run to give up on this issue, if any (DKT-404). Nil is the
-	// ordinary answer and costs one indexed read of the event log.
-	disposition, err := engine.LatestIssueDisposition(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching the run disposition: %w", err), output.ErrGeneral)
-	}
-
-	// Scope is stored as a JSON array in `issues.scope_globs`, or NULL when
-	// the issue declares none. The empty string is the NULL case.
-	scopeJSON, err := db.IssueScopeGlobs(conn, id)
-	if err != nil {
-		return nil, showResult{}, cmdErr(fmt.Errorf("fetching scope: %w", err), output.ErrGeneral)
-	}
-	var scope []string
-	scopeDeclared := scopeJSON != ""
-	if scopeDeclared {
-		if err := json.Unmarshal([]byte(scopeJSON), &scope); err != nil {
-			return nil, showResult{}, cmdErr(fmt.Errorf("decoding scope: %w", err), output.ErrGeneral)
-		}
-	}
-
-	result := showResult{
-		Issue:           issue,
-		SubIssues:       subIssues,
-		Relations:       relations,
-		LinkedProposals: linkedProposals,
-		Comments:        comments,
-		Activity:        activity,
-		RunDisposition:  disposition,
-		Scope:           scope,
-		ScopeDeclared:   scopeDeclared,
-	}
-	return issue, result, nil
+// renderShowDetail is the human rendering of one shown issue.
+func renderShowDetail(r showResult) string {
+	return render.RenderDetail(r.Issue, r.SubIssues, r.Relations,
+		r.LinkedProposals, r.Comments, r.Activity, r.RunDisposition)
 }
 
 func runIssueShow(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+	shown, err := verb.IssueShow(cmd.Context(), verbEnv(cmd), verb.IssueShowInput{Issues: args})
+	if err != nil {
+		return verbErr(err)
+	}
 
 	if len(args) == 1 {
-		issue, result, err := fetchIssueDetail(conn, args[0])
-		if err != nil {
-			return err
-		}
+		result := showResultOf(shown.Issues[0])
 		var message string
 		if !w.JSONMode {
-			message = render.RenderDetail(issue, result.SubIssues, result.Relations,
-				result.LinkedProposals, result.Comments, result.Activity,
-				result.RunDisposition)
+			message = renderShowDetail(result)
 		}
 		w.Success(result, message)
 		return nil
 	}
 
-	results := make([]showResult, 0, len(args))
+	results := make([]showResult, 0, len(shown.Issues))
 	var messages []string
-	for _, arg := range args {
-		issue, result, err := fetchIssueDetail(conn, arg)
-		if err != nil {
-			return err
-		}
+	for _, d := range shown.Issues {
+		result := showResultOf(d)
 		results = append(results, result)
 		if !w.JSONMode {
-			messages = append(messages, render.RenderDetail(issue, result.SubIssues,
-				result.Relations, result.LinkedProposals, result.Comments, result.Activity,
-				result.RunDisposition))
+			messages = append(messages, renderShowDetail(result))
 		}
 	}
 

@@ -166,7 +166,7 @@ TOML
 
   # THE HEADLINE: the follow SAW the events that were written while it ran.
   local ZL_FOLLOWED
-  ZL_FOLLOWED=$(jq -s '[.[].data.events[].kind]' "$ZL_FOLLOW_OUT" 2>/dev/null || echo '[]')
+  ZL_FOLLOWED=$(jq -s '[.[].data.items[].kind]' "$ZL_FOLLOW_OUT" 2>/dev/null || echo '[]')
   if printf '%s' "$ZL_FOLLOWED" | jq -e 'index("step-claimed")' >/dev/null 2>&1; then
     check "ZL" "ZL1_follow_saw_live_events" "PASS"
   else
@@ -186,8 +186,8 @@ TOML
   # the same page every interval, which is the failure a poller is most likely
   # to have and the one a human eyeballing output would not notice.
   local ZL_SEQS ZL_UNIQ
-  ZL_SEQS=$(jq -s '[.[].data.events[].seq] | length' "$ZL_FOLLOW_OUT" 2>/dev/null || echo 0)
-  ZL_UNIQ=$(jq -s '[.[].data.events[].seq] | unique | length' "$ZL_FOLLOW_OUT" 2>/dev/null || echo 0)
+  ZL_SEQS=$(jq -s '[.[].data.items[].seq] | length' "$ZL_FOLLOW_OUT" 2>/dev/null || echo 0)
+  ZL_UNIQ=$(jq -s '[.[].data.items[].seq] | unique | length' "$ZL_FOLLOW_OUT" 2>/dev/null || echo 0)
   if [ "$ZL_SEQS" = "$ZL_UNIQ" ] && [ "$ZL_SEQS" != "0" ]; then
     check "ZL" "ZL1_follow_no_repeats" "PASS"
   else
@@ -312,7 +312,7 @@ TOML
   run_env "$ZL_B" events list --run RUN-1 --limit 200 --json
   assert_exit "ZL" "ZL3_events" 0
   if printf '%s' "$CMD_STDOUT" \
-    | jq -e '[.data.events[].kind] | index("run-budget-set")' >/dev/null 2>&1; then
+    | jq -e '[.data.items[].kind] | index("run-budget-set")' >/dev/null 2>&1; then
     check "ZL" "ZL3_budget_event_logged" "PASS"
   else
     check "ZL" "ZL3_budget_event_logged" "FAIL" \
@@ -322,7 +322,7 @@ TOML
   # The event carries BOTH numbers, so an auditor need not reconstruct the old
   # cap from an earlier event.
   if printf '%s' "$CMD_STDOUT" \
-    | jq -e '[.data.events[] | select(.kind == "run-budget-set")][0].data
+    | jq -e '[.data.items[] | select(.kind == "run-budget-set")][0].data
              | has("from") and has("to")' >/dev/null 2>&1; then
     check "ZL" "ZL3_budget_event_carries_delta" "PASS"
   else
@@ -389,7 +389,7 @@ TOML
   run_env "$ZL_B" events list --since "$((ZL_MIN_NOW - 1))" --limit 200 --json
   assert_exit "ZL" "ZL4_list_after_prune" 0
   if printf '%s' "$CMD_STDOUT" \
-    | jq -e '[.data.events[].kind] | index("events-pruned")' >/dev/null 2>&1; then
+    | jq -e '[.data.items[].kind] | index("events-pruned")' >/dev/null 2>&1; then
     check "ZL" "ZL4_prune_is_logged" "PASS"
   else
     check "ZL" "ZL4_prune_is_logged" "FAIL" \
@@ -536,7 +536,7 @@ TOML
   # `events list` WITHOUT `--follow` is what an earlier stage shipped. The
   # flag's arrival did not change the verb's shape — same keys, same envelope.
   local ZL_D_KEYS
-  ZL_D_KEYS=$(echo "$CMD_STDOUT" | jq -S -c '[.data.events[0] | keys] | .[0]')
+  ZL_D_KEYS=$(echo "$CMD_STDOUT" | jq -S -c '[.data.items[0] | keys] | .[0]')
   if printf '%s' "$ZL_D_KEYS" | grep -q '"seq"' \
     && printf '%s' "$ZL_D_KEYS" | grep -q '"kind"'; then
     check "ZL" "ZL6_list_shape_unchanged" "PASS"

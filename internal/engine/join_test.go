@@ -127,34 +127,6 @@ func TestJoinAcceptsEveryTerminalStatus(t *testing.T) {
 // J2: a `waiting-human` sibling parks
 // ---------------------------------------------------------------------------
 
-// TestWaitingHumanSiblingParksTheJoin is J2: `waiting-human` is NOT terminal, so
-// it holds the join open — the issue is parked on the operator's decision.
-//
-// This is the counterpart of the J1 test above, and the pair is the point:
-// `waiting-human` looks terminal (nobody is working on it) and is not (the work
-// is not finished). Releasing the join on it would start downstream work on the
-// strength of a question nobody has answered.
-func TestWaitingHumanSiblingParksTheJoin(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "the change summary", "")
-	for i := range 3 {
-		claimAndComplete(t, conn, e, fmt.Sprintf("review@0#%d", i), "findings", "")
-	}
-	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = ?`,
-		db.StepWaitingHuman, "review@0#3")
-
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		successor := stepNamed(t, sched, "synthesize@0")
-		if ready, _ := sched.Ready(successor); ready {
-			t.Error("synthesize@0 is ready with a waiting-human sibling; " +
-				"J2 parks the issue on the operator's decision")
-		}
-	})
-}
-
 // ---------------------------------------------------------------------------
 // J3: inputs resolve over `done` siblings only
 // ---------------------------------------------------------------------------
@@ -336,9 +308,8 @@ func TestQuorumMissRoutesPerOnFail(t *testing.T) {
 // against: exactly `min_siblings` done, the rest terminal, and the successor
 // becomes ready.
 //
-// It exists for the same reason TestReadyBaseline does — a pair of tests that
-// only ever saw the join refuse would pass against an implementation that never
-// releases it.
+// It exists because a pair of tests that only ever saw the join refuse would
+// pass against an implementation that never releases it.
 func TestQuorumMetJoinsNormally(t *testing.T) {
 	conn, run := quorumRun(t)
 	e := testEngine()

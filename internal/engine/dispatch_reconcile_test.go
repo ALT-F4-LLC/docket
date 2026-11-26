@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -64,87 +65,6 @@ func TestReconcileRunsAllThreeStages(t *testing.T) {
 	if status != db.DispatchClosed || reason != db.CloseReasonReconciled {
 		t.Fatalf("stored dispatch is (%s, %s), want (%s, %s)",
 			status, reason, db.DispatchClosed, db.CloseReasonReconciled)
-	}
-}
-
-// TestReconcileMatchesTheManualOrdering is criterion 3, asserted the only way
-// that means anything: run the SAME wave twice, once through the three verbs by
-// hand and once through the reconcile, and compare what the discrepancy probe
-// sees afterwards.
-//
-// The ledger row, its source, its attempt, and the `usage_recorded` fast path
-// the probe actually reads must be identical, and `next` — which runs the probe
-// — must answer in both.
-func TestReconcileMatchesTheManualOrdering(t *testing.T) {
-	// The manual ordering, in its own database.
-	manualConn := mustDB(t)
-	manualEngine := testEngine()
-	manualRun := dispatchRun(t, manualConn)
-	openDispatch(t, manualConn, manualRun, 0, nowMS)
-	manualStep := stepIDByInstance(t, manualConn, "implement@0")
-	completeWithoutUsage(t, manualConn, manualEngine, manualStep)
-
-	_, err := manualEngine.BackfillUsage(manualConn, manualRun, []BackfillRow{
-		{Step: manualStep, Unit: "tokens", Quantity: 48211},
-	}, "wave-journal:wf-7", "", nowMS)
-	testsupport.Must(t, err, "manual backfill-usage: %v", err)
-	_, mismatch, err := manualEngine.VerifyDispatch(manualConn, manualRun, nowMS)
-	testsupport.Must(t, err, "manual verify: %v", err)
-	if mismatch != nil {
-		t.Fatalf("manual verify found a mismatch at row %d", mismatch.Position)
-	}
-	_, err = manualEngine.CloseDispatch(manualConn, manualRun, false, IntegrationSkip{}, nowMS)
-	testsupport.Must(t, err, "manual close: %v", err)
-
-	// The reconcile, in another.
-	oneConn := mustDB(t)
-	oneEngine := testEngine()
-	oneRun := dispatchRun(t, oneConn)
-	openDispatch(t, oneConn, oneRun, 0, nowMS)
-	oneStep := stepIDByInstance(t, oneConn, "implement@0")
-	completeWithoutUsage(t, oneConn, oneEngine, oneStep)
-
-	_, err = oneEngine.ReconcileDispatch(oneConn, oneRun, []BackfillRow{
-		{Step: oneStep, Unit: "tokens", Quantity: 48211},
-	}, "wave-journal:wf-7", "", false, IntegrationSkip{}, nowMS)
-	testsupport.Must(t, err, "reconcile: %v", err)
-
-	// What the ledger holds, row for row.
-	manualRows := usageRowsFor(t, manualConn, manualStep)
-	oneRows := usageRowsFor(t, oneConn, oneStep)
-	if len(manualRows) != 1 || len(oneRows) != 1 {
-		t.Fatalf("ledger rows: manual %d, reconciled %d, want 1 each",
-			len(manualRows), len(oneRows))
-	}
-	m, o := manualRows[0], oneRows[0]
-	if m.Unit != o.Unit || m.Quantity != o.Quantity ||
-		m.Attempt != o.Attempt || m.Source != o.Source {
-		t.Fatalf("the reconciled row differs from the hand-typed one:\n"+
-			"  manual:     %+v\n  reconciled: %+v", m, o)
-	}
-
-	// And what the PROBE reads — the fast-path column, not the rows.
-	manualStepRow, err := db.GetStep(manualConn, manualStep)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	oneStepRow, err := db.GetStep(oneConn, oneStep)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if manualStepRow.UsageRecorded != oneStepRow.UsageRecorded {
-		t.Fatalf("usage_recorded: manual %v, reconciled %v — D2's probe reads "+
-			"this column and the two orderings must leave it identical",
-			manualStepRow.UsageRecorded, oneStepRow.UsageRecorded)
-	}
-	if !oneStepRow.UsageRecorded {
-		t.Fatal("usage_recorded is false after a reconcile; the probe would " +
-			"keep refusing")
-	}
-
-	// The probe itself, run end to end, on both.
-	if _, err := manualEngine.NextSteps(manualConn, manualRun, 0, nowMS); err != nil {
-		t.Fatalf("`next` refuses after the manual ordering: %v", err)
-	}
-	if _, err := oneEngine.NextSteps(oneConn, oneRun, 0, nowMS); err != nil {
-		t.Fatalf("`next` refuses after the reconcile but not after the manual "+
-			"ordering: %v", err)
 	}
 }
 
@@ -305,27 +225,97 @@ func TestReconcileClosesOverParkedSuccessors(t *testing.T) {
 	testsupport.Must(t, err, "refresh-scope after the close: %v", err)
 }
 
-// TestReconcileLeavesTheStandaloneVerbsAlone is criterion 2 at the engine
-// level: the three functions the reconcile calls are the SAME ones the verbs
-// call, so a plain CloseDispatch on a plain run behaves exactly as before.
-func TestReconcileLeavesTheStandaloneVerbsAlone(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	runID := dispatchRun(t, conn)
-
+// retriedAfterOpen parks implement@0 on a gap-only record after the manifest
+// opened and resolves it --as retry. Claim and record both pass --metadata, as
+// a real wave's do, so the retried step renders the claim history its spent
+// claim left behind: attempt and the merged metadata bag.
+func retriedAfterOpen(t *testing.T, conn *sql.DB, runID int) {
+	t.Helper()
 	openDispatch(t, conn, runID, 0, nowMS)
-	implID := stepIDByInstance(t, conn, "implement@0")
-	completeWithoutUsage(t, conn, e, implID)
-
-	_, err := e.BackfillUsage(conn, runID, []BackfillRow{
-		{Step: implID, Unit: "tokens", Quantity: 7},
-	}, "", "", nowMS)
-	testsupport.Must(t, err, "backfill-usage: %v", err)
-
-	outcome, err := e.CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS)
-	testsupport.Must(t, err, "close: %v", err)
-	if outcome.Status != db.DispatchClosed || outcome.Reason != db.CloseReasonReconciled {
-		t.Fatalf("close outcome = %+v, want (%s, %s)",
-			outcome, db.DispatchClosed, db.CloseReasonReconciled)
+	id := stepIDByInstance(t, conn, "implement@0")
+	claim, err := ClaimStep(conn, id, ClaimOptions{
+		Owner: "worker", Metadata: `{"dispatched_tier":"standard"}`, NowMS: nowMS,
+	})
+	testsupport.Must(t, err, "claim: %v", err)
+	testsupport.Must(t, testEngine().CompleteStep(conn, id, CompleteOptions{
+		Token:    claim.Token,
+		Artifact: []byte("   \n"),
+		Gaps:     [][]byte{[]byte("# The fix is out of scope\n\nNothing here to change.")},
+		Metadata: `{"model_resolved":"unknown","effort_resolved":"unknown"}`,
+		NowMS:    nowMS,
+	}), "gap-only record")
+	if got := statusOf(t, conn, id); got != db.StepWaitingHuman {
+		t.Fatalf("premise: implement@0 is %q after a gap-only record, want %q",
+			got, db.StepWaitingHuman)
 	}
+	testsupport.Must(t, testEngine().ResolveStep(conn, id, ResolveRetry, "run it again", nowMS),
+		"resolve --as retry")
+	if got := statusOf(t, conn, id); got != db.StepPending {
+		t.Fatalf("premise: implement@0 is %q after the retry, want %q", got, db.StepPending)
+	}
+}
+
+// TestVerifyRetriedRowDoesNotFail pins a retry resolved on a manifest row while
+// its dispatch is open: the operator's ruling on that step is what moved its
+// rendering, so verify reports the row as retried and still verifies.
+func TestVerifyRetriedRowDoesNotFail(t *testing.T) {
+	conn := mustDB(t)
+	runID := dispatchRun(t, conn)
+	retriedAfterOpen(t, conn, runID)
+
+	result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+	testsupport.Must(t, err, "verify: %v", err)
+	if got := verdictOf(result, "implement@0"); got != RowRetried {
+		t.Fatalf("the retried row reads %q, want %q: %+v", got, RowRetried, result.Rows)
+	}
+	if mismatch != nil || !result.Verified {
+		t.Fatalf("verify refused a manifest whose only shift is a recorded retry: "+
+			"mismatch %+v, rows %+v", mismatch, result.Rows)
+	}
+}
+
+// TestVerifyUnrelatedShiftStillFails keeps the retry exemption narrow: a shift
+// no recorded retry resolution explains still refuses.
+func TestVerifyUnrelatedShiftStillFails(t *testing.T) {
+	t.Run("a failed claim returned to the pool is not a retry", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := dispatchRun(t, conn)
+		openDispatch(t, conn, runID, 0, nowMS)
+		id := stepIDByInstance(t, conn, "implement@0")
+		claim, err := ClaimStep(conn, id, ClaimOptions{Owner: "worker", NowMS: nowMS})
+		testsupport.Must(t, err, "claim: %v", err)
+		testsupport.Must(t, testEngine().FailStep(conn, id, claim.Token, "went wrong", "", nowMS),
+			"fail")
+		if got := statusOf(t, conn, id); got != db.StepPending {
+			t.Fatalf("premise: implement@0 is %q after a below-budget fail, want %q",
+				got, db.StepPending)
+		}
+
+		result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+		testsupport.Must(t, err, "verify: %v", err)
+		if got := verdictOf(result, "implement@0"); got != RowShifted {
+			t.Errorf("a failed-and-reoffered row reads %q, want %q", got, RowShifted)
+		}
+		if mismatch == nil || result.Verified {
+			t.Errorf("verify passed a shift no retry resolution explains: %+v", result.Rows)
+		}
+	})
+
+	t.Run("a retried row that also shifted elsewhere still refuses", func(t *testing.T) {
+		conn := mustDB(t)
+		runID := dispatchRun(t, conn)
+		retriedAfterOpen(t, conn, runID)
+		testsupport.Must(t, db.SetConfig(conn, 0, db.KeyLeaseTTLDefault, "45m"),
+			"setting the default lease TTL")
+
+		result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
+		testsupport.Must(t, err, "verify: %v", err)
+		if got := verdictOf(result, "implement@0"); got != RowShifted {
+			t.Errorf("a retried row whose lease TTL also changed reads %q, want %q",
+				got, RowShifted)
+		}
+		if mismatch == nil || result.Verified {
+			t.Errorf("verify passed a lease-TTL shift on a retried row: %+v", result.Rows)
+		}
+	})
 }

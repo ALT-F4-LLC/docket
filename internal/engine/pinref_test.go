@@ -78,7 +78,7 @@ func TestReadFilePinsAgreeWithReaders(t *testing.T) {
 		t.Errorf("verifyFilePin status = %q (path %q), want %q", v.Status, v.Path, PinOK)
 	}
 
-	got, _, err := readPinnedPacketFile("RUN-1", packetPinsForRun(pins), []string{root}, filepath.Join("contracts", "pinned.md"))
+	got, _, err := readPinnedPacketFile("RUN-1", packetFilePins(pins), []string{root}, filepath.Join("contracts", "pinned.md"))
 	testsupport.Must(t, err, "readPinnedPacketFile: %v", err)
 	if got != body {
 		t.Errorf("packet resolver read %q, want %q", got, body)

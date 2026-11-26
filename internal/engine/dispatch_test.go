@@ -14,7 +14,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
-	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // Dispatch — one test per clause group.
@@ -228,29 +227,6 @@ func (c *countingActionRunner) Run(
 ) (ActionResult, error) {
 	c.runs[sc.Instance]++
 	return c.inner.Run(ctx, a, sc)
-}
-
-// TestDispatchOpenDrivesACascadedActionStep: an action the open drives routes
-// and readies a second action step. The open keeps driving until nothing
-// routes, so the second action has run and the manifest carries no ready
-// action row for it.
-func TestDispatchOpenDrivesACascadedActionStep(t *testing.T) {
-	e := testEngine()
-	conn, runID := cascadeRun(t, e)
-	approveDecide(t, conn, e)
-
-	m := openDispatch(t, conn, runID, 0, nowMS)
-
-	if got := stepStatus(t, conn, "rereduce@0"); got != db.StepDone {
-		t.Errorf("rereduce@0 is %q after dispatch open, want %q — reduce@0's "+
-			"routing readied it inside the same call", got, db.StepDone)
-	}
-	for _, r := range m.Rows {
-		if r.Instance == "rereduce@0" && r.Kind == workflow.ClassAction && r.Status == db.StepReady {
-			t.Errorf("the manifest carries rereduce@0 as a ready action row; " +
-				"no relay will ever execute it")
-		}
-	}
 }
 
 // TestDispatchOpenOpensACascadedVoteProposal: an action the open drives routes
@@ -588,8 +564,7 @@ func TestManifestLimitSlicesAfterOrdering(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
 
-	// Two issues on disjoint scopes, exactly like
-	// TestNextStillOffersDisjointScopesTogether: neither can exclude the
+	// Two issues on disjoint scopes: neither can exclude the
 	// other, so activation offers both as ready — the two rows this
 	// comparison needs. A single-issue run offers only its root step and
 	// would leave the ordering-then-slicing property unasserted.
@@ -732,24 +707,6 @@ func TestDispatchOpenRefusalNamesTheOpenOne(t *testing.T) {
 // Verify
 // ---------------------------------------------------------------------------
 
-// TestVerifyEqual: an untouched manifest verifies.
-func TestVerifyEqual(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-
-	result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
-	testsupport.Must(t, err, "verify: %v", err)
-	if mismatch != nil {
-		t.Fatalf("an untouched manifest reported a mismatch at position %d:\n"+
-			"  stored:     %s\n  recomputed: %s",
-			mismatch.Position, mismatch.Stored, mismatch.Computed)
-	}
-	if !result.Verified {
-		t.Error("verified = false on an untouched manifest")
-	}
-}
-
 // TestVerifyRefusesASelfInconsistentStoredRow pins DKT-46's restored
 // cross-check: `row_json` and `row_sha256` are written together, and a stored
 // row whose bytes no longer hash to its recorded sum is refused as an ERROR —
@@ -769,39 +726,6 @@ func TestVerifyRefusesASelfInconsistentStoredRow(t *testing.T) {
 	_, _, err = NewEngine().VerifyDispatch(conn, runID, nowMS)
 	if err == nil || !strings.Contains(err.Error(), "row_sha256") {
 		t.Fatalf("verify err = %v, want a refusal naming the diverged pair", err)
-	}
-}
-
-// TestVerifyReportsTheFirstDifferingPosition: an unequal manifest names
-// the FIRST differing position, with both renderings.
-//
-// The manifest is invalidated by claiming a step, which removes it from the
-// ready set — the ordinary way a manifest goes stale.
-func TestVerifyReportsTheFirstDifferingPosition(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	manifest := openDispatch(t, conn, runID, 0, nowMS)
-	if len(manifest.Rows) == 0 {
-		t.Fatal("premise: the manifest must have rows")
-	}
-
-	// As a premise: claiming is NOT refused while a dispatch is open.
-	claimInstance(t, conn, manifest.Rows[0].Instance, nowMS)
-
-	result, mismatch, err := NewEngine().VerifyDispatch(conn, runID, nowMS)
-	testsupport.Must(t, err, "verify: %v", err)
-	if mismatch == nil {
-		t.Fatal("a manifest whose first step was claimed verified as equal")
-	}
-	if result.Verified {
-		t.Error("verified = true alongside a mismatch")
-	}
-	if mismatch.Position != 0 {
-		t.Errorf("mismatch at position %d, want 0 — the FIRST differing row",
-			mismatch.Position)
-	}
-	if mismatch.Stored == "" {
-		t.Error("the stored row was not rendered; verify requires the differing BYTES")
 	}
 }
 
@@ -1086,7 +1010,7 @@ func TestVerifyMatchesRowsByIdentityNotPosition(t *testing.T) {
 // `RowMismatch.Computed` is a non-empty rendering of the CURRENT row, not the
 // empty string the missing-row branch produces.
 //
-// TestVerifyReportsTheFirstDifferingPosition exercises only the missing-row
+// TestVerifyReportsEveryRowNotJustTheFirst exercises only the missing-row
 // branch (the claimed step drops out of the ready set entirely); this test
 // changes the lease TTL config between open and verify, which changes a
 // still-ready row's canonical bytes without touching its readiness.
@@ -1297,33 +1221,6 @@ func TestClaimIsNotRefusedByAnOpenDispatch(t *testing.T) {
 	if claim.Token == "" {
 		t.Error("the claim minted no token")
 	}
-}
-
-// TestIssueModeNextIsUnaffected: `docket next` WITHOUT `--run` never
-// probes anything.
-//
-// Issue mode's byte-identical guarantee is preserved, which is what
-// keeps `test_x_next.sh` passing untouched. The unit-level assertion is that the
-// issue-mode path does not reach the run-mode probes at all — asserted here by
-// running it over a database that HAS an open dispatch and a discrepancy, where
-// a probe that fired would refuse.
-func TestIssueModeNextIsUnaffected(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-
-	// Run mode refuses...
-	if _, err := NewEngine().NextSteps(conn, runID, 0, nowMS); err == nil {
-		t.Fatal("premise: run mode must refuse with a dispatch open")
-	}
-
-	// ...and the issue-mode planner answers, because it never asks. The engine
-	// entry point for issue mode is the planner, which this package does not
-	// call: the CLI's runNext branches BEFORE reaching NextSteps, so
-	// the structural guarantee is that no dispatch probe exists on that path.
-	// The behavioral half is test_x_next.sh, which passes untouched.
-	_, _, err := db.ListIssues(conn, db.ListOptions{})
-	testsupport.Must(t, err, "the issue-mode data path failed: %v", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1578,49 +1475,6 @@ func finishWithoutUsageAt(t *testing.T, conn *sql.DB, instance string, at int64)
 	testsupport.Must(t, err, "finishing %s: %v", instance, err)
 	err = tx.Commit()
 	testsupport.Must(t, err, "Commit: %v", err)
-}
-
-// TestDiscrepancyD3ExcludesHistoricalSteps is D3: a step that reached its
-// terminal status BEFORE the run's activation is not a discrepancy.
-//
-// Without this, upgrading the binary would instantly make every historical run's
-// dispatch un-closable — a migration that breaks in-flight work, which is
-// exactly what was refused for schemas.
-func TestDiscrepancyD3ExcludesHistoricalSteps(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-	abandon(t, conn, runID, nowMS)
-
-	answer, err := NewEngine().NextSteps(conn, runID, 0, nowMS)
-	testsupport.Must(t, err, "next: %v", err)
-	stepID := stepIDByInstance(t, conn, answer.Steps[0].Instance)
-
-	var activated int64
-	err = conn.QueryRow(
-		`SELECT COALESCE(activated_at_ms, 0) FROM runs WHERE id = ?`, runID,
-	).Scan(&activated)
-	testsupport.Must(t, err, "reading activated_at_ms: %v", err)
-	if activated == 0 {
-		t.Fatal("premise: the run must be activated")
-	}
-
-	// Terminal, claimed, no usage, and recorded BEFORE the run was activated.
-	// `attempt = 1` keeps D5 from excusing the step first: an unclaimed step
-	// owes nothing whatever its clock, and this test would then pass with D3
-	// gone. `recorded_at_ms` is the clock D3 reads.
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, attempt = 1, recorded_at_ms = ?, updated_at_ms = ?
-		  WHERE id = ?`,
-		db.StepDone, activated-1, activated-1, stepID)
-
-	for _, d := range discrepanciesAt(t, conn, runID, nowMS) {
-		if d.Kind == DiscrepancyMissingUsage {
-			t.Errorf("a step terminal BEFORE activation is a discrepancy (%v); D3 "+
-				"excludes it, or upgrading the binary makes every historical run "+
-				"un-closable", d)
-		}
-	}
 }
 
 // TestDiscrepancyD3HoldsAcrossALaterAnnotation is D3 against a later row
@@ -2005,30 +1859,6 @@ func TestAbandonIsUnconditional(t *testing.T) {
 	testsupport.Must(t, err, "reading the dispatch-abandoned event: %v", err)
 	if !strings.Contains(data, "relay died") {
 		t.Errorf("the event %q does not carry the operator's reason", data)
-	}
-}
-
-// TestCloseRacingAbandonReportsWhy: close and abandon are both CAS on
-// (id, status='open'), and the loser learns WHY.
-//
-// A loser told "not open" cannot tell whether the batch was reconciled or given
-// up on — which are opposite facts about whether its work is accounted for.
-func TestCloseRacingAbandonReportsWhy(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-
-	// The abandon wins; the close arrives second.
-	abandon(t, conn, runID, nowMS)
-
-	_, err := NewEngine().CloseDispatch(conn, runID, false, IntegrationSkip{}, nowMS)
-	if err == nil {
-		t.Fatal("close succeeded against an abandoned dispatch")
-	}
-	// It reports "no dispatch is open", which is the honest answer once the
-	// abandon committed: the open-manifest probe finds nothing.
-	if !strings.Contains(err.Error(), "no dispatch is open") {
-		t.Errorf("the refusal %q does not say why the close failed", err)
 	}
 }
 

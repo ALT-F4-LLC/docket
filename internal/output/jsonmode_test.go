@@ -10,7 +10,8 @@ import (
 
 // TestParseJSONMode covers the full accepted-value table. The boolean
 // spellings matter: --json was a Bool flag before v2, so --json=true and
-// --json=false parsed successfully then and must keep doing so.
+// --json=false parsed successfully then and must keep doing so. The v1
+// dialect is retired and rejected.
 func TestParseJSONMode(t *testing.T) {
 	tests := []struct {
 		raw     string
@@ -18,9 +19,9 @@ func TestParseJSONMode(t *testing.T) {
 		wantErr bool
 	}{
 		{"", JSONNone, false},
-		{"v1", JSONV1, false},
-		{"true", JSONV1, false},
-		{"1", JSONV1, false},
+		{"v1", JSONNone, true},
+		{"true", JSONV2, false},
+		{"1", JSONV2, false},
 		{"v2", JSONV2, false},
 		{"false", JSONNone, false},
 		{"0", JSONNone, false},
@@ -42,79 +43,34 @@ func TestParseJSONMode(t *testing.T) {
 	}
 }
 
-// TestBareJSONIsByteIdenticalToV1 is the compatibility guard for the most
-// compat-sensitive edit in the program: converting --json from Bool to String.
-// A bare --json (NoOptDefVal "v1") must produce exactly what the Bool flag
-// produced.
-func TestBareJSONIsByteIdenticalToV1(t *testing.T) {
-	data := map[string]any{"key": "val", "n": 3}
-
-	// What the Bool-era flag produced: New(true, false) -> v1 envelope.
-	var legacy bytes.Buffer
-	legacyWriter := &Writer{JSONMode: true, Stdout: &legacy, Stderr: &bytes.Buffer{}}
-	legacyWriter.Success(data, "done")
-
-	// What a bare --json produces now.
-	version, err := ParseJSONMode("v1")
-	testsupport.Must(t, err, "ParseJSONMode(v1): %v", err)
-	var current bytes.Buffer
-	currentWriter := &Writer{
-		JSONMode: true, JSONVersion: version,
-		Stdout: &current, Stderr: &bytes.Buffer{},
-	}
-	currentWriter.Success(data, "done")
-
-	if legacy.String() != current.String() {
-		t.Errorf("bare --json output drifted from v1:\n legacy = %q\ncurrent = %q",
-			legacy.String(), current.String())
-	}
-}
-
-// TestZeroValueWriterEmitsV1 pins the Writer zero value: a Writer with
-// JSONMode set but no JSONVersion (as older code and existing tests build)
-// must emit v1, never v2.
-func TestZeroValueWriterEmitsV1(t *testing.T) {
+// TestZeroValueWriterEmitsV2 pins the Writer zero value: a Writer with
+// JSONMode set but no JSONVersion renders the v2 envelope, the only JSON
+// dialect.
+func TestZeroValueWriterEmitsV2(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Writer{JSONMode: true, Stdout: &buf, Stderr: &bytes.Buffer{}}
 	w.Success(testCollection{items: []int{1, 2}, total: 9, truncated: true}, "")
 
-	var raw map[string]any
-	err := json.Unmarshal(buf.Bytes(), &raw)
+	var envelope struct {
+		Data struct {
+			Items     []int `json:"items"`
+			Total     int   `json:"total"`
+			Truncated bool  `json:"truncated"`
+		} `json:"data"`
+	}
+	err := json.Unmarshal(buf.Bytes(), &envelope)
 	testsupport.Must(t, err, "unmarshal: %v", err)
-	dataMap, ok := raw["data"].(map[string]any)
-	if !ok {
-		t.Fatalf("data type = %T, want map", raw["data"])
-	}
-	if _, hasItems := dataMap["items"]; hasItems {
-		t.Error("zero-value Writer emitted a v2 envelope; want v1")
+	if len(envelope.Data.Items) != 2 || envelope.Data.Total != 9 || !envelope.Data.Truncated {
+		t.Errorf("zero-value Writer data = %+v, want {items:[1 2] total:9 truncated:true}\n%s",
+			envelope.Data, buf.String())
 	}
 }
 
-func TestNewWithVersion(t *testing.T) {
-	tests := []struct {
-		version      JSONVersion
-		wantJSONMode bool
-	}{
-		{JSONNone, false},
-		{JSONV1, true},
-		{JSONV2, true},
-	}
-	for _, tt := range tests {
-		w := NewWithVersion(tt.version, false)
-		if w.JSONMode != tt.wantJSONMode {
-			t.Errorf("NewWithVersion(%v).JSONMode = %v, want %v",
-				tt.version, w.JSONMode, tt.wantJSONMode)
-		}
-		if w.JSONVersion != tt.version {
-			t.Errorf("NewWithVersion(%v).JSONVersion = %v", tt.version, w.JSONVersion)
-		}
-	}
-}
-
-// TestNewMatchesLegacyBoolConstructor pins New's Bool-era signature behavior.
+// TestNewMatchesLegacyBoolConstructor pins New's Bool-era signature behavior:
+// the bool alone selects JSON mode with the v2 envelope.
 func TestNewMatchesLegacyBoolConstructor(t *testing.T) {
-	if w := New(true, false); w.JSONVersion != JSONV1 || !w.JSONMode {
-		t.Errorf("New(true,false) = {mode:%v version:%v}, want {true JSONV1}",
+	if w := New(true, false); w.JSONVersion != JSONV2 || !w.JSONMode {
+		t.Errorf("New(true,false) = {mode:%v version:%v}, want {true JSONV2}",
 			w.JSONMode, w.JSONVersion)
 	}
 	if w := New(false, false); w.JSONVersion != JSONNone || w.JSONMode {

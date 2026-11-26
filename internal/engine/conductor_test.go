@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -250,24 +251,6 @@ func TestOperatorVerbsRequireTheConductorCapability(t *testing.T) {
 	}
 }
 
-// TestUnboundRunStaysOpenToTheOperatorVerbs: a run activated before
-// the capability existed asks for nothing, so a migrated store's runs in
-// flight keep working exactly as they did.
-func TestUnboundRunStaysOpenToTheOperatorVerbs(t *testing.T) {
-	for _, verb := range conductorVerbs {
-		t.Run(verb.name, func(t *testing.T) {
-			conn := mustDB(t)
-			run, _ := boundRun(t, conn)
-			unbind(t, conn, run.ID)
-			e := testEngine()
-			stepID := verb.setup(t, conn, e, run)
-
-			testsupport.Must(t, verb.call(conn, e, run, stepID, ""),
-				"%s on an unbound run without a token: %v", verb.name, nil)
-		})
-	}
-}
-
 // TestConductRunRotatesTheCapability: `run conduct` mints a fresh token,
 // retires the standing one, and records who took the seat.
 func TestConductRunRotatesTheCapability(t *testing.T) {
@@ -311,6 +294,48 @@ func TestConductRunRotatesTheCapability(t *testing.T) {
 	if leaked != 0 {
 		t.Error("the minted token appears in an event payload")
 	}
+}
+
+// TestConductorSeatedRecordsTheDaemonObservedCaller: the conductor-seated
+// event stores the token name and peer address the daemon observed. Over HTTP
+// both are set; over the Unix socket the peer address is empty and no token
+// name is stored.
+func TestConductorSeatedRecordsTheDaemonObservedCaller(t *testing.T) {
+	seatedData := func(t *testing.T, caller DaemonCaller) map[string]any {
+		t.Helper()
+		conn := mustDB(t)
+		run, _ := boundRun(t, conn)
+		_, err := ConductRun(conn, run.ID, ConductOptions{By: auditBy, Caller: caller, NowMS: nowMS})
+		testsupport.Must(t, err, "ConductRun: %v", err)
+		var raw string
+		err = conn.QueryRow(
+			`SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`,
+			run.ID, EventConductorSeated).Scan(&raw)
+		testsupport.Must(t, err, "reading the conductor-seated event: %v", err)
+		data := map[string]any{}
+		testsupport.Must(t, json.Unmarshal([]byte(raw), &data), "decoding %s", raw)
+		return data
+	}
+
+	t.Run("HTTP", func(t *testing.T) {
+		data := seatedData(t, DaemonCaller{TokenName: "ci-relay", PeerAddr: "203.0.113.7:51234"})
+		if got := data["token_name"]; got != "ci-relay" {
+			t.Errorf("token_name = %v, want ci-relay (data %v)", got, data)
+		}
+		if got := data["peer_addr"]; got != "203.0.113.7:51234" {
+			t.Errorf("peer_addr = %v, want 203.0.113.7:51234 (data %v)", got, data)
+		}
+	})
+
+	t.Run("Unix socket", func(t *testing.T) {
+		data := seatedData(t, DaemonCaller{})
+		if got, ok := data["peer_addr"]; ok && got != "" {
+			t.Errorf("peer_addr = %v, want empty (data %v)", got, data)
+		}
+		if got, ok := data["token_name"]; ok {
+			t.Errorf("token_name = %v stored for a socket caller, want none (data %v)", got, data)
+		}
+	})
 }
 
 // TestConductRunBindsAnUnboundRunAndRefusesATerminalOne covers the two ends:

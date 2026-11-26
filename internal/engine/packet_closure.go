@@ -5,7 +5,7 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -49,10 +49,10 @@ const policyPinRef = "policy.toml"
 // bound workflows reach. Order is preserved from scan.pins, which is already
 // sorted by ref, so the recorded set stays deterministic.
 func packetClosurePins(
-	scan *configScan, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
-) []db.Pin {
+	scan *configScan, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
+) []store.Pin {
 	needed := packetClosureRefs(scan, runIssues, bindings)
-	out := make([]db.Pin, 0, len(needed))
+	out := make([]store.Pin, 0, len(needed))
 	for _, p := range scan.pins {
 		if needed[path.Clean(filepath.ToSlash(p.Ref))] {
 			out = append(out, p)
@@ -64,7 +64,7 @@ func packetClosurePins(
 // packetClosureRefs computes the set of config-relative refs the bound
 // workflows can reach, as described at the top of this file.
 func packetClosureRefs(
-	scan *configScan, runIssues []*db.RunIssue, bindings map[int]*boundDefinition,
+	scan *configScan, runIssues []*store.RunIssue, bindings map[int]*boundDefinition,
 ) map[string]bool {
 	needed := map[string]bool{policyPinRef: true}
 
@@ -157,10 +157,10 @@ func packetIncludesOf(roots []string, ref string) []string {
 // current file size into the declared-packet index where the inherited pin
 // deliberately resolves as present-with-unknown-size — and a re-activation
 // must not reject a run that was legal when it started.
-func withoutAlreadyPinned(closure []db.Pin, existing []db.Pin, roots []string) []db.Pin {
+func withoutAlreadyPinned(closure []store.Pin, existing []store.Pin, roots []string) []store.Pin {
 	have := make(map[string]bool, len(existing))
 	for _, p := range existing {
-		if p.Kind != db.PinKindFile {
+		if p.Kind != store.PinKindFile {
 			continue
 		}
 		ref := p.Ref
@@ -176,7 +176,7 @@ func withoutAlreadyPinned(closure []db.Pin, existing []db.Pin, roots []string) [
 		have[path.Clean(filepath.ToSlash(ref))] = true
 	}
 
-	kept := make([]db.Pin, 0, len(closure))
+	kept := make([]store.Pin, 0, len(closure))
 	for _, p := range closure {
 		if !have[path.Clean(filepath.ToSlash(p.Ref))] {
 			kept = append(kept, p)

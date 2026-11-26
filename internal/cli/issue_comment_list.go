@@ -3,10 +3,10 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -20,22 +20,11 @@ var commentListCmd = &cobra.Command{
 }
 
 func runIssueCommentList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := issueArg(args[0])
+	listed, err := verb.IssueCommentList(cmd.Context(), verbEnv(cmd), verb.IssueCommentListInput{Issue: args[0]})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	// Verify the issue exists.
-	if _, err := getIssueOrErr(conn, id, fmt.Sprintf("issue %s", args[0])); err != nil {
-		return err
-	}
-
-	comments, err := db.ListComments(conn, id)
-	if err != nil {
-		return cmdErr(fmt.Errorf("fetching comments: %w", err), output.ErrGeneral)
-	}
+	id, comments := listed.IssueID, listed.Comments
 
 	if w.JSONMode {
 		w.Success(comments, "")

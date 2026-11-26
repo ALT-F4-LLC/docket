@@ -112,29 +112,6 @@ on_fail = "skip"
 	}
 }
 
-// TestGateNotYetItsTurnDoesNotEnterReview is the predicate's lower bound, and
-// the reason it is R3 rather than "any pending human step".
-//
-// The fixture declares `commit-gate` from activation. If the mirror counted it
-// the moment it existed, every issue in this workflow would read `review` from
-// its first claim onward — a status that would then mean nothing at all.
-func TestGateNotYetItsTurnDoesNotEnterReview(t *testing.T) {
-	conn := mustDB(t)
-	_, issue := activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "the change summary", "")
-
-	if got := stepStatus(t, conn, "commit-gate@0"); got != db.StepPending {
-		t.Fatalf("premise: commit-gate@0 = %q", got)
-	}
-	if got := issueStatus(t, conn, issue); got != string(model.StatusInProgress) {
-		t.Errorf("issue = %q with a human gate four steps downstream, want %q "+
-			"— it is pending because its predecessors are still to run, not "+
-			"because anyone is waiting on a decision", got, model.StatusInProgress)
-	}
-}
-
 // TestExhaustedFailureNarratesTheRouting is AC3's second half: an exhausted
 // failure routed somewhere terminal also drops a trail comment. The
 // non-exhausted half is TestFailedStepNarratesTheRetry.

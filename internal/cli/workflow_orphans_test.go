@@ -67,22 +67,23 @@ func listOrphans(t *testing.T, conn *sql.DB) (string, []orphanRow) {
 
 	var envelope struct {
 		Data struct {
-			Workflows []orphanRow `json:"workflows"`
+			Items     []orphanRow `json:"items"`
 			Total     int         `json:"total"`
+			Truncated bool        `json:"truncated"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, raw)
 	}
-	if envelope.Data.Total != len(envelope.Data.Workflows) {
+	if envelope.Data.Total != len(envelope.Data.Items) {
 		// The Collection contract's `total` is the TRUE pre-limit count, and
 		// under --orphans the population it counts is the orphans, not the
 		// registry: a total that still counted workflows would report
 		// truncation that never happened.
 		t.Errorf("total = %d over %d listed orphans", envelope.Data.Total,
-			len(envelope.Data.Workflows))
+			len(envelope.Data.Items))
 	}
-	return human, envelope.Data.Workflows
+	return human, envelope.Data.Items
 }
 
 type orphanRow struct {
@@ -95,6 +96,9 @@ func runOrphanList(t *testing.T, conn *sql.DB, jsonMode bool) string {
 	t.Helper()
 	cmd := orphanListCmd(t, conn)
 	w, buf := bufWriter(jsonMode)
+	if jsonMode {
+		w.JSONVersion = output.JSONV2
+	}
 	testsupport.Must(t, runWorkflowList(cmd, nil, w), "workflow list --orphans")
 	return buf.String()
 }

@@ -133,27 +133,6 @@ func TestGetIssueFilesEmpty(t *testing.T) {
 	}
 }
 
-func TestGetIssueFilesSorted(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	id := mustCreateIssue(t, db, "sorted-test")
-
-	// Attach in reverse order.
-	err = AttachFiles(db, id, []string{"z.go", "a.go", "m.go"}, "alice")
-	testsupport.Must(t, err, "AttachFiles: %v", err)
-
-	files, err := GetIssueFiles(db, id)
-	testsupport.Must(t, err, "GetIssueFiles: %v", err)
-	if len(files) != 3 {
-		t.Fatalf("expected 3 files, got %d", len(files))
-	}
-	if files[0] != "a.go" || files[1] != "m.go" || files[2] != "z.go" {
-		t.Errorf("expected alphabetical order, got %v", files)
-	}
-}
-
 func TestGetIssueFilesTxSortedAndNeverNil(t *testing.T) {
 	db := mustOpen(t)
 	err := Initialize(db)
@@ -388,53 +367,5 @@ func TestCreateIssueDoesNotMutateFileInput(t *testing.T) {
 		if input[i] != original[i] {
 			t.Errorf("input[%d] = %q, want %q (slice was mutated)", i, input[i], original[i])
 		}
-	}
-}
-
-func TestAttachFilesRecordsActivity(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	id := mustCreateIssue(t, db, "activity-test")
-
-	err = AttachFiles(db, id, []string{"main.go"}, "alice")
-	testsupport.Must(t, err, "AttachFiles: %v", err)
-
-	// Verify activity was recorded.
-	var count int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM activity_log WHERE issue_id = ? AND field_changed = 'files'`,
-		id,
-	).Scan(&count); err != nil {
-		t.Fatalf("counting activity: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 files activity entry, got %d", count)
-	}
-}
-
-func TestDetachFilesRecordsActivity(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	id := mustCreateIssue(t, db, "detach-activity-test")
-
-	err = AttachFiles(db, id, []string{"main.go"}, "alice")
-	testsupport.Must(t, err, "AttachFiles: %v", err)
-	err = DetachFiles(db, id, []string{"main.go"}, "bob")
-	testsupport.Must(t, err, "DetachFiles: %v", err)
-
-	// Should have 2 file activity entries: one for attach, one for detach.
-	var count int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM activity_log WHERE issue_id = ? AND field_changed = 'files'`,
-		id,
-	).Scan(&count); err != nil {
-		t.Fatalf("counting activity: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("expected 2 files activity entries, got %d", count)
 	}
 }

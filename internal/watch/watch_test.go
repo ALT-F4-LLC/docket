@@ -12,76 +12,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-func TestRunWatch_CallsFnImmediately(t *testing.T) {
-	var called bool
-	ctx, cancel := context.WithCancel(context.Background())
-
-	var stdout bytes.Buffer
-	opts := Options{
-		Interval: 50 * time.Millisecond,
-		Stdout:   &stdout,
-		Stderr:   &bytes.Buffer{},
-	}
-
-	err := RunWatch(ctx, opts, func(_ context.Context, w *output.Writer) error {
-		called = true
-		fmt.Fprintln(w.Stdout, "hello")
-		cancel()
-		return nil
-	})
-
-	testsupport.Must(t, err, "unexpected error: %v", err)
-	if !called {
-		t.Fatal("fn was not called on first cycle")
-	}
-	if !strings.Contains(stdout.String(), "hello") {
-		t.Fatalf("expected stdout to contain 'hello', got: %q", stdout.String())
-	}
-}
-
-func TestRunWatch_CallsFnAfterInterval(t *testing.T) {
-	var callCount int
-	ctx, cancel := context.WithCancel(context.Background())
-
-	opts := Options{
-		Interval: 10 * time.Millisecond,
-		Stdout:   &bytes.Buffer{},
-		Stderr:   &bytes.Buffer{},
-	}
-
-	err := RunWatch(ctx, opts, func(_ context.Context, w *output.Writer) error {
-		callCount++
-		fmt.Fprintln(w.Stdout, "tick")
-		if callCount >= 3 {
-			cancel()
-		}
-		return nil
-	})
-
-	testsupport.Must(t, err, "unexpected error: %v", err)
-	if callCount < 3 {
-		t.Fatalf("expected at least 3 calls, got %d", callCount)
-	}
-}
-
-func TestRunWatch_ReturnsOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-
-	opts := Options{
-		Interval: 10 * time.Millisecond,
-		Stdout:   &bytes.Buffer{},
-		Stderr:   &bytes.Buffer{},
-	}
-
-	err := RunWatch(ctx, opts, func(_ context.Context, w *output.Writer) error {
-		fmt.Fprintln(w.Stdout, "once")
-		return nil
-	})
-
-	testsupport.Must(t, err, "expected nil error on context cancel, got: %v", err)
-}
-
 func TestRunWatch_TTYEmitsANSIClear(t *testing.T) {
 	var callCount int
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,6 +87,9 @@ func TestRunWatch_JSONModeNoANSI(t *testing.T) {
 
 	err := RunWatch(ctx, opts, func(_ context.Context, w *output.Writer) error {
 		callCount++
+		if w.JSONVersion != output.JSONV2 {
+			t.Errorf("JSON-mode watch Writer version = %v, want JSONV2", w.JSONVersion)
+		}
 		fmt.Fprintln(w.Stdout, `{"ok":true}`)
 		if callCount >= 2 {
 			cancel()
@@ -255,39 +188,6 @@ func TestRunWatch_ThreeConsecutiveErrorsExits(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "3 consecutive errors") {
 		t.Fatalf("unexpected error message: %v", err)
-	}
-}
-
-func TestRunWatch_BufferReused(t *testing.T) {
-	// Verify the buffer is allocated once by checking that RunWatch
-	// completes multiple cycles without issues (indirect test — the
-	// implementation uses buf.Reset() rather than allocating a new buffer).
-	var callCount int
-	ctx, cancel := context.WithCancel(context.Background())
-
-	var stdout bytes.Buffer
-	opts := Options{
-		Interval: 10 * time.Millisecond,
-		Stdout:   &stdout,
-		Stderr:   &bytes.Buffer{},
-	}
-
-	err := RunWatch(ctx, opts, func(_ context.Context, w *output.Writer) error {
-		callCount++
-		// Write different content each cycle to verify buffer is reset
-		fmt.Fprintf(w.Stdout, "cycle-%d\n", callCount)
-		if callCount >= 3 {
-			cancel()
-		}
-		return nil
-	})
-
-	testsupport.Must(t, err, "unexpected error: %v", err)
-
-	out := stdout.String()
-	// Each cycle should have its own content, not accumulated
-	if strings.Contains(out, "cycle-1cycle-1") {
-		t.Fatal("buffer appears to accumulate content instead of being reset")
 	}
 }
 

@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -176,24 +175,42 @@ type ClaimOptions struct {
 // A step with NO pre-gates takes the identical path with an empty phase 2, so
 // the overwhelmingly common case is byte-identical to the pre-gate-free
 // behavior.
-func ClaimStep(conn *sql.DB, stepID int, opts ClaimOptions) (*ClaimResult, error) {
+func ClaimStep(conn store.LegacyDB, stepID int, opts ClaimOptions) (*ClaimResult, error) {
 	return claimRecordingRefusals(conn, stepID, opts, nil)
 }
 
-// ClaimStepWithGates is ClaimStep with a gate runner, so pre-gates execute.
+// ClaimStepWithGates is ClaimStepWithGatesStore on store.StoreOn(conn).
+func (e *Engine) ClaimStepWithGates(
+	conn store.LegacyDB, stepID int, opts ClaimOptions,
+) (*ClaimResult, error) {
+	return e.ClaimStepWithGatesStore(store.StoreOn(conn), stepID, opts)
+}
+
+// ClaimStepWithGatesStore is ClaimStep with a gate runner, so pre-gates execute.
 //
 // The runner is a PARAMETER rather than a package-level value because
 // `ClaimStep` is a package-level function with no access to `e.Gates`. The
 // nil-runner form keeps every existing caller and every test written before
 // pre-gates working unchanged: with no runner, a declared pre-gate records
 // `unmatched` rather than executing, which is the fail-closed direction.
-func (e *Engine) ClaimStepWithGates(
-	conn *sql.DB, stepID int, opts ClaimOptions,
+func (e *Engine) ClaimStepWithGatesStore(
+	storage store.Store, stepID int, opts ClaimOptions,
 ) (*ClaimResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return claimRecordingRefusals(conn, stepID, opts, e)
 }
 
-// ClaimStepRendered is ClaimStepWithGates for `step claim --render`: the claim
+// ClaimStepRendered is ClaimStepRenderedStore on store.StoreOn(conn).
+func (e *Engine) ClaimStepRendered(
+	conn store.LegacyDB, stepID int, opts ClaimOptions, templatePath, executor string,
+) (*ClaimResult, *RenderResult, error) {
+	return e.ClaimStepRenderedStore(store.StoreOn(conn), stepID, opts, templatePath, executor)
+}
+
+// ClaimStepRenderedStore is ClaimStepWithGates for `step claim --render`: the claim
 // and the packet render as ONE saga (DKT-804).
 //
 // The render used to run strictly AFTER the claim's commit, and a render-time
@@ -224,9 +241,13 @@ func (e *Engine) ClaimStepWithGates(
 // ending the lease costs it one of its own verbs rather than the full TTL or an
 // operator-gated reap. Every deterministic failure still refuses before anything
 // is written.
-func (e *Engine) ClaimStepRendered(
-	conn *sql.DB, stepID int, opts ClaimOptions, templatePath, executor string,
+func (e *Engine) ClaimStepRenderedStore(
+	storage store.Store, stepID int, opts ClaimOptions, templatePath, executor string,
 ) (*ClaimResult, *RenderResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	if _, err := RenderStepAs(conn, stepID, templatePath, executor, opts.NowMS); err != nil {
 		return nil, nil, err
 	}
@@ -250,14 +271,14 @@ func (e *Engine) ClaimStepRendered(
 
 // claimRecordingRefusals records every CONFLICT-coded refusal of claimStepWithGates
 // as one `claim-refused` event (DKT-2776), in its own transaction that
-// commits although the claim did not. A lost CAS surfaces as db.ErrLeaseHeld,
+// commits although the claim did not. A lost CAS surfaces as store.ErrLeaseHeld,
 // which the CLI maps to CONFLICT, so it counts too.
 func claimRecordingRefusals(
-	conn *sql.DB, stepID int, opts ClaimOptions, e *Engine,
+	conn store.LegacyDB, stepID int, opts ClaimOptions, e *Engine,
 ) (*ClaimResult, error) {
 	result, err := claimStepWithGates(conn, stepID, opts, e)
 	code, isEngine := CodeOf(err)
-	if (isEngine && code == CodeConflict) || errors.Is(err, db.ErrLeaseHeld) {
+	if (isEngine && code == CodeConflict) || errors.Is(err, store.ErrLeaseHeld) {
 		if recErr := recordClaimRefused(conn, stepID, opts, err.Error(), refusalHolders(err)); recErr != nil {
 			return nil, recErr
 		}
@@ -275,16 +296,16 @@ func claimRecordingRefusals(
 // pre-gate row committed and before transaction B begins, so a test can
 // issue a second claim inside that window.
 var (
-	claimHookBeforeCAS     func(tx *sql.Tx, stepID int)
-	claimHookBeforeRefresh func(tx *sql.Tx, stepID int)
+	claimHookBeforeCAS     func(tx store.LegacyTx, stepID int)
+	claimHookBeforeRefresh func(tx store.LegacyTx, stepID int)
 	claimHookAfterPreGates func(stepID int)
 )
 
 // recordClaimRefused writes the `claim-refused` event (DKT-2776).
 func recordClaimRefused(
-	conn *sql.DB, stepID int, opts ClaimOptions, reason string, holders []Holder,
+	conn store.LegacyDB, stepID int, opts ClaimOptions, reason string, holders []Holder,
 ) error {
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return fmt.Errorf("recording the refused claim: %w", err)
 	}
@@ -309,14 +330,14 @@ func recordClaimRefused(
 	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return commitWrite(tx)
 }
 
 func claimStepWithGates(
-	conn *sql.DB, stepID int, opts ClaimOptions, e *Engine,
+	conn store.LegacyDB, stepID int, opts ClaimOptions, e *Engine,
 ) (*ClaimResult, error) {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -369,6 +390,7 @@ func claimStepWithGates(
 		return nil, fmt.Errorf("beginning claim: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
 	sched, err := LoadScheduler(tx, step.RunID, defs, opts.NowMS)
 	if err != nil {
@@ -379,7 +401,7 @@ func claimStepWithGates(
 	// CAS see one consistent state.
 	fresh := sched.stepByID[stepID]
 	if fresh == nil {
-		return nil, notFoundErr(db.ErrStepNotFound,
+		return nil, notFoundErr(store.ErrStepNotFound,
 			"step %s not found", model.FormatStepID(stepID))
 	}
 
@@ -389,13 +411,13 @@ func claimStepWithGates(
 	// against an expired lease succeeds with no operator action and no
 	// reaper. This is the liveness mechanism re-offering rests on.
 	if sched.Expired(fresh) {
-		if err := db.ReapStepTx(tx, fresh.ID, opts.NowMS); err != nil {
+		if err := st.ReapStepTx(fresh.ID, opts.NowMS); err != nil {
 			return nil, err
 		}
 		// The outcome breakdown (DKT-490): a claim reaped here spent an
 		// attempt in silence, and the counter is what keeps that from reading
 		// as a failure on the row this same transaction re-claims.
-		if err := db.MarkStepClaimReapedTx(tx, fresh.ID, opts.NowMS); err != nil {
+		if err := st.MarkStepClaimReapedTx(fresh.ID, opts.NowMS); err != nil {
 			return nil, err
 		}
 		if err := recordEvent(tx, eventRecord{
@@ -404,7 +426,7 @@ func claimStepWithGates(
 		}); err != nil {
 			return nil, err
 		}
-		fresh.Status = db.StepPending
+		fresh.Status = store.StepPending
 		fresh.Owner, fresh.TokenHash, fresh.ExpiresMS = "", "", 0
 		fresh.StartedMS = nil
 		fresh.ReapedClaims++
@@ -518,7 +540,7 @@ func claimStepWithGates(
 		// depend on which step happened to be claimed next.
 		if cond == CondBudget {
 			refusal := enforceBudgetTx(tx, sched, fresh, claimCost, opts.NowMS)
-			if err := tx.Commit(); err != nil {
+			if err := commitWrite(tx); err != nil {
 				return nil, fmt.Errorf("committing the budget pause: %w", err)
 			}
 			return nil, refusal
@@ -578,7 +600,7 @@ func claimStepWithGates(
 	// same snapshot, same pause-and-refuse contract as the CondBudget branch.
 	if opts.CostMultiplier > 0 && !sched.budgetAdmits(fresh, claimCost) {
 		refusal := enforceBudgetTx(tx, sched, fresh, claimCost, opts.NowMS)
-		if err := tx.Commit(); err != nil {
+		if err := commitWrite(tx); err != nil {
 			return nil, fmt.Errorf("committing the budget pause: %w", err)
 		}
 		return nil, refusal
@@ -597,18 +619,18 @@ func claimStepWithGates(
 	if claimHookBeforeCAS != nil {
 		claimHookBeforeCAS(tx, fresh.ID)
 	}
-	token, lease, err := db.ClaimStepWithRecoveryTx(
-		tx, fresh.ID, opts.Owner, opts.RecoverySecret, ttlMS, opts.NowMS)
+	token, lease, err := st.ClaimStepWithRecoveryTx(
+		fresh.ID, opts.Owner, opts.RecoverySecret, ttlMS, opts.NowMS)
 	if err != nil {
 		return nil, err
 	}
 
 	// `started_ms` stamps HERE, at claim, not at first heartbeat — that is what
 	// makes `max_step_duration` schedule-to-close.
-	if err := db.StartStepTx(tx, fresh.ID, opts.NowMS); err != nil {
+	if err := st.StartStepTx(fresh.ID, opts.NowMS); err != nil {
 		return nil, err
 	}
-	if err := db.SetStepStatusTx(tx, fresh.ID, db.StepClaimed, opts.NowMS, opts.NowMS); err != nil {
+	if err := st.SetStepStatusTx(fresh.ID, store.StepClaimed, opts.NowMS, opts.NowMS); err != nil {
 		return nil, err
 	}
 
@@ -636,7 +658,7 @@ func claimStepWithGates(
 		if err != nil {
 			return nil, err
 		}
-		if err := db.SetStepMetadataTx(tx, fresh.ID, merged, opts.NowMS); err != nil {
+		if err := st.SetStepMetadataTx(fresh.ID, merged, opts.NowMS); err != nil {
 			return nil, err
 		}
 		// The snapshot carries the merge forward so THIS claim's own context
@@ -715,7 +737,7 @@ func claimStepWithGates(
 
 	// Reflect the claim in the snapshot so the bundle's `context.step` reports
 	// the step as `claimed` — which is what it now is.
-	fresh.Status = db.StepClaimed
+	fresh.Status = store.StepClaimed
 	fresh.Attempt = lease.Attempt
 	fresh.Owner, fresh.TokenHash, fresh.ExpiresMS = opts.Owner, lease.TokenHash, lease.ExpiresMS
 	fresh.StartedMS = &opts.NowMS
@@ -732,10 +754,10 @@ func claimStepWithGates(
 	// marker an earlier claim left when it ended before transaction B.
 	phase := ""
 	if len(preGates) > 0 {
-		phase = db.ClaimPhasePreGates
+		phase = store.ClaimPhasePreGates
 	}
 	if fresh.ClaimPhase != phase {
-		if err := db.SetStepClaimPhaseTx(tx, fresh.ID, phase, opts.NowMS); err != nil {
+		if err := st.SetStepClaimPhaseTx(fresh.ID, phase, opts.NowMS); err != nil {
 			return nil, err
 		}
 		fresh.ClaimPhase = phase
@@ -752,12 +774,11 @@ func claimStepWithGates(
 		if err := recordStepInputs(tx, fresh.ID, bundle.Inputs); err != nil {
 			return nil, err
 		}
-		var rowVersion int
-		if err := tx.QueryRow(
-			`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
+		rowVersion, err := st.StepRowVersionTx(fresh.ID)
+		if err != nil {
 			return nil, fmt.Errorf("reading step version: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		if err := commitWrite(tx); err != nil {
 			return nil, fmt.Errorf("committing claim: %w", err)
 		}
 		return &ClaimResult{
@@ -800,13 +821,12 @@ func claimStepWithGates(
 		return nil, err
 	}
 
-	var provisionalVersion int
-	if err := tx.QueryRow(
-		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&provisionalVersion); err != nil {
+	provisionalVersion, err := st.StepRowVersionTx(fresh.ID)
+	if err != nil {
 		return nil, fmt.Errorf("reading step version: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing the claim: %w", err)
 	}
 
@@ -844,6 +864,7 @@ func claimStepWithGates(
 			"beginning the claim's context transaction: %w", err))
 	}
 	defer txB.Rollback()
+	stB := store.TxOn(txB)
 
 	// Transaction B RECOMPUTES `expires_ms` from its own commit
 	// time. Phase 2 ran subprocesses — each bounded by the gate's own timeout,
@@ -869,8 +890,8 @@ func claimStepWithGates(
 	if claimHookBeforeRefresh != nil {
 		claimHookBeforeRefresh(txB, fresh.ID)
 	}
-	refreshed, err := db.RefreshClaimLeaseTx(
-		txB, fresh.ID, lease.TokenHash, ttlMS, opts.NowMS)
+	refreshed, err := stB.RefreshClaimLeaseTx(
+		fresh.ID, lease.TokenHash, ttlMS, opts.NowMS)
 	if err != nil {
 		return nil, incompleteClaim(committed, err)
 	}
@@ -884,7 +905,7 @@ func claimStepWithGates(
 	}
 	fresh.ExpiresMS = refreshed2ExpiresMS(opts.NowMS, ttlMS)
 	committed.LeaseExpiresMS = fresh.ExpiresMS
-	if err := db.SetStepClaimPhaseTx(txB, fresh.ID, "", opts.NowMS); err != nil {
+	if err := stB.SetStepClaimPhaseTx(fresh.ID, "", opts.NowMS); err != nil {
 		return nil, incompleteClaim(committed, err)
 	}
 	fresh.ClaimPhase = ""
@@ -906,13 +927,12 @@ func claimStepWithGates(
 		return nil, incompleteClaim(committed, err)
 	}
 
-	var rowVersion int
-	if err := txB.QueryRow(
-		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
+	rowVersion, err := stB.StepRowVersionTx(fresh.ID)
+	if err != nil {
 		return nil, incompleteClaim(committed, fmt.Errorf("reading step version: %w", err))
 	}
 
-	if err := txB.Commit(); err != nil {
+	if err := commitWrite(txB); err != nil {
 		return nil, incompleteClaim(committed, fmt.Errorf(
 			"committing the claim's context: %w", err))
 	}
@@ -955,28 +975,28 @@ func claimStepWithGates(
 //
 // A re-mint appends `step-reminted` in this transaction.
 func reMintOwnClaim(
-	tx *sql.Tx, sched *Scheduler, fresh *db.Step, ttls ttlConfig, opts ClaimOptions,
+	tx store.LegacyTx, sched *Scheduler, fresh *store.Step, ttls ttlConfig, opts ClaimOptions,
 ) (*ClaimResult, error) {
 	if opts.Owner == "" || fresh.Owner != opts.Owner || !fresh.Lease().Live(opts.NowMS) {
 		return nil, nil
 	}
-	var recoveryHash sql.NullString
-	if err := tx.QueryRow(
-		`SELECT recovery_hash FROM steps WHERE id = ?`, fresh.ID).Scan(&recoveryHash); err != nil {
+	st := store.TxOn(tx)
+	recoveryHash, hashed, err := st.StepRecoveryHashTx(fresh.ID)
+	if err != nil {
 		return nil, fmt.Errorf("reading the recovery hash: %w", err)
 	}
-	if !recoveryHash.Valid {
+	if !hashed {
 		return nil, conflictErr(
 			"step %s: the claim held by %s was taken without a recovery secret, so it "+
 				"cannot be re-minted; wait for the lease to expire or reap it",
 			fresh.Instance, opts.Owner)
 	}
-	if !model.TokenMatches(opts.RecoverySecret, recoveryHash.String) {
+	if !model.TokenMatches(opts.RecoverySecret, recoveryHash) {
 		return nil, conflictErr(
 			"step %s: the claim held by %s was taken with a recovery secret, and this "+
 				"re-claim did not present it", fresh.Instance, opts.Owner)
 	}
-	if fresh.ClaimPhase == db.ClaimPhasePreGates {
+	if fresh.ClaimPhase == store.ClaimPhasePreGates {
 		return nil, conflictErr(
 			"step %s: the claim held by %s is still in its pre-gate phase "+
 				"(its context transaction has not committed); retry once the phase finishes",
@@ -993,14 +1013,13 @@ func reMintOwnClaim(
 	}
 	bundle.PreGates = preGates
 
-	token, err := db.ReMintStepTokenTx(tx, fresh.ID, opts.Owner, opts.NowMS)
+	token, err := st.ReMintStepTokenTx(fresh.ID, opts.Owner, opts.NowMS)
 	if err != nil {
 		return nil, err
 	}
 
-	var rowVersion int
-	if err := tx.QueryRow(
-		`SELECT row_version FROM steps WHERE id = ?`, fresh.ID).Scan(&rowVersion); err != nil {
+	rowVersion, err := st.StepRowVersionTx(fresh.ID)
+	if err != nil {
 		return nil, fmt.Errorf("reading step version: %w", err)
 	}
 	data, err := json.Marshal(map[string]any{
@@ -1015,7 +1034,7 @@ func reMintOwnClaim(
 	}); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing the re-minted token: %w", err)
 	}
 
@@ -1042,12 +1061,12 @@ func reMintOwnClaim(
 // never resolved. targetSHA is the sha this claim's bundle carries: a row
 // stamped with a different one is skipped, and an unstamped row — the claim's
 // own measurement, or one from before the column — replays as before.
-func recordedPreGates(tx *sql.Tx, stepID int, targetSHA string) ([]PreGateResult, error) {
-	rows, err := db.GateResultsForStepTx(tx, stepID)
+func recordedPreGates(tx store.LegacyTx, stepID int, targetSHA string) ([]PreGateResult, error) {
+	rows, err := store.TxOn(tx).GateResultsForStepTx(stepID)
 	if err != nil {
 		return nil, err
 	}
-	last := make(map[string]db.GateResultRow)
+	last := make(map[string]store.GateResultRow)
 	order := make([]string, 0, len(rows))
 	for _, r := range rows {
 		if !r.Pre || (r.TargetSHA != "" && r.TargetSHA != targetSHA) {
@@ -1081,8 +1100,9 @@ func recordedPreGates(tx *sql.Tx, stepID int, targetSHA string) ([]PreGateResult
 // (AssembleRecordedContext) must replay what this attempt was handed, not the
 // union of every attempt's bindings. Same transaction as the claim, so a
 // reader never sees the row between the two.
-func recordStepInputs(tx *sql.Tx, stepID int, inputs []ContextInput) error {
-	if err := db.ClearStepInputsTx(tx, stepID); err != nil {
+func recordStepInputs(tx store.LegacyTx, stepID int, inputs []ContextInput) error {
+	st := store.TxOn(tx)
+	if err := st.ClearStepInputsTx(stepID); err != nil {
 		return err
 	}
 	for position, in := range inputs {
@@ -1090,7 +1110,7 @@ func recordStepInputs(tx *sql.Tx, stepID int, inputs []ContextInput) error {
 		if !ok {
 			continue
 		}
-		if err := db.InsertStepInputTx(tx, stepID, position, artifactID); err != nil {
+		if err := st.InsertStepInputTx(stepID, position, artifactID); err != nil {
 			return err
 		}
 	}
@@ -1129,7 +1149,12 @@ func unclaimableReason(kind string) string {
 		"(or moved past with `docket step resolve`), not by a worker"
 }
 
-// ReadContext re-emits a step's context bundle READ-ONLY, no token required
+// ReadContext is ReadContextStore on store.StoreOn(conn).
+func ReadContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error) {
+	return ReadContextStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// ReadContextStore re-emits a step's context bundle READ-ONLY, no token required
 // It is `step context`'s implementation.
 //
 // IT WRITES NOTHING — not even a reap. Lazy reaping is confined to
@@ -1143,11 +1168,20 @@ func unclaimableReason(kind string) string {
 // since. A step not yet handed out — or back at `pending` for a retry — reads
 // live, as the claim that will hand it out would assemble it (recordedClaim).
 // ReadLiveContext asks the live question of any step.
-func ReadContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
+func ReadContextStore(storage store.Store, stepID int, nowMS int64) (*Context, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return readContext(conn, stepID, nowMS, false)
 }
 
-// ReadLiveContext is ReadContext resolved over the run's artifacts AS THEY
+// ReadLiveContext is ReadLiveContextStore on store.StoreOn(conn).
+func ReadLiveContext(conn store.LegacyDB, stepID int, nowMS int64) (*Context, error) {
+	return ReadLiveContextStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// ReadLiveContextStore is ReadContext resolved over the run's artifacts AS THEY
 // STAND, whether or not the step has been handed out — `step context --live`.
 //
 // It answers a different question from ReadContext on a claimed step: not
@@ -1155,13 +1189,17 @@ func ReadContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
 // preview an operator wants before authorizing a retry, and the one reading
 // every consumer had before DKT-1054, kept reachable by name rather than
 // removed.
-func ReadLiveContext(conn *sql.DB, stepID int, nowMS int64) (*Context, error) {
+func ReadLiveContextStore(storage store.Store, stepID int, nowMS int64) (*Context, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	return readContext(conn, stepID, nowMS, true)
 }
 
-func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, error) {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+func readContext(conn store.LegacyDB, stepID int, nowMS int64, live bool) (*Context, error) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -1177,7 +1215,7 @@ func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, er
 		return nil, err
 	}
 
-	tx, err := beginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning context read: %w", err)
 	}
@@ -1191,7 +1229,7 @@ func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, er
 	}
 	fresh := sched.stepByID[stepID]
 	if fresh == nil {
-		return nil, notFoundErr(db.ErrStepNotFound,
+		return nil, notFoundErr(store.ErrStepNotFound,
 			"step %s not found", model.FormatStepID(stepID))
 	}
 
@@ -1210,7 +1248,7 @@ func readContext(conn *sql.DB, stepID int, nowMS int64, live bool) (*Context, er
 // Handing over the answer rather than the apparatus is what keeps the read
 // verbs unable to disagree with `next`.
 type StepView struct {
-	Step *db.Step
+	Step *store.Step
 	Row  model.StepRow
 	// Routing and SagaStage are rendered by `step show` so an operator can see
 	// why an unclaimed step is not `done`: a step mid-saga is engine-owned and
@@ -1228,7 +1266,7 @@ type StepView struct {
 	// ParkClass is that park's ROUTABLE form (DKT-1900): the closed-enum value
 	// a conductor or panel decides on, where ParkReason is the prose it shows
 	// the person it escalates to. Empty exactly where ParkReason is.
-	ParkClass db.ParkClass
+	ParkClass store.ParkClass
 	// Authority is what entitled the step's latest ruling (operator,
 	// standing-grant, or conductor); AuthorityRef names the standing grant and
 	// is set only beside standing-grant. Both empty on a step never ruled on.
@@ -1253,7 +1291,7 @@ type StepView struct {
 	// that put it there — a conductor read this verb and the event feed on
 	// 2026-08-16 and reported three failed gates as passes. The results were
 	// always in the table; nothing rendered them.
-	Gates []db.GateResultRow
+	Gates []store.GateResultRow
 	// HeldCluster is a materialized held step's provenance: which cluster it
 	// decides, out of how many, and which artifact carries it (DKT-239).
 	//
@@ -1279,11 +1317,20 @@ type StepView struct {
 	TargetWorktree string
 }
 
-// LoadStepView reads one step at its effective status. IT WRITES NOTHING — not
+// LoadStepView is LoadStepViewStore on store.StoreOn(conn).
+func LoadStepView(conn store.LegacyDB, stepID int, nowMS int64) (*StepView, error) {
+	return LoadStepViewStore(store.StoreOn(conn), stepID, nowMS)
+}
+
+// LoadStepViewStore reads one step at its effective status. IT WRITES NOTHING — not
 // even a reap (reaping is confined to next/claim).
-func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+func LoadStepViewStore(storage store.Store, stepID int, nowMS int64) (*StepView, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -1299,7 +1346,7 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 		return nil, err
 	}
 
-	tx, err := beginReadSnapshot(conn)
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("beginning step read: %w", err)
 	}
@@ -1313,7 +1360,7 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 	}
 	fresh := sched.stepByID[stepID]
 	if fresh == nil {
-		return nil, notFoundErr(db.ErrStepNotFound,
+		return nil, notFoundErr(store.ErrStepNotFound,
 			"step %s not found", model.FormatStepID(stepID))
 	}
 
@@ -1326,7 +1373,7 @@ func LoadStepView(conn *sql.DB, stepID int, nowMS int64) (*StepView, error) {
 	// pool is capped at one connection, so a pool read from here would deadlock
 	// against the transaction still open — the discipline actorCountsTx
 	// documents for the report.
-	gates, err := db.GateResultsForStepTx(tx, stepID)
+	gates, err := store.TxOn(tx).GateResultsForStepTx(stepID)
 	if err != nil {
 		return nil, err
 	}

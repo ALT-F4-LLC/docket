@@ -1,7 +1,10 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -17,10 +20,16 @@ func CreateComment(db *sql.DB, comment *model.Comment) (int, error) {
 }
 
 // CreateCommentIdempotent is CreateComment with an optional idempotency key.
-// A repeat call with the same key returns the original comment id and inserts
-// nothing; the key is recorded in the same transaction as the insert.
+// A repeat call with the same key and the same issue, author and body returns
+// the original comment id and inserts nothing; the same key with different
+// content returns an error wrapping ErrConflict that names the key. The key and
+// its fingerprint are recorded in the same transaction as the insert.
 func CreateCommentIdempotent(db *sql.DB, comment *model.Comment, idempotencyKey string) (int, error) {
-	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeIssueComment, idempotencyKey)
+	fingerprint, err := commentFingerprint(comment)
+	if err != nil {
+		return 0, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeIssueComment, idempotencyKey, fingerprint)
 	if err != nil {
 		return 0, err
 	}
@@ -66,21 +75,16 @@ func CreateCommentIdempotentTx(tx *sql.Tx, comment *model.Comment, scope, idempo
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO comments (issue_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		comment.IssueID,
 		comment.Body,
 		comment.Author,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, false, fmt.Errorf("inserting comment: %w", err)
-	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, false, fmt.Errorf("getting last insert id: %w", err)
 	}
 
 	// Touch the issue's updated_at so recently-commented issues surface in sorted lists.
@@ -93,12 +97,28 @@ func CreateCommentIdempotentTx(tx *sql.Tx, comment *model.Comment, scope, idempo
 	}
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, scope, idempotencyKey, int(id64)); err != nil {
+		fingerprint, err := commentFingerprint(comment)
+		if err != nil {
+			return 0, false, err
+		}
+		if err := recordIdempotencyKeyFingerprintTx(tx, scope, idempotencyKey, fingerprint, id); err != nil {
 			return 0, false, err
 		}
 	}
 
-	return int(id64), true, nil
+	return id, true, nil
+}
+
+// commentFingerprint identifies a comment request by its issue, author and
+// body: the content a retry repeats. The fields are JSON-encoded before
+// hashing so no two distinct requests share an encoding.
+func commentFingerprint(comment *model.Comment) (string, error) {
+	encoded, err := json.Marshal([]any{comment.IssueID, comment.Author, comment.Body})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting comment request: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // EngineAuthor is the fixed Author value for comments the engine writes
@@ -122,24 +142,19 @@ const EngineAuthor = "docket-engine"
 func InsertEngineComment(tx *sql.Tx, issueID int, body string, nowMS int64) (int, error) {
 	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO comments (issue_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		issueID,
 		body,
 		EngineAuthor,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting engine comment: %w", err)
 	}
 
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-
-	return int(id64), nil
+	return id, nil
 }
 
 // InsertNoteTx records an author-attributed comment against the caller's
@@ -168,28 +183,23 @@ func InsertNoteTx(tx *sql.Tx, issueID int, body, author, now string) (int, error
 		return 0, err
 	}
 
-	res, err = tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO comments (issue_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		issueID,
 		body,
 		author,
 		now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting comment: %w", err)
-	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
 	}
 
 	if err := RecordActivity(tx, issueID, "comment_added", "", body, author); err != nil {
 		return 0, err
 	}
 
-	return int(id64), nil
+	return id, nil
 }
 
 // ListComments retrieves all comments for an issue, ordered by the auto-minted

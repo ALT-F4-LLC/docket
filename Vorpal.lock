@@ -194,11 +194,11 @@ platform = "aarch64-linux"
 
 [[sources]]
 name = "git"
-path = "https://sdk.vorpal.build/source/git-2.53.0.tar.gz"
+path = "https://sdk.vorpal.build/source/git-2.56.1.tar.gz"
 includes = []
 excludes = []
-digest = "4c08acf32a9dd52cb4f64d1835bade4128af51dd85742245987643cde0aeb9b1"
-platform = "aarch64-darwin"
+digest = "40bf26a1c4760295ea03e4021324e2734979714a6734836399337160bb068af5"
+platform = "x86_64-linux"
 
 [[sources]]
 name = "git"
@@ -206,7 +206,7 @@ path = "https://sdk.vorpal.build/source/git-2.53.0.tar.gz"
 includes = []
 excludes = []
 digest = "4c08acf32a9dd52cb4f64d1835bade4128af51dd85742245987643cde0aeb9b1"
-platform = "x86_64-linux"
+platform = "aarch64-darwin"
 
 [[sources]]
 name = "git"
@@ -290,6 +290,14 @@ platform = "aarch64-darwin"
 
 [[sources]]
 name = "go"
+path = "https://sdk.vorpal.build/source/go1.27.4.linux-amd64.tar.gz"
+includes = []
+excludes = []
+digest = "bad14029288873e33a5b183dac153abe884473f801743d540b9a8ca0b8c53324"
+platform = "x86_64-linux"
+
+[[sources]]
+name = "go"
 path = "https://sdk.vorpal.build/source/go1.26.0.linux-arm64.tar.gz"
 includes = []
 excludes = []
@@ -297,28 +305,12 @@ digest = "bcee4e23358013d48b6ad5eb2152dc64dc320d7a6dfac8ed56767f2243b0213a"
 platform = "aarch64-linux"
 
 [[sources]]
-name = "go"
-path = "https://sdk.vorpal.build/source/go1.26.0.linux-amd64.tar.gz"
-includes = []
-excludes = []
-digest = "d23a8bd1d7050453d53bcb13271e7682a176463a6f53992b1a2cedf17310ef30"
-platform = "x86_64-linux"
-
-[[sources]]
 name = "goimports"
 path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
 includes = []
 excludes = []
 digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
 platform = "aarch64-darwin"
-
-[[sources]]
-name = "goimports"
-path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
-includes = []
-excludes = []
-digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
-platform = "x86_64-linux"
 
 [[sources]]
 name = "goimports"
@@ -337,12 +329,12 @@ digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
 platform = "aarch64-linux"
 
 [[sources]]
-name = "gopls"
-path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
+name = "goimports"
+path = "https://sdk.vorpal.build/source/go-tools-v0.52.0.tar.gz"
 includes = []
 excludes = []
-digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
-platform = "aarch64-darwin"
+digest = "d70336617c0a161e9cd4b4283ea9c08fb78f80bf43910870335a1063770c938c"
+platform = "x86_64-linux"
 
 [[sources]]
 name = "gopls"
@@ -350,7 +342,7 @@ path = "https://sdk.vorpal.build/source/go-tools-v0.42.0.tar.gz"
 includes = []
 excludes = []
 digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
-platform = "x86_64-linux"
+platform = "aarch64-darwin"
 
 [[sources]]
 name = "gopls"
@@ -367,6 +359,14 @@ includes = []
 excludes = []
 digest = "411df8f3301010012a491337a4f5fa884fbcc323fe7e9ad75aa470f4bf921c56"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "gopls"
+path = "https://sdk.vorpal.build/source/go-tools-v0.52.0.tar.gz"
+includes = []
+excludes = []
+digest = "d70336617c0a161e9cd4b4283ea9c08fb78f80bf43910870335a1063770c938c"
+platform = "x86_64-linux"
 
 [[sources]]
 name = "grep"
@@ -602,19 +602,19 @@ platform = "x86_64-darwin"
 
 [[sources]]
 name = "protoc"
-path = "https://sdk.vorpal.build/source/protoc-34.0-linux-x86_64.zip"
-includes = []
-excludes = []
-digest = "72ef7563c9bc34409ec1bbc2632479a47a1c99e458346fcb7f4e1ca0c2f4f008"
-platform = "x86_64-linux"
-
-[[sources]]
-name = "protoc"
 path = "https://sdk.vorpal.build/source/protoc-34.0-linux-aarch_64.zip"
 includes = []
 excludes = []
 digest = "7c9aae2782708d82aee85e682d364a8cc11f352d55b5fe8ccfc8a6f3ab950d30"
 platform = "aarch64-linux"
+
+[[sources]]
+name = "protoc"
+path = "https://sdk.vorpal.build/source/protoc-36.2-linux-x86_64.zip"
+includes = []
+excludes = []
+digest = "c3c3ac93d295f01f0cfba581ba59d08de46e241f55d4df3cfe907e42833d0ecc"
+platform = "x86_64-linux"
 
 [[sources]]
 name = "protoc"
@@ -634,10 +634,10 @@ platform = "aarch64-darwin"
 
 [[sources]]
 name = "protoc-gen-go"
-path = "https://sdk.vorpal.build/source/protoc-gen-go.v1.36.11.linux.amd64.tar.gz"
+path = "https://sdk.vorpal.build/source/protoc-gen-go.v1.36.12.linux.amd64.tar.gz"
 includes = []
 excludes = []
-digest = "72d35ffffc54b7024a90a0ca8ad2dde80f08822918ba8c52b2d3c0698f5d2d3a"
+digest = "45d4134b4f9a3720c18d13b0e2a1bdcba8dec33388826c5a78b6d41c0efb0e77"
 platform = "x86_64-linux"
 
 [[sources]]
@@ -658,11 +658,11 @@ platform = "aarch64-linux"
 
 [[sources]]
 name = "protoc-gen-go-grpc"
-path = "https://sdk.vorpal.build/source/protoc-gen-go-grpc-v1.79.1.tar.gz"
+path = "https://sdk.vorpal.build/source/protoc-gen-go-grpc-v1.85.0.tar.gz"
 includes = []
 excludes = []
-digest = "f1d541547bc8d5199a9877209b5a65ee26a3e983965ccbf9000785c75c91c0bd"
-platform = "aarch64-darwin"
+digest = "382d515d3e6df44e660d49b6abd2e6e8a760e8159f4e0da103b8298b32627c97"
+platform = "x86_64-linux"
 
 [[sources]]
 name = "protoc-gen-go-grpc"
@@ -670,7 +670,7 @@ path = "https://sdk.vorpal.build/source/protoc-gen-go-grpc-v1.79.1.tar.gz"
 includes = []
 excludes = []
 digest = "f1d541547bc8d5199a9877209b5a65ee26a3e983965ccbf9000785c75c91c0bd"
-platform = "x86_64-linux"
+platform = "aarch64-darwin"
 
 [[sources]]
 name = "protoc-gen-go-grpc"
@@ -722,11 +722,11 @@ platform = "aarch64-linux"
 
 [[sources]]
 name = "staticcheck"
-path = "https://sdk.vorpal.build/source/staticcheck-2026.1.tar.gz"
+path = "https://sdk.vorpal.build/source/staticcheck-2026.2.2.tar.gz"
 includes = []
 excludes = []
-digest = "fb3b8a69d94d507016bea39129274c2329704a451c0db6af620bcd8486288241"
-platform = "aarch64-darwin"
+digest = "1cfbe131693bb3854d1c182b85532145deec5e589a4d1a03f7d0188f8c93b2ec"
+platform = "x86_64-linux"
 
 [[sources]]
 name = "staticcheck"
@@ -734,7 +734,7 @@ path = "https://sdk.vorpal.build/source/staticcheck-2026.1.tar.gz"
 includes = []
 excludes = []
 digest = "fb3b8a69d94d507016bea39129274c2329704a451c0db6af620bcd8486288241"
-platform = "x86_64-linux"
+platform = "aarch64-darwin"
 
 [[sources]]
 name = "staticcheck"

@@ -43,7 +43,7 @@ func TestDocDeleteJSONRequiresForce(t *testing.T) {
 	testsupport.Must(t, err, "CreateDoc: %v", err)
 	id := model.FormatDocID(docID)
 
-	err = runDocDeleteCmd(t, conn, id, "--json=v1")
+	err = runDocDeleteCmd(t, conn, id, "--json=v2")
 	if err == nil {
 		t.Fatal("doc delete --json without --force deleted unconfirmed")
 	}
@@ -57,7 +57,7 @@ func TestDocDeleteJSONRequiresForce(t *testing.T) {
 	}
 
 	// --force is the consent, in JSON mode too: the delete now proceeds.
-	err = runDocDeleteCmd(t, conn, id, "--json=v1", "--force")
+	err = runDocDeleteCmd(t, conn, id, "--json=v2", "--force")
 	testsupport.Must(t, err, "doc delete --json --force: %v", err)
 	if _, err := db.GetDoc(conn, docID); err == nil {
 		t.Fatalf("doc delete --json --force left %s in place", id)

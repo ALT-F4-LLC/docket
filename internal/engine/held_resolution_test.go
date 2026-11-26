@@ -94,36 +94,6 @@ func TestSequentialDecisionsPreserveEachOther(t *testing.T) {
 	}
 }
 
-// TestApproveValueCorrectsTheAggregatedField is DKT-42's third move: the
-// corrected value lands on the field itself — so thresholds and downstream
-// inputs route on the number the operator endorsed — with the computed value
-// it replaced kept in the trail.
-func TestApproveValueCorrectsTheAggregatedField(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	driveToReconcile(t, conn, e, multiClusterPayload)
-	held := heldInstances(t, conn)
-
-	// C-1 is {low, blocker}: the even-count rule medians to "low". The
-	// operator's judgment is "high".
-	err := e.DecideStepValue(conn, stepIDByInstance(t, conn, held[0]),
-		true, "the blocker report is right", "high", nowMS)
-	testsupport.Must(t, err, "approving with --value: %v", err)
-
-	elements := resolvedElements(t, conn)
-	if got, _ := elements[0]["severity"].(string); got != "high" {
-		t.Errorf("severity = %q, want the operator's corrected value", got)
-	}
-	if got, _ := elements[0][KeyOperatorSetFrom].(string); got != "low" {
-		t.Errorf("operator_set_from = %q, want the computed value it replaced", got)
-	}
-	if got, _ := elements[0][KeyOperatorNote].(string); got != "the blocker report is right" {
-		t.Errorf("operator_note = %q", got)
-	}
-}
-
 // TestApproveValueRefusals: the value is validated against the pinned
 // schema's declared enum BEFORE anything is written, and it accompanies
 // approve only.

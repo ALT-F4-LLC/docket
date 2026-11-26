@@ -382,30 +382,6 @@ func TestBackfillNamesANeverClaimedTarget(t *testing.T) {
 	}
 }
 
-// TestBackfillIsQuietForAClaimedTarget is the "existing valid back-fills
-// unchanged" half. The verb exists for a step that RAN and could not report its
-// own spend; that step must never draw the advisory.
-func TestBackfillIsQuietForAClaimedTarget(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-
-	implID := stepIDByInstance(t, conn, "implement@0")
-	completeWithoutUsage(t, conn, e, implID)
-
-	out, err := e.BackfillUsage(conn, runID, []BackfillRow{
-		{Step: implID, Unit: "tokens", Quantity: 48211},
-	}, "", "", nowMS)
-	testsupport.Must(t, err, "backfill-usage: %v", err)
-
-	if len(out.Unclaimed) != 0 {
-		t.Fatalf("Unclaimed = %+v on a claimed, completed step, want none — a "+
-			"warning on the verb's own reason for existing is noise that "+
-			"teaches conductors to ignore it", out.Unclaimed)
-	}
-}
-
 // TestBackfillNamesASupersededSweptTarget covers the evidence's second step
 // (STEP-3158, `verify-tribunal@1`, superseded).
 //

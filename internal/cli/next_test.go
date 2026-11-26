@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"maps"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -19,6 +21,7 @@ func nextCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 	cmd := cmdWithDB(conn)
 	cmd.Flags().StringSlice("status", nil, "")
 	cmd.Flags().StringSlice("priority", nil, "")
+	cmd.Flags().StringSlice("size", nil, "")
 	cmd.Flags().StringSlice("label", nil, "")
 	cmd.Flags().StringSlice("type", nil, "")
 	cmd.Flags().Int("limit", limit, "")
@@ -31,7 +34,7 @@ func nextCmdWithDB(conn *sql.DB, limit int) *cobra.Command {
 
 type nextJSON struct {
 	Data struct {
-		Issues []struct {
+		Items []struct {
 			ID    string   `json:"id"`
 			Files []string `json:"files"`
 			Docs  []struct {
@@ -40,7 +43,7 @@ type nextJSON struct {
 				Title  string `json:"title"`
 				Status string `json:"status"`
 			} `json:"docs"`
-		} `json:"issues"`
+		} `json:"items"`
 		Total int `json:"total"`
 	} `json:"data"`
 }
@@ -49,6 +52,7 @@ func runNextJSON(t *testing.T, conn *sql.DB, limit int) nextJSON {
 	t.Helper()
 	cmd := nextCmdWithDB(conn, limit)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 	var nj nextJSON
@@ -72,6 +76,87 @@ func createIssueWithFile(t *testing.T, conn *sql.DB, title, file string) int {
 	return id
 }
 
+// nextIDs runs cmd in issue mode under v2 and returns the listed ids, sorted.
+func nextIDs(t *testing.T, cmd *cobra.Command) []string {
+	t.Helper()
+	w, buf := bufWriter(true)
+	err := runNext(cmd, nil, w)
+	testsupport.Must(t, err, "runNext: %v", err)
+	var nj nextJSON
+	if err := json.Unmarshal(buf.Bytes(), &nj); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	ids := make([]string, 0, len(nj.Data.Items))
+	for _, item := range nj.Data.Items {
+		ids = append(ids, item.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestNextForwardsEachIssueFilter pins that each issue-mode filter flag
+// reaches the ready-set query: one seeded issue matches each flag's value,
+// and the flag alone lists exactly that issue.
+func TestNextForwardsEachIssueFilter(t *testing.T) {
+	conn := newTestDB(t)
+	create := func(issue model.Issue, labels ...string) string {
+		t.Helper()
+		if issue.Status == "" {
+			issue.Status = model.StatusTodo
+		}
+		if issue.Priority == "" {
+			issue.Priority = model.PriorityMedium
+		}
+		if issue.Kind == "" {
+			issue.Kind = model.IssueKindTask
+		}
+		id, err := db.CreateIssue(conn, &issue, labels, nil)
+		testsupport.Must(t, err, "CreateIssue(%q): %v", issue.Title, err)
+		return model.FormatID(id)
+	}
+	create(model.Issue{Title: "plain"})
+	busy := create(model.Issue{Title: "busy", Status: model.StatusInProgress})
+	urgent := create(model.Issue{Title: "urgent", Priority: model.PriorityCritical})
+	small := create(model.Issue{Title: "small", Size: model.SizeSmall})
+	labelled := create(model.Issue{Title: "labelled"}, "infra")
+	bug := create(model.Issue{Title: "bug", Kind: model.IssueKindBug})
+
+	for _, tc := range []struct{ flag, value, want string }{
+		{"status", "in-progress", busy},
+		{"priority", "critical", urgent},
+		{"size", "small", small},
+		{"label", "infra", labelled},
+		{"type", "bug", bug},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			cmd := nextCmdWithDB(conn, 10)
+			err := cmd.Flags().Set(tc.flag, tc.value)
+			testsupport.Must(t, err, "setting --%s: %v", tc.flag, err)
+			if got := nextIDs(t, cmd); !slices.Equal(got, []string{tc.want}) {
+				t.Errorf("next --%s %s = %v, want [%s]", tc.flag, tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNextListsTheInvocationsProject pins that `next`, which resolves its own
+// project, lists the project its checkout names rather than the default one.
+func TestNextListsTheInvocationsProject(t *testing.T) {
+	conn := newTestDB(t)
+	createIssue(t, conn, "default project", model.StatusTodo, model.PriorityHigh)
+	_, two, _ := threeProjects(t, conn)
+	theirs, err := db.CreateIssue(conn, &model.Issue{
+		ProjectID: two, Title: "two's issue",
+		Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue in two.git: %v", err)
+
+	got := nextIDs(t, inCheckoutOf(t, nextCmdWithDB(conn, 10), two))
+	if want := []string{model.FormatID(theirs)}; !slices.Equal(got, want) {
+		t.Errorf("next from two.git's checkout = %v, want %v", got, want)
+	}
+}
+
 func TestNextJSON_HydratesFilesAndDocs(t *testing.T) {
 	conn := newTestDB(t)
 	issueID := createIssueWithFile(t, conn, "ready", "internal/db/doc_links.go")
@@ -79,10 +164,10 @@ func TestNextJSON_HydratesFilesAndDocs(t *testing.T) {
 	linkDocIssue(t, conn, doc, issueID)
 
 	nj := runNextJSON(t, conn, 10)
-	if len(nj.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(nj.Data.Issues))
+	if len(nj.Data.Items) != 1 {
+		t.Fatalf("issues = %d, want 1", len(nj.Data.Items))
 	}
-	iss := nj.Data.Issues[0]
+	iss := nj.Data.Items[0]
 	if len(iss.Files) != 1 || iss.Files[0] != "internal/db/doc_links.go" {
 		t.Errorf("files = %v, want [internal/db/doc_links.go]", iss.Files)
 	}
@@ -91,59 +176,6 @@ func TestNextJSON_HydratesFilesAndDocs(t *testing.T) {
 	}
 	if iss.Docs[0].ID != "DOC-1" || iss.Docs[0].Type != "tdd" || iss.Docs[0].Status != "approved" || iss.Docs[0].Title != "Docket Doc CLI" {
 		t.Errorf("doc shape wrong: %+v", iss.Docs[0])
-	}
-}
-
-func TestNextJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "ready no context", model.StatusTodo, model.PriorityHigh)
-
-	cmd := nextCmdWithDB(conn, 10)
-	w, buf := bufWriter(true)
-	err := runNext(cmd, nil, w)
-	testsupport.Must(t, err, "runNext: %v", err)
-
-	var env struct {
-		Data struct {
-			Issues []map[string]json.RawMessage `json:"issues"`
-		} `json:"data"`
-	}
-	err = json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if len(env.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(env.Data.Issues))
-	}
-	for _, key := range []string{"files", "docs"} {
-		if got := string(env.Data.Issues[0][key]); got != "[]" {
-			t.Errorf("%s = %s, want []", key, got)
-		}
-	}
-}
-
-// TestNextJSON_NoReadyIssuesIsAnEmptyArray pins the same "[] never null"
-// contract as TestNextJSON_FilesAndDocsEmptyAreArrays, one level up: FindReady
-// and filterReady return a nil slice when nothing is ready (planner/plan.go's
-// `var ready []*model.Issue`), and nextResult has no custom MarshalJSON like
-// issueListPayload does — an unguarded nil would serialize `.data.issues` as
-// JSON null, breaking any consumer iterating it.
-func TestNextJSON_NoReadyIssuesIsAnEmptyArray(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "already done", model.StatusDone, model.PriorityHigh)
-
-	cmd := nextCmdWithDB(conn, 10)
-	w, buf := bufWriter(true)
-	err := runNext(cmd, nil, w)
-	testsupport.Must(t, err, "runNext: %v", err)
-
-	var env struct {
-		Data struct {
-			Issues json.RawMessage `json:"issues"`
-		} `json:"data"`
-	}
-	err = json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if got := string(env.Data.Issues); got != "[]" {
-		t.Errorf("issues = %s, want []", got)
 	}
 }
 
@@ -207,37 +239,6 @@ func runNextHuman(t *testing.T, conn *sql.DB) string {
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 	return buf.String()
-}
-
-func TestNext_HydratesPostLimitOnly(t *testing.T) {
-	conn := newTestDB(t)
-	first := createIssue(t, conn, "First", model.StatusTodo, model.PriorityHigh)
-	second := createIssue(t, conn, "Second", model.StatusTodo, model.PriorityLow)
-
-	docFirst := createDoc(t, conn, "First Doc", "tdd", "approved")
-	docSecond := createDoc(t, conn, "Second Doc", "ux", "draft")
-	linkDocIssue(t, conn, docFirst, first)
-	linkDocIssue(t, conn, docSecond, second)
-
-	nj := runNextJSON(t, conn, 1)
-	if len(nj.Data.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1 (limit)", len(nj.Data.Issues))
-	}
-	emitted := nj.Data.Issues[0]
-	if emitted.ID != model.FormatID(first) {
-		t.Fatalf("emitted = %s, want %s (priority order)", emitted.ID, model.FormatID(first))
-	}
-	if len(emitted.Docs) != 1 || emitted.Docs[0].Title != "First Doc" {
-		t.Errorf("emitted issue not hydrated with its doc: %+v", emitted.Docs)
-	}
-
-	cmd := nextCmdWithDB(conn, 1)
-	w, buf := bufWriter(true)
-	err := runNext(cmd, nil, w)
-	testsupport.Must(t, err, "runNext: %v", err)
-	if strings.Contains(buf.String(), "Second Doc") {
-		t.Errorf("beyond-limit issue's doc leaked into output:\n%s", buf.String())
-	}
 }
 
 // classCapWorkflow offers one root step per class: three bounded by

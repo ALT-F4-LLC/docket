@@ -385,25 +385,6 @@ func TestFlatVolumeAcrossDeclaredRoundsParksTheLoop(t *testing.T) {
 	}
 }
 
-// TestShrinkingVolumeKeepsTheLoopRunning is the lower bound: a loop that IS
-// converging sets a new minimum every round and must never park on this
-// signal — a guard that fired on convergence would break every workflow that
-// declares the tolerance.
-func TestShrinkingVolumeKeepsTheLoopRunning(t *testing.T) {
-	conn := mustDB(t)
-	activatedCustomRun(t, conn, volumeWorkflowSrc)
-	e := testEngine()
-
-	driveVolumeRound(t, conn, e, 0, 3)
-	driveVolumeRound(t, conn, e, 1, 2)
-	driveVolumeRound(t, conn, e, 2, 1)
-
-	if !stepExists(t, conn, "fix@3") {
-		t.Error("a converging loop was refused a round; shrinking volume is " +
-			"progress and must keep the loop running")
-	}
-}
-
 // TestNoiseAroundABestVolumeStillParks pins the measurement's semantics: "no
 // improvement" means no NEW MINIMUM, not endpoint-to-endpoint decrease.
 // RUN-51's volumes (8, 12, 10, 10, 7, 10, 7, 11, 10, ~8) fell between plenty

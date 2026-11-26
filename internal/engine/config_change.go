@@ -1,12 +1,11 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // CONFIG WRITES TO SECURITY-LOAD-BEARING KEYS ARE RECORDED (DKT-2767).
@@ -26,7 +25,12 @@ import (
 // criticality, sealed, hold_on_dissent — still shapes how a tally decides, and
 // that is what this records.
 
-// SetConfig is the engine's config write: db.SetConfigTx plus, for a vote-rule
+// SetConfig is SetConfigStore on store.StoreOn(conn).
+func SetConfig(conn store.LegacyDB, projectID int, key, value, changedBy string) error {
+	return SetConfigStore(store.StoreOn(conn), projectID, key, value, changedBy)
+}
+
+// SetConfigStore is the engine's config write: the store's SetConfigTx plus, for a vote-rule
 // key, the `config-changed` event, committed together or not at all.
 //
 // `changedBy` is the identity the activity log attributes issue edits to
@@ -35,23 +39,27 @@ import (
 // not a proof. A write to a key outside the vote-rule family records nothing,
 // and a refused write (unknown key, invalid value) records nothing because it
 // wrote nothing.
-func SetConfig(conn *sql.DB, projectID int, key, value, changedBy string) error {
+func SetConfigStore(storage store.Store, projectID int, key, value, changedBy string) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("storing config %s: %w", key, err)
 	}
 	defer tx.Rollback()
 
-	prior, err := db.SetConfigTx(tx, projectID, key, value)
+	prior, err := store.TxOn(tx).SetConfigTx(projectID, key, value)
 	if err != nil {
 		return err
 	}
-	if strings.HasPrefix(key, db.KeyVoteRulePrefix) {
+	if strings.HasPrefix(key, store.KeyVoteRulePrefix) {
 		if err := recordConfigChange(tx, projectID, key, prior, value, changedBy); err != nil {
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("storing config %s: %w", key, err)
 	}
 	return nil
@@ -72,7 +80,7 @@ type configChange struct {
 
 // recordConfigChange writes the event in the caller's transaction — the
 // write's own, so the record and the change land together.
-func recordConfigChange(tx *sql.Tx, projectID int, key, prior, value, changedBy string) error {
+func recordConfigChange(tx store.LegacyTx, projectID int, key, prior, value, changedBy string) error {
 	scope := "project"
 	if projectID == 0 {
 		scope = "global"

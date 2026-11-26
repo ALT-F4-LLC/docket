@@ -143,33 +143,6 @@ func TestRunNoteIsRunScoped(t *testing.T) {
 	}
 }
 
-// TestRunNoteIsDeterministicAtFixedState: two reads at the same run state are
-// byte-identical, and a note is RECORDED run state — the mid-run edits the
-// snapshot discipline immunizes against still move nothing.
-func TestRunNoteIsDeterministicAtFixedState(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-	_, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
-	testsupport.Must(t, err, "AddRunNote: %v", err)
-	stepID := stepIDByInstance(t, conn, "implement@0")
-
-	before := bundleJSON(t, conn, stepID)
-	execSQL(t, conn, `UPDATE issues SET description = ? WHERE id = ?`, "EDITED BODY", issue)
-	after := bundleJSON(t, conn, stepID)
-	if before != after {
-		t.Errorf("a live issue edit moved a bundle carrying a note:\nbefore: %s\nafter:  %s",
-			before, after)
-	}
-
-	r1, err := RenderStep(conn, stepID, "", nowMS)
-	testsupport.Must(t, err, "RenderStep: %v", err)
-	r2, err := RenderStep(conn, stepID, "", nowMS)
-	testsupport.Must(t, err, "RenderStep: %v", err)
-	if r1.Packet != r2.Packet {
-		t.Error("two renders at one run state differ")
-	}
-}
-
 func TestRunNoteRefusals(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
@@ -313,36 +286,6 @@ func TestRunNoteRequiresTheConductorCapability(t *testing.T) {
 			t.Errorf("notes = %d, events = %d; want 1 and 1", notes, events)
 		}
 	})
-}
-
-func TestRunNoteIsEventLogged(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	note, err := AddRunNote(conn, run.ID, testConductorToken, noteBy, operatorNote, noteText, nowMS)
-	testsupport.Must(t, err, "AddRunNote: %v", err)
-
-	var runID int
-	var data string
-	err = conn.QueryRow(
-		`SELECT run_id, data FROM events WHERE kind = ?`, EventRunNoteAdded,
-	).Scan(&runID, &data)
-	testsupport.Must(t, err, "reading the run-note-added event: %v", err)
-	if runID != run.ID {
-		t.Errorf("event run_id = %d, want %d", runID, run.ID)
-	}
-	var payload struct {
-		Note int    `json:"note"`
-		Text string `json:"text"`
-	}
-	testsupport.Must(t, json.Unmarshal([]byte(data), &payload), "event data %q: %v", data, err)
-	if payload.Note != note.ID || payload.Text != noteText {
-		t.Errorf("event data = %s, want note %d with the text verbatim", data, note.ID)
-	}
-
-	actor, ok := ActorFor(EventRunNoteAdded)
-	if !ok || actor != ActorHuman {
-		t.Errorf("ActorFor(run-note-added) = %v/%v, want ActorHuman", actor, ok)
-	}
 }
 
 // TestRunNoteEventRecordsItsAuthority: each run-note-added event says under

@@ -1,15 +1,14 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The mid-run attachment-list refresh: the scope refresh's exception
@@ -43,16 +42,28 @@ type RefreshedFiles struct {
 	Steps []string `json:"steps"`
 }
 
-// RefreshIssueFilesInRun re-reads the issue's attached paths and overwrites the
+// RefreshIssueFilesInRun is RefreshIssueFilesInRunStore on store.StoreOn(conn).
+func RefreshIssueFilesInRun(
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
+) (*RefreshedFiles, error) {
+	return RefreshIssueFilesInRunStore(store.StoreOn(conn), runID, issueID, reason, by, token, nowMS)
+}
+
+// RefreshIssueFilesInRunStore re-reads the issue's attached paths and overwrites the
 // `files` key of ONE run-issue's activation snapshot.
 //
 // On a bound run it requires the conductor capability as `token`: `issue file
 // add|remove` is ungated, so without the check an executor could change its own
 // issue's attachments and then make that change reach its own packets.
-func RefreshIssueFilesInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+func RefreshIssueFilesInRunStore(
+	storage store.Store, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedFiles, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted attachment list; " +
@@ -69,8 +80,9 @@ func RefreshIssueFilesInRun(
 	}
 	defer tx.Rollback()
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -117,7 +129,7 @@ func RefreshIssueFilesInRun(
 	}
 	frozen := *snapshot.Files
 
-	live, err := db.GetIssueFilesTx(tx, issueID)
+	live, err := st.GetIssueFilesTx(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the live attachment list for %s: %w",
 			model.FormatID(issueID), err)
@@ -167,7 +179,7 @@ func RefreshIssueFilesInRun(
 	if err != nil {
 		return nil, fmt.Errorf("serializing the refreshed snapshot: %w", err)
 	}
-	if err := db.SetRunIssueSnapshotTx(tx, runID, issueID, string(refreshed)); err != nil {
+	if err := st.SetRunIssueSnapshotTx(runID, issueID, string(refreshed)); err != nil {
 		return nil, err
 	}
 
@@ -185,7 +197,7 @@ func RefreshIssueFilesInRun(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("refreshing the snapshotted attachment list: %w", err)
 	}
 	return &RefreshedFiles{

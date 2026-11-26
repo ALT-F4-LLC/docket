@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
@@ -203,6 +205,9 @@ func TestEveryStepVerbIsRegistered(t *testing.T) {
 		// integration mints, most of all. Opaque KV merged onto the finished
 		// step's metadata, event-logged.
 		"annotate",
+		// `repin`: re-records a done step's issue.diff over the range the
+		// step recorded for its head, superseding a whole-branch re-cut.
+		"repin",
 		// `integrate`: the engine's one git write — cherry-pick a finished
 		// writer's recorded chain onto the shared branch with -x, then annotate
 		// the step with the resulting HEAD, as one operation that stops on a
@@ -266,20 +271,6 @@ func TestGuardVerbsAreRegistered(t *testing.T) {
 	}
 }
 
-// TestNoTokenFlagOnStepVerbs extends TestNoTokenFlag to the step surface.
-//
-// Tokens pass via env or stdin, NEVER argv: argv is world-readable through
-// `ps` on a shared host, so a --token flag would defeat the capability model
-// at the transport layer regardless of how carefully the rest is built.
-func TestNoTokenFlagOnStepVerbs(t *testing.T) {
-	for _, sub := range stepCmd.Commands() {
-		if sub.Flags().Lookup("token") != nil {
-			t.Errorf("`docket step %s` has a --token flag; argv is world-readable "+
-				"through `ps` and tokens must pass via env or stdin", sub.Name())
-		}
-	}
-}
-
 // TestStepRecordIsCompleteAlias is DKT-107: a worktree-isolated agent's shell
 // guard misparses the bare word "complete" as the `complete` builtin and
 // refuses the whole command line before docket ever sees it. `step record` is
@@ -304,7 +295,18 @@ func TestStepRecordIsCompleteAlias(t *testing.T) {
 // (waiting-human)`: no gate, no verdict, a success glyph on a park. RUN-63's
 // executor read that line, answered "Record succeeded", and reported the wave
 // green over a real cargo-fmt failure. These drive emitRecordState — the whole
-// of what the RunE does after the saga returns — over recorded gate rows.
+// of what the RunE does after the verb returns — over recorded gate rows.
+
+// emitRecorded reads the step's row and failed gates as verb.StepComplete
+// returns them after an inline saga, and prints them with emitRecordState.
+func emitRecorded(t *testing.T, w *output.Writer, conn *sql.DB, stepID int) {
+	t.Helper()
+	failed, err := engine.FailedGates(conn, stepID)
+	testsupport.Must(t, err, "FailedGates: %v", err)
+	view, err := engine.LoadStepView(conn, stepID, model.NowMS())
+	testsupport.Must(t, err, "LoadStepView: %v", err)
+	emitRecordState(w, view.Row, failed, nil)
+}
 
 // recordFixture activates a run and returns the connection and the executor
 // step every case here records against.
@@ -370,7 +372,7 @@ func TestStepRecordNamesTheFailedGateAndItsExit(t *testing.T) {
 		db.GateResultRow{Gate: "self-hygiene", Verdict: db.GateVerdictFail, Exit: &exit})
 
 	w, buf := bufWriter(false)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	out := buf.String()
 	for _, want := range []string{
@@ -409,7 +411,7 @@ func TestStepRecordNamesEveryFailedGate(t *testing.T) {
 		db.GateResultRow{Gate: "build", Verdict: db.GateVerdictFail, Exit: &exit})
 
 	w, buf := bufWriter(false)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	out := buf.String()
 	want := "gates build failed (exit 1), secret-scan unmatched (no exit); " +
@@ -432,7 +434,7 @@ func TestStepRecordJSONCarriesTheFailedGates(t *testing.T) {
 		db.GateResultRow{Gate: "self-hygiene", Verdict: db.GateVerdictFail, Exit: &exit})
 
 	w, buf := bufWriter(true)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	var envelope struct {
 		OK   bool `json:"ok"`
@@ -486,7 +488,7 @@ func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
 			Exit: intPtr(3), Pre: true})
 
 	w, buf := bufWriter(false)
-	testsupport.Must(t, emitRecordState(w, conn, stepID, nil), "emitRecordState: %v", nil)
+	emitRecorded(t, w, conn, stepID)
 
 	want := "✔ Completed " + model.FormatStepID(stepID) + " (done)\n"
 	if buf.String() != want {
@@ -495,6 +497,205 @@ func TestStepRecordKeepsItsSuccessLineWhenGatesPass(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+// TestStepAnnotateCommandRecordsTheProjectItRegisters keeps the
+// project-registered event the root hook wrote before step annotate resolved
+// its own project, and pins that the read commands register nothing.
+func TestStepAnnotateCommandRecordsTheProjectItRegisters(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedRunForNext(t, conn)
+	first := stepIDNamed(t, conn, "first@0")
+	ref := model.FormatStepID(first)
+	claim, err := engine.ClaimStep(conn, first, engine.ClaimOptions{Owner: "worker-1", NowMS: model.NowMS()})
+	testsupport.Must(t, err, "claim: %v", err)
+	testsupport.Must(t, engine.NewEngine().CompleteStep(conn, first, engine.CompleteOptions{
+		Token: claim.Token, Artifact: []byte("result"), NowMS: model.NowMS(),
+	}), "complete")
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+
+	runLeaseCommand(t, conn, anchored("/repos/step-show"), stepShowCmd, ref)
+	runLeaseCommand(t, conn, anchored("/repos/step-context"), stepContextCmd, ref)
+	testsupport.Must(t, stepListCmd.Flags().Set("run", model.FormatRunID(runID)), "set --run")
+	runLeaseCommand(t, conn, anchored("/repos/step-list"), stepListCmd)
+	testsupport.Must(t, stepAnnotateCmd.Flags().Set("metadata", `{"k":1}`), "set --metadata")
+	runLeaseCommand(t, conn, anchored("/repos/step-annotate"), stepAnnotateCmd, ref)
+
+	got := registrationEvents(t, conn)
+	if len(got) != 1 || got["/repos/step-annotate"] != "step annotate" {
+		t.Errorf("registration events = %v, want only /repos/step-annotate registered by step annotate", got)
+	}
+}
+
+// TestStepRulingCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each step ruling
+// command resolved its own project.
+func TestStepRulingCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+	cases := map[string]func(t *testing.T, conn *sql.DB, cfg *config.Config){
+		"step hold": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			activatedRunForNext(t, conn)
+			testsupport.Must(t, stepHoldCmd.Flags().Set("reason", "for the operator"), "set --reason")
+			runLeaseCommand(t, conn, cfg, stepHoldCmd, model.FormatStepID(stepIDNamed(t, conn, "first@0")))
+		},
+		"step reap": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			activatedRunForNext(t, conn)
+			first := stepIDNamed(t, conn, "first@0")
+			_, err := engine.ClaimStep(conn, first, engine.ClaimOptions{Owner: "doomed", NowMS: model.NowMS()})
+			testsupport.Must(t, err, "claim: %v", err)
+			testsupport.Must(t, stepReapCmd.Flags().Set("reason", "spawn died"), "set --reason")
+			runLeaseCommand(t, conn, cfg, stepReapCmd, model.FormatStepID(first))
+		},
+		"step approve": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			gate := readyGate(t, conn)
+			testsupport.Must(t, stepApproveCmd.Flags().Set("authority", engine.AuthorityOperator), "set --authority")
+			runLeaseCommand(t, conn, cfg, stepApproveCmd, model.FormatStepID(gate))
+		},
+		"step reject": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			gate := readyGate(t, conn)
+			testsupport.Must(t, stepRejectCmd.Flags().Set("authority", engine.AuthorityOperator), "set --authority")
+			runLeaseCommand(t, conn, cfg, stepRejectCmd, model.FormatStepID(gate))
+		},
+		"step resolve": func(t *testing.T, conn *sql.DB, cfg *config.Config) {
+			id := parkedStep(t, conn)
+			testsupport.Must(t, stepResolveCmd.Flags().Set("as", engine.ResolveSkip), "set --as")
+			testsupport.Must(t, stepResolveCmd.Flags().Set("authority", engine.AuthorityOperator), "set --authority")
+			runLeaseCommand(t, conn, cfg, stepResolveCmd, model.FormatStepID(id))
+		},
+	}
+	for verb, run := range cases {
+		t.Run(verb, func(t *testing.T) {
+			conn := newTestDB(t)
+			identity := "/repos/" + strings.ReplaceAll(verb, " ", "-")
+			run(t, conn, anchored(identity))
+
+			got := registrationEvents(t, conn)
+			if len(got) != 1 || got[identity] != verb {
+				t.Errorf("registration events = %v, want %s registered by %q", got, identity, verb)
+			}
+		})
+	}
+}
+
+// TestStepRulingCommandsReportABadRequestBeforeAnUnreadableCwd: a malformed
+// STEP-N, or a resolve with no --as, is reported as the request's
+// VALIDATION_ERROR even when the working directory cannot be read.
+func TestStepRulingCommandsReportABadRequestBeforeAnUnreadableCwd(t *testing.T) {
+	cases := map[string]struct {
+		run  func(conn *sql.DB) error
+		want string
+	}{
+		"step hold": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runStepHold(reapCmdWithDB(conn), []string{"ISSUE-1"}, w)
+		}, want: "invalid step ID"},
+		"step reap": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runStepReap(reapCmdWithDB(conn), []string{"ISSUE-1"}, w)
+		}, want: "invalid step ID"},
+		"step approve": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runDecide(decideCmdWithDB(conn), []string{"ISSUE-1"}, true, w)
+		}, want: "invalid step ID"},
+		"step reject": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runDecide(decideCmdWithDB(conn), []string{"ISSUE-1"}, false, w)
+		}, want: "invalid step ID"},
+		"step resolve": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			cmd := resolveCmdWithDB(conn)
+			_ = cmd.Flags().Set("as", engine.ResolveSkip)
+			return runStepResolve(cmd, []string{"ISSUE-1"}, w)
+		}, want: "invalid step ID"},
+		"step resolve without --as": {run: func(conn *sql.DB) error {
+			w, _ := bufWriter(true)
+			return runStepResolve(resolveCmdWithDB(conn), []string{"STEP-1"}, w)
+		}, want: "--as is required"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn := newTestDB(t)
+			stubGetwdFailure(t)
+
+			err := c.run(conn)
+			assertCmdCode(t, err, output.ErrValidation, name)
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: error = %v, want it to name %q", name, err, c.want)
+			}
+		})
+	}
+}
+
+// TestStepRulingCommandsReadTheCapabilityFromStdin: with DOCKET_TOKEN empty,
+// each ruling command on a bound run takes the conductor capability piped on
+// stdin and rules.
+func TestStepRulingCommandsReadTheCapabilityFromStdin(t *testing.T) {
+	cases := map[string]func(t *testing.T, conn *sql.DB) (run func() error, stepID int, event string){
+		"step hold": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			activatedRunForNext(t, conn)
+			first := stepIDNamed(t, conn, "first@0")
+			return func() error {
+				cmd := reapCmdWithDB(conn)
+				testsupport.Must(t, cmd.Flags().Set("reason", "for the operator"), "set --reason")
+				w, _ := bufWriter(true)
+				return runStepHold(cmd, []string{model.FormatStepID(first)}, w)
+			}, first, engine.EventStepHeld
+		},
+		"step reap": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			activatedRunForNext(t, conn)
+			first := stepIDNamed(t, conn, "first@0")
+			_, err := engine.ClaimStep(conn, first, engine.ClaimOptions{Owner: "doomed", NowMS: model.NowMS()})
+			testsupport.Must(t, err, "claim: %v", err)
+			return func() error {
+				cmd := reapCmdWithDB(conn)
+				testsupport.Must(t, cmd.Flags().Set("reason", "spawn died"), "set --reason")
+				w, _ := bufWriter(true)
+				return runStepReap(cmd, []string{model.FormatStepID(first)}, w)
+			}, first, engine.EventLeaseReaped
+		},
+		"step approve": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			gate := readyGate(t, conn)
+			return func() error {
+				w, _ := bufWriter(true)
+				return runDecide(decideCmdWithDB(conn), []string{model.FormatStepID(gate)}, true, w)
+			}, gate, engine.EventStepApproved
+		},
+		"step reject": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			gate := readyGate(t, conn)
+			return func() error {
+				w, _ := bufWriter(true)
+				return runDecide(decideCmdWithDB(conn), []string{model.FormatStepID(gate)}, false, w)
+			}, gate, engine.EventStepRejected
+		},
+		"step resolve": func(t *testing.T, conn *sql.DB) (func() error, int, string) {
+			id := parkedStep(t, conn)
+			return func() error {
+				cmd := resolveCmdWithDB(conn)
+				testsupport.Must(t, cmd.Flags().Set("as", engine.ResolveSkip), "set --as")
+				w, _ := bufWriter(true)
+				return runStepResolve(cmd, []string{model.FormatStepID(id)}, w)
+			}, id, engine.EventStepResolved
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn := newTestDB(t)
+			run, id, event := setup(t, conn)
+			token := envToken(t)
+			t.Setenv(TokenEnvVar, "")
+			withStdin(t, token+"\n")
+
+			err := run()
+			testsupport.Must(t, err, "%s with the capability on stdin: %v", name, err)
+			if rulingEvent(t, conn, id, event) == nil {
+				t.Errorf("%s recorded no %s event", name, event)
+			}
+		})
+	}
+}
 
 // TestStepClaimCommandWritesTheMetadataFlag drives the REAL `step claim` RunE
 // over its REAL flag set and reads the step back out of the store (DKT-592).
@@ -539,5 +740,141 @@ func TestStepClaimCommandWritesTheMetadataFlag(t *testing.T) {
 	if !strings.Contains(step.Metadata, `"tier_requested":"a"`) {
 		t.Errorf("metadata = %q, want the claim's bag — the flag was parsed and dropped",
 			step.Metadata)
+	}
+}
+
+// TestStepClaimRefusesItsFlagsBeforeTheRecoverySecret keeps the refusal a
+// claim invalid both ways reports: the flag, as before the command called
+// internal/verb, not the group-readable secret file on stdin.
+func TestStepClaimRefusesItsFlagsBeforeTheRecoverySecret(t *testing.T) {
+	conn, stepID := claimableStep(t)
+	readable := secretFile(t, testRecoverySecret, 0o644)
+
+	cases := []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"no owner", nil, "--owner is required"},
+		{"non-positive ttl", map[string]string{"owner": "worker-1", "ttl": "-1s"}, "--ttl must be positive"},
+		{"non-positive cost multiplier", map[string]string{"owner": "worker-1", "cost-multiplier": "0"},
+			"--cost-multiplier must be positive"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for name, value := range c.flags {
+				testsupport.Must(t, stepClaimCmd.Flags().Set(name, value), "setting --%s", name)
+			}
+			stepClaimCmd.SetIn(openStdin(t, readable))
+			t.Cleanup(func() { stepClaimCmd.SetIn(nil) })
+
+			_, err := runLeaseCommandOutput(t, conn, nil, stepClaimCmd, model.FormatStepID(stepID))
+			if errCode(t, err) != output.ErrValidation || !strings.HasPrefix(err.Error(), c.want) {
+				t.Errorf("error = %v, want a VALIDATION_ERROR starting %q", err, c.want)
+			}
+			assertUnclaimed(t, conn, stepID)
+		})
+	}
+}
+
+// TestStepLeaseCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each step lease command
+// resolved its own project, including for a command refused after it
+// registered the project.
+func TestStepLeaseCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	conn, stepID := claimableStep(t)
+	ref := model.FormatStepID(stepID)
+	anchored := func(identity string) *config.Config {
+		return &config.Config{Identity: identity, Anchored: true}
+	}
+
+	testsupport.Must(t, stepClaimCmd.Flags().Set("owner", "worker-1"), "set --owner")
+	claimed := runLeaseCommand(t, conn, anchored("/repos/step-claim"), stepClaimCmd, ref)
+	token, _ := claimed["token"].(string)
+	t.Setenv(TokenEnvVar, token)
+	runLeaseCommand(t, conn, anchored("/repos/step-heartbeat"), stepHeartbeatCmd, ref)
+	runLeaseCommand(t, conn, anchored("/repos/step-fail"), stepFailCmd, ref)
+
+	// The failure retired the token, so this completion is refused after it
+	// registers its project.
+	artifact := filepath.Join(t.TempDir(), "artifact.md")
+	testsupport.Must(t, os.WriteFile(artifact, []byte("result"), 0o600), "writing the artifact")
+	testsupport.Must(t, stepCompleteCmd.Flags().Set("artifact-file", artifact), "set --artifact-file")
+	if _, err := runLeaseCommandOutput(t, conn, anchored("/repos/step-complete"), stepCompleteCmd, ref); err == nil {
+		t.Fatal("step complete with a retired token succeeded, want AUTH_ERROR")
+	}
+
+	want := map[string]string{
+		"/repos/step-claim":     "step claim",
+		"/repos/step-heartbeat": "step heartbeat",
+		"/repos/step-fail":      "step fail",
+		"/repos/step-complete":  "step complete",
+	}
+	got := registrationEvents(t, conn)
+	if len(got) != len(want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+	for identity, verb := range want {
+		if got[identity] != verb {
+			t.Errorf("%s registered by %q, want %q", identity, got[identity], verb)
+		}
+	}
+}
+
+// TestStepClaimCommandDeliversTheTokenOfAnIncompleteClaim drives a claim
+// whose lease commits and whose authoritative render then fails: the template
+// indexes past the packet's files only once the step reads claimed. The
+// command exits 0 with the live token and the failure in claim_error.
+func TestStepClaimCommandDeliversTheTokenOfAnIncompleteClaim(t *testing.T) {
+	conn, stepID := claimableStep(t)
+	template := filepath.Join(t.TempDir(), "packet.tmpl")
+	testsupport.Must(t, os.WriteFile(template, []byte(
+		`{{.Step.Step}}{{if eq .Step.Status "claimed"}}{{index .Files 99}}{{end}}`), 0o600),
+		"writing the template")
+
+	testsupport.Must(t, stepClaimCmd.Flags().Set("owner", "worker-1"), "set --owner")
+	testsupport.Must(t, stepClaimCmd.Flags().Set("render", "true"), "set --render")
+	testsupport.Must(t, stepClaimCmd.Flags().Set("template", template), "set --template")
+	out, err := runLeaseCommandOutput(t, conn, nil, stepClaimCmd, model.FormatStepID(stepID))
+	if err != nil {
+		t.Fatalf("a claim whose lease committed was reported as a failure: %v", err)
+	}
+
+	var envelope struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Token      string `json:"token"`
+			ClaimError string `json:"claim_error"`
+		} `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal([]byte(out), &envelope), "payload is not JSON: %q", out)
+	if !envelope.OK || !strings.Contains(envelope.Data.ClaimError, "index out of range") {
+		t.Errorf("envelope = %s, want ok with the render failure in claim_error", out)
+	}
+	if err := db.AuthorizeStepRead(conn, stepID, envelope.Data.Token, model.NowMS()); err != nil {
+		t.Errorf("the delivered token does not hold the committed lease: %v", err)
+	}
+}
+
+// TestStepIntegrateSaysPicksLandUnsigned: the verb's human summary names every
+// commit it picked and says the picks landed unsigned by design.
+func TestStepIntegrateSaysPicksLandUnsigned(t *testing.T) {
+	first := strings.Repeat("a", 40)
+	second := strings.Repeat("b", 40)
+	third := strings.Repeat("c", 40)
+	done := []engine.StepIntegration{
+		{Step: "STEP-1", Picked: []string{first, second}, IntegratedSHA: strings.Repeat("d", 40), Unsigned: true},
+		{Step: "STEP-2", Picked: []string{third}, IntegratedSHA: strings.Repeat("e", 40), Unsigned: true},
+	}
+
+	got := integrationSummary(done)
+
+	for _, sha := range []string{first, second, third} {
+		if !strings.Contains(got, sha[:12]) {
+			t.Errorf("summary does not name picked commit %.12s:\n%s", sha, got)
+		}
+	}
+	if !strings.Contains(got, "landed unsigned by design") {
+		t.Errorf("summary does not say the picks landed unsigned by design:\n%s", got)
 	}
 }

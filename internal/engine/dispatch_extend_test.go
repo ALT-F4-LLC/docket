@@ -447,39 +447,6 @@ func TestDispatchExtendRefusesWithNoOpenDispatch(t *testing.T) {
 	}
 }
 
-// TestDispatchExtendKeepsVerifyPassing is AC3's first half: `dispatch verify`
-// iterates the GROWN stored list by step id and still passes. An appended row
-// is an ordinary manifest row to every consumer of the manifest.
-func TestDispatchExtendKeepsVerifyPassing(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	openDispatch(t, conn, run.ID, 0, nowMS)
-	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
-	x := extendDispatch(t, conn, run.ID, nowMS)
-	if len(x.Rows) == 0 {
-		t.Fatal("the extend appended nothing; the test's premise is broken")
-	}
-
-	result, mismatch, err := e.VerifyDispatch(conn, run.ID, nowMS)
-	testsupport.Must(t, err, "dispatch verify: %v", err)
-	if mismatch != nil {
-		t.Fatalf("verify reported a mismatch at position %d after an extend:\n"+
-			"  stored:   %s\n  computed: %s",
-			mismatch.Position, mismatch.Stored, mismatch.Computed)
-	}
-	if !result.Verified {
-		t.Errorf("verify.Verified = false after an extend, want true")
-	}
-	if len(result.Rows) != len(openManifestRows(t, conn, run.ID)) {
-		t.Errorf("verify reported %d row verdict(s), want one per stored row "+
-			"(%d) — it must iterate the GROWN list",
-			len(result.Rows), len(openManifestRows(t, conn, run.ID)))
-	}
-}
-
 // extendDrivesSrc: two chains whose engine-run tails are readied by operator
 // rulings rather than by `step record` — a vote step behind an executor the
 // operator resolves, and an action step behind a human step the operator

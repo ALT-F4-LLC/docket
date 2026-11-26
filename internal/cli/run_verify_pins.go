@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -61,77 +61,20 @@ does not say so yet.`,
 }
 
 func runRunVerifyPins(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	report, err := engine.VerifyPins(conn, runID)
-	if err != nil {
-		return runErr(err)
-	}
-
 	// UNSOUND IS AN ERROR, not a report with a sad line in it. The question
 	// this verb answers is asked by scripts and by conductors deciding whether
 	// to proceed, and an exit code is the only part of the answer they cannot
-	// miss. The code matches what the blocked verbs themselves return, so a
-	// caller that handles one handles both.
-	if !report.Sound() {
-		code := output.ErrConflict
-		remedy := fmt.Sprintf("; restore the file(s), or `docket run repin %s "+
-			"--reason ...` adopts current disk bytes for the remaining steps "+
-			"(DKT-408)", report.Run)
-		switch {
-		case report.Changed > 0:
-			// Drift wins the disposition: it is the half a repin can fix, and
-			// its remedy is the one to try first.
-		case report.Missing > 0:
-			code = output.ErrNotFound
-			// A missing ref has no current bytes to adopt; repin would refuse.
-			remedy = "; restore the file(s) or abandon the run"
-		case report.ExecutedCopyChanged > 0:
-			// A gate run from the invoking checkout would execute other bytes
-			// than the run pinned. The run's own pins are intact, so repin has
-			// nothing to adopt and a new run would pin the run's checkout
-			// again; the fix is the invoking copy or where the gate runs.
-			remedy = "; restore the gate script in the invoking checkout, " +
-				"or run the gate from the run's checkout"
-		default:
-			// ONLY THE CLOSURE IS OPEN. Nothing drifted, so there is nothing on
-			// disk to restore and repin has no changed bytes to adopt — it
-			// would report a clean no-op on exactly this run. The pin set froze
-			// without the ref, and only a new activation pins one. The code is
-			// the one the blocked claims themselves return, which is this
-			// verb's rule: a caller that handles the refusal handles the
-			// prediction of it.
-			code = output.ErrValidation
-			remedy = "; the pin set froze without the ref(s), so the step(s) " +
-				"reading them refuse at claim (VALIDATION_ERROR) — start a new " +
-				"run to pin them, or take the reference back out of the " +
-				"referencing file"
-		}
-		// Unpinned gates are a separate report, but an unsound run must not
-		// hide them: name them beside the drift.
-		var names []string
-		for _, g := range report.Gates {
-			if g.Status == engine.GateUnpinned {
-				names = append(names, fmt.Sprintf("%q", g.Gate))
-			}
-		}
-		if len(names) > 0 {
-			remedy += "; gates with no pinned script: " + strings.Join(names, ", ")
-		}
-		return cmdErr(fmt.Errorf("%s: %s%s",
-			report.Run, engine.PinReportReason(report), remedy), code)
+	// miss, so the CLI renders the refusal alone.
+	res, err := verb.RunVerifyPins(cmd.Context(), verbEnv(cmd), verb.RunVerifyPinsInput{Run: ref})
+	if err != nil {
+		return verbErr(err)
 	}
 
 	var message string
 	if !w.JSONMode {
-		message = renderPinReport(report)
+		message = renderPinReport(res.Report)
 	}
-	w.Success(report, message)
+	w.Success(res.Report, message)
 	return nil
 }
 

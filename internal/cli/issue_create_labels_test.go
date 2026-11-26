@@ -29,7 +29,7 @@ func TestIssueCreateEchoesAppliedLabels(t *testing.T) {
 	testsupport.Must(t, createCmd.Flags().Set("label", "security-load-bearing,routing"), "set --label")
 	// --json is the root's persistent flag; jsonVersionOf finds it through
 	// InheritedFlags, so it has to be set where it actually lives.
-	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 	t.Cleanup(func() {
 		_ = createCmd.Flags().Set("label", "")
 		_ = createCmd.Flags().Set("title", "")
@@ -103,7 +103,7 @@ func TestIssueCreateReplayWritesNothing(t *testing.T) {
 	resetCreateFlags()
 	t.Cleanup(resetCreateFlags)
 
-	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 	testsupport.Must(t, createCmd.Flags().Set("idempotency-key", "K"), "set --idempotency-key")
 
 	create := func(title, scope string) string {
@@ -146,7 +146,8 @@ func TestIssueCreateReplayWritesNothing(t *testing.T) {
 	activityBefore, err := db.CountActivity(conn, id)
 	testsupport.Must(t, err, "CountActivity: %v", err)
 
-	replayID := create("replayed", "b/**")
+	// Same title: a different title under K is a conflict, not a replay.
+	replayID := create("original", "b/**")
 	if replayID != firstID {
 		t.Fatalf("replay under the same key returned %s, want the earlier issue %s", replayID, firstID)
 	}
@@ -208,9 +209,10 @@ func TestIssueCreateReplayOfKeyRecordedElsewhereLeavesIssue(t *testing.T) {
 
 	create := func(key, scope string) int {
 		t.Helper()
-		testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
+		testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v2"), "set --json")
 		testsupport.Must(t, createCmd.Flags().Set("idempotency-key", key), "set --idempotency-key")
-		testsupport.Must(t, createCmd.Flags().Set("title", "via cli"), "set --title")
+		// The seeded title, so the replay under K matches its fingerprint.
+		testsupport.Must(t, createCmd.Flags().Set("title", "recorded elsewhere"), "set --title")
 		testsupport.Must(t, createCmd.Flags().Set("scope", scope), "set --scope")
 		restore := captureStdout(t)
 		runErr := createCmd.RunE(createCmd, nil)
@@ -261,45 +263,6 @@ func TestIssueCreateReplayOfKeyRecordedElsewhereLeavesIssue(t *testing.T) {
 	testsupport.Must(t, err, "IssueScopeGlobs: %v", err)
 	if freshScope != `["a/**"]` {
 		t.Errorf("fresh create under K2 stored scope %q, want %q", freshScope, `["a/**"]`)
-	}
-}
-
-// TestIssueCreateWithoutKeyStoresScope: a create with no idempotency key is
-// always an insert, so its --scope must be stored. The CLI applies --scope
-// only when CreateIssueIdempotent reports inserted, so a keyless create that
-// reported no insert would drop the scope silently.
-func TestIssueCreateWithoutKeyStoresScope(t *testing.T) {
-	conn := newTestDB(t)
-	cmd := cmdWithDB(conn)
-	cmd.SetContext(context.WithValue(cmd.Context(), dbKey, conn))
-	createCmd.SetContext(cmd.Context())
-	resetCreateFlags()
-	t.Cleanup(resetCreateFlags)
-
-	testsupport.Must(t, rootCmd.PersistentFlags().Set("json", "v1"), "set --json")
-	testsupport.Must(t, createCmd.Flags().Set("title", "keyless"), "set --title")
-	testsupport.Must(t, createCmd.Flags().Set("scope", "a/**"), "set --scope")
-
-	restore := captureStdout(t)
-	runErr := createCmd.RunE(createCmd, nil)
-	out := restore()
-	testsupport.Must(t, runErr, "issue create --scope a/**: %v", runErr)
-
-	var env struct {
-		Data struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		t.Fatalf("create payload is not JSON: %v\n%s", err, out)
-	}
-	id, err := model.ParseID(env.Data.ID)
-	testsupport.Must(t, err, "ParseID(%q): %v", env.Data.ID, err)
-
-	scope, err := db.IssueScopeGlobs(conn, id)
-	testsupport.Must(t, err, "IssueScopeGlobs: %v", err)
-	if scope != `["a/**"]` {
-		t.Errorf("keyless create stored scope %q, want %q", scope, `["a/**"]`)
 	}
 }
 

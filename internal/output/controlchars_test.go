@@ -79,21 +79,12 @@ func assertParsesAndRoundTrips(t *testing.T, envelope string, raw []byte) {
 	}
 }
 
-func TestJSONV1EscapesControlCharacters(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	w := &Writer{JSONMode: true, JSONVersion: JSONV1, Stdout: &stdout, Stderr: &stderr}
-
-	// The MESSAGE carries them too: it is the rendered human line, built from
-	// the same untrusted title, and it rides in the same envelope.
-	w.Success(controlCharFixture(), "Created DKT-1: ctrl\x01title")
-
-	assertParsesAndRoundTrips(t, "v1", stdout.Bytes())
-}
-
 func TestJSONV2EscapesControlCharacters(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	w := &Writer{JSONMode: true, JSONVersion: JSONV2, Stdout: &stdout, Stderr: &stderr}
 
+	// The MESSAGE carries them too: it is the rendered human line, built from
+	// the same untrusted title, and it rides in the same envelope.
 	w.Success(controlCharFixture(), "Created DKT-1: ctrl\x01title")
 
 	assertParsesAndRoundTrips(t, "v2", stdout.Bytes())

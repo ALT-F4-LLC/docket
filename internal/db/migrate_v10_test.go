@@ -35,51 +35,6 @@ var v10Columns = []struct{ table, column string }{
 	{"steps", "usage_recorded"},
 }
 
-func TestMigrateToV10(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-
-	for _, table := range v10Tables {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s missing after migration", table)
-		}
-	}
-	// The indexes are asserted BY NAME rather than left to the table check,
-	// because two of them carry semantics no table probe can see:
-	// `idx_dispatches_one_open` is the partial UNIQUE index that IS the open
-	// race guard, and `idx_reap_acks_open` is the partial index that makes the
-	// reap-ack dormancy one lookup. A migration that created the tables and
-	// dropped either would leave a schema whose shape looked right and whose
-	// guarantees were gone.
-	for _, index := range []string{
-		"idx_usage_ledger_run",
-		"idx_dispatches_one_open",
-		"idx_reap_acks_open",
-	} {
-		if !hasIndex(t, db, index) {
-			t.Errorf("%s missing after migration", index)
-		}
-	}
-	for _, col := range v10Columns {
-		if !columnExists(t, db, col.table, col.column) {
-			t.Errorf("%s.%s missing after migration", col.table, col.column)
-		}
-	}
-}
-
 // TestSchemaSpanIsComplete is a tripwire, and it is NOT a tautology check.
 //
 // The planned span was v5–v10; every version past it is a recorded addition,
@@ -91,7 +46,7 @@ func TestMigrateToV10(t *testing.T) {
 // GAPS, because a missing entry turns Migrate's loop into a runtime error on a
 // user's database rather than a build-time failure on ours.
 func TestSchemaSpanIsComplete(t *testing.T) {
-	// The span now ends at v44. v11 through v44 are AMENDMENTS, not stages —
+	// The span now ends at v47. v11 through v47 are AMENDMENTS, not stages —
 	// workflow retirement (DKT-21), the projects dimension (operator request,
 	// 2026-08-09), vote provenance (DKT-71), per-seat vote spend (DKT-95),
 	// artifact revisions (DKT-70), the retry-budget base (DKT-86/DKT-90),
@@ -110,8 +65,10 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// (2026-10-09), the step
 	// recorded-at clock (2026-10-10), the step resolution authority
 	// (2026-10-10), the claim phase (2026-10-10), the run-note
-	// authority (2026-10-10), the step recovery hash (2026-10-10), and the
-	// fix-loop cap (2026-10-11) — each one needed a version and leaves the
+	// authority (2026-10-10), the step recovery hash (2026-10-10), the
+	// fix-loop cap (2026-10-11), the pinned file bytes (2026-10-18), the
+	// event low watermark (2026-10-18), and the idempotency request
+	// fingerprint (2026-10-18) — each one needed a version and leaves the
 	// v5-v10 arithmetic untouched.
 	//
 	// The tripwire itself is UNCHANGED IN PURPOSE. It still fails the next
@@ -119,9 +76,10 @@ func TestSchemaSpanIsComplete(t *testing.T) {
 	// test firing is exactly how v11 through v23 came to be documented rather
 	// than discovered afterwards. Raising the number without adding the new
 	// version and its reason to the list above is the move it exists to stop.
-	if currentSchemaVersion != 44 {
-		t.Errorf("currentSchemaVersion = %d, want 44 — the recorded schema "+
-			"span ends at v44 (the fix-loop cap). Moving past 44 means "+
+	if currentSchemaVersion != 47 {
+		t.Errorf("currentSchemaVersion = %d, want 47 — the recorded schema "+
+			"span ends at v47 (the idempotency request fingerprint). Moving "+
+			"past 47 means "+
 			"recording the new version and the reason it needs one in "+
 			"this test's span list first", currentSchemaVersion)
 	}

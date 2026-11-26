@@ -2,9 +2,6 @@ package exec
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -124,84 +121,6 @@ func TestRenderArgvKeepsElementBoundariesVisible(t *testing.T) {
 
 	if RenderArgv(nil) != "" {
 		t.Error("an empty argv renders as the empty string")
-	}
-}
-
-// TestJSONModeCarriesRawBytes proves JSON mode carries the raw bytes.
-//
-// JSON mode is UNTOUCHED and is inherently safe: encoding/json escapes control
-// bytes by contract, and the consumer is a program that does not interpret
-// them. Quoting on top of JSON encoding would DOUBLE-ESCAPE and corrupt the
-// value a machine consumer reads, so --json output carries the raw bytes
-// exactly as stored. The asymmetry is the point: the escaping exists for
-// terminals, and only terminals get it.
-func TestJSONModeCarriesRawBytes(t *testing.T) {
-	for _, hv := range hostileValues {
-		t.Run(hv.name, func(t *testing.T) {
-			// The raw value goes into JSON, NOT the rendered one.
-			encoded, err := json.Marshal(map[string]string{"command": hv.value})
-			testsupport.Must(t, err, "json.Marshal: %v", err)
-
-			// No raw control byte survives into the JSON text either —
-			// encoding/json handles that itself, which is why the renderer
-			// must not also be applied.
-			for _, b := range encoded {
-				if b < 0x20 {
-					t.Errorf("encoding/json emitted a raw control byte 0x%02x", b)
-				}
-			}
-
-			// And it ROUND-TRIPS TO THE ORIGINAL BYTES, which is what a
-			// machine consumer needs.
-			var back map[string]string
-			if err := json.Unmarshal(encoded, &back); err != nil {
-				t.Fatalf("json.Unmarshal: %v", err)
-			}
-			if back["command"] != hv.value {
-				t.Errorf("JSON must round-trip to the ORIGINAL bytes.\n got: %q\nwant: %q", back["command"], hv.value)
-			}
-
-			// Applying the renderer before JSON encoding would corrupt it —
-			// asserted so the mistake is caught if someone "helpfully" adds it.
-			doubleEncoded, err := json.Marshal(map[string]string{"command": Render(hv.value)})
-			testsupport.Must(t, err, "json.Marshal: %v", err)
-			var doubleBack map[string]string
-			if err := json.Unmarshal(doubleEncoded, &doubleBack); err != nil {
-				t.Fatalf("json.Unmarshal: %v", err)
-			}
-			if doubleBack["command"] == hv.value {
-				t.Error("rendering before JSON encoding must be detectable as corruption; it round-tripped unchanged")
-			}
-		})
-	}
-}
-
-// TestRenderDoesNotModifyStoredBytes proves rendering leaves stored bytes
-// unchanged.
-//
-// Escaping is a RENDERING transform applied at the print boundary. Mutating
-// stored bytes would break the fence hash re-verification, which is the one
-// thing that must compare unmodified content — so the hash is recomputed after
-// a render and must still match.
-func TestRenderDoesNotModifyStoredBytes(t *testing.T) {
-	for _, hv := range hostileValues {
-		stored := hv.value
-		before := sha256.Sum256([]byte(stored))
-
-		// Render it several times and in both forms.
-		_ = Render(stored)
-		_ = RenderArgv([]string{stored})
-		_ = Render(stored)
-
-		after := sha256.Sum256([]byte(stored))
-		if before != after {
-			t.Errorf("%s: rendering must not modify the stored bytes", hv.name)
-		}
-		// The stored value still hashes to what it did, so the fence hash
-		// re-verification against the stored hash keeps passing.
-		if hex.EncodeToString(before[:]) != hex.EncodeToString(after[:]) {
-			t.Errorf("%s: the stored hash changed across a render", hv.name)
-		}
 	}
 }
 

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -9,10 +8,10 @@ import (
 	"time"
 
 	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/spf13/cobra"
 )
@@ -644,12 +643,12 @@ func (r *trustEventRecorder) record(entry trust.Entry) error {
 		return nil
 	}
 
-	conn, err := db.Open(cfg.DBPath)
+	conn, err := store.OpenSQLiteDB(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("%w: opening %s: %w", errTrustUnrecorded, cfg.DBPath, err)
 	}
 	defer conn.Close()
-	if err := db.Migrate(conn); err != nil {
+	if err := store.StoreOn(conn).Migrate(); err != nil {
 		return fmt.Errorf("%w: migrating %s: %w", errTrustUnrecorded, cfg.DBPath, err)
 	}
 
@@ -722,8 +721,6 @@ func trustCmdError(err error) error {
 		return cmdErr(err, output.ErrConflict)
 	case errors.Is(err, trust.ErrIntegrity), errors.Is(err, trust.ErrParse):
 		return cmdErr(err, output.ErrValidation)
-	case errors.Is(err, sql.ErrNoRows):
-		return cmdErr(err, output.ErrNotFound)
 	case errors.Is(err, errTrustUnrecorded):
 		// The request was well-formed and what failed is this repo's event log:
 		// on an add the store is untouched, on a rm the removal has already

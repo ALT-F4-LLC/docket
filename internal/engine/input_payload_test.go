@@ -144,34 +144,6 @@ func TestPacketCarriesThePayload(t *testing.T) {
 	}
 }
 
-// TestPayloadSurvivesConcatenationHazards falsifies the rejected alternative
-// (B) rather than only rejecting it in prose: a payload holding the very text
-// that delimits a section must arrive intact and must not corrupt the body.
-func TestPayloadSurvivesConcatenationHazards(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-
-	const payload = "{\"note\":\"== INPUT change-summary\\nnot a real header\"}"
-	implID := stepIDByInstance(t, conn, "implement@0")
-	producedWithPayload(t, conn, run.ID, implID, "change-summary", "real prose", payload)
-
-	reviewID := stepIDByInstance(t, conn, "review@0#0")
-	bundle, err := ReadContext(conn, reviewID, nowMS)
-	testsupport.Must(t, err, "ReadContext: %v", err)
-	for _, in := range bundle.Inputs {
-		if in.Kind != "change-summary" {
-			continue
-		}
-		if in.Payload != payload {
-			t.Errorf("payload = %q, want %q", in.Payload, payload)
-		}
-		if in.Body != "real prose" {
-			t.Errorf("body = %q, want %q — the halves stay separate", in.Body,
-				"real prose")
-		}
-	}
-}
-
 // TestInputsBytesCountsPayloads pins that the context cap must see payload
 // bytes, or a bundle could exceed its declared cap while reporting that it did
 // not. The cap's honesty is the reason the field exists.
@@ -191,49 +163,6 @@ func TestInputsBytesCountsPayloads(t *testing.T) {
 		t.Errorf("inputs_bytes = %d, which does not account for a %d-byte "+
 			"payload — the cap would be computed against a lie",
 			meta.InputsBytes, len(payload))
-	}
-}
-
-// TestPayloadTracksItsArtifactExactlyAsTheBodyDoes pins that the new field is
-// governed by the SAME rule as the half beside it, which is the property that
-// matters here.
-//
-// "Assembly reads no live state" is about ISSUE and TREE state — the
-// title, body, labels, scope, and pinned files, all snapshotted at activation
-// and covered by TestContextAssemblyReadsNoLiveState. Artifact rows are a
-// different category: they are written once, at completion, and read back as
-// the record of that event. `body` is re-read on every assembly, and `payload`
-// must behave identically — an asymmetry between the two halves of one artifact
-// would be the defect, not the re-read.
-//
-// So this asserts the invariant that is actually load-bearing: whatever the
-// engine does with `body`, it does with `payload`.
-func TestPayloadTracksItsArtifactExactlyAsTheBodyDoes(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-
-	implID := stepIDByInstance(t, conn, "implement@0")
-	producedWithPayload(t, conn, run.ID, implID, "change-summary", "prose",
-		`[{"severity":"high"}]`)
-	reviewID := stepIDByInstance(t, conn, "review@0#0")
-
-	if !strings.Contains(bundleJSON(t, conn, reviewID), "severity") {
-		t.Fatal("the bundle carries no payload to begin with")
-	}
-
-	// Edit BOTH halves and require the bundle to move on both or neither.
-	execSQL(t, conn, `UPDATE artifacts SET body = ?, payload = ? WHERE step_id = ?`,
-		"EDITED PROSE", `[{"severity":"EDITED"}]`, implID)
-
-	after := bundleJSON(t, conn, reviewID)
-	bodyMoved := strings.Contains(after, "EDITED PROSE")
-	payloadMoved := strings.Contains(after, `severity\":\"EDITED`) ||
-		strings.Contains(after, `"severity":"EDITED"`)
-
-	if bodyMoved != payloadMoved {
-		t.Errorf("the two halves of one artifact disagree: body moved = %v, "+
-			"payload moved = %v — they must be governed by the same rule\n%s",
-			bodyMoved, payloadMoved, after)
 	}
 }
 

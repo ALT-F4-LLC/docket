@@ -1,7 +1,9 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -17,10 +19,13 @@ func CreateDocComment(db *sql.DB, c *model.DocComment) (int, error) {
 }
 
 // CreateDocCommentIdempotent is CreateDocComment with an optional idempotency
-// key. A repeat call with the same key returns the original comment id and
-// inserts nothing; the key is recorded in the same transaction as the insert.
+// key. A repeat call with the same key and the same doc, author and body
+// returns the original comment id and inserts nothing; the same key with
+// different content returns an error wrapping ErrConflict that names the key.
+// The key is recorded in the same transaction as the insert.
 func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey string) (int, error) {
-	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeDocComment, idempotencyKey)
+	fingerprint := docCommentFingerprint(c)
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeDocComment, idempotencyKey, fingerprint)
 	if err != nil {
 		return 0, err
 	}
@@ -39,12 +44,12 @@ func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey 
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO doc_comments (doc_id, body, author, created_at)
-		 VALUES (?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?) RETURNING id`,
 		c.DocID, c.Body, c.Author, now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting doc comment: %w", err)
 	}
 
@@ -52,13 +57,8 @@ func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey 
 		return 0, fmt.Errorf("touching doc updated_at: %w", err)
 	}
 
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeDocComment, idempotencyKey, int(id64)); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeDocComment, idempotencyKey, fingerprint, id); err != nil {
 			return 0, err
 		}
 	}
@@ -67,7 +67,16 @@ func CreateDocCommentIdempotent(db *sql.DB, c *model.DocComment, idempotencyKey 
 		return 0, fmt.Errorf("committing transaction: %w", err)
 	}
 
-	return int(id64), nil
+	return id, nil
+}
+
+// docCommentFingerprint identifies a create request by the content the caller
+// supplies: the doc target, author and body. Length prefixes keep distinct
+// field splits from hashing alike.
+func docCommentFingerprint(c *model.DocComment) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "doc=%d\nauthor=%d:%s\nbody=%d:%s", c.DocID, len(c.Author), c.Author, len(c.Body), c.Body)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // ListDocComments returns all comments for a doc ordered by created_at ASC.

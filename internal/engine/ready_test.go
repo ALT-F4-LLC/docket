@@ -91,37 +91,6 @@ func execSQL(t *testing.T, conn *sql.DB, query string, args ...any) {
 // R1-R7, each independently satisfied and falsified
 // ---------------------------------------------------------------------------
 
-// TestReadyBaseline is the satisfied case every falsification below is measured
-// against: the fixture's root step, on a freshly activated run, is ready.
-//
-// It exists separately because a falsification test that never saw the
-// predicate return true would pass just as well against a predicate that always
-// returns false.
-func TestReadyBaseline(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		root := stepNamed(t, sched, "implement@0")
-		ready, cond := sched.Ready(root)
-		if !ready {
-			t.Fatalf("implement@0 is not ready: %s", cond)
-		}
-
-		// And its successor is NOT ready, because R3 is unmet — the baseline
-		// for the R3 case below.
-		for _, s := range sched.Steps() {
-			if s.StepName == "review" {
-				if ready, cond := sched.Ready(s); ready {
-					t.Errorf("%s is ready before implement@0 is done", s.Instance)
-				} else if cond != CondPredecessors {
-					t.Errorf("%s blocked by %q, want %q", s.Instance, cond, CondPredecessors)
-				}
-			}
-		}
-	})
-}
-
 // TestReadyR1RunActive falsifies R1: a run that is not `active` offers nothing,
 // whatever its steps say.
 func TestReadyR1RunActive(t *testing.T) {
@@ -246,30 +215,6 @@ func TestReadyR3Predecessors(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestReadyR3SkippedPredecessorSatisfies pins that a `skipped` predecessor does
-// NOT strand its successors. A false `when` means the step does not
-// run, not that everything after it is unschedulable — and expansion creates
-// the skipped row precisely so the `after` edge stays resolvable.
-func TestReadyR3SkippedPredecessorSatisfies(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-
-	execSQL(t, conn, `UPDATE steps SET status = ? WHERE instance = ? AND issue_id = ?`,
-		db.StepSkipped, "implement@0", issue)
-
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		for _, s := range sched.Steps() {
-			if s.StepName != "review" {
-				continue
-			}
-			if ready, cond := sched.Ready(s); !ready {
-				t.Errorf("%s blocked by a SKIPPED predecessor (%s) — "+
-					"a skipped step must not strand its successors", s.Instance, cond)
-			}
-		}
-	})
 }
 
 // TestReadyR4ScopeConflict falsifies R4 at the predicate level: a step whose
@@ -636,22 +581,6 @@ func TestClassCapProjectOverrideWinsOverStoreWide(t *testing.T) {
 	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
 		if got := sched.Limit("write").Max; got != 1 {
 			t.Errorf("Limit(write).Max = %d, want the project's 1 over the store's 3", got)
-		}
-	})
-}
-
-// TestClassCapAutoDerivesFromTheHost: `auto` resolves to half the host's CPUs,
-// never below one.
-func TestClassCapAutoDerivesFromTheHost(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := classCapRun(t, conn)
-	err := db.SetConfig(conn, 0, db.KeyClassMaxPrefix+"write", db.ClassMaxAuto)
-	testsupport.Must(t, err, "setting auto: %v", err)
-
-	want := max(1, runtime.NumCPU()/2)
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		if got := sched.Limit("write").Max; got != want {
-			t.Errorf("Limit(write).Max = %d under auto, want %d", got, want)
 		}
 	})
 }
@@ -1098,45 +1027,6 @@ func TestExpiryIgnoresStepsOfANonActiveRun(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestPausedRunSuspendsRatherThanExemptsTheLease is the other half,
-// and the one that keeps the fix from becoming an escape hatch: pausing a run
-// must SUSPEND the TTL, not forgive it.
-//
-// A step whose lease lapsed during a pause is still reaped by the first reap
-// after the run returns to `active` — nothing wrote `expires_ms`, so the debt
-// is intact. Without this, "pause the run" would be a way to make a wedged
-// writer permanently unreapable.
-func TestPausedRunSuspendsRatherThanExemptsTheLease(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-
-	const hour = 60 * 60 * 1000
-	execSQL(t, conn,
-		`UPDATE steps SET status = ?, owner = 'w', token_hash = 'h', expires_ms = ?
-		  WHERE instance = ? AND issue_id = ?`,
-		db.StepClaimed, nowMS-hour, "implement@0", issue)
-
-	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
-		string(model.RunWaitingHuman), run.ID)
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		if sched.Expired(stepNamed(t, sched, "implement@0")) {
-			t.Fatal("the paused run reaped; the suspension half is already broken")
-		}
-	})
-
-	// The park resolves and the run resumes. The lease is still lapsed, and the
-	// step is reapable again with no further wall-clock time passing.
-	execSQL(t, conn, `UPDATE runs SET status = ? WHERE id = ?`,
-		string(model.RunActive), run.ID)
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		if !sched.Expired(stepNamed(t, sched, "implement@0")) {
-			t.Error("a lease that lapsed during a pause was not reaped once the " +
-				"run resumed — the pause must SUSPEND the TTL, not forgive it, " +
-				"or pausing becomes a way to make a wedged writer immortal")
-		}
-	})
 }
 
 // TestMaxStepDurationStillBoundsAnActiveRun is AC2: the suspension

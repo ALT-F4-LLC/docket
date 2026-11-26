@@ -196,28 +196,40 @@ TOML
   assert_stdout_contains "ZN" "ZN3_identity_b" "proofreader-colour"
 
   # ===========================================================================
-  # N4 — THE LADDER: an edit is a CONFLICT, a deletion is NOT_FOUND
+  # N4 — THE SNAPSHOT: render serves pinned bytes; `pin show` reports drift
   # ===========================================================================
   #
-  # Snapshot-pinning, enforced. A post-activation edit must never produce a
-  # silently different packet: same step => same packet, or an explicit refusal
-  # naming both hashes.
+  # Snapshot-pinning, enforced. Activation stores each pinned file's bytes, so
+  # a post-activation edit or deletion never changes a packet: same step =>
+  # same packet. Drift on disk is refused where the disk is read, by `pin show`:
+  # an edit is a CONFLICT naming the drift, a deletion is NOT_FOUND.
 
   printf 'Check spelling, grammar, and EVERYTHING ELSE TOO.\n' \
     >"$ZN_CFG/checklists/proofreader-copy.md"
 
   run_env "$ZN" step render STEP-1
-  assert_exit "ZN" "ZN4_edited_conflicts" 4
+  assert_exit "ZN" "ZN4_edited_renders_pinned" 0
+  assert_stdout_contains "ZN" "ZN4_edited_pinned_body" \
+    "Check spelling, grammar, and the caption on every plate."
+  if echo "$CMD_STDOUT" | grep -q "EVERYTHING ELSE TOO"; then
+    check "ZN" "ZN4_edited_not_served" "FAIL" \
+      "render served the edited on-disk bytes instead of the pinned bytes"
+  else
+    check "ZN" "ZN4_edited_not_served" "PASS"
+  fi
 
-  # BOTH hashes, named. An operator needs to know whether to restore the file
-  # or start a new run, and neither is decidable from "it changed".
-  assert_stderr_contains "ZN" "ZN4_conflict_explains" "has changed since this run pinned it"
-  assert_stderr_contains "ZN" "ZN4_conflict_pinned_hash" "pinned "
-  assert_stderr_contains "ZN" "ZN4_conflict_disk_hash" "on disk "
+  run_env "$ZN" pin show RUN-1 checklists/proofreader-copy.md
+  assert_exit "ZN" "ZN4_pin_show_edited_conflicts" 4
+  assert_stderr_contains "ZN" "ZN4_pin_show_drift_explains" "pin drift"
 
   rm "$ZN_CFG/checklists/proofreader-copy.md"
   run_env "$ZN" step render STEP-1
-  assert_exit "ZN" "ZN4_deleted_not_found" 2
+  assert_exit "ZN" "ZN4_deleted_renders_pinned" 0
+  assert_stdout_contains "ZN" "ZN4_deleted_pinned_body" \
+    "Check spelling, grammar, and the caption on every plate."
+
+  run_env "$ZN" pin show RUN-1 checklists/proofreader-copy.md
+  assert_exit "ZN" "ZN4_pin_show_deleted_not_found" 2
 
   # The OTHER sibling is unaffected: one broken file does not poison the run.
   run_env "$ZN" step render STEP-2

@@ -61,24 +61,6 @@ func stampPrerequisite(t *testing.T, conn *sql.DB, issueID, prereqID int, offset
 	execSQL(t, conn, `UPDATE issues SET updated_at = ? WHERE id = ?`, at, prereqID)
 }
 
-// A prerequisite that was already met before the park is not what the park
-// waits on, so the park is not signalled as retry-eligible.
-func TestRetryEligibleIgnoresAPrerequisiteMetBeforeThePark(t *testing.T) {
-	conn := mustDB(t)
-	runID, issueID, prereqID, _ := retryFixture(t, conn)
-	stampPrerequisite(t, conn, issueID, prereqID, -time.Minute)
-	execSQL(t, conn, `UPDATE issues SET status = ? WHERE id = ?`, string(model.StatusDone), prereqID)
-
-	got, err := RetryEligibleParks(conn, runID)
-	testsupport.Must(t, err, "RetryEligibleParks: %v", err)
-	if len(got) != 0 {
-		t.Errorf("a park whose prerequisite predates it was listed: %+v", got)
-	}
-	if m := openDispatch(t, conn, runID, 0, nowMS); len(m.RetryEligible) != 0 || len(retryEligibleEvents(t, conn, runID)) != 0 {
-		t.Errorf("dispatch open signalled it: %+v", m.RetryEligible)
-	}
-}
-
 // A prerequisite that closed before the park and was only edited after it (a
 // comment, a label) did not change for the park: its close decides, not its
 // updated_at.

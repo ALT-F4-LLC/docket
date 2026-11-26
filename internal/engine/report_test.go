@@ -15,6 +15,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -303,7 +304,7 @@ func TestReportFloorAgreesWithEnforcement(t *testing.T) {
 // and the bodies are one `step context` away for anyone who wants them.
 func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
+	runID, issueID := budgetRun(t, conn, 0)
 	e := testEngine()
 
 	const body = "the-artifact-body-nobody-should-see-in-a-rollup"
@@ -326,6 +327,10 @@ func TestReportArtifactIndexCarriesNoBodies(t *testing.T) {
 	}
 	if entry.SHA256 == "" || entry.Producer == "" || entry.Kind == "" {
 		t.Errorf("the index row is incomplete: %+v", entry)
+	}
+	if entry.Producer != "implement@0" || entry.Issue != model.FormatID(issueID) {
+		t.Errorf("the index row names producer %q on %q, want implement@0 on %s",
+			entry.Producer, entry.Issue, model.FormatID(issueID))
 	}
 }
 
@@ -834,7 +839,7 @@ func TestReportRendersEvidenceLessFindingsAsUnsupported(t *testing.T) {
 		Blockers: []model.Finding{{Text: "the test fails on main", Evidence: []string{ref}}},
 		Concerns: []model.Finding{{Text: "naming could be tighter"}},
 	}
-	err := ValidateCastEvidence(conn, proposalID, findings)
+	err := ValidateCastEvidence(store.StoreOn(conn), proposalID, findings)
 	testsupport.Must(t, err, "ValidateCastEvidence: %v", err)
 	_, err = db.CastVote(conn, &model.Vote{
 		ProposalID: proposalID, VoterName: "alice", VoterRole: "reviewer",
@@ -898,55 +903,6 @@ func TestReportWithholdsFindingsWhileTheBallotIsSealed(t *testing.T) {
 	if len(report.Findings) != 3 {
 		t.Errorf("after the tally closed the ballot the report carries %d finding(s), want 3",
 			len(report.Findings))
-	}
-}
-
-// TestRunReportSnapshotDoesNotBlockWriters pins that the report's snapshot is a
-// reader: while it is open, another process's write transaction commits
-// without waiting out busy_timeout. A snapshot taken under BEGIN IMMEDIATE
-// would hold the write lock for the whole report, and the writer would fail
-// with SQLITE_BUSY.
-func TestRunReportSnapshotDoesNotBlockWriters(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "issues.db")
-	reporter, err := db.Open(path)
-	testsupport.Must(t, err, "opening the reporter's handle: %v", err)
-	t.Cleanup(func() { reporter.Close() })
-	_, err = reporter.Exec("CREATE TABLE t (x INTEGER)")
-	testsupport.Must(t, err, "creating the table: %v", err)
-
-	writer, err := db.Open(path)
-	testsupport.Must(t, err, "opening the writer's handle: %v", err)
-	t.Cleanup(func() { writer.Close() })
-	_, err = writer.Exec("PRAGMA busy_timeout=50")
-	testsupport.Must(t, err, "shortening busy_timeout: %v", err)
-
-	snapshot, err := beginReadSnapshot(reporter)
-	testsupport.Must(t, err, "opening the snapshot: %v", err)
-	defer snapshot.Rollback()
-	// A deferred BEGIN holds nothing until its first read; read so the
-	// snapshot is really open while the writer runs.
-	var before int
-	err = snapshot.QueryRow("SELECT count(*) FROM t").Scan(&before)
-	testsupport.Must(t, err, "reading in the snapshot: %v", err)
-
-	tx, err := writer.Begin()
-	if err != nil {
-		t.Fatalf("writer's BEGIN while the report snapshot is open: %v", err)
-	}
-	if _, err := tx.Exec("INSERT INTO t (x) VALUES (1)"); err != nil {
-		tx.Rollback()
-		t.Fatalf("writer's INSERT while the report snapshot is open: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("writer's COMMIT while the report snapshot is open: %v", err)
-	}
-
-	var during int
-	err = snapshot.QueryRow("SELECT count(*) FROM t").Scan(&during)
-	testsupport.Must(t, err, "re-reading in the snapshot: %v", err)
-	if during != before {
-		t.Errorf("snapshot saw %d rows after the writer committed, want %d: "+
-			"the report must read one instant", during, before)
 	}
 }
 

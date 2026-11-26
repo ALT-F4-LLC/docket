@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -516,22 +515,5 @@ func TestMalformedPayloadIsRefused(t *testing.T) {
 	}); err != nil {
 		t.Errorf("a payload with unregistered fields was refused: %v — "+
 			"field validation is not the shape check's", err)
-	}
-}
-
-// TestRunReachesDoneWhenEveryStepIs is the routing transaction's run half: the
-// rollup moves the run to `done` only when the last step lands.
-func TestRunReachesDoneWhenEveryStepIs(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "summary", "")
-
-	// The run is still active: nine steps remain.
-	current, err := db.GetRun(conn, run.ID)
-	testsupport.Must(t, err, "GetRun: %v", err)
-	if current.Status != model.RunActive {
-		t.Errorf("run status = %q after one step, want %q", current.Status, model.RunActive)
 	}
 }

@@ -46,6 +46,9 @@ func TestNextIssueModeByteIdentical(t *testing.T) {
 	capture := func(jsonMode bool) string {
 		cmd := nextCmdWithDB(conn, 10)
 		w, buf := bufWriter(jsonMode)
+		if jsonMode {
+			w.JSONVersion = output.JSONV2
+		}
 		err := runNext(cmd, nil, w)
 		testsupport.Must(t, err, "runNext: %v", err)
 		return buf.String()
@@ -70,11 +73,11 @@ func TestNextIssueModeByteIdentical(t *testing.T) {
 		}
 	}
 
-	// And the payload is the issue-mode shape: `issues`, not `steps`.
+	// And the payload is the issue-mode collection: issue `items`, no `steps`.
 	var envelope struct {
 		Data struct {
-			Issues []json.RawMessage `json:"issues"`
-			Steps  []json.RawMessage `json:"steps"`
+			Items []json.RawMessage `json:"items"`
+			Steps []json.RawMessage `json:"steps"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(withSteps), &envelope); err != nil {
@@ -83,8 +86,8 @@ func TestNextIssueModeByteIdentical(t *testing.T) {
 	// Three issues: the two created here plus the one seedRun attached to the
 	// activated run. Issue mode sees all of them and knows nothing about the
 	// run any of them belongs to — which is the point.
-	if len(envelope.Data.Issues) != 3 {
-		t.Errorf("issue mode returned %d issues, want 3", len(envelope.Data.Issues))
+	if len(envelope.Data.Items) != 3 {
+		t.Errorf("issue mode returned %d issues, want 3", len(envelope.Data.Items))
 	}
 	if envelope.Data.Steps != nil {
 		t.Error("issue mode emitted a `steps` key")
@@ -162,6 +165,63 @@ func TestNextStepModeAllFiltersNamedAtOnce(t *testing.T) {
 	}
 }
 
+// TestNextStepModeRefusesAnEmptyIssueFilter: a filter flag given an empty
+// value was still given, and step mode refuses it like any other.
+func TestNextStepModeRefusesAnEmptyIssueFilter(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedRunForNext(t, conn)
+
+	cmd := nextCmdWithDB(conn, 10)
+	err := cmd.Flags().Set("run", model.FormatRunID(runID))
+	testsupport.Must(t, err, "setting --run: %v", err)
+	err = cmd.Flags().Set("status", "")
+	testsupport.Must(t, err, "setting --status: %v", err)
+
+	w, _ := bufWriter(true)
+	err = runNext(cmd, nil, w)
+	var cmdError *CmdError
+	if !asCmdError(err, &cmdError) || cmdError.Code != output.ErrValidation {
+		t.Fatalf("next --run --status \"\" = %v, want a VALIDATION_ERROR", err)
+	}
+	if !strings.Contains(err.Error(), "--status") {
+		t.Errorf("message does not name --status: %s", err)
+	}
+}
+
+// TestNextStepModeReportsRunFaultsBeforeTheLimit pins which fault step mode
+// reports when the call has two: a bad run reference or a refused filter
+// comes before a negative --limit under v2.
+func TestNextStepModeReportsRunFaultsBeforeTheLimit(t *testing.T) {
+	conn := newTestDB(t)
+	run := model.FormatRunID(activatedRunForNext(t, conn))
+
+	for _, tc := range []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"limit alone", map[string]string{"run": run}, "--limit must be >= 0"},
+		{"bad run", map[string]string{"run": "not-a-run"}, "invalid run ID"},
+		{"refused filter", map[string]string{"run": run, "status": "todo"}, "--status is an issue filter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := nextCmdWithDB(conn, 10)
+			tc.flags["json"] = "true"
+			tc.flags["limit"] = "-1"
+			for name, value := range tc.flags {
+				err := cmd.Flags().Set(name, value)
+				testsupport.Must(t, err, "setting --%s: %v", name, err)
+			}
+
+			w, _ := bufWriter(true)
+			err := runNext(cmd, nil, w)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("runNext = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestNextStepModeWireShape pins the `next row` wire shape, field for field,
 // plus the two recorded additions: `instance` and `kind`.
 func TestNextStepModeWireShape(t *testing.T) {
@@ -172,23 +232,24 @@ func TestNextStepModeWireShape(t *testing.T) {
 	err := cmd.Flags().Set("run", model.FormatRunID(runID))
 	testsupport.Must(t, err, "setting --run: %v", err)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 
 	var envelope struct {
 		Data struct {
-			Steps []map[string]any `json:"steps"`
+			Items []map[string]any `json:"items"`
 			Total int              `json:"total"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(envelope.Data.Steps) != 1 {
-		t.Fatalf("got %d ready steps, want 1 (only the root is ready)", len(envelope.Data.Steps))
+	if len(envelope.Data.Items) != 1 {
+		t.Fatalf("got %d ready steps, want 1 (only the root is ready)", len(envelope.Data.Items))
 	}
 
-	row := envelope.Data.Steps[0]
+	row := envelope.Data.Items[0]
 	// { step, issue, run, executor, class, attempt, expected_cost,
 	//          lease_ttl_s, metadata } — plus instance, kind, status.
 	for _, key := range []string{
@@ -240,22 +301,23 @@ func TestNextStepModeHumanStepCarriesNoExecutor(t *testing.T) {
 	err := cmd.Flags().Set("run", model.FormatRunID(runID))
 	testsupport.Must(t, err, "setting --run: %v", err)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 
 	var envelope struct {
 		Data struct {
-			Steps []map[string]any `json:"steps"`
+			Items []map[string]any `json:"items"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(envelope.Data.Steps) != 1 {
-		t.Fatalf("got %d ready steps, want the human step", len(envelope.Data.Steps))
+	if len(envelope.Data.Items) != 1 {
+		t.Fatalf("got %d ready steps, want the human step", len(envelope.Data.Items))
 	}
 
-	row := envelope.Data.Steps[0]
+	row := envelope.Data.Items[0]
 	if row["kind"] != "human" {
 		t.Fatalf("kind = %v, want human", row["kind"])
 	}

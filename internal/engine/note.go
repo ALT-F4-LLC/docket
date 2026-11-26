@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // DKT-1079 — the run note: the dispatcher's channel into every packet.
@@ -54,7 +53,12 @@ type RunNote struct {
 	RecordedAtMS int64 `json:"recorded_at_ms"`
 }
 
-// AddRunNote records one note against a run, event-logged, in one
+// AddRunNote is AddRunNoteStore on store.StoreOn(conn).
+func AddRunNote(conn store.LegacyDB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+	return AddRunNoteStore(store.StoreOn(conn), runID, token, by, under, text, nowMS)
+}
+
+// AddRunNoteStore records one note against a run, event-logged, in one
 // transaction.
 //
 // It refuses an empty note (a note with no content steers nothing), one over
@@ -82,7 +86,11 @@ type RunNote struct {
 // `by` says who wrote the note and from where, and the event records it as
 // `actor` and `cwd`, as every ruling does. A note with either field empty is
 // refused as a validation error before anything is written.
-func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+func AddRunNoteStore(storage store.Store, runID int, token string, by Attribution, under Authority, text string, nowMS int64) (*RunNote, error) {
+	conn, connErr := store.SQLDB(storage)
+	if connErr != nil {
+		return nil, connErr
+	}
 	under, err := ParseRunNoteAuthority(under.Kind)
 	if err != nil {
 		return nil, err
@@ -102,8 +110,8 @@ func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Aut
 				"note to the ruling", len(text), RunNoteMaxBytes)
 	}
 
-	run, err := db.GetRun(conn, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := store.StoreOn(conn).GetRun(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -124,7 +132,7 @@ func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Aut
 		return nil, err
 	}
 
-	id, err := db.InsertRunNoteTx(tx, db.RunNote{
+	id, err := store.TxOn(tx).InsertRunNoteTx(store.RunNote{
 		RunID: runID, Text: text, Authority: under.Kind, CreatedAtMS: nowMS,
 	})
 	if err != nil {
@@ -144,7 +152,7 @@ func AddRunNote(conn *sql.DB, runID int, token string, by Attribution, under Aut
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("recording the run note: %w", err)
 	}
 	return &RunNote{ID: id, Text: text, Authority: under.Kind, RecordedAtMS: nowMS}, nil
@@ -158,7 +166,7 @@ const RunNoteAuthorityUnknown = "unknown"
 // runNoteFromRow is the one conversion from a stored note to its read shape.
 // A stored authority outside ParseRunNoteAuthority's set reads as unknown
 // rather than verbatim, so no stored value reaches a packet header unchecked.
-func runNoteFromRow(n db.RunNote) RunNote {
+func runNoteFromRow(n store.RunNote) RunNote {
 	authority := n.Authority
 	if _, err := ParseRunNoteAuthority(authority); err != nil {
 		authority = RunNoteAuthorityUnknown
@@ -188,15 +196,25 @@ func ParseRunNoteAuthority(kind string) (Authority, error) {
 	}
 }
 
-// ListRunNotes returns a run's notes in the order they render.
-func ListRunNotes(conn *sql.DB, runID int) ([]RunNote, error) {
-	if _, err := db.GetRun(conn, runID); err != nil {
-		if errors.Is(err, db.ErrRunNotFound) {
+// ListRunNotes is ListRunNotesStore on store.StoreOn(conn).
+func ListRunNotes(conn store.LegacyDB, runID int) ([]RunNote, error) {
+	return ListRunNotesStore(store.StoreOn(conn), runID)
+}
+
+// ListRunNotesStore returns a run's notes in the order they render.
+func ListRunNotesStore(storage store.Store, runID int) ([]RunNote, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	st := store.StoreOn(conn)
+	if _, err := st.GetRun(runID); err != nil {
+		if errors.Is(err, store.ErrRunNotFound) {
 			return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 		}
 		return nil, err
 	}
-	rows, err := db.ListRunNotes(conn, runID)
+	rows, err := st.ListRunNotes(runID)
 	if err != nil {
 		return nil, err
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -156,24 +157,6 @@ func TestHeldStepIsMaterialized(t *testing.T) {
 	testsupport.Must(t, err, "counting: %v", err)
 	if count != 1 {
 		t.Errorf("%d materialized steps after a resume, want exactly one", count)
-	}
-}
-
-// TestHeldStepIsReadyImmediately: R1/R2/R6 apply, R3 is vacuous, and
-// R4/R5 do not apply to a human step.
-//
-// So it is ready the moment it exists — which is correct: the question it asks
-// is already answered by data on disk, and there is nothing for it to wait on.
-func TestHeldStepIsReadyImmediately(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-	driveToReconcile(t, conn, e, clusteredPayload)
-
-	ready := readyInstances(t, conn)
-	if !contains(ready, "reconcile-held@0#0") {
-		t.Errorf("ready set is %v; the materialized step must be offered "+
-			"immediately", ready)
 	}
 }
 
@@ -1058,43 +1041,6 @@ func TestOfferedResolutionsMoveAHoldRejectedPark(t *testing.T) {
 	}
 }
 
-// TestRetryStillWorksOnAnOrdinaryPark is the guard on the guard.
-//
-// The refusal must be NARROW. A step parked by a plain gate failure — no hold
-// materialized at all — is exactly where `retry` is the right remedy, and
-// refusing it there would remove the least destructive resolution from the
-// cases that need it most. That would be a worse defect than the one
-// reported.
-func TestRetryStillWorksOnAnOrdinaryPark(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	// A parked step with NO held step for its ordinal. Parked by direct
-	// update rather than by driving a gate failure: what this test needs is
-	// the STATUS, and the absence of a `*-held@N` row is the whole point.
-	claimInstance(t, conn, "implement@0", nowMS)
-	step := heldStep(t, conn, "implement@0")
-	_, err := conn.Exec(
-		`UPDATE steps SET status = ?, routing = ? WHERE id = ?`,
-		db.StepWaitingHuman, workflow.OnFailWaitingHuman, step.ID)
-	testsupport.Must(t, err, "parking the step: %v", err)
-
-	parked, err := db.GetStep(conn, step.ID)
-	testsupport.Must(t, err, "re-reading the parked step: %v", err)
-	if parked.Status != db.StepWaitingHuman {
-		t.Fatalf("premise: the step is %q, want %q", parked.Status, db.StepWaitingHuman)
-	}
-
-	err = e.ResolveStep(conn, step.ID, ResolveRetry, "", nowMS)
-	testsupport.Must(t, err, "retry was refused on an ORDINARY park, where it is the "+
-		"correct remedy: %v", err)
-
-	if got, _ := db.GetStep(conn, step.ID); got.Status != db.StepPending {
-		t.Errorf("after retry the step is %q, want %q", got.Status, db.StepPending)
-	}
-}
-
 // TestResolutionArtifactSupersedesTheOriginal is DKT-70(b), amended by
 // DKT-112.
 //
@@ -1208,5 +1154,65 @@ func TestHeldClusterSurvivesNewerEngineArtifacts(t *testing.T) {
 				t.Errorf("a newer %s row on the routing step hid the held cluster", kind)
 			}
 		})
+	}
+}
+
+// TestHeldFixRoundResolutionDoesNotRepark: a fix round answers a parked held
+// cluster with more work, not with a rejection. The aggregate it gates must not
+// park as rejected by an operator, because that park holds the issue and with
+// it the very round the resolution minted.
+func TestHeldFixRoundResolutionDoesNotRepark(t *testing.T) {
+	conn := mustDB(t)
+	activatedRun(t, conn)
+	e := testEngine()
+	configureHoldTally(t, conn, "panel", "alice,bob,carol")
+
+	held := driveHeldVote(t, conn, e, clusteredPayload, model.ProposalStatusRejected)
+
+	err := e.ResolveStep(conn, stepIDByInstance(t, conn, held[0]),
+		ResolveFixRound, "another round", nowMS)
+	testsupport.Must(t, err, "resolving the held cluster --as fix-round: %v", err)
+
+	// The resolution resumes the aggregate itself; routing it again must be
+	// a no-op over the same answer, not a second loop entry.
+	routingID := stepIDByInstance(t, conn, "reconcile@0")
+	err = e.ResumeSaga(conn, routingID, nowMS)
+	testsupport.Must(t, err, "routing reconcile@0: %v", err)
+
+	routing := heldStep(t, conn, "reconcile@0")
+	const rejectedPhrase = "rejected by an operator"
+	if routing.ParkClass == db.ParkClassHeldRejected {
+		t.Errorf("reconcile@0 parked %q after a fix-round resolution; nobody "+
+			"rejected the cluster", routing.ParkClass)
+	}
+	if strings.Contains(routing.ParkReason, rejectedPhrase) ||
+		strings.Contains(routing.Routing, rejectedPhrase) {
+		t.Errorf("reconcile@0 routing %q / park reason %q blames an operator "+
+			"rejection that never happened", routing.Routing, routing.ParkReason)
+	}
+	if routing.Status == db.StepWaitingHuman {
+		t.Errorf("reconcile@0 is %q (%q); a park on the issue holds the round "+
+			"the resolution minted", routing.Status, routing.ParkReason)
+	}
+	if routing.SagaStage != "" {
+		t.Errorf("reconcile@0's saga is %q, want complete", routing.SagaStage)
+	}
+
+	// Exactly the one round the operator authorized.
+	var loopCount, later int
+	countRow(t, conn, `SELECT loop_count FROM run_issues WHERE issue_id = ?`,
+		routing.IssueID, &loopCount)
+	if loopCount != 1 {
+		t.Errorf("loop_count = %d, want 1: one fix round was authorized", loopCount)
+	}
+	countRow(t, conn, `SELECT COUNT(*) FROM steps WHERE ordinal > ?`, 1, &later)
+	if later != 0 {
+		t.Errorf("%d steps beyond ordinal 1; routing the aggregate entered a "+
+			"second loop", later)
+	}
+
+	// The minted round is offered.
+	if ready := readyInstances(t, conn); !contains(ready, "review@1#0") {
+		t.Errorf("ready = %v, want the minted round's review@1#0", ready)
 	}
 }

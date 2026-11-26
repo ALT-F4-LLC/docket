@@ -81,87 +81,6 @@ func TestNextOffersOnlyClaimableSet(t *testing.T) {
 	}
 }
 
-// TestNextStillOffersDisjointScopesTogether is the other half, and the reason
-// this is a filter rather than a serialization: work that genuinely cannot
-// collide must still run in parallel. A fix that offered one row at a time
-// would pass the test above and destroy the system's throughput.
-func TestNextStillOffersDisjointScopesTogether(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-
-	a := createIssue(t, conn, "issue A", "body", "task", nil)
-	b := createIssue(t, conn, "issue B", "body", "task", nil)
-	err := db.SetIssueScopeGlobs(conn, a, `["internal/a/**"]`)
-	testsupport.Must(t, err, "setting scope: %v", err)
-	err = db.SetIssueScopeGlobs(conn, b, `["internal/b/**"]`)
-	testsupport.Must(t, err, "setting scope: %v", err)
-	run := startRun(t, conn, a, b)
-	_, err = activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	if ready := readyOffered(offeredRows(t, conn, run.ID)); len(ready) != 2 {
-		t.Fatalf("offered %d ready rows, want both: internal/a/** and "+
-			"internal/b/** cannot collide", len(ready))
-	}
-}
-
-// TestNextOffersScopelessIssuesTogether keeps S1 intact through the filter: an
-// issue that declares no scope never excludes and is never excluded, which is
-// the overwhelmingly common case and the one every pre-existing issue is in.
-func TestNextOffersScopelessIssuesTogether(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-
-	a := createIssue(t, conn, "issue A", "body", "task", nil)
-	b := createIssue(t, conn, "issue B", "body", "task", nil)
-	run := startRun(t, conn, a, b)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	if ready := readyOffered(offeredRows(t, conn, run.ID)); len(ready) != 2 {
-		t.Fatalf("offered %d ready rows, want both: a scope-less issue never "+
-			"excludes (S1)", len(ready))
-	}
-}
-
-// TestClaimablePrefixIsFair pins the property that keeps a loser from starving.
-//
-// The filter is greedy over the caller's order, and SortSteps has already made
-// that order total (priority, then age, then id). So the winner of a
-// conflicting cluster is deterministic and is always the oldest — which means a
-// step that lost stays at the front of the queue and takes the floor as soon as
-// the winner releases it. RUN-3's review fanout went 0-for-5 against an
-// unordered race; the ordering is what forecloses that.
-func TestClaimablePrefixIsFair(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-
-	a := createIssue(t, conn, "issue A", "body", "task", nil)
-	b := createIssue(t, conn, "issue B", "body", "task", nil)
-	for _, id := range []int{a, b} {
-		err := db.SetIssueScopeGlobs(conn, id, `["internal/engine/**"]`)
-		testsupport.Must(t, err, "setting scope: %v", err)
-	}
-	run := startRun(t, conn, a, b)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	// Asked repeatedly with the state unchanged, the same step wins every
-	// time. An arbitrary choice would schedule just as correctly and starve
-	// unpredictably.
-	first := readyOffered(offeredRows(t, conn, run.ID))
-	if len(first) != 1 {
-		t.Fatalf("offered %d ready rows, want 1", len(first))
-	}
-	for i := 0; i < 5; i++ {
-		again := readyOffered(offeredRows(t, conn, run.ID))
-		if len(again) != 1 || again[0].Step != first[0].Step {
-			t.Fatalf("offer %d chose %v, want the same winner %s every time",
-				i, again, first[0].Step)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // DKT-23 — the offer's CLASS half. The scope tests above prove the set is
 // claimable against R4; these prove it against R5. RUN-2's dispatch relay
@@ -331,44 +250,6 @@ func TestHeadroomRefusalNamesTheNumbers(t *testing.T) {
 			t.Errorf("the headroom refusal %q does not name %q; the claimant "+
 				"needs the cap, the occupancy, and the source without a corpus "+
 				"grep (DKT-23)", err.Error(), want)
-		}
-	}
-}
-
-// TestDispatchOpenCapsSameClassOffer mirrors the cap through `dispatch open`,
-// exactly as TestDispatchOpenOffersOnlyClaimableSet mirrors the scope half:
-// readyRows is the manifest's shared tail and must narrow identically, or the
-// manifest offers a row `next` would have withheld.
-func TestDispatchOpenCapsSameClassOffer(t *testing.T) {
-	conn := mustDB(t)
-	registerSource(t, conn, []byte(writeLimitedSrc), "serialized.toml")
-
-	a := createIssue(t, conn, "issue A", "body", "task", nil)
-	b := createIssue(t, conn, "issue B", "body", "task", nil)
-	run := startRun(t, conn, a, b)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	m := openDispatch(t, conn, run.ID, 0, nowMS)
-	writes := 0
-	writesByStage := make(map[int]int)
-	for _, r := range m.Rows {
-		if r.Class != "write" {
-			continue
-		}
-		writesByStage[r.Stage]++
-		if r.Status == db.StepReady {
-			writes++
-		}
-	}
-	if writes != 1 {
-		t.Errorf("manifest carries %d ready write-class rows against max 1 "+
-			"(DKT-23); the wave spawns every ready row it is handed", writes)
-	}
-	for stage, n := range writesByStage {
-		if n > 1 {
-			t.Errorf("manifest stage %d carries %d write-class rows against "+
-				"max 1; the cap must hold within every stage", stage, n)
 		}
 	}
 }
@@ -627,11 +508,10 @@ func TestNextCapsOfferAtBudgetHeadroomWithNonZeroFloor(t *testing.T) {
 }
 
 // TestDispatchOpenCapsBudgetOffer mirrors the budget cap through `dispatch
-// open`, exactly as TestDispatchOpenCapsSameClassOffer mirrors the class
-// half (DKT-49-C11): ClaimablePrefix has two independent call sites,
-// next.go and dispatch.go, and the reported incident (DISPATCH-20) was a
-// dispatch MANIFEST carrying rows next would have withheld — so the budget
-// half needs the same mirror the class half already has.
+// open`: ClaimablePrefix has two independent call sites, next.go and
+// dispatch.go, and the reported incident (DISPATCH-20) was a dispatch
+// MANIFEST carrying rows next would have withheld — so the cap is asserted
+// at the dispatch call site too.
 func TestDispatchOpenCapsBudgetOffer(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)

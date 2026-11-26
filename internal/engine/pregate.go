@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -77,7 +76,7 @@ func preClaimGates(spec *workflow.Step) []workflow.Gate {
 // It runs inside the claim's transaction A, where the resolver's snapshot
 // reads belong; the paths it returns are consumed outside it.
 func preGateTarget(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
+	tx store.LegacyReadTx, sched *Scheduler, step *store.Step, spec *workflow.Step,
 ) (sha, worktree string, err error) {
 	if step.WorkRoot != "" {
 		// The step's own recorded worktree wins, and it settles the question:
@@ -85,7 +84,7 @@ func preGateTarget(
 		// inputs resolve to.
 		return "", step.WorkRoot, nil
 	}
-	artifacts, err := db.ListRunArtifactsTx(tx, step.RunID)
+	artifacts, err := store.TxOn(tx).ListRunArtifactsTx(step.RunID)
 	if err != nil {
 		return "", "", err
 	}
@@ -98,8 +97,8 @@ func preGateTarget(
 // stale-target check (DKT-193) consumes the sha half. The artifact snapshot is
 // passed in so a caller iterating a whole manifest loads the table once.
 func resolvedTargetFor(
-	tx *sql.Tx, sched *Scheduler, step *db.Step, spec *workflow.Step,
-	artifacts []*db.Artifact,
+	tx store.LegacyReadTx, sched *Scheduler, step *store.Step, spec *workflow.Step,
+	artifacts []*store.Artifact,
 ) (sha, worktree string, err error) {
 	if spec == nil || len(spec.Inputs) == 0 {
 		return "", "", nil
@@ -138,7 +137,7 @@ func resolvedTargetFor(
 // the two verbs would disagree about a completed step's target the moment a
 // later round — or a re-pin of its producer's diff — recorded a newer one.
 func stepTargetRef(
-	tx *sql.Tx, sched *Scheduler, step *db.Step,
+	tx store.LegacyReadTx, sched *Scheduler, step *store.Step,
 ) (sha, worktree string, err error) {
 	spec := materializedSpec(sched.defs[step.WorkflowID], step, sched.holdTally)
 	if spec == nil || !consumesIssueDiff(spec) {
@@ -199,9 +198,12 @@ var claimPreGateBudget = 60 * time.Second
 // whole. Only a COMPLETE measurement qualifies — a process ran and exited —
 // and only for the sha this claim resolved: a result for an earlier target, a
 // run that measured nothing, or a run still in flight leaves the gate on the
-// budgeted path below, unchanged. The claim never waits on a detached run.
+// budgeted path below. The claim never waits on a detached run: on that path,
+// a gate measuring a target sha that the budget ends before it finishes
+// records the measurement as pending, never the budget's kill as its result
+// (pendingPastClaimBudget).
 func runPreGates(
-	conn *sql.DB, e *Engine, step *db.Step, gates []workflow.Gate,
+	conn store.LegacyDB, e *Engine, step *store.Step, gates []workflow.Gate,
 	targetSHA, workRoot string, nowMS int64,
 ) ([]PreGateResult, error) {
 	out := make([]PreGateResult, 0, len(gates))
@@ -271,7 +273,7 @@ func runPreGates(
 
 		var rows []GateResultRow
 		if !bound {
-			rows, err = recordUnbindablePreGate(conn, step, gate, targetSHA, workRoot, nowMS)
+			rows, err = recordUnbindablePreGate(conn, step, gate, targetSHA, workRoot, scratch.Failure, nowMS)
 		} else {
 			rows, err = measurePreGate(conn, e, step, gate, preGateMeasurement{
 				workRoot: workRoot, scratch: scratch, targetSHA: targetSHA,
@@ -313,7 +315,7 @@ type preGateMeasurement struct {
 	// ends with errPreGateRecordDeclined. The detached path uses it to refuse
 	// a row for a step that was claimed, or a target that moved, while the
 	// gate ran. nil records unconditionally, which is the claim's own path.
-	record func(tx *sql.Tx) (bool, error)
+	record func(tx store.LegacyTx) (bool, error)
 }
 
 // errPreGateRecordDeclined is measurePreGate's answer when m.record said no:
@@ -329,7 +331,7 @@ var errPreGateRecordDeclined = errors.New(
 // become a detached-specific one either. What differs between the two callers
 // is the bound and the key on the row, and both arrive in m.
 func measurePreGate(
-	conn *sql.DB, e *Engine, step *db.Step, gate workflow.Gate,
+	conn store.LegacyDB, e *Engine, step *store.Step, gate workflow.Gate,
 	m preGateMeasurement, nowMS int64,
 ) ([]GateResultRow, error) {
 	commands, hashes, err := gateCommands(conn, step, gate)
@@ -399,6 +401,9 @@ func measurePreGate(
 		if err != nil {
 			return nil, err
 		}
+		if !m.deadline.IsZero() && m.targetSHA != "" && !time.Now().Before(m.deadline) {
+			rows = pendingPastClaimBudget(rows, m.targetSHA)
+		}
 	}
 
 	// Mark every row as a pre-gate result BEFORE recording, so the
@@ -435,6 +440,52 @@ func measurePreGate(
 	return rows, nil
 }
 
+// pendingPastClaimBudget replaces every row the claim's budget, not the gate,
+// ended with a pending row: `skipped`, no exit, saying the measurement of the
+// target sha is pending, rather than recording the budget's kill as a failure.
+//
+// The budget's rows are the gate's trailing non-pass rows, walked from the
+// end. A row with no exit spawned nothing and keeps its own record (a fence
+// line skipped before its spawn, an unmatched line). A row with exit -1 and no
+// duration is an attempt exec never started because the deadline had passed
+// (a flaky re-attempt, a later fence line). The first row that ran is the
+// attempt the budget stopped; rows before it exited on their own before the
+// budget ended, so they measured the gate and stay as recorded.
+//
+// The caller decides "the budget is spent" after the run returns, so an
+// attempt that fails on its own in the instant the budget ends also reads as
+// pending: the claim records no verdict it cannot attribute to the gate.
+func pendingPastClaimBudget(rows []GateResultRow, targetSHA string) []GateResultRow {
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
+		if r.Verdict == VerdictPass {
+			break
+		}
+		if r.Exit == nil {
+			continue
+		}
+		started := *r.Exit != -1 || r.DurationMS > 0
+		what := "was spent before this attempt could start"
+		if started {
+			what = "ended while this gate ran, so the claim stopped it"
+		}
+		r.Exit = nil
+		r.Verdict = VerdictSkipped
+		r.Reason = fmt.Sprintf(
+			"the measurement of %.12s is pending: the claim's %s pre-gate budget %s, "+
+				"and the claim records no result for it; no detached pre-gate result for this "+
+				"target had been recorded when the claim ran, and no detached run "+
+				"measures a claimed step, so this gate's result comes only from "+
+				"running it outside the claim",
+			targetSHA, claimPreGateBudget, what)
+		rows[i] = r
+		if started {
+			break
+		}
+	}
+	return rows
+}
+
 // recordUnbindablePreGate records one pre-gate as `skipped`, spawning nothing,
 // when the tree under review cannot be bound (DKT-254 mode 1).
 //
@@ -449,12 +500,12 @@ func measurePreGate(
 // not be bound" can tell an assurance from an absence. Recording nothing would
 // leave the bundle looking like a step that declared no pre-gates at all.
 func recordUnbindablePreGate(
-	conn *sql.DB, step *db.Step, gate workflow.Gate,
-	targetSHA, worktree string, nowMS int64,
+	conn store.LegacyDB, step *store.Step, gate workflow.Gate,
+	targetSHA, worktree, failure string, nowMS int64,
 ) ([]GateResultRow, error) {
 	rows := []GateResultRow{{
 		Gate: gate.Name, Verdict: VerdictSkipped, Pre: true,
-		Reason: unbindableReason(targetSHA, worktree),
+		Reason: unbindableReason(targetSHA, worktree, failure),
 	}}
 	if err := recordPreGateRows(conn, step, gate.Name, rows, nowMS); err != nil {
 		return nil, err
@@ -471,7 +522,7 @@ func recordUnbindablePreGate(
 // head; the sentence tells the operator that this is the tree measured and
 // which verbs move the target on purpose.
 func retainedTargetAdvisory(
-	conn *sql.DB, e *Engine, step *db.Step, targetSHA string,
+	conn store.LegacyDB, e *Engine, step *store.Step, targetSHA string,
 ) (string, error) {
 	if targetSHA == "" || e == nil || e.IsAncestorFn == nil {
 		return "", nil
@@ -499,16 +550,17 @@ func retainedTargetAdvisory(
 //
 // A holding step records its declared artifact before its own issue.diff, so
 // the round that produced the target never counts against it.
-func retainedAcrossNoCommitRound(conn *sql.DB, step *db.Step, targetSHA string) (bool, error) {
-	artifacts, err := db.ListRunArtifacts(conn, step.RunID)
+func retainedAcrossNoCommitRound(conn store.LegacyDB, step *store.Step, targetSHA string) (bool, error) {
+	st := store.StoreOn(conn)
+	artifacts, err := st.ListRunArtifacts(step.RunID)
 	if err != nil {
 		return false, err
 	}
-	steps, err := db.ListRunSteps(conn, step.RunID)
+	steps, err := st.ListRunSteps(step.RunID)
 	if err != nil {
 		return false, err
 	}
-	issueSteps := make(map[int]*db.Step, len(steps))
+	issueSteps := make(map[int]*store.Step, len(steps))
 	for _, s := range steps {
 		if s.IssueID == step.IssueID {
 			issueSteps[s.ID] = s
@@ -549,7 +601,7 @@ func retainedAcrossNoCommitRound(conn *sql.DB, step *db.Step, targetSHA string) 
 }
 
 // announcePreGate commits the `gate-started` event before the spawn.
-func announcePreGate(conn *sql.DB, step *db.Step, gate string, nowMS int64) error {
+func announcePreGate(conn store.LegacyDB, step *store.Step, gate string, nowMS int64) error {
 	tx, err := conn.Begin()
 	if err != nil {
 		return fmt.Errorf("announcing pre-gate %s: %w", gate, err)
@@ -561,7 +613,7 @@ func announcePreGate(conn *sql.DB, step *db.Step, gate string, nowMS int64) erro
 		tx.Rollback()
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("committing the pre-gate announcement: %w", err)
 	}
 	return nil
@@ -569,7 +621,7 @@ func announcePreGate(conn *sql.DB, step *db.Step, gate string, nowMS int64) erro
 
 // recordPreGateRows commits one pre-gate's results in their own transaction.
 func recordPreGateRows(
-	conn *sql.DB, step *db.Step, gate string, rows []GateResultRow, nowMS int64,
+	conn store.LegacyDB, step *store.Step, gate string, rows []GateResultRow, nowMS int64,
 ) error {
 	_, err := recordPreGateRowsIf(conn, step, gate, rows, nowMS, nil)
 	return err
@@ -581,8 +633,8 @@ func recordPreGateRows(
 // guard's reads and the insert are one step against every other writer — a
 // claim cannot commit between the two.
 func recordPreGateRowsIf(
-	conn *sql.DB, step *db.Step, gate string, rows []GateResultRow, nowMS int64,
-	guard func(tx *sql.Tx) (bool, error),
+	conn store.LegacyDB, step *store.Step, gate string, rows []GateResultRow, nowMS int64,
+	guard func(tx store.LegacyTx) (bool, error),
 ) (bool, error) {
 	tx, err := conn.Begin()
 	if err != nil {
@@ -609,7 +661,7 @@ func recordPreGateRowsIf(
 	if err := recordGateEvents(tx, step, gate, rows); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -652,7 +704,7 @@ func preGateResultOf(r GateResultRow) PreGateResult {
 // preGateResultOfRecorded is preGateResultOf for a row read back from the
 // ledger: a re-minted claim's replay (recordedPreGates) and a detached result
 // the claim serves both render stored rows in the bundle's shape.
-func preGateResultOfRecorded(r db.GateResultRow) PreGateResult {
+func preGateResultOfRecorded(r store.GateResultRow) PreGateResult {
 	return PreGateResult{
 		Gate: r.Gate, Argv: r.Argv, Exit: r.Exit, DurationMS: r.DurationMS,
 		Output: r.Output, Truncated: r.Truncated, Verdict: r.Verdict,
@@ -667,17 +719,36 @@ func refreshed2ExpiresMS(nowMS, ttlMS int64) int64 {
 }
 
 // unbindableReason names WHY the tree could not be bound, distinguishing the
-// three ways it happens so an operator knows which remedy applies.
+// four ways it happens so an operator knows which remedy applies.
 //
 // The distinctions are not cosmetic. A missing OBJECT means the producing
 // step's commit never reached this machine — the remedy is to fetch it. A
-// present object with a swept worktree means reconstruction was tried and
-// failed, which points at the checkout rather than at the run. A step with a
-// worktree path and no sha at all is a producer that declared a tree and no
-// commit, which is a workflow-authoring problem. One sentence for all three
-// would send every operator down the same wrong path two times in three.
-func unbindableReason(targetSHA, worktree string) string {
+// present object whose checkout failed points at the checkout rather than at
+// the run, and the checkout's own error output says what stopped it. A swept
+// worktree whose commit could not be reconstructed, with no error output to
+// quote, is the missing-object case seen from a step that had a tree. A step
+// with a worktree path and no sha at all is a producer that declared a tree
+// and no commit, which is a workflow-authoring problem. One sentence for all
+// of them would send most operators down the wrong path.
+//
+// failure is the scratch checkout's error text (scratchTree.Failure). It is
+// set only when the commit resolved in the repository and checking it out
+// failed; the reason then names the commit and quotes that text, and does
+// not claim the commit is missing, since it is not.
+func unbindableReason(targetSHA, worktree, failure string) string {
 	switch {
+	case targetSHA != "" && failure != "" && worktree != "":
+		return fmt.Sprintf(
+			"the step's worktree %s no longer exists and the commit %s could "+
+				"not be checked out: %s; not measuring the shared checkout in "+
+				"its place",
+			worktree, targetSHA, quoteCheckoutFailure(failure))
+	case targetSHA != "" && failure != "":
+		return fmt.Sprintf(
+			"the tree under review (%s) is not checked out anywhere this step "+
+				"can reach and the commit could not be checked out: %s; not "+
+				"measuring the shared checkout in its place",
+			targetSHA, quoteCheckoutFailure(failure))
 	case targetSHA != "" && worktree != "":
 		return fmt.Sprintf(
 			"the step's worktree %s no longer exists and %s could not be "+

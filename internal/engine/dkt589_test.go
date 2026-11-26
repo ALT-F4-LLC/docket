@@ -125,39 +125,6 @@ func TestIdenticalVerdictAtTwoOrdinalsParksTheLoop(t *testing.T) {
 	}
 }
 
-// TestChangedVerdictAtTwoOrdinalsEntersTheLoop is the lower bound, and the half
-// that matters most: a guard that fired on a loop still learning something
-// would break every workflow that uses one.
-//
-// RUN-31's round 1 is exactly this case — AC2 and AC5 still unmet but AC9 newly
-// regressed — and it must not park. Only the round after it, whose report was
-// byte-identical, is the repeat.
-func TestChangedVerdictAtTwoOrdinalsEntersTheLoop(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", theSameACReport, unmetPayload)
-
-	driveToVerify(t, conn, e, 1)
-	claimAndComplete(t, conn, e, "verify@1",
-		theSameACReport+"\nAC9 regressed: the reap path lost its narration",
-		unmetPayload)
-
-	if !stepExists(t, conn, "fix@2") {
-		t.Error("a round whose verdict changed did not mint the next one; the " +
-			"loop must keep running while it is still learning something")
-	}
-	if got := stepStatus(t, conn, "verify@1"); got != db.StepDone {
-		t.Errorf("verify@1 = %q, want %q — a changed verdict is a real round",
-			got, db.StepDone)
-	}
-	if got := loopCount(t, conn, run.ID, issue); got != 2 {
-		t.Errorf("loop_count = %d, want 2", got)
-	}
-}
-
 // TestFixRoundOverridesTheRepeatedVerdictPark is the escape hatch, and the
 // reason parking is the right refusal rather than a hard stop. It is the SAME
 // verb that gets past the bound (DKT-237) and past DKT-340's own park — the

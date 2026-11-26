@@ -1,16 +1,14 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -49,56 +47,36 @@ var linkCmd = &cobra.Command{
 	Short: "Manage issue relations",
 }
 
+// relationArg is the <relation> argument with parseRelationTypeArg's courtesy
+// applied: a spelling it accepts becomes the canonical type, and any other
+// passes through for the verb to refuse in its own argument order.
+func relationArg(arg string) string {
+	if relType, err := parseRelationTypeArg(arg); err == nil {
+		return string(relType)
+	}
+	return arg
+}
+
 var linkAddCmd = &cobra.Command{
 	Use:   "add <id> <relation> <target_id>",
 	Short: "Create a relation between two issues",
 	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		sourceID, err := issueArg(args[0])
+		res, err := verb.IssueLinkAdd(cmd.Context(), verbEnv(cmd), verb.IssueLinkAddInput{
+			Issue:    args[0],
+			Relation: relationArg(args[1]),
+			Target:   args[2],
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		relType, err := parseRelationTypeArg(args[1])
-		if err != nil {
-			return cmdErr(fmt.Errorf("%w", err), output.ErrValidation)
-		}
-
-		targetID, err := model.ParseID(args[2])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid target ID: %w", err), output.ErrValidation)
-		}
-
-		rel := &model.Relation{
-			SourceIssueID: sourceID,
-			TargetIssueID: targetID,
-			RelationType:  relType,
-		}
-
-		relID, err := db.CreateRelation(conn, rel)
-		if err != nil {
-			if e := notFound(err, "issue"); e != nil {
-				return e
-			}
-			if errors.Is(err, db.ErrSelfRelation) {
-				return cmdErr(fmt.Errorf("cannot link an issue to itself"), output.ErrValidation)
-			}
-			if errors.Is(err, db.ErrDuplicateRelation) {
-				return cmdErr(fmt.Errorf("relation already exists"), output.ErrConflict)
-			}
-			if errors.Is(err, db.ErrCycleDetected) {
-				return cmdErr(err, output.ErrConflict)
-			}
-			return cmdErr(fmt.Errorf("creating relation: %w", err), output.ErrGeneral)
-		}
-
-		rel.ID = relID
-
+		rel := res.Relation
 		w.Success(rel, fmt.Sprintf("Linked %s %s %s",
-			model.FormatID(sourceID), string(relType), model.FormatID(targetID)))
+			model.FormatID(rel.SourceIssueID), string(rel.RelationType), model.FormatID(rel.TargetIssueID)))
 		return nil
 	},
 }
@@ -109,38 +87,26 @@ var linkRemoveCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		sourceID, err := issueArg(args[0])
+		res, err := verb.IssueLinkRemove(cmd.Context(), verbEnv(cmd), verb.IssueLinkRemoveInput{
+			Issue:    args[0],
+			Relation: relationArg(args[1]),
+			Target:   args[2],
+		})
+		recordProjectRegistration(cmd, res.Registered)
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
 
-		relType, err := parseRelationTypeArg(args[1])
-		if err != nil {
-			return cmdErr(fmt.Errorf("%w", err), output.ErrValidation)
-		}
-
-		targetID, err := model.ParseID(args[2])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid target ID: %w", err), output.ErrValidation)
-		}
-
-		if err := db.DeleteRelation(conn, sourceID, targetID, string(relType)); err != nil {
-			if e := notFound(err, "relation"); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("deleting relation: %w", err), output.ErrGeneral)
-		}
-
+		rel := res.Relation
 		result := unlinkResult{
-			SourceIssueID: model.FormatID(sourceID),
-			TargetIssueID: model.FormatID(targetID),
-			RelationType:  string(relType),
+			SourceIssueID: model.FormatID(rel.SourceIssueID),
+			TargetIssueID: model.FormatID(rel.TargetIssueID),
+			RelationType:  string(rel.RelationType),
 		}
 
 		w.Success(result, fmt.Sprintf("Unlinked %s %s %s",
-			model.FormatID(sourceID), string(relType), model.FormatID(targetID)))
+			result.SourceIssueID, result.RelationType, result.TargetIssueID))
 		return nil
 	},
 }
@@ -151,25 +117,12 @@ var linkListCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := issueArg(args[0])
+		listed, err := verb.IssueLinkList(cmd.Context(), verbEnv(cmd), verb.IssueLinkListInput{Issue: args[0]})
 		if err != nil {
-			return err
+			return verbErr(err)
 		}
-
-		exists, err := db.IssueExists(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("checking issue: %w", err), output.ErrGeneral)
-		}
-		if !exists {
-			return cmdErr(fmt.Errorf("issue not found: %s", model.FormatID(id)), output.ErrNotFound)
-		}
-
-		relations, err := db.GetIssueRelations(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching relations: %w", err), output.ErrGeneral)
-		}
+		id, relations := listed.IssueID, listed.Relations
 
 		if len(relations) == 0 {
 			quiet, _ := cmd.Flags().GetBool("quiet")

@@ -3,9 +3,9 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -53,23 +53,24 @@ type conductResponse struct {
 }
 
 func runRunConduct(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
 	by, err := rulingBy()
 	if err != nil {
+		// A malformed run id outranks the working-directory error. The verb
+		// refuses it too, but only once the caller is attributed.
+		if _, parseErr := model.ParseRunID(args[0]); parseErr != nil {
+			return cmdErr(parseErr, output.ErrValidation)
+		}
 		return err
 	}
+	env := verbEnv(cmd)
+	env.Author, env.Cwd = by.Actor, by.Cwd
 
-	result, err := engine.ConductRun(conn, runID, engine.ConductOptions{
-		By: by, NowMS: model.NowMS(),
-	})
+	res, err := verb.RunConduct(cmd.Context(), env, verb.RunConductInput{Run: args[0]})
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	result := res.Conduct
 
 	message := fmt.Sprintf("Took the conductor seat on %s", result.Run.Ref())
 	if result.Rotated {

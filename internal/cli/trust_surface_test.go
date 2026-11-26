@@ -165,28 +165,28 @@ func TestTrustAddDeclaredFilesPinTheExecRoot(t *testing.T) {
 	}
 
 	listCmd := newTrustListCmd()
-	jsonCmdWithVersion(t, listCmd, "v1")
+	jsonCmdWithVersion(t, listCmd, "v2")
 	stdout := captureStdout(t)
 	err = runTrustVerb(t, cfg, listCmd)
 	out := stdout()
 	testsupport.Must(t, err, "trust list: %v", err)
 	var envelope struct {
 		Data struct {
-			Entries []struct {
+			Items []struct {
 				DeclaredFiles []struct {
 					Path   string `json:"path"`
 					SHA256 string `json:"sha256"`
 				} `json:"declared_files"`
-			} `json:"entries"`
+			} `json:"items"`
 		} `json:"data"`
 	}
 	if jsonErr := json.Unmarshal([]byte(out), &envelope); jsonErr != nil {
 		t.Fatalf("trust list JSON did not parse: %v\n%s", jsonErr, out)
 	}
-	if len(envelope.Data.Entries) != 1 {
-		t.Fatalf("trust list shows %d entries, want 1:\n%s", len(envelope.Data.Entries), out)
+	if len(envelope.Data.Items) != 1 {
+		t.Fatalf("trust list shows %d entries, want 1:\n%s", len(envelope.Data.Items), out)
 	}
-	listed := envelope.Data.Entries[0].DeclaredFiles
+	listed := envelope.Data.Items[0].DeclaredFiles
 	if len(listed) != len(want) {
 		t.Fatalf("trust list shows declared files %+v, want %+v", listed, want)
 	}

@@ -12,30 +12,6 @@ import (
 // and `scope_globs` use, because no size was ever recorded under the
 // label convention this column replaces as workflow-routing input.
 
-func TestMigrateToV34(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, col := range v34ColumnSentinels {
-		exists, err := hasColumnDB(db, col.table, col.column)
-		if err != nil || !exists {
-			t.Errorf("%s.%s missing after migration (err %v)", col.table, col.column, err)
-		}
-	}
-}
-
 // TestV34RewindGuardConvergesAStampedStore is v27's trap (migrate_v27_test.go)
 // applied to v34: a store stamped 34 by a binary built mid-change, missing
 // `issues.size`, must be detected and re-migrated rather than trusted at face

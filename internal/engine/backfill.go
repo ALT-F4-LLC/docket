@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The usage back-fill.
@@ -41,7 +40,14 @@ type VoteBackfillRow struct {
 	Quantity float64
 }
 
-// BackfillVoteUsage records panel spend a relay measured but the seats could
+// BackfillVoteUsage is BackfillVoteUsageStore on store.StoreOn(conn).
+func (e *Engine) BackfillVoteUsage(
+	conn store.LegacyDB, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
+) error {
+	return e.BackfillVoteUsageStore(store.StoreOn(conn), proposalID, rows, source, nowMS)
+}
+
+// BackfillVoteUsageStore records panel spend a relay measured but the seats could
 // not report at cast time (DKT-115).
 //
 // The step back-fill above cannot receive it: tribunal seats carry a proposal
@@ -58,9 +64,13 @@ type VoteBackfillRow struct {
 // ONE TRANSACTION for the whole batch, for the same reason the step back-fill
 // is: a half-applied batch would strand its remainder behind the ledger's
 // unique key on a re-run.
-func (e *Engine) BackfillVoteUsage(
-	conn *sql.DB, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
+func (e *Engine) BackfillVoteUsageStore(
+	storage store.Store, proposalID int, rows []VoteBackfillRow, source string, nowMS int64,
 ) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	if len(rows) == 0 {
 		return validationErr("no usage rows to back-fill; pass at least one " +
 			"--voter with its --unit and --quantity")
@@ -74,16 +84,14 @@ func (e *Engine) BackfillVoteUsage(
 		return fmt.Errorf("beginning the back-fill: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	var proposalCount int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM proposals WHERE id = ?`, proposalID,
-	).Scan(&proposalCount); err != nil {
-		return fmt.Errorf("resolving proposal %s: %w",
-			model.FormatProposalID(proposalID), err)
+	exists, err := st.ProposalExistsTx(proposalID)
+	if err != nil {
+		return err
 	}
-	if proposalCount == 0 {
-		return notFoundErr(db.ErrNotFound, "proposal %s not found",
+	if !exists {
+		return notFoundErr(store.ErrNotFound, "proposal %s not found",
 			model.FormatProposalID(proposalID))
 	}
 
@@ -99,25 +107,21 @@ func (e *Engine) BackfillVoteUsage(
 			return validationErr("--voter is required on every row; a vote " +
 				"usage row attaches to a named seat's cast")
 		}
-		var voteID int64
-		err := tx.QueryRow(
-			`SELECT id FROM votes WHERE proposal_id = ? AND voter_name = ?`,
-			proposalID, r.Voter).Scan(&voteID)
-		if errors.Is(err, sql.ErrNoRows) {
+		voteID, found, err := st.VoteIDTx(proposalID, r.Voter)
+		if err != nil {
+			return err
+		}
+		if !found {
 			return validationErr(
 				"%q has no cast on %s; vote usage attaches to a seat's cast, "+
 					"and a seat that never cast has nothing to attach to",
 				r.Voter, model.FormatProposalID(proposalID))
 		}
-		if err != nil {
-			return fmt.Errorf("resolving the %q seat on %s: %w",
-				r.Voter, model.FormatProposalID(proposalID), err)
-		}
 		seats[r.Voter] = voteID
 	}
 
 	for _, r := range rows {
-		if err := db.ValidateUnitName(r.Unit); err != nil {
+		if err := store.ValidateUnitName(r.Unit); err != nil {
 			return validationErr("voter %q: %s", r.Voter, err)
 		}
 		if math.IsNaN(r.Quantity) || math.IsInf(r.Quantity, 0) || r.Quantity < 0 {
@@ -125,9 +129,9 @@ func (e *Engine) BackfillVoteUsage(
 				"voter %q, unit %q: quantity must be a finite non-negative "+
 					"number, got %g", r.Voter, r.Unit, r.Quantity)
 		}
-		if err := db.InsertVoteUsageTx(
-			tx, seats[r.Voter], r.Unit, r.Quantity, source, nowMS); err != nil {
-			if errors.Is(err, db.ErrUsageAlreadyRecorded) {
+		if err := st.InsertVoteUsageTx(
+			seats[r.Voter], r.Unit, r.Quantity, source, nowMS); err != nil {
+			if errors.Is(err, store.ErrUsageAlreadyRecorded) {
 				return conflictErr(
 					"seat %q already has %q usage recorded on %s; a back-fill "+
 						"adds to the ledger and never overwrites it",
@@ -137,7 +141,7 @@ func (e *Engine) BackfillVoteUsage(
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return fmt.Errorf("committing the back-fill: %w", err)
 	}
 	return nil
@@ -231,7 +235,15 @@ type BackfillOutcome struct {
 	MetadataDropped []DroppedMetadataTarget `json:"metadata_dropped,omitempty"`
 }
 
-// BackfillUsage records usage for steps whose claimant could not report it.
+// BackfillUsage is BackfillUsageStore on store.StoreOn(conn).
+func (e *Engine) BackfillUsage(
+	conn store.LegacyDB, runID int, rows []BackfillRow, source string,
+	onDuplicate string, nowMS int64,
+) (*BackfillOutcome, error) {
+	return e.BackfillUsageStore(store.StoreOn(conn), runID, rows, source, onDuplicate, nowMS)
+}
+
+// BackfillUsageStore records usage for steps whose claimant could not report it.
 //
 // ONE TRANSACTION for the whole batch. A back-fill that half-applied would
 // leave a dispatch that is neither closable nor honestly re-runnable, and an
@@ -295,10 +307,14 @@ type BackfillOutcome struct {
 // is named on the outcome. A bag that is not a JSON object still refuses the
 // batch whatever the step's status, because the shape is a property of the
 // input and not of the step.
-func (e *Engine) BackfillUsage(
-	conn *sql.DB, runID int, rows []BackfillRow, source string,
+func (e *Engine) BackfillUsageStore(
+	storage store.Store, runID int, rows []BackfillRow, source string,
 	onDuplicate string, nowMS int64,
 ) (*BackfillOutcome, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if len(rows) == 0 {
 		return nil, validationErr("no usage rows to back-fill; pass at least one " +
 			"--step with its --unit and --quantity")
@@ -327,16 +343,17 @@ func (e *Engine) BackfillUsage(
 		return nil, fmt.Errorf("beginning the back-fill: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
 	// Every named step is resolved and checked against the run BEFORE anything
 	// is written, so a batch naming one wrong step refuses without having
 	// written the rows that preceded it in the list.
-	steps := make(map[int]*db.Step, len(rows))
+	steps := make(map[int]*store.Step, len(rows))
 	for _, r := range rows {
 		if _, seen := steps[r.Step]; seen {
 			continue
 		}
-		step, err := db.GetStepTx(tx, r.Step)
+		step, err := st.GetStepTx(r.Step)
 		if err != nil {
 			return nil, notFoundErr(err, "step %s not found",
 				model.FormatStepID(r.Step))
@@ -381,7 +398,7 @@ func (e *Engine) BackfillUsage(
 			return nil, err
 		}
 		step := steps[r.Step]
-		if db.StepTerminal(step.Status) || dropped[r.Step] {
+		if store.StepTerminal(step.Status) || dropped[r.Step] {
 			continue
 		}
 		dropped[r.Step] = true
@@ -398,7 +415,7 @@ func (e *Engine) BackfillUsage(
 				"default unit", model.FormatStepID(r.Step))
 		}
 		step := steps[r.Step]
-		if err := db.InsertUsageRowTx(tx, db.UsageRow{
+		if err := st.InsertUsageRowTx(store.UsageRow{
 			RunID:    runID,
 			StepID:   r.Step,
 			Attempt:  step.Attempt,
@@ -411,7 +428,7 @@ func (e *Engine) BackfillUsage(
 			// the claimant itself. It is phrased rather than passed through as
 			// raw SQLite text, because a refusal must name its way out:
 			// merging silently would hide a double-count of real spend.
-			if errors.Is(err, db.ErrUsageAlreadyRecorded) {
+			if errors.Is(err, store.ErrUsageAlreadyRecorded) {
 				// --on-duplicate=skip: this row is already in the ledger, so
 				// there is nothing to add and nothing to overwrite. The batch
 				// carries on and the skip is REPORTED, never silent — a
@@ -467,7 +484,7 @@ func (e *Engine) BackfillUsage(
 		}
 	}
 	for id, bag := range bags {
-		if err := db.SetStepMetadataTx(tx, id, bag, nowMS); err != nil {
+		if err := st.SetStepMetadataTx(id, bag, nowMS); err != nil {
 			return nil, err
 		}
 	}
@@ -475,12 +492,12 @@ func (e *Engine) BackfillUsage(
 	// The fast path D2's probe reads. Marked once per step rather than
 	// once per row.
 	for id := range steps {
-		if err := db.MarkStepUsageRecordedTx(tx, id); err != nil {
+		if err := st.MarkStepUsageRecordedTx(id); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("committing the back-fill: %w", err)
 	}
 	return &BackfillOutcome{

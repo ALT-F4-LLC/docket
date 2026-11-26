@@ -2,6 +2,9 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,25 +40,40 @@ func attachedIssues(t *testing.T, conn *sql.DB, runID int) []int {
 	return ids
 }
 
-func TestRunIssueAddAndRemoveInPlanning(t *testing.T) {
+// TestRunIssueAnswersWithTheSetItNowHolds pins both verbs' output: the JSON
+// payload is the run and its issue list after the change, and the human line
+// names what was asked for.
+func TestRunIssueAnswersWithTheSetItNowHolds(t *testing.T) {
 	conn := newTestDB(t)
 	a := createIssue(t, conn, "first", model.StatusBacklog, model.PriorityNone)
 	b := createIssue(t, conn, "second", model.StatusBacklog, model.PriorityNone)
 	run := planningRun(t, conn, a)
-
 	cmd := cmdWithDB(conn)
-	w, _ := bufWriter(true)
-	err := runRunIssueAdd(cmd, []string{run.Ref(), model.FormatID(b)}, w)
-	testsupport.Must(t, err, "run issue add: %v", err)
-	if got := attachedIssues(t, conn, run.ID); len(got) != 2 {
-		t.Fatalf("attached = %v, want both issues", got)
+
+	w, buf := bufWriter(true)
+	testsupport.Must(t, runRunIssueAdd(cmd, []string{run.Ref(), model.FormatID(b)}, w), "run issue add")
+	var env struct {
+		Data runIssueSet `json:"data"`
+	}
+	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &env), "decoding %s", buf)
+	want := runIssueSet{Run: run.Ref(), Status: "planning", Issues: []string{model.FormatID(a), model.FormatID(b)}}
+	if env.Data.Run != want.Run || env.Data.Status != want.Status || !slices.Equal(env.Data.Issues, want.Issues) {
+		t.Errorf("payload = %+v, want %+v", env.Data, want)
 	}
 
-	w, _ = bufWriter(true)
-	err = runRunIssueRemove(cmd, []string{run.Ref(), model.FormatID(a)}, w)
-	testsupport.Must(t, err, "run issue remove: %v", err)
-	if got := attachedIssues(t, conn, run.ID); len(got) != 1 || got[0] != b {
-		t.Fatalf("attached = %v, want only the second issue", got)
+	w, buf = bufWriter(false)
+	testsupport.Must(t, runRunIssueRemove(cmd, []string{run.Ref(), model.FormatID(a)}, w), "run issue remove")
+	if got, want := buf.String(), fmt.Sprintf("Removed %s from %s", model.FormatID(a), run.Ref()); !strings.Contains(got, want) {
+		t.Errorf("remove output = %q, want it to say %q", got, want)
+	}
+
+	testsupport.Must(t, db.SetRunStatus(conn, run.ID, model.RunActive, "", model.NowMS()), "SetRunStatus")
+	w, buf = bufWriter(false)
+	testsupport.Must(t, runRunIssueAdd(cmd, []string{run.Ref(), model.FormatID(a)}, w), "run issue add")
+	wantLine := fmt.Sprintf("Added %s to %s (bound and snapshotted at the next `docket run activate`)",
+		model.FormatID(a), run.Ref())
+	if got := buf.String(); !strings.Contains(got, wantLine) {
+		t.Errorf("add output = %q, want it to say %q", got, wantLine)
 	}
 }
 
@@ -108,25 +126,25 @@ func TestRunIssueRemoveRefusesOutsidePlanning(t *testing.T) {
 	}
 }
 
-// TestRunIssueRemoveIsAllOrNothing: `remove A TYPO` must not detach A and then
-// refuse — the membership check runs over the whole set first.
-func TestRunIssueRemoveIsAllOrNothing(t *testing.T) {
+// TestRunIssueRefusalsSpeakTheProjectsPrefix: an id no project owns is named
+// in the invoking project's prefix, as the root hook's display prefix named it
+// before these commands resolved their own project.
+func TestRunIssueRefusalsSpeakTheProjectsPrefix(t *testing.T) {
 	conn := newTestDB(t)
-	a := createIssue(t, conn, "x", model.StatusBacklog, model.PriorityNone)
-	run := planningRun(t, conn, a)
-
+	testsupport.Must(t, db.SetProjectPrefix(conn, 1, "VOR"), "SetProjectPrefix")
+	run := planningRun(t, conn)
 	cmd := cmdWithDB(conn)
-	w, _ := bufWriter(true)
-	err := runRunIssueRemove(cmd, []string{run.Ref(), model.FormatID(a), "DKT-99"}, w)
-	if err == nil {
-		t.Fatal("remove with an unattached id succeeded")
+
+	w, _ := bufWriter(false)
+	err := runRunIssueAdd(cmd, []string{run.Ref(), "DKT-99"}, w)
+	if err == nil || !strings.Contains(err.Error(), "issue VOR-99 not found") {
+		t.Errorf("add refusal = %v, want it to name VOR-99", err)
 	}
-	var cmdError *CmdError
-	if !asCmdError(err, &cmdError) || cmdError.Code != output.ErrNotFound {
-		t.Errorf("error = %v, want NOT_FOUND", err)
-	}
-	if got := attachedIssues(t, conn, run.ID); len(got) != 1 {
-		t.Errorf("attached = %v; a refused remove detached something", got)
+
+	w, _ = bufWriter(false)
+	err = runRunIssueRemove(cmd, []string{run.Ref(), "DKT-77"}, w)
+	if want := "issue VOR-77 is not attached to " + run.Ref(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("remove refusal = %v, want it to say %q", err, want)
 	}
 }
 

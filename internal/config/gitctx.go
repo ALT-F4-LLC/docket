@@ -29,7 +29,14 @@ type gitContext struct {
 	// reason: remote URLs and root commits are repo-controlled and survive a
 	// hostile clone; where the repository sits on the operator's disk is not
 	// and does not.
+	//
+	// It is empty unless Registered.
 	Identity string
+	// Registered reports whether Toplevel is a checkout the repository at the
+	// common directory registered as its own (see isRegisteredCheckout). Only
+	// a registered checkout may claim Identity; an unregistered one still has
+	// a Toplevel, which bounds the local-store walk.
+	Registered bool
 }
 
 // GitHead reports dir's checked-out branch and commit, best-effort: a
@@ -55,31 +62,73 @@ func GitHead(dir string) (branch, commit string) {
 // dir is not inside a git working tree (or git is missing, times out, or
 // predates --path-format) — callers then fall back to cwd-derived values,
 // which is the correct answer for a directory that simply is not a checkout.
+//
+// A toplevel that is not a checkout of the repository git reports still
+// resolves, with Registered false and no Identity: a `.git` file or
+// `commondir` is input from whoever wrote the directory, and can name any
+// repository on disk. See isRegisteredCheckout.
 func lookupGit(dir string) (gitContext, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "git", "-C", dir,
 		"rev-parse", "--path-format=absolute",
-		"--show-toplevel", "--git-common-dir").Output()
+		"--show-toplevel", "--git-common-dir", "--git-dir").Output()
 	if err != nil {
 		return gitContext{}, false
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) < 2 {
+	if len(lines) < 3 {
 		return gitContext{}, false
 	}
-	toplevel := strings.TrimSpace(lines[0])
-	commonDir := strings.TrimSpace(lines[1])
-	if toplevel == "" || commonDir == "" {
-		return gitContext{}, false
+	var paths [3]string
+	for i := range paths {
+		resolved, err := filepath.EvalSymlinks(strings.TrimSpace(lines[i]))
+		if err != nil {
+			return gitContext{}, false
+		}
+		paths[i] = resolved
 	}
+	toplevel, commonDir, gitDir := paths[0], paths[1], paths[2]
 
 	identity := commonDir
 	if filepath.Base(commonDir) == ".git" {
 		identity = filepath.Dir(commonDir)
 	}
-	return gitContext{Toplevel: toplevel, Identity: identity}, true
+	if !isRegisteredCheckout(toplevel, gitDir, commonDir, identity) {
+		return gitContext{Toplevel: toplevel}, true
+	}
+	return gitContext{Toplevel: toplevel, Identity: identity, Registered: true}, true
+}
+
+// isRegisteredCheckout reports whether toplevel is a checkout of the
+// repository at commonDir: the identity root itself, or a linked worktree git
+// registered there. Registration is proven by the back-link `git worktree add`
+// writes to <commonDir>/worktrees/<name>/gitdir, inside the repository's own
+// gitdir where the checkout cannot author it. Every path must be canonical. Any
+// unreadable or mismatched back-link reports false.
+func isRegisteredCheckout(toplevel, gitDir, commonDir, identity string) bool {
+	if toplevel == identity {
+		return true
+	}
+	if filepath.Dir(gitDir) != filepath.Join(commonDir, "worktrees") {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
+	if err != nil {
+		return false
+	}
+	backLink := strings.TrimSpace(string(data))
+	if backLink == "" {
+		return false
+	}
+	// `git worktree add --relative-paths` writes the back-link relative to the
+	// admin directory.
+	if !filepath.IsAbs(backLink) {
+		backLink = filepath.Join(gitDir, backLink)
+	}
+	resolved, err := filepath.EvalSymlinks(backLink)
+	return err == nil && resolved == filepath.Join(toplevel, ".git")
 }
 
 // gitHeadCmd builds the git command GitHead runs. The caller of `docket step

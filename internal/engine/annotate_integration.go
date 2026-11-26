@@ -1,15 +1,14 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -65,7 +64,9 @@ import (
 // THE SHA MUST CARRY THE WRITER'S WORK (DKT-4269). Ancestry alone says the sha
 // is on the branch, so the engine also establishes that the sha's line holds a
 // patch-equivalent of every commit of the writer's chain (IntegrationRangeFn),
-// and refuses, recording nothing, when one is missing. The re-recorded diff is
+// and refuses, recording nothing, when one is missing. The chain is the step's
+// own change: its recorded `round_base` to its head, or `base` when the record
+// has no round delta (stepOwnChain). The re-recorded diff is
 // then the combined patch of the integrated range (RangePatchFn), scoped the
 // way every `issue.diff` is, so a writer integrated as a range of picks shows
 // every file and not the last commit's. With no range probe wired, the re-record
@@ -107,7 +108,14 @@ const MetadataKeyIntegratedSHA = "integrated_sha"
 // rode a `step resolve`.
 const ResolutionIntegratedSHA = "integrated-sha"
 
-// AnnotateIntegration records a verified integration for a finished write-class
+// AnnotateIntegration is AnnotateIntegrationStore on store.StoreOn(conn).
+func (e *Engine) AnnotateIntegration(
+	conn store.LegacyDB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
+) (*IntegrationAnnotation, error) {
+	return e.AnnotateIntegrationStore(store.StoreOn(conn), stepID, sha, metadata, by, token, nowMS)
+}
+
+// AnnotateIntegrationStore records a verified integration for a finished write-class
 // step: the sha's ancestry against the shared checkout's HEAD is established
 // first, then the step's `issue.diff` is re-recorded over the integrated range
 // and `integrated_sha` (plus any further metadata) is merged onto the step's
@@ -120,9 +128,13 @@ const ResolutionIntegratedSHA = "integrated-sha"
 // it); a step whose record names no commit (there is no divergence to
 // resolve); an engine with no ancestry seam wired; an unanswerable ancestry
 // question; and a sha that is not an ancestor of the shared checkout's HEAD.
-func (e *Engine) AnnotateIntegration(
-	conn *sql.DB, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
+func (e *Engine) AnnotateIntegrationStore(
+	storage store.Store, stepID int, sha, metadata string, by Attribution, token string, nowMS int64,
 ) (*IntegrationAnnotation, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if !fullCommitSHA.MatchString(sha) {
 		return nil, validationErr(
@@ -148,8 +160,8 @@ func (e *Engine) AnnotateIntegration(
 		return nil, err
 	}
 
-	step, err := db.GetStep(conn, stepID)
-	if errors.Is(err, db.ErrStepNotFound) {
+	step, err := store.StoreOn(conn).GetStep(stepID)
+	if errors.Is(err, store.ErrStepNotFound) {
 		return nil, notFoundErr(err, "step %s not found", model.FormatStepID(stepID))
 	}
 	if err != nil {
@@ -160,7 +172,7 @@ func (e *Engine) AnnotateIntegration(
 	if err := authorizeConductor(conn, step.RunID, token, "step annotate --integrated-sha"); err != nil {
 		return nil, err
 	}
-	if !db.StepTerminal(step.Status) {
+	if !store.StepTerminal(step.Status) {
 		return nil, conflictErr(
 			"step %s is %s; annotate applies to a finished step — a live step's "+
 				"metadata lands with its record", step.Instance, step.Status)
@@ -218,10 +230,11 @@ func (e *Engine) AnnotateIntegration(
 
 	// DKT-4269: ancestry says the sha is on the branch, not that it carries the
 	// writer's work. The engine also establishes that the sha holds a
-	// patch-equivalent of every commit of the writer's chain, and re-pins over
+	// patch-equivalent of every commit of the step's own chain, from its
+	// recorded `round_base` (else `base`) to its head, and re-pins over
 	// the whole integrated range, so a multi-commit writer's reviewers see
 	// every file instead of the last commit's.
-	writerHead, writerBase := writerChain(prior.Payload, from)
+	writerHead, writerBase := stepOwnChain(prior.Payload, from)
 	// The chain is passed to git as revisions, so it is held to the shape of a
 	// commit id before any argument is built from it, as `step integrate` holds
 	// it: a value that began with "-" would be an option, not a revision. The
@@ -302,7 +315,7 @@ func (e *Engine) AnnotateIntegration(
 			return nil, err
 		}
 	}
-	if err := db.SetStepMetadataTx(tx, step.ID, merged, nowMS); err != nil {
+	if err := store.TxOn(tx).SetStepMetadataTx(step.ID, merged, nowMS); err != nil {
 		return nil, err
 	}
 	// The annotation VERBATIM, as every annotation is logged: what was added
@@ -314,7 +327,7 @@ func (e *Engine) AnnotateIntegration(
 	}); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("annotating %s: %w", step.Instance, err)
 	}
 
@@ -361,9 +374,9 @@ func integrationMetadata(sha, metadata string) (string, error) {
 // `--worktree` re-pin both write (applyIssueDiffRepin), minus that re-pin's
 // worktree rewrite: the resolved commit lives on the shared branch, and the
 // step's declared worktree stays what its executor recorded.
-func recordIntegrationRepinTx(tx *sql.Tx, step *db.Step, repin *IssueDiffRepin, nowMS int64) error {
+func recordIntegrationRepinTx(tx store.LegacyTx, step *store.Step, repin *IssueDiffRepin, nowMS int64) error {
 	supersedes := repin.supersededID
-	id, err := db.InsertArtifactTx(tx, db.Artifact{
+	id, err := store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: ArtifactKindIssueDiff,
 		Body: repin.body, Payload: repin.payload,
 		SHA256:     workflow.SHA256([]byte(repin.body)),
@@ -415,6 +428,22 @@ func writerChain(payload, head string) (writerHead, writerBase string) {
 		return record.WriterHead, record.WriterBase
 	}
 	return head, record.Base
+}
+
+// stepOwnChain narrows the writer chain to the step's own change: a round
+// record's `round_base` bounds the commits this step made, where `base` can
+// sit below earlier rounds' or other work's commits on the same branch. Only
+// the writer's own record carries `round_base`; an annotation's record carries
+// the narrowed `writer_base` forward instead.
+func stepOwnChain(payload, head string) (writerHead, writerBase string) {
+	writerHead, writerBase = writerChain(payload, head)
+	var record struct {
+		RoundBase string `json:"round_base"`
+	}
+	if payload != "" && json.Unmarshal([]byte(payload), &record) == nil && record.RoundBase != "" {
+		writerBase = record.RoundBase
+	}
+	return writerHead, writerBase
 }
 
 func missingCommits(missing []string) string {

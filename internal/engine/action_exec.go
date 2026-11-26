@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/exec"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -99,7 +99,7 @@ func runAggregate(a ActionSpec, sc StepContext) ActionResult {
 		return ActionResult{
 			Kind: a.Output, Failed: true, Reason: reason,
 			Results: []ActionResultRow{{
-				Action: a.Name, Verdict: db.ActionVerdictFail,
+				Action: a.Name, Verdict: store.ActionVerdictFail,
 				Builtin: true, Reason: reason,
 			}},
 		}
@@ -153,7 +153,7 @@ func runAggregate(a ActionSpec, sc StepContext) ActionResult {
 		Payload: string(payload),
 		Held:    outcome.Held,
 		Results: []ActionResultRow{{
-			Action: a.Name, Verdict: db.ActionVerdictPass, Builtin: true,
+			Action: a.Name, Verdict: store.ActionVerdictPass, Builtin: true,
 			Output: recorded,
 		}},
 	}
@@ -203,7 +203,7 @@ func (r *ExecActionRunner) runTrustedCommand(
 		return ActionResult{
 			Kind: a.Output, Failed: true, Reason: reason,
 			Results: []ActionResultRow{{
-				Action: a.Name, Verdict: db.ActionVerdictUnmatched, Reason: reason,
+				Action: a.Name, Verdict: store.ActionVerdictUnmatched, Reason: reason,
 			}},
 		}
 	}
@@ -287,7 +287,7 @@ func (r *ExecActionRunner) spawnMatched(
 		return ActionResult{
 			Kind: a.Output, Failed: true, Reason: reason,
 			Results: []ActionResultRow{{
-				Action: a.Name, Verdict: db.ActionVerdictUnmatched, Reason: reason,
+				Action: a.Name, Verdict: store.ActionVerdictUnmatched, Reason: reason,
 				TrustEntry: entry.Name, ArgvSHA256: trust.ArgvSHA256(match.Argv),
 				Prefix: entry.Prefix,
 			}},
@@ -365,9 +365,9 @@ func (r *ExecActionRunner) spawnMatched(
 	for i := range attempts {
 		attempt := attempts[i]
 		exit := attempt.Result.Exit
-		verdict := db.ActionVerdictFail
+		verdict := store.ActionVerdictFail
 		if actionAttemptIsPass(attempt.Result) {
-			verdict = db.ActionVerdictPass
+			verdict = store.ActionVerdictPass
 		}
 		out.Results = append(out.Results, ActionResultRow{
 			Action: a.Name, Ordinal: i, Argv: match.Argv, Exit: &exit,
@@ -386,7 +386,7 @@ func (r *ExecActionRunner) spawnMatched(
 		// Resolve refusal. Nothing ran after it, so it routes.
 		reason := refusal.Err.Error()
 		out.Results = append(out.Results, ActionResultRow{
-			Action: a.Name, Ordinal: refusal.Ordinal, Verdict: db.ActionVerdictUnmatched,
+			Action: a.Name, Ordinal: refusal.Ordinal, Verdict: store.ActionVerdictUnmatched,
 			Reason: reason, TrustEntry: entry.Name,
 			ArgvSHA256: trust.ArgvSHA256(match.Argv), Prefix: entry.Prefix,
 		})
@@ -416,7 +416,7 @@ func (r *ExecActionRunner) spawnMatched(
 		// renderer rather than printed raw.
 		reason := err.Error()
 		out.Failed, out.Reason = true, reason
-		out.Results[len(out.Results)-1].Verdict = db.ActionVerdictFail
+		out.Results[len(out.Results)-1].Verdict = store.ActionVerdictFail
 		out.Results[len(out.Results)-1].Reason = reason
 		return out
 	}
@@ -430,7 +430,7 @@ func (r *ExecActionRunner) spawnMatched(
 			reason := fmt.Sprintf(
 				"the action's payload does not satisfy the step's declared schema: %v", err)
 			out.Failed, out.Reason = true, reason
-			out.Results[len(out.Results)-1].Verdict = db.ActionVerdictFail
+			out.Results[len(out.Results)-1].Verdict = store.ActionVerdictFail
 			out.Results[len(out.Results)-1].Reason = reason
 			return out
 		}
@@ -447,7 +447,7 @@ func (r *ExecActionRunner) failed(
 	return ActionResult{
 		Kind: a.Output, Failed: true, Reason: reason,
 		Results: []ActionResultRow{{
-			Action: a.Name, Verdict: db.ActionVerdictFail, Reason: reason,
+			Action: a.Name, Verdict: store.ActionVerdictFail, Reason: reason,
 			TrustEntry: match.Entry.Name, ArgvSHA256: trust.ArgvSHA256(match.Argv),
 			Prefix: match.Entry.Prefix,
 		}},

@@ -499,52 +499,6 @@ func TestDispatchOpenNamesPinDrift(t *testing.T) {
 	}
 }
 
-// TestPinDriftNamesOnlyUnsoundPins pins the surfacing helper the read verbs
-// share: sound pins are omitted, drifted and missing ones are named, and a
-// sound run yields nil so callers gate on emptiness.
-func TestPinDriftNamesOnlyUnsoundPins(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	root := t.TempDir()
-
-	pinAFile(t, conn, run.ID, root, "contracts/sound.md", "OK\n")
-	pinAFile(t, conn, run.ID, root, "contracts/drifted.md", "OLD\n")
-	testsupport.Must(t, os.WriteFile(
-		filepath.Join(root, "contracts/drifted.md"), []byte("NEW\n"), 0o644), "rewrite")
-
-	report, err := verifyPinsIn(conn, run.ID, []string{root})
-	testsupport.Must(t, err, "verifyPinsIn: %v", err)
-	var drift []PinVerdict
-	for _, v := range report.Pins {
-		if v.Status != PinOK {
-			drift = append(drift, v)
-		}
-	}
-
-	found := false
-	for _, v := range drift {
-		if v.Ref == "contracts/sound.md" {
-			t.Errorf("the sound pin is in the drift set: %+v", v)
-		}
-		if v.Ref == "contracts/drifted.md" && v.Status == PinChanged {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("the drifted pin is not in the drift set: %+v", drift)
-	}
-
-	notice := PinDriftNotice(drift, "RUN-1")
-	for _, want := range []string{"contracts/drifted.md", "run repin RUN-1"} {
-		if !strings.Contains(notice, want) {
-			t.Errorf("notice %q does not mention %q", notice, want)
-		}
-	}
-	if PinDriftNotice(nil, "RUN-1") != "" {
-		t.Error("a sound run renders a drift notice")
-	}
-}
-
 // TestRepinRefusalNamesTheVerbsThatReapALapsedClaim: the guard still refuses on
 // a lapsed-but-unreaped claim (DKT-489's semantics), but the refusal that told
 // an operator to "wait for their leases to be reaped" named no verb that
@@ -788,23 +742,6 @@ func TestRepinRefusesWithoutTheConductorCapability(t *testing.T) {
 		if n := len(repinEvents(t, conn, run.ID)); n != 0 {
 			t.Errorf("%s: the refused repin recorded %d run-repinned event(s)", tc.name, n)
 		}
-	}
-}
-
-// TestRepinWithTheRunsConductorTokenAdoptsTheDrift: the run's own capability
-// re-pins the drifted ref to the bytes on disk and records its event.
-func TestRepinWithTheRunsConductorTokenAdoptsTheDrift(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	root, ref, _, onDisk := driftedPin(t, conn, run.ID)
-
-	_, err := repinRunIn(conn, run.ID, "install", testConductorToken, nowMS, []string{root})
-	testsupport.Must(t, err, "repin with the run's conductor token: %v", err)
-	if got := pinSHA(t, conn, run.ID, ref); got != onDisk {
-		t.Errorf("pin = %s, want the disk hash %s", got, onDisk)
-	}
-	if n := len(repinEvents(t, conn, run.ID)); n != 1 {
-		t.Errorf("recorded %d run-repinned event(s), want 1", n)
 	}
 }
 

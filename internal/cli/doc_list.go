@@ -1,14 +1,15 @@
 package cli
 
 import (
-	"fmt"
-	"strings"
+	"os"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -77,9 +78,25 @@ var docListCmd = &cobra.Command{
 	},
 }
 
-func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
+// verbEnv is the Env a verb call runs under: this invocation's store, author,
+// working directory and project identity. A command built outside the root
+// hook carries no config, and its empty identity resolves to the default
+// project.
+func verbEnv(cmd *cobra.Command) verb.Env {
+	cwd, _ := os.Getwd()
+	env := verb.Env{
+		Store:  store.StoreOn(getDB(cmd)),
+		Author: config.DefaultAuthor(),
+		Cwd:    cwd,
+		Verb:   commandPath(cmd),
+	}
+	if cfg := getCfg(cmd); cfg != nil {
+		env.Project = verb.ProjectInput{Identity: cfg.Identity, Anchored: cfg.Anchored}
+	}
+	return env
+}
 
+func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 	types, _ := cmd.Flags().GetStringSlice("type")
 	statuses, _ := cmd.Flags().GetStringSlice("status")
 	author, _ := cmd.Flags().GetString("author")
@@ -91,26 +108,17 @@ func runDocList(cmd *cobra.Command, args []string, w *output.Writer) error {
 		return err
 	}
 
-	opts := db.DocListOptions{
-		ProjectID: getProjectID(cmd),
-		Types:     types,
-		Statuses:  statuses,
-		Author:    author,
-		Limit:     limit,
-	}
-
-	if sortFlag != "" {
-		parts := strings.SplitN(sortFlag, ":", 2)
-		opts.Sort = parts[0]
-		if len(parts) > 1 {
-			opts.SortDir = parts[1]
-		}
-	}
-
-	summaries, total, err := db.ListDocsWithCounts(conn, opts)
+	listed, err := verb.DocList(cmd.Context(), verbEnv(cmd), verb.DocListInput{
+		Types:    types,
+		Statuses: statuses,
+		Author:   author,
+		Sort:     sortFlag,
+		Limit:    limit,
+	})
 	if err != nil {
-		return cmdErr(fmt.Errorf("listing docs: %w", err), output.ErrGeneral)
+		return verbErr(err)
 	}
+	summaries, total := listed.Docs, listed.Total
 
 	// `--with-body` re-emits the pre-DKT-1045 row verbatim — the full
 	// model.Doc shape, body included — so the one caller that wants bodies in

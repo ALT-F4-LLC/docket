@@ -1,7 +1,10 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -74,10 +77,16 @@ func CreateDoc(db *sql.DB, doc *model.Doc) (int, error) {
 }
 
 // CreateDocIdempotent is CreateDoc with an optional idempotency key. A repeat
-// call with the same key returns the original doc id and inserts nothing; the
-// key is recorded in the same transaction as the insert.
+// call with the same key and the same doc content returns the original doc id
+// and inserts nothing; the same key with different content returns an error
+// wrapping ErrConflict that names the key. The key and its fingerprint are
+// recorded in the same transaction as the insert.
 func CreateDocIdempotent(db *sql.DB, doc *model.Doc, idempotencyKey string) (int, error) {
-	existingID, hit, tx, err := beginIdempotentCreate(db, ScopeDocCreate, idempotencyKey)
+	fingerprint, err := docCreateFingerprint(doc)
+	if err != nil {
+		return 0, err
+	}
+	existingID, hit, tx, err := beginIdempotentCreateFingerprinted(db, ScopeDocCreate, idempotencyKey, fingerprint)
 	if err != nil {
 		return 0, err
 	}
@@ -88,28 +97,22 @@ func CreateDocIdempotent(db *sql.DB, doc *model.Doc, idempotencyKey string) (int
 
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := tx.Exec(
+	var id int
+	if err := tx.QueryRow(
 		`INSERT INTO docs (project_id, type, status, title, body, author, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectOrDefault(doc.ProjectID),
 		doc.Type, doc.Status, doc.Title, doc.Body, doc.Author, now, now,
-	)
-	if err != nil {
+	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting doc: %w", err)
 	}
-
-	id64, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
-	}
-	id := int(id64)
 
 	if _, err := appendDocRevision(tx, id, doc.Body, docChangeKindCreate, doc.Author, now); err != nil {
 		return 0, err
 	}
 
 	if idempotencyKey != "" {
-		if err := RecordIdempotencyKeyTx(tx, ScopeDocCreate, idempotencyKey, id); err != nil {
+		if err := recordIdempotencyKeyFingerprintTx(tx, ScopeDocCreate, idempotencyKey, fingerprint, id); err != nil {
 			return 0, err
 		}
 	}
@@ -125,6 +128,20 @@ func CreateDocIdempotent(db *sql.DB, doc *model.Doc, idempotencyKey string) (int
 	doc.UpdatedAt = createdAt
 
 	return id, nil
+}
+
+// docCreateFingerprint is the SHA-256 of a doc create's request content: the
+// project, type, status, title, body and author it would insert. The fields are
+// JSON-encoded before hashing so no two distinct requests share an encoding.
+func docCreateFingerprint(doc *model.Doc) (string, error) {
+	encoded, err := json.Marshal([]any{
+		projectOrDefault(doc.ProjectID), doc.Type, doc.Status, doc.Title, doc.Body, doc.Author,
+	})
+	if err != nil {
+		return "", fmt.Errorf("fingerprinting the doc create: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // GetDoc returns the doc with the given ID, or ErrNotFound.
@@ -588,7 +605,7 @@ func appendDocRevision(tx *sql.Tx, docID int, body, changeKind, author, createdA
 		docID, next, body, changeKind, author, createdAt,
 	)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "PRIMARY KEY") {
+		if isUniqueOrPKConflict(err) {
 			return 0, ErrConflict
 		}
 		return 0, fmt.Errorf("inserting doc revision: %w", err)

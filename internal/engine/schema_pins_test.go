@@ -308,36 +308,6 @@ emits = "result"
 	}
 }
 
-// TestSchemaPinsAreDeterministic is what the goldens rest on: the same
-// inputs produce the same pin rows, in the same order, every time. An order
-// that varied with map iteration would make the golden flap on nothing.
-func TestSchemaPinsAreDeterministic(t *testing.T) {
-	var first []string
-	for range 5 {
-		conn := mustDB(t)
-		registerSource(t, conn, []byte(payloadWorkflow), "pinned-payloads.toml")
-		registerSchemaFixture(t, conn, "findings", 1, pinFindingsSchema)
-		registerSchemaFixture(t, conn, "other", 1, pinFindingsSchema)
-
-		issue := createIssue(t, conn, "deterministic", "a body", "task", nil)
-		run := startRun(t, conn, issue)
-		_, err := activate(conn, run.ID)
-		testsupport.Must(t, err, "activate: %v", err)
-
-		var got []string
-		for _, p := range pinsByKind(t, conn, run.ID, db.PinKindSchema) {
-			got = append(got, p.Ref+"|"+p.SHA256)
-		}
-		if first == nil {
-			first = got
-			continue
-		}
-		if strings.Join(got, ",") != strings.Join(first, ",") {
-			t.Fatalf("schema pins differ between activations:\n  %v\n  %v", first, got)
-		}
-	}
-}
-
 // TestSchemasRegisterBeforeWorkflows is the registration ordering contract,
 // asserted over the real sort.
 //

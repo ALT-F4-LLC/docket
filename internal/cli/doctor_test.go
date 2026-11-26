@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -66,63 +67,75 @@ func seededDBPath(t *testing.T) string {
 	return dbPath
 }
 
-// TestDoctorEnvelopeShapesTheSevenChecks drives the real command against an
-// empty in-memory store outside a git repository, and asserts the wire shape
-// AC1 promises: seven rows, each carrying check/verdict/detail, plus clean and
-// skipped.
-func TestDoctorEnvelopeShapesTheSevenChecks(t *testing.T) {
+// TestDoctorReportsPostgresStateWithoutTheDSN seeds a DSN carrying a userinfo
+// secret and a password query parameter, and asserts that both output modes
+// carry the postgres state row while neither secret, the username, the
+// database name, nor the DSN itself appears anywhere in the output.
+func TestDoctorReportsPostgresStateWithoutTheDSN(t *testing.T) {
+	userinfoSecret := "userinfo-" + strings.Repeat("s3", 4)
+	querySecret := "query-" + strings.Repeat("q9", 4)
+	dsn := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword("doctoruser", userinfoSecret),
+		Host:     "127.0.0.1:1",
+		Path:     "/doctordb",
+		RawQuery: url.Values{"password": {querySecret}, "sslmode": {"disable"}}.Encode(),
+	}).String()
+	t.Setenv(config.PostgresDSNEnv, dsn)
+
 	conn := newTestDB(t)
 	cfg := &config.Config{DBPath: seededDBPath(t)}
-	w, buf := bufWriter(true)
 
-	err := runDoctor(doctorCmdWithDB(conn, cfg), w)
-	if err != nil {
-		t.Fatalf("doctor returned an error: %v", err)
-	}
-
+	jsonW, jsonOut := bufWriter(true)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), jsonW), "doctor (json): %v", nil)
 	var envelope doctorEnvelope
-	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	if err := json.Unmarshal(jsonOut.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, jsonOut.String())
 	}
-
-	want := []string{"seat", "store", "project", "install-drift", "pins", "link-farm", "stragglers"}
-	if len(envelope.Data.Checks) != len(want) {
-		t.Fatalf("checks = %v, want %d rows", envelope.Data.Checks, len(want))
-	}
-	for i, name := range want {
-		if envelope.Data.Checks[i].Check != name {
-			t.Errorf("checks[%d] = %q, want %q", i, envelope.Data.Checks[i].Check, name)
-		}
-		if envelope.Data.Checks[i].Verdict == "" {
-			t.Errorf("checks[%d] (%s) has no verdict", i, name)
+	var row string
+	for _, c := range envelope.Data.Checks {
+		if c.Check == "postgres" {
+			row = c.Verdict + " " + c.Detail
 		}
 	}
-
-	// No --run and no --source: both AC2's SKIP and clean/skipped follow.
-	if !envelope.Data.Skipped {
-		t.Error("skipped = false with neither --run nor --source given, want true")
-	}
-	if envelope.Data.Clean {
-		t.Error("clean = true with checks SKIPped, want false")
+	if row != "OK configured; DSN withheld" {
+		t.Errorf("postgres row = %q, want %q", row, "OK configured; DSN withheld")
 	}
 
-	// The human-mode rendering carries the same summary.
-	textW, out := bufWriter(false)
-	if err := runDoctor(doctorCmdWithDB(conn, cfg), textW); err != nil {
-		t.Fatalf("doctor (human mode) returned an error: %v", err)
+	textW, textOut := bufWriter(false)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), textW), "doctor (human): %v", nil)
+	if !strings.Contains(textOut.String(), "configured; DSN withheld") {
+		t.Errorf("human output lacks the postgres state line:\n%s", textOut.String())
 	}
-	if !strings.Contains(out.String(), "clean: false") {
-		t.Errorf("human output %q does not report clean: false", out.String())
+
+	for mode, out := range map[string]string{"json": jsonOut.String(), "human": textOut.String()} {
+		for _, secret := range []string{dsn, userinfoSecret, querySecret, "doctoruser", "doctordb"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("%s output contains %q:\n%s", mode, secret, out)
+			}
+		}
+	}
+}
+
+// TestDoctorReportsAnUnsetPostgresDSN pins the benign state: no DSN in the
+// environment reads as not configured, and the row never moves clean.
+func TestDoctorReportsAnUnsetPostgresDSN(t *testing.T) {
+	t.Setenv(config.PostgresDSNEnv, "")
+	conn := newTestDB(t)
+	cfg := &config.Config{DBPath: seededDBPath(t)}
+	w, buf := bufWriter(false)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), w), "doctor: %v", nil)
+	if !strings.Contains(buf.String(), "postgres       OK    not configured") {
+		t.Errorf("human output lacks the not-configured postgres line:\n%s", buf.String())
 	}
 }
 
 // TestDoctorReportsAnUnboundCwdWithoutRegistering is the measured defect: from
 // a git worktree whose identity has no project row, `docket doctor` once
 // claimed the store's default row for that identity and logged a
-// project-registered event with verb doctor. It resolves the project the way
-// the root hook does for the real `doctor` command, then runs doctor, and
-// asserts the report says unbound while the projects table, the default row,
-// and the event log are untouched.
+// project-registered event with verb doctor. It runs doctor with that
+// identity in config, and asserts the report says unbound while the projects
+// table, the default row, and the event log are untouched.
 func TestDoctorReportsAnUnboundCwdWithoutRegistering(t *testing.T) {
 	conn := newTestDB(t)
 	cfg := &config.Config{
@@ -135,17 +148,8 @@ func TestDoctorReportsAnUnboundCwdWithoutRegistering(t *testing.T) {
 	eventsBefore := eventRowCount(t, conn)
 	defaultBefore := defaultProjectIdentity(t, conn)
 
-	id, err := resolveInvocationProject(commandAt(t, "doctor"), conn, cfg)
-	testsupport.Must(t, err, "resolving doctor's project: %v", err)
-	if id != db.UnregisteredProjectID {
-		t.Fatalf("doctor resolved project %d, want the unregistered sentinel %d",
-			id, db.UnregisteredProjectID)
-	}
-
-	cmd := doctorCmdWithDB(conn, cfg)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, id))
 	w, buf := bufWriter(true)
-	testsupport.Must(t, runDoctor(cmd, w), "doctor: %v", nil)
+	testsupport.Must(t, runDoctor(doctorCmdWithDB(conn, cfg), w), "doctor: %v", nil)
 
 	var envelope doctorEnvelope
 	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {

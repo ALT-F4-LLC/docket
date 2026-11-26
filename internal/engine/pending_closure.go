@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -9,7 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -103,8 +102,9 @@ func normalizePinRef(ref string) string {
 
 // pendingPacketClosure computes the refs a run's non-terminal work can still
 // read, each mapped to what reaches it.
-func pendingPacketClosure(conn *sql.DB, runID int, roots []string) (pendingClosure, error) {
-	steps, err := db.ListRunSteps(conn, runID)
+func pendingPacketClosure(conn store.LegacyDB, runID int, roots []string) (pendingClosure, error) {
+	st := store.StoreOn(conn)
+	steps, err := st.ListRunSteps(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func pendingPacketClosure(conn *sql.DB, runID int, roots []string) (pendingClosu
 	if err != nil {
 		return nil, err
 	}
-	runIssues, err := db.ListRunIssues(conn, runID)
+	runIssues, err := st.ListRunIssues(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func pendingPacketClosure(conn *sql.DB, runID int, roots []string) (pendingClosu
 	add(policyPinRef, "the harness (policy)")
 
 	for _, s := range steps {
-		if db.StepTerminal(s.Status) {
+		if store.StepTerminal(s.Status) {
 			continue
 		}
 		spec := stepSpec(defs, s, holdTally{})
@@ -245,7 +245,7 @@ func unpinnedClosureRefs(
 	// treating an inherited ref as unheld is the mistake both walks avoid.
 	have := make(map[string]bool, len(pins))
 	for _, v := range pins {
-		if v.Kind != db.PinKindFile {
+		if v.Kind != store.PinKindFile {
 			continue
 		}
 		ref := v.Ref

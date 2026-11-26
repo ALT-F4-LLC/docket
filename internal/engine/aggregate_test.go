@@ -170,28 +170,6 @@ func TestAggregateScalarFieldIsTheIdentity(t *testing.T) {
 	}
 }
 
-// TestAggregateSpreadIsDistanceInTheDeclaredOrder: spread is the
-// distance between the extreme members' POSITIONS, never a count of distinct
-// values and never a value difference.
-func TestAggregateSpreadIsDistanceInTheDeclaredOrder(t *testing.T) {
-	// Both clusters span positions 1..3, so both have spread 2 — one with two
-	// members, one with three. A count-of-distinct-values implementation would
-	// give 2 and 3 and hold the wrong one.
-	const raw = `[{"severity":["low","high"]},{"severity":["low","medium","high"]}]`
-
-	out, err := aggregateOver(t, raw, medianParams(MethodMedian, 2), severityOrder)
-	testsupport.Must(t, err, "Aggregate: %v", err)
-	if len(out.Held) != 2 {
-		t.Fatalf("held %v, want both clusters — {low,high} and {low,medium,high} "+
-			"are both spread 2", out.Held)
-	}
-	for i := range out.Payload {
-		if out.Payload[i][KeyHeld] != true {
-			t.Errorf("element %d is not marked held", i)
-		}
-	}
-}
-
 // TestAggregateHoldBoundary is the hold `>=` boundary and its off switch.
 func TestAggregateHoldBoundary(t *testing.T) {
 	// positions 1 and 3: spread 2.

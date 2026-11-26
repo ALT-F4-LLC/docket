@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The mid-run scope refresh (DKT-869), and why it exists after DKT-741 said it
@@ -104,10 +103,18 @@ type RefreshedScope struct {
 // `retry` re-executes it and records a fresh diff — over the refreshed scope,
 // which is the entire point of authorizing the widen.
 var refreshBlockingStepStatuses = []string{
-	db.StepClaimed, db.StepRunning, db.StepGated,
+	store.StepClaimed, store.StepRunning, store.StepGated,
 }
 
-// RefreshIssueScopeInRun re-reads `issues.scope_globs` and overwrites the
+// RefreshIssueScopeInRun is RefreshIssueScopeInRunStore on store.StoreOn(conn).
+func RefreshIssueScopeInRun(
+	conn store.LegacyDB, runID, issueID int, reason string, by Attribution, token string,
+	nowMS int64,
+) (*RefreshedScope, error) {
+	return RefreshIssueScopeInRunStore(store.StoreOn(conn), runID, issueID, reason, by, token, nowMS)
+}
+
+// RefreshIssueScopeInRunStore re-reads `issues.scope_globs` and overwrites the
 // `scope` key of ONE run-issue's activation snapshot (DKT-869).
 //
 // The unit is (run, issue) rather than a single step because that is where the
@@ -120,10 +127,14 @@ var refreshBlockingStepStatuses = []string{
 // On a bound run it requires the conductor capability (DKT-2465) as `token`:
 // `issue edit --scope` is ungated, so without this check an executor could
 // widen its own issue and then make that widen reach its own packets.
-func RefreshIssueScopeInRun(
-	conn *sql.DB, runID, issueID int, reason string, by Attribution, token string,
+func RefreshIssueScopeInRunStore(
+	storage store.Store, runID, issueID int, reason string, by Attribution, token string,
 	nowMS int64,
 ) (*RefreshedScope, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, validationErr(
 			"a reason is required to refresh a snapshotted scope; the event " +
@@ -141,8 +152,9 @@ func RefreshIssueScopeInRun(
 	}
 	defer tx.Rollback()
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -212,6 +224,10 @@ func RefreshIssueScopeInRun(
 	var straddle *refreshStraddleError
 	var terminal *refreshAllTerminalError
 	switch {
+	case errors.As(err, &terminal) && !ri.Expanded():
+		// Not yet expanded, so no step rows exist: the steps expansion creates
+		// will render this snapshot, so the refresh reaches all of them.
+		steps = []string{}
 	case errors.As(err, &straddle):
 		return nil, conflictErr(
 			"%d step(s) of %s in %s are mid-flight (%s); a refresh under one "+
@@ -239,7 +255,7 @@ func RefreshIssueScopeInRun(
 	if err != nil {
 		return nil, err
 	}
-	if err := db.SetRunIssueSnapshotTx(tx, runID, issueID, refreshed); err != nil {
+	if err := st.SetRunIssueSnapshotTx(runID, issueID, refreshed); err != nil {
 		return nil, err
 	}
 
@@ -258,7 +274,7 @@ func RefreshIssueScopeInRun(
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("refreshing the snapshotted scope: %w", err)
 	}
 	return &RefreshedScope{
@@ -295,24 +311,11 @@ func (e *refreshAllTerminalError) Error() string {
 // *refreshAllTerminalError). A caller rewords either through errors.As, so an
 // operator is told what actually moved; one that does not still refuses.
 func refreshableSteps(
-	tx *sql.Tx, runID, issueID int, runRef string,
+	tx store.LegacyTx, runID, issueID int, runRef string,
 ) ([]string, error) {
-	rows, err := tx.Query(
-		`SELECT instance, status FROM steps
-		  WHERE run_id = ? AND issue_id = ? AND status NOT IN (?, ?, ?, ?)
-		  ORDER BY id`,
-		runID, issueID,
-		db.StepDone, db.StepSkipped, db.StepSuperseded, db.StepFailedRouted)
+	remaining, err := store.TxOn(tx).IssueUnfinishedStepsTx(runID, issueID)
 	if err != nil {
-		return nil, fmt.Errorf("collecting %s's remaining steps: %w", runRef, err)
-	}
-	type liveStep struct{ instance, status string }
-	remaining, err := scanTxRows(rows, func(r *sql.Rows) (liveStep, error) {
-		var s liveStep
-		return s, r.Scan(&s.instance, &s.status)
-	})
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("in %s: %w", runRef, err)
 	}
 
 	blocking := make(map[string]bool, len(refreshBlockingStepStatuses))
@@ -321,11 +324,11 @@ func refreshableSteps(
 	}
 	var instances, straddled []string
 	for _, s := range remaining {
-		if blocking[s.status] {
-			straddled = append(straddled, fmt.Sprintf("%s (%s)", s.instance, s.status))
+		if blocking[s.Status] {
+			straddled = append(straddled, fmt.Sprintf("%s (%s)", s.Instance, s.Status))
 			continue
 		}
-		instances = append(instances, s.instance)
+		instances = append(instances, s.Instance)
 	}
 	issue := model.FormatID(issueID)
 	if len(straddled) > 0 {
@@ -345,8 +348,8 @@ func quiescenceErr(cause error) *Error {
 // runIssueTx loads one `run_issues` row, distinguishing "not in this run" from
 // a read failure — the membership check `run abandon --issue` makes, returning
 // the row because the caller needs its snapshot.
-func runIssueTx(tx *sql.Tx, runID, issueID int) (*db.RunIssue, error) {
-	all, err := db.ListRunIssuesTx(tx, runID)
+func runIssueTx(tx store.LegacyTx, runID, issueID int) (*store.RunIssue, error) {
+	all, err := store.TxOn(tx).ListRunIssuesTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +358,7 @@ func runIssueTx(tx *sql.Tx, runID, issueID int) (*db.RunIssue, error) {
 			return ri, nil
 		}
 	}
-	return nil, notFoundErr(db.ErrNotFound, "issue %s is not part of run %s",
+	return nil, notFoundErr(store.ErrNotFound, "issue %s is not part of run %s",
 		model.FormatID(issueID), model.FormatRunID(runID))
 }
 
@@ -363,8 +366,8 @@ func runIssueTx(tx *sql.Tx, runID, issueID int) (*db.RunIssue, error) {
 // value written is the value that was read — a widen landing between a
 // standalone read and the UPDATE would otherwise be reported as the `to` of an
 // event that wrote something else.
-func liveIssueScopeTx(tx *sql.Tx, issueID int) ([]string, error) {
-	stored, err := db.IssueScopeGlobsTx(tx, issueID)
+func liveIssueScopeTx(tx store.LegacyTx, issueID int) ([]string, error) {
+	stored, err := store.TxOn(tx).IssueScopeGlobsTx(issueID)
 	if err != nil {
 		return nil, fmt.Errorf("reading the live scope for %s: %w",
 			model.FormatID(issueID), err)

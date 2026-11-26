@@ -2,19 +2,25 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -48,6 +54,7 @@ func TestDispatchVerifyCLIEqualExitsClean(t *testing.T) {
 	testsupport.Must(t, err, "dispatch open: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runDispatchVerify(dispatchCmdWithDB(conn, runRef), w)
 	testsupport.Must(t, err, "dispatch verify: %v", err)
 
@@ -87,6 +94,7 @@ func TestDispatchVerifyCLIConflictRendersRowsAndExitCode(t *testing.T) {
 	testsupport.Must(t, err, "claim: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runDispatchVerify(dispatchCmdWithDB(conn, runRef), w)
 	if err == nil {
 		t.Fatal("a claimed manifest row verified clean")
@@ -135,11 +143,15 @@ func backfillCmdWithDB(conn *sql.DB, runRef string) *cobra.Command {
 }
 
 // stderrWriter is bufWriter with the warning channel visible: DKT-993's whole
-// subject is what reaches stderr, and bufWriter discards it.
+// subject is what reaches stderr, and bufWriter discards it. JSON mode renders
+// the v2 envelope.
 func stderrWriter(jsonMode bool) (*output.Writer, *bytes.Buffer, *bytes.Buffer) {
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	return &output.Writer{JSONMode: jsonMode, Stdout: stdout, Stderr: stderr},
-		stdout, stderr
+	w := &output.Writer{JSONMode: jsonMode, Stdout: stdout, Stderr: stderr}
+	if jsonMode {
+		w.JSONVersion = output.JSONV2
+	}
+	return w, stdout, stderr
 }
 
 // pendingStepID returns a step of the run that nothing has ever claimed —
@@ -536,16 +548,15 @@ func TestDispatchOpenJSONEnvelopeUnchangedByRender(t *testing.T) {
 	}
 }
 
-// TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits: bare --json (v1,
-// the version a bare flag actually parses to — NoOptDefVal gives it "v1", not
-// "v2") carries the same total/truncated/limits fields v2 does, decoded by
-// KEY rather than into a typed field: encoding/json folds field names
-// case-insensitively, so a struct field named Total would still populate from
-// a wire key of "Total" even after the `json:"total"` tag was dropped from
+// TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits: the --json=v2
+// envelope carries total/truncated/limits under their exact lowercase keys,
+// decoded by KEY rather than into a typed field: encoding/json folds field
+// names case-insensitively, so a struct field named Total would still populate
+// from a wire key of "Total" even after the `json:"total"` tag was dropped from
 // engine.Manifest, and the mutant this test exists to catch would survive.
 func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
 	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV1
+	w.JSONVersion = output.JSONV2
 	openDispatchCLI(t, twoClassWorkflow, 2, 1, w)
 
 	raw := buf.String()
@@ -576,5 +587,147 @@ func TestDispatchOpenJSONEnvelopeCarriesTotalTruncatedLimits(t *testing.T) {
 		if string(got) != field.want {
 			t.Errorf("envelope data[%q] = %s, want %s", field.key, got, field.want)
 		}
+	}
+}
+
+func TestDispatchOpenRefusesANonPositiveAckSeq(t *testing.T) {
+	conn := newTestDB(t)
+	runID := activatedDispatchRunForCLI(t, conn)
+	cmd := dispatchCmdWithDB(conn, model.FormatRunID(runID))
+	if err := cmd.Flags().Set("ack-reap", "0"); err != nil {
+		t.Fatalf("set --ack-reap: %v", err)
+	}
+
+	w, _ := bufWriter(true)
+	err := runDispatchOpen(cmd, w)
+	assertCmdCode(t, err, output.ErrValidation, "dispatch open --ack-reap 0")
+	if !strings.Contains(err.Error(), "--ack-reap 0 is not an event seq") {
+		t.Errorf("error = %v, want it to name the flag", err)
+	}
+}
+
+// withAnchoredIdentity gives cmd the anchored config identity the root hook
+// would have loaded for it.
+func withAnchoredIdentity(cmd *cobra.Command, identity string) *cobra.Command {
+	cmd.SetContext(context.WithValue(cmd.Context(), cfgKey,
+		&config.Config{Identity: identity, Anchored: true}))
+	return cmd
+}
+
+// TestDispatchCommandsRecordTheProjectsTheyRegister keeps the
+// project-registered event the root hook wrote before each dispatch command
+// resolved its own project, including for a reconcile refused after it
+// registered the project.
+func TestDispatchCommandsRecordTheProjectsTheyRegister(t *testing.T) {
+	conn := newTestDB(t)
+	ref := model.FormatRunID(activatedDispatchRunForCLI(t, conn))
+	w, _ := bufWriter(true)
+
+	err := runDispatchOpen(withAnchoredIdentity(dispatchCmdWithDB(conn, ref), "/repos/dispatch-open"), w)
+	testsupport.Must(t, err, "dispatch open: %v", err)
+	err = runDispatchExtend(withAnchoredIdentity(dispatchCmdWithDB(conn, ref), "/repos/dispatch-extend"), w)
+	testsupport.Must(t, err, "dispatch extend: %v", err)
+
+	// An empty batch is refused at the back-fill stage, after the close has
+	// registered its project.
+	batch := filepath.Join(t.TempDir(), "usage.json")
+	testsupport.Must(t, os.WriteFile(batch, []byte("[]"), 0o600), "writing the batch")
+	reconcile := withAnchoredIdentity(dispatchCloseCmdWithDB(conn, ref), "/repos/dispatch-reconcile")
+	if err := reconcile.Flags().Set("backfill-from", batch); err != nil {
+		t.Fatalf("set --backfill-from: %v", err)
+	}
+	assertCmdCode(t, runDispatchClose(reconcile, w), output.ErrValidation, "dispatch close --backfill-from []")
+
+	err = runDispatchClose(withAnchoredIdentity(dispatchCloseCmdWithDB(conn, ref), "/repos/dispatch-close"), w)
+	testsupport.Must(t, err, "dispatch close: %v", err)
+
+	runID, _ := verb.ParseRunRef(ref)
+	seatConductor(t, conn, runID)
+	backfill := withAnchoredIdentity(backfillCmdWithDB(conn, ref), "/repos/dispatch-backfill")
+	testsupport.Must(t, backfill.Flags().Set("step", model.FormatStepID(pendingStepID(t, conn, runID))),
+		"set --step")
+	testsupport.Must(t, backfill.Flags().Set("unit", "tokens"), "set --unit")
+	testsupport.Must(t, backfill.Flags().Set("quantity", "7"), "set --quantity")
+	err = runDispatchBackfillUsage(backfill, w)
+	testsupport.Must(t, err, "dispatch backfill-usage: %v", err)
+
+	// The close above left no dispatch open, so the abandon is refused after
+	// it registered its project.
+	abandon := withAnchoredIdentity(cmdWithDB(conn), "/repos/dispatch-abandon")
+	abandon.Flags().String("run", ref, "")
+	abandon.Flags().String("reason", "", "")
+	assertCmdCode(t, runDispatchAbandon(abandon, w), output.ErrConflict, "dispatch abandon with none open")
+
+	waive := withAnchoredIdentity(waiveTargetCmdWithDB(conn, ref, "cafe1234cafe", "", []string{"review@0#0"}),
+		"/repos/dispatch-waive")
+	err = runDispatchWaiveTarget(waive, w)
+	testsupport.Must(t, err, "dispatch waive-target: %v", err)
+
+	want := map[string]string{
+		"/repos/dispatch-open":      "dispatch open",
+		"/repos/dispatch-extend":    "dispatch extend",
+		"/repos/dispatch-reconcile": "dispatch close",
+		"/repos/dispatch-close":     "dispatch close",
+		"/repos/dispatch-backfill":  "dispatch backfill-usage",
+		"/repos/dispatch-abandon":   "dispatch abandon",
+		"/repos/dispatch-waive":     "dispatch waive-target",
+	}
+	if got := registrationEvents(t, conn); !maps.Equal(got, want) {
+		t.Errorf("registration events = %v, want %v", got, want)
+	}
+}
+
+// A doubly malformed invocation reports the malformed --run first, as each
+// command did before it called its verb.
+func TestDispatchCommandsRefuseAMalformedRunFirst(t *testing.T) {
+	conn := newTestDB(t)
+	w, _ := bufWriter(true)
+
+	open := dispatchCmdWithDB(conn, "nope")
+	if err := open.Flags().Set("json", "true"); err != nil {
+		t.Fatalf("set --json: %v", err)
+	}
+	if err := open.Flags().Set("limit", "-1"); err != nil {
+		t.Fatalf("set --limit: %v", err)
+	}
+	err := runDispatchOpen(open, w)
+	assertCmdCode(t, err, output.ErrValidation, "dispatch open --run nope --limit -1")
+	if !strings.HasPrefix(err.Error(), "invalid run ID") {
+		t.Errorf("dispatch open error = %v, want the run refused first", err)
+	}
+
+	reconcile := dispatchCloseCmdWithDB(conn, "nope")
+	if err := reconcile.Flags().Set("backfill-from", filepath.Join(t.TempDir(), "missing.json")); err != nil {
+		t.Fatalf("set --backfill-from: %v", err)
+	}
+	err = runDispatchClose(reconcile, w)
+	assertCmdCode(t, err, output.ErrValidation, "dispatch close --run nope --backfill-from missing")
+	if !strings.HasPrefix(err.Error(), "invalid run ID") {
+		t.Errorf("dispatch close error = %v, want the run refused first", err)
+	}
+}
+
+// A --no-conditions ruling from an unreadable working directory is refused
+// GENERAL naming the getwd cause, before the batch file is read.
+func TestDispatchCloseNoConditionsRefusesAnUnreadableWorkingDirectory(t *testing.T) {
+	conn := newTestDB(t)
+	ref := model.FormatRunID(activatedDispatchRunForCLI(t, conn))
+	saved := getwd
+	getwd = func() (string, error) { return "", errors.New("getwd: no such file or directory") }
+	t.Cleanup(func() { getwd = saved })
+
+	cmd := dispatchCloseCmdWithDB(conn, ref)
+	cmd.Flags().String("no-conditions", "", "")
+	if err := cmd.Flags().Set("no-conditions", "tracked elsewhere"); err != nil {
+		t.Fatalf("set --no-conditions: %v", err)
+	}
+	if err := cmd.Flags().Set("backfill-from", filepath.Join(t.TempDir(), "missing.json")); err != nil {
+		t.Fatalf("set --backfill-from: %v", err)
+	}
+	w, _ := bufWriter(true)
+	err := runDispatchClose(cmd, w)
+	assertCmdCode(t, err, output.ErrGeneral, "dispatch close --no-conditions")
+	if !strings.Contains(err.Error(), "could not be resolved (getwd: no such file or directory)") {
+		t.Errorf("error = %v, want the getwd cause named", err)
 	}
 }

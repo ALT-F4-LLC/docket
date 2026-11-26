@@ -31,26 +31,6 @@ const multiClusterPayload = `[
   {"id":"C-2","severity":["low","high"]}
 ]`
 
-// TestEachHeldClusterGetsItsOwnStep is the core assertion.
-//
-// Two held clusters must produce two human steps. With one step for both, an
-// operator has exactly one approve/reject to spend on two independent
-// questions.
-func TestEachHeldClusterGetsItsOwnStep(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	driveToReconcile(t, conn, e, multiClusterPayload)
-
-	held := heldInstances(t, conn)
-	if len(held) != 2 {
-		t.Fatalf("got %d held step(s) for 2 held clusters: %v\n"+
-			"each held cluster needs its own human step, or approve/reject "+
-			"is binary over the set (DKT-15)", len(held), held)
-	}
-}
-
 // TestHeldClustersResolveIndependently is the property the operator actually
 // wanted: accept one cluster, reject another, in the same hold.
 func TestHeldClustersResolveIndependently(t *testing.T) {

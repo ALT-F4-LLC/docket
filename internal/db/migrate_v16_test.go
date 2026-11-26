@@ -9,30 +9,6 @@ import (
 // stamped 16 without it. The behavior the column exists for — a retried step's
 // next claim minting a fresh ledger attempt — is the engine's to prove.
 
-func TestMigrateToV16(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, col := range v16ColumnSentinels {
-		exists, err := hasColumnDB(db, col.table, col.column)
-		if err != nil || !exists {
-			t.Errorf("%s.%s missing after migration (err %v)", col.table, col.column, err)
-		}
-	}
-}
-
 // TestV16RewindGuardConvergesAStampedStore rebuilds `steps` without the column
 // while leaving the stamp at 16 — the mid-change-binary database v13's guard
 // comment describes — and asserts Migrate converges it.

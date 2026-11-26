@@ -1,12 +1,11 @@
 package engine
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // The CONDUCTOR CAPABILITY (DKT-2465).
@@ -36,12 +35,16 @@ import (
 //     exists. This is the "guard with no engine = allow" posture: nothing is
 //     required where nothing was ever minted, and a migrated store's runs in
 //     flight keep working. Every run THIS binary activates is bound at birth.
+//     The engine sees no transport, so this holds on every one; the daemon
+//     narrows it, refusing these verbs over its HTTP listener on an unbound
+//     run until someone conducts it (internal/daemon/conductor_gate.go).
 //   - `run conduct` is itself token-free, because nothing authenticates a
 //     caller and a run whose conductor session died must not be un-pausable
 //     forever. That makes the mechanism TAMPER-EVIDENT rather than
 //     tamper-proof: a caller that takes the seat retires the standing token,
 //     so the standing conductor's next ruling refuses AUTH_ERROR, and the
-//     `conductor-seated` event names the taker's actor and cwd. A harness that
+//     `conductor-seated` event names the taker's actor and cwd, and the token
+//     name and peer address the daemon observed. A harness that
 //     keys callers keeps its executors off `run conduct` rather than off every
 //     gated verb.
 
@@ -50,8 +53,8 @@ import (
 var ErrNotConductor = errors.New("not the run's conductor")
 
 // authorizeConductorTx is the check inside a verb's own transaction.
-func authorizeConductorTx(tx *sql.Tx, runID int, token, verb string) error {
-	hash, err := db.RunConductorHashTx(tx, runID)
+func authorizeConductorTx(tx store.LegacyReadTx, runID int, token, verb string) error {
+	hash, err := store.TxOn(tx).RunConductorHashTx(runID)
 	if err != nil {
 		return err
 	}
@@ -63,17 +66,26 @@ func authorizeConductorTx(tx *sql.Tx, runID int, token, verb string) error {
 // resolve). It runs after the step is loaded and before any of those paths
 // writes; a `run conduct` racing it can only retire a token the ruling was
 // about to use, which is the rotation doing its job.
-func authorizeConductor(conn *sql.DB, runID int, token, verb string) error {
-	hash, err := db.RunConductorHash(conn, runID)
+func authorizeConductor(conn store.LegacyDB, runID int, token, verb string) error {
+	hash, err := store.StoreOn(conn).RunConductorHash(runID)
 	if err != nil {
 		return err
 	}
 	return checkConductor(hash, token, runID, verb)
 }
 
-// AuthorizeConductor is authorizeConductor for a CLI verb whose write lives
+// AuthorizeConductor is AuthorizeConductorStore on store.StoreOn(conn).
+func AuthorizeConductor(conn store.LegacyDB, runID int, token, verb string) error {
+	return AuthorizeConductorStore(store.StoreOn(conn), runID, token, verb)
+}
+
+// AuthorizeConductorStore is authorizeConductor for a CLI verb whose write lives
 // outside the engine (`vote commit`): the verb runs it before writing.
-func AuthorizeConductor(conn *sql.DB, runID int, token, verb string) error {
+func AuthorizeConductorStore(storage store.Store, runID int, token, verb string) error {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return err
+	}
 	return authorizeConductor(conn, runID, token, verb)
 }
 
@@ -111,8 +123,33 @@ type ConductOptions struct {
 	// By is who is taking the seat and from where. REQUIRED, exactly as on a
 	// ruling: the event is the whole audit trail of a token-free verb that
 	// mints authority, so an unattributed one must not be written.
-	By    Attribution
-	NowMS int64
+	By Attribution
+	// Caller is what the daemon observed about the request. The zero value is
+	// a caller with no daemon-observed identity: the Unix socket, or a direct
+	// store write.
+	Caller DaemonCaller
+	NowMS  int64
+}
+
+// DaemonCaller is the identity the daemon observed on a request, as opposed
+// to Attribution's self-reported actor and cwd. TokenName names the token
+// that authenticated an HTTP request; PeerAddr is the remote address the
+// HTTP listener saw. A Unix-socket request carries neither.
+type DaemonCaller struct {
+	TokenName string
+	PeerAddr  string
+}
+
+// addTo writes the caller onto an event's field map. `peer_addr` is always
+// written, empty for a caller the daemon saw no address for; `token_name` is
+// present only when a token authenticated the request, so a socket seat never
+// reads as token-authenticated.
+func (c DaemonCaller) addTo(fields map[string]any) map[string]any {
+	fields["peer_addr"] = c.PeerAddr
+	if c.TokenName != "" {
+		fields["token_name"] = c.TokenName
+	}
+	return fields
 }
 
 // ConductResult is what the verb returns: the token, ONCE.
@@ -127,14 +164,23 @@ type ConductResult struct {
 	Rotated bool
 }
 
-// ConductRun takes (or re-takes) a run's conductor seat: it mints the run's
+// ConductRun is ConductRunStore on store.StoreOn(conn).
+func ConductRun(conn store.LegacyDB, runID int, opts ConductOptions) (*ConductResult, error) {
+	return ConductRunStore(store.StoreOn(conn), runID, opts)
+}
+
+// ConductRunStore takes (or re-takes) a run's conductor seat: it mints the run's
 // capability, retiring any standing one, and records who did it.
 //
 // It refuses a TERMINAL run: there is nothing left to conduct, and a token
 // minted on a done run would be a capability for verbs that all refuse it
 // anyway. A planning run is conductable — `run abandon` applies to one — and
 // its first activation then keeps the capability rather than minting a second.
-func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, error) {
+func ConductRunStore(storage store.Store, runID int, opts ConductOptions) (*ConductResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if err := opts.By.require("run conduct"); err != nil {
 		return nil, err
 	}
@@ -144,9 +190,10 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 		return nil, fmt.Errorf("conducting %s: %w", model.FormatRunID(runID), err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
-	if errors.Is(err, db.ErrRunNotFound) {
+	run, err := st.GetRunTx(runID)
+	if errors.Is(err, store.ErrRunNotFound) {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	if err != nil {
@@ -157,7 +204,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 			run.Ref(), run.Status)
 	}
 
-	standing, err := db.RunConductorHashTx(tx, runID)
+	standing, err := st.RunConductorHashTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -165,12 +212,12 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 	if err != nil {
 		return nil, err
 	}
-	if err := db.SetRunConductorHashTx(tx, runID, hash); err != nil {
+	if err := st.SetRunConductorHashTx(runID, hash); err != nil {
 		return nil, err
 	}
 
 	rotated := standing != ""
-	data, err := rulingData(opts.By, map[string]any{"rotated": rotated})
+	data, err := rulingData(opts.By, opts.Caller.addTo(map[string]any{"rotated": rotated}))
 	if err != nil {
 		return nil, fmt.Errorf("recording the conductor seat: %w", err)
 	}
@@ -180,7 +227,7 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 		return nil, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("conducting %s: %w", model.FormatRunID(runID), err)
 	}
 	return &ConductResult{Run: run, Token: token, Rotated: rotated}, nil
@@ -190,8 +237,9 @@ func ConductRun(conn *sql.DB, runID int, opts ConductOptions) (*ConductResult, e
 // no-op on a run already bound — one conducted while still planning keeps the
 // capability its conductor holds. Returns the token, or "" when nothing was
 // minted.
-func mintConductorTx(tx *sql.Tx, runID int) (string, error) {
-	standing, err := db.RunConductorHashTx(tx, runID)
+func mintConductorTx(tx store.LegacyTx, runID int) (string, error) {
+	st := store.TxOn(tx)
+	standing, err := st.RunConductorHashTx(runID)
 	if err != nil {
 		return "", err
 	}
@@ -202,7 +250,7 @@ func mintConductorTx(tx *sql.Tx, runID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := db.SetRunConductorHashTx(tx, runID, hash); err != nil {
+	if err := st.SetRunConductorHashTx(runID, hash); err != nil {
 		return "", err
 	}
 	return token, nil

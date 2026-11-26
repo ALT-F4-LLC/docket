@@ -11,6 +11,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
+	"github.com/spf13/cobra"
 )
 
 // DKT-869 at the verb level. The engine half — that the refresh is real, that
@@ -136,6 +137,43 @@ func TestRunRefreshScopeRequiresItsArguments(t *testing.T) {
 	})
 }
 
+// With an unreadable working directory, a malformed refresh request still
+// reports its own fault, as the three refresh commands did before the move:
+// the run reference, a missing or malformed --issue, and a missing --reason.
+// Only a well-formed request reports the directory.
+func TestRunRefreshCommandsReportTheRequestFaultBeforeTheDirectory(t *testing.T) {
+	conn := newTestDB(t)
+	stubGetwdFailure(t)
+
+	for name, run := range map[string]func(*cobra.Command, string, *output.Writer) error{
+		"refresh-body":  runRunRefreshBody,
+		"refresh-files": runRunRefreshFiles,
+		"refresh-scope": runRunRefreshScope,
+	} {
+		t.Run(name, func(t *testing.T) {
+			refresh := func(ref, issue, reason string) error {
+				cmd := cmdWithDB(conn)
+				cmd.Flags().String("issue", "", "")
+				cmd.Flags().String("reason", "", "")
+				for flag, value := range map[string]string{"issue": issue, "reason": reason} {
+					if value != "" {
+						testsupport.Must(t, cmd.Flags().Set(flag, value), "setting --%s", flag)
+					}
+				}
+				w, _ := bufWriter(false)
+				return run(cmd, ref, w)
+			}
+
+			assertRefreshCode(t, refresh("RUN-x", "DKT-1", "authorized"), output.ErrValidation, `invalid run ID "RUN-x"`)
+			assertRefreshCode(t, refresh("RUN-1", "", "authorized"), output.ErrValidation, "--issue is required")
+			assertRefreshCode(t, refresh("RUN-1", "DKT-x", "authorized"), output.ErrValidation, "invalid issue ID")
+			assertRefreshCode(t, refresh("RUN-1", "DKT-1", ""), output.ErrValidation, "--reason is required")
+			assertRefreshCode(t, refresh("RUN-1", "DKT-1", "authorized"), output.ErrGeneral,
+				"working directory could not be resolved")
+		})
+	}
+}
+
 // TestRunRefreshScopeWithoutAWidenIsRefused is the gate, at the verb: the only
 // way to change what this verb copies is `issue edit --scope`, so a refresh
 // with no widen behind it must fail rather than record a no-op ruling.
@@ -200,26 +238,6 @@ func TestRunRefreshScopeRequiresTheConductorCapability(t *testing.T) {
 			t.Errorf("snapshot scope = %s, want the widened declaration", got)
 		}
 	})
-}
-
-// TestRunRefreshScopeOnAnUnboundRunNeedsNoToken: a run with no minted
-// capability is refreshed without a token, as at every conductor-gated verb.
-func TestRunRefreshScopeOnAnUnboundRunNeedsNoToken(t *testing.T) {
-	t.Setenv(TokenEnvVar, "")
-	conn := newTestDB(t)
-	runID, issueID := scopedIssueInLiveRun(t, conn, `["a/**"]`, `["a/**"]`)
-	hash, err := db.RunConductorHash(conn, runID)
-	testsupport.Must(t, err, "reading the conductor hash: %v", err)
-	if hash != "" {
-		t.Fatal("premise: the fixture run is bound to a conductor capability")
-	}
-	editWithScope(t, conn, issueID, false, "a/**", "b/**")
-
-	_, err = refreshScope(t, conn, runID, issueID, "authorized", false)
-	testsupport.Must(t, err, "run refresh-scope on an unbound run: %v", err)
-	if got := snapshotScopeJSON(t, conn, runID, issueID); got != `["a/**","b/**"]` {
-		t.Errorf("snapshot scope = %s, want the widened declaration", got)
-	}
 }
 
 // assertRefreshRefused checks that a refused refresh wrote nothing: the

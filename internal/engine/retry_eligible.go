@@ -1,15 +1,14 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/planner"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // RetryEligible is a step parked gap-only whose issue's depends_on or blocks
@@ -35,23 +34,23 @@ type RetryEligible struct {
 // first needs it, instead of once per list (the relations read scans the
 // whole issue_relations table).
 type runReads struct {
-	conn  *sql.DB
+	conn  store.LegacyDB
 	runID int
 
-	steps     []*db.Step
+	steps     []*store.Step
 	stepsRead bool
 	relations []model.Relation
 	relsRead  bool
 }
 
 // runReadsFromSteps shares a step list a caller already loaded.
-func runReadsFromSteps(conn *sql.DB, runID int, steps []*db.Step) *runReads {
+func runReadsFromSteps(conn store.LegacyDB, runID int, steps []*store.Step) *runReads {
 	return &runReads{conn: conn, runID: runID, steps: steps, stepsRead: true}
 }
 
-func (r *runReads) runSteps() ([]*db.Step, error) {
+func (r *runReads) runSteps() ([]*store.Step, error) {
 	if !r.stepsRead {
-		steps, err := db.ListRunSteps(r.conn, r.runID)
+		steps, err := store.StoreOn(r.conn).ListRunSteps(r.runID)
 		if err != nil {
 			return nil, fmt.Errorf("listing run steps: %w", err)
 		}
@@ -62,7 +61,7 @@ func (r *runReads) runSteps() ([]*db.Step, error) {
 
 func (r *runReads) directionalRelations() ([]model.Relation, error) {
 	if !r.relsRead {
-		relations, err := db.GetAllDirectionalRelations(r.conn)
+		relations, err := store.StoreOn(r.conn).GetAllDirectionalRelations()
 		if err != nil {
 			return nil, fmt.Errorf("reading relations: %w", err)
 		}
@@ -71,10 +70,19 @@ func (r *runReads) directionalRelations() ([]model.Relation, error) {
 	return r.relations, nil
 }
 
-// RunAdvisories is `run status`'s pair of advisory lists, the unexpanded
+// RunAdvisories is RunAdvisoriesStore on store.StoreOn(conn).
+func RunAdvisories(conn store.LegacyDB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+	return RunAdvisoriesStore(store.StoreOn(conn), runID)
+}
+
+// RunAdvisoriesStore is `run status`'s pair of advisory lists, the unexpanded
 // issues and the retry-eligible parks, read over one step list and one
 // relations scan.
-func RunAdvisories(conn *sql.DB, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+func RunAdvisoriesStore(storage store.Store, runID int) ([]UnexpandedIssue, []RetryEligible, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, nil, err
+	}
 	reads := &runReads{conn: conn, runID: runID}
 	unexpanded, err := reads.unexpandedIssues()
 	if err != nil {
@@ -93,7 +101,7 @@ func RunAdvisories(conn *sql.DB, runID int) ([]UnexpandedIssue, []RetryEligible,
 // last changed after the park, in step order. A prerequisite that was already
 // met before the park cannot be what the park waits on. A pure read: `run status` renders it, and `dispatch open` renders it
 // and records the event.
-func RetryEligibleParks(conn *sql.DB, runID int) ([]RetryEligible, error) {
+func RetryEligibleParks(conn store.LegacyDB, runID int) ([]RetryEligible, error) {
 	return (&runReads{conn: conn, runID: runID}).retryEligibleParks()
 }
 
@@ -103,9 +111,9 @@ func (r *runReads) retryEligibleParks() ([]RetryEligible, error) {
 	if err != nil {
 		return nil, err
 	}
-	var parked []*db.Step
+	var parked []*store.Step
 	for _, s := range steps {
-		if s.Status == db.StepWaitingHuman && s.ParkClass == db.ParkClassGapOnly {
+		if s.Status == store.StepWaitingHuman && s.ParkClass == store.ParkClassGapOnly {
 			parked = append(parked, s)
 		}
 	}
@@ -130,14 +138,14 @@ func (r *runReads) retryEligibleParks() ([]RetryEligible, error) {
 	for id := range need {
 		ids = append(ids, id)
 	}
-	issues, err := db.GetIssuesByIDs(conn, ids)
+	issues, err := store.StoreOn(conn).GetIssuesByIDs(ids)
 	if err != nil {
 		return nil, fmt.Errorf("reading prerequisite issues: %w", err)
 	}
 	// When each prerequisite became done. Its updated_at moves on any later
 	// edit (a comment, a label), which is not the prerequisite changing; it is
 	// the fallback only for an issue whose close the log never saw.
-	doneAt, err := db.StatusReachedAt(conn, ids, string(model.StatusDone))
+	doneAt, err := store.StatusReachedAt(conn, ids, string(model.StatusDone))
 	if err != nil {
 		return nil, fmt.Errorf("reading when prerequisites closed: %w", err)
 	}
@@ -221,7 +229,7 @@ func notBeforePark(at time.Time, parkMS int64) bool {
 // new park is signalled afresh. The parks already recorded are read in one
 // query over the run, and the missing events commit in one transaction; a
 // failure to record is returned without hiding the list.
-func recordRetryEligible(conn *sql.DB, reads *runReads, nowMS int64) ([]RetryEligible, error) {
+func recordRetryEligible(conn store.LegacyDB, reads *runReads, nowMS int64) ([]RetryEligible, error) {
 	eligible, err := reads.retryEligibleParks()
 	if err != nil || len(eligible) == 0 {
 		return eligible, err
@@ -277,32 +285,19 @@ type retryEligiblePark struct{ stepID, rowVersion int }
 
 // recordedRetryEligible is the set of parks the run's park-retry-eligible
 // events already name.
-func recordedRetryEligible(conn *sql.DB, runID int) (map[retryEligiblePark]bool, error) {
-	rows, err := conn.Query(
-		`SELECT step_id, data FROM events WHERE run_id = ? AND kind = ?`,
-		runID, EventParkRetryEligible)
+func recordedRetryEligible(conn store.LegacyDB, runID int) (map[retryEligiblePark]bool, error) {
+	events, err := store.StoreOn(conn).RunStepEvents(runID, EventParkRetryEligible)
 	if err != nil {
 		return nil, fmt.Errorf("reading retry-eligible events: %w", err)
 	}
-	defer rows.Close()
 	seen := make(map[retryEligiblePark]bool)
-	for rows.Next() {
-		var (
-			stepID sql.NullInt64
-			raw    string
-		)
-		if err := rows.Scan(&stepID, &raw); err != nil {
-			return nil, fmt.Errorf("reading a retry-eligible event: %w", err)
-		}
+	for _, e := range events {
 		var data struct {
 			RowVersion int `json:"row_version"`
 		}
-		if stepID.Valid && json.Unmarshal([]byte(raw), &data) == nil {
-			seen[retryEligiblePark{int(stepID.Int64), data.RowVersion}] = true
+		if json.Unmarshal([]byte(e.Data), &data) == nil {
+			seen[retryEligiblePark{e.StepID, data.RowVersion}] = true
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading retry-eligible events: %w", err)
 	}
 	return seen, nil
 }

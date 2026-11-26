@@ -38,7 +38,7 @@ func sha256Of(body string) string {
 
 func migratedDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	err := Initialize(db)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = Migrate(db)

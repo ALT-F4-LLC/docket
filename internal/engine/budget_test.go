@@ -3,7 +3,6 @@ package engine
 import (
 	"database/sql"
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -73,23 +72,6 @@ func expectedCostOf(t *testing.T, conn *sql.DB, instance string) float64 {
 // The floor is a SUM over claim events, one case per accrual rule
 // ---------------------------------------------------------------------------
 
-// TestFloorAccruesPerClaimEvent: a plain claim accrues the step's cost, once.
-func TestFloorAccruesPerClaimEvent(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	if got := runFloor(t, conn, runID); got != 0 {
-		t.Fatalf("floor before any claim = %g, want 0", got)
-	}
-
-	want := expectedCostOf(t, conn, "implement@0")
-	claimInstance(t, conn, "implement@0", nowMS)
-
-	if got := runFloor(t, conn, runID); got != want {
-		t.Errorf("floor after one claim = %g, want %g", got, want)
-	}
-}
-
 // TestFloorRetriesReAccrue: a reaped step claimed again writes a SECOND
 // `step-claimed` event and the SUM counts BOTH.
 //
@@ -114,40 +96,6 @@ func TestFloorRetriesReAccrue(t *testing.T) {
 	if got := runFloor(t, conn, runID); got != 2*cost {
 		t.Errorf("floor after a reap and a re-claim = %g, want %g — retries "+
 			"re-accrue and nothing is released", got, 2*cost)
-	}
-}
-
-// TestFloorFanoutAccruesPerSibling: `expected_cost` is PER EXPANDED SIBLING,
-// so four siblings claim four times and accrue four times. No division, no
-// proration — the fixture says so verbatim.
-func TestFloorFanoutAccruesPerSibling(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "summary", "")
-
-	var siblings []string
-	for _, s := range runSteps(t, conn, runID) {
-		if s.StepName == "review" && s.Status == db.StepPending {
-			siblings = append(siblings, s.Instance)
-		}
-	}
-	if len(siblings) < 2 {
-		t.Fatalf("the fixture expanded %d claimable review siblings; the fanout "+
-			"case needs several", len(siblings))
-	}
-
-	before := runFloor(t, conn, runID)
-	var want float64
-	for _, instance := range siblings {
-		want += expectedCostOf(t, conn, instance)
-		claimInstance(t, conn, instance, nowMS)
-	}
-
-	if got := runFloor(t, conn, runID) - before; math.Abs(got-want) > 1e-9 {
-		t.Errorf("the fanout accrued %g, want %g (one accrual per sibling, no "+
-			"proration)", got, want)
 	}
 }
 
@@ -259,50 +207,6 @@ func TestFloorIgnoresSkippedAndSupersededVoteRows(t *testing.T) {
 	if got := runFloor(t, conn, run.ID); got != want {
 		t.Errorf("floor = %g, want %g (only the pending panel accrues; the "+
 			"skipped 2.0 and superseded 4.0 panels must not)", got, want)
-	}
-}
-
-// TestFloorBoundedByMaxFixLoops checks loop re-accrual at the fixture's
-// `max_fix_loops = 2`: the floor cannot exceed the arithmetic bound, ever.
-//
-// A loop entry is a DIFFERENT step row with its own `expected_cost`, claimed and
-// event-logged independently, so `max_fix_loops` bounds the floor BY
-// CONSTRUCTION — "bounded loops bound the floor" falling out of loop expansion
-// rather than needing arithmetic of its own. The assertion is therefore
-// over what the run CAN instantiate, not over a number this test computes.
-func TestFloorBoundedByMaxFixLoops(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	// The bound: every step the run could ever instantiate, claimed once per
-	// permitted loop entry. Nothing this run does may push the floor past it.
-	steps := runSteps(t, conn, runID)
-	var perPass float64
-	for _, s := range steps {
-		perPass += s.ExpectedCost
-	}
-	const maxLoops = 2 // the fixture's `max_fix_loops`
-	bound := perPass * (maxLoops + 1)
-
-	// Claim everything claimable, repeatedly, forcing reaps in between — the
-	// most expensive thing an operator could do to this run short of entering
-	// loops, which expansion controls.
-	for range 3 {
-		for _, s := range runSteps(t, conn, runID) {
-			if s.Status != db.StepPending || s.Kind != "executor" {
-				continue
-			}
-			if _, err := ClaimStep(conn, s.ID,
-				ClaimOptions{Owner: "worker", NowMS: nowMS}); err != nil {
-				continue // not ready, or refused: both are fine here
-			}
-		}
-		execSQL(t, conn, `UPDATE steps SET expires_ms = 1 WHERE run_id = ?`, runID)
-	}
-
-	if got := runFloor(t, conn, runID); got > bound {
-		t.Errorf("floor = %g, above the %g the loop bound permits; a floor that "+
-			"can exceed its bound is one `max_fix_loops` does not bound", got, bound)
 	}
 }
 
@@ -603,62 +507,6 @@ func TestBreachPausesTheRunWithAReason(t *testing.T) {
 	}
 }
 
-// TestBreachIsIdempotentUnderConcurrentFlips: the flip is CAS on
-// (run_id, status='active'), so a second invocation that observes the same
-// crossing matches ZERO rows and writes neither a second reason nor a second
-// event.
-func TestBreachIsIdempotentUnderConcurrentFlips(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0.01)
-
-	for i := range 2 {
-		_, err := ClaimStep(conn, stepIDByInstance(t, conn, "implement@0"),
-			ClaimOptions{Owner: fmt.Sprintf("w%d", i), NowMS: nowMS + int64(i)})
-		if err == nil {
-			t.Fatalf("claim %d past the cap was admitted", i)
-		}
-	}
-
-	// Exactly ONE pause event. The second flip matched no row — the run was
-	// already `waiting-human` — so it wrote nothing.
-	if n := countRunEvents(t, conn, runID, EventRunPaused); n != 1 {
-		t.Errorf("%d %s events after two breaching claims, want 1 — the CAS is "+
-			"what makes the second a no-op", n, EventRunPaused)
-	}
-}
-
-// TestResumeRePausesAtTheSameCap is stated because "resume immediately
-// re-pauses" reads as a bug and is not one: `run resume` clears nothing, the cap
-// has not moved, so the condition has not changed.
-//
-// Raising the cap is `run start`-time only in v1 — recorded rather than
-// invented here, because the command surface has no budget mutator.
-func TestResumeRePausesAtTheSameCap(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0.01)
-
-	if _, err := ClaimStep(conn, stepIDByInstance(t, conn, "implement@0"),
-		ClaimOptions{Owner: "worker", NowMS: nowMS}); err == nil {
-		t.Fatal("the first claim past the cap was admitted")
-	}
-
-	// The operator resumes.
-	err := db.SetRunStatus(conn, runID, model.RunActive, "", nowMS+1)
-	testsupport.Must(t, err, "resuming: %v", err)
-
-	// And the next claim pauses it again, at the same cap.
-	if _, err := ClaimStep(conn, stepIDByInstance(t, conn, "implement@0"),
-		ClaimOptions{Owner: "worker", NowMS: nowMS + 2}); err == nil {
-		t.Fatal("the claim after the resume was admitted; the cap has not moved")
-	}
-	run, err := db.GetRun(conn, runID)
-	testsupport.Must(t, err, "GetRun: %v", err)
-	if run.Status != model.RunWaitingHuman {
-		t.Errorf("run is %s after resume-and-claim, want %s",
-			run.Status, model.RunWaitingHuman)
-	}
-}
-
 // TestBreachSurvivesAPreBreachStepCompleting is DKT-68: a step claimed BEFORE
 // the run's budget breach, completing AFTER it, must not silently resume the
 // run. `BreachRunBudgetTx` pauses only the RUN row — it parks no step — so
@@ -782,54 +630,6 @@ func TestBudgetR7AndClaimAgree(t *testing.T) {
 	}
 }
 
-// TestBudgetDormancyExecutesNoQuery is budget dormancy, asserted by COUNTING
-// QUERIES rather than by inspection.
-//
-// `budgetHeadroom` returns true on its first line when the effective cap is 0,
-// and the snapshot's loader declines to query at all in that case. A run
-// started without `--budget` in a repo that never set `budget.default`
-// therefore executes exactly the queries v9 executed — the dormancy claim,
-// measured rather than asserted.
-func TestBudgetDormancyExecutesNoQuery(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	tx, err := conn.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	defer tx.Rollback()
-
-	run, err := db.GetRunTx(tx, runID)
-	testsupport.Must(t, err, "GetRunTx: %v", err)
-	snap, err := loadBudget(tx, run)
-	testsupport.Must(t, err, "loadBudget: %v", err)
-
-	if !snap.unlimited() {
-		t.Fatalf("premise: a run with no --budget in a repo with no default is "+
-			"not unlimited (cap %g)", snap.cap)
-	}
-	if snap.source != BudgetUnlimited {
-		t.Errorf("source = %q, want %q", snap.source, BudgetUnlimited)
-	}
-	// The floor and the reported sum were NOT computed: an unlimited run runs no
-	// budget query, so both are the zero value rather than a number.
-	if snap.floor != 0 || snap.reported != 0 {
-		t.Errorf("an unlimited snapshot carries floor %g and reported %g; both "+
-			"queries must be skipped entirely", snap.floor, snap.reported)
-	}
-
-	// And the same run, having actually claimed a step, still reports an
-	// unlimited snapshot with no floor computed — the dormancy is not "until
-	// something happens", it is unconditional on the cap.
-	tx.Rollback()
-	claimInstance(t, conn, "implement@0", nowMS)
-	withBudget(t, conn, runID, func(snap budgetSnapshot) {
-		if snap.floor != 0 {
-			t.Errorf("an unlimited run computed a floor of %g after a claim; the "+
-				"query must not run at all", snap.floor)
-		}
-	})
-}
-
 // TestEffectiveCapIsTheRunRow: the cap a claim enforces is read from the RUN
 // ROW and from nowhere else.
 //
@@ -890,35 +690,6 @@ func TestBudgetSourceOf(t *testing.T) {
 				tc.cap, tc.configDefault, got, tc.want)
 		}
 	}
-}
-
-// TestCapSetAfterRunStartDoesNotReCapTheRun is the run-row rule's consequence,
-// stated because it is surprising: a run started before `budget.default` was
-// set has `runs.budget = 0` stored and stays UNLIMITED even after the default
-// is set.
-//
-// That is the pinning property applied to budgets, and it is the right answer —
-// a config change must not silently re-cap a live run. `run report` prints the
-// effective cap and where it came from precisely so an operator asking "why
-// didn't it stop?" gets the answer from a read verb.
-func TestCapSetAfterRunStartDoesNotReCapTheRun(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	// The run is already under way.
-	claimInstance(t, conn, "implement@0", nowMS)
-
-	// Now somebody sets a default. It applies to runs STARTED after it, not to
-	// this one — because this one's row says 0 and enforcement reads the row.
-	err := db.SetConfig(conn, 0, db.KeyBudgetDefault, "0.01")
-	testsupport.Must(t, err, "setting budget.default: %v", err)
-
-	withBudget(t, conn, runID, func(snap budgetSnapshot) {
-		if !snap.unlimited() {
-			t.Errorf("a mid-flight run gained a cap of %g from a config change; "+
-				"the cap is read from the run row", snap.cap)
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------

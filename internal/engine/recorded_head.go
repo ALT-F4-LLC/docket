@@ -1,14 +1,15 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -35,7 +36,8 @@ type recordedHead struct {
 	// checkout is never measured at the stale sha.
 	Worktree string `json:"worktree"`
 	// Live marks a head whose WHOLE work a checkout of it would not reproduce:
-	// the worktree held uncommitted or untracked state, or no resolvable fork
+	// the worktree held uncommitted or untracked state (sandbox stubs do not
+	// count: sandboxStub), or no resolvable fork
 	// point, or a commit the run's checkout cannot check out. The gates and the
 	// diff then read the live worktree, as they always did, but REFUSE to stand
 	// for it once its HEAD is no longer Head, so a worktree that moves on after
@@ -53,7 +55,7 @@ type recordedHead struct {
 // worktree is the shared checkout (a step may record it; it keeps the live-tree
 // behavior, because its head legitimately moves as work is
 // integrated.
-func (e *Engine) captureRecordedHead(conn *sql.DB, runID int, worktree string) (recordedHead, bool) {
+func (e *Engine) captureRecordedHead(conn store.LegacyDB, runID int, worktree string) (recordedHead, bool) {
 	return e.captureRecordedHeadIn(runExecRoot(conn, runID), worktree)
 }
 
@@ -101,11 +103,17 @@ func resolvedDir(path string) string {
 	return filepath.Clean(path)
 }
 
+// recordedHeadConn is the handle a recorded-head read runs on: the database,
+// or a transaction whose own uncommitted rows the read must see.
+type recordedHeadConn interface {
+	store.LegacyDB | store.LegacyTx
+}
+
 // recordedHeadOf is the head recorded for the step's CURRENT worktree. It
 // swallows a read error as "no record", the refusal direction for its
 // callers; a stage that would fall back to the live worktree on "no record"
 // uses recordedHeadOfErr and propagates the error instead.
-func recordedHeadOf(conn rowQuerier, step *db.Step) (recordedHead, bool) {
+func recordedHeadOf[C recordedHeadConn](conn C, step *store.Step) (recordedHead, bool) {
 	rec, ok, err := recordedHeadOfErr(conn, step)
 	return rec, ok && err == nil
 }
@@ -114,21 +122,27 @@ func recordedHeadOf(conn rowQuerier, step *db.Step) (recordedHead, bool) {
 // absence of a record: ok is false only when no row exists or the newest row
 // is cleared or names another worktree, and any other failure to read the
 // row is returned, so a caller retries rather than measures a different tree.
-func recordedHeadOfErr(conn rowQuerier, step *db.Step) (recordedHead, bool, error) {
-	var payload sql.NullString
-	err := conn.QueryRow(
-		`SELECT payload FROM artifacts WHERE step_id = ? AND kind = ?
-		  ORDER BY id DESC LIMIT 1`,
-		step.ID, RecordedHeadArtifactKind).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return recordedHead{}, false, nil
+func recordedHeadOfErr[C recordedHeadConn](conn C, step *store.Step) (recordedHead, bool, error) {
+	var (
+		payload string
+		found   bool
+		err     error
+	)
+	switch c := any(conn).(type) {
+	case store.LegacyDB:
+		payload, found, err = store.StoreOn(c).NewestStepPayload(step.ID, RecordedHeadArtifactKind)
+	case store.LegacyTx:
+		payload, found, err = store.TxOn(c).NewestStepPayloadTx(step.ID, RecordedHeadArtifactKind)
 	}
 	if err != nil {
 		return recordedHead{}, false, fmt.Errorf(
 			"reading the recorded head for %s: %w", step.Instance, err)
 	}
+	if !found {
+		return recordedHead{}, false, nil
+	}
 	var rec recordedHead
-	if json.Unmarshal([]byte(payload.String), &rec) != nil ||
+	if json.Unmarshal([]byte(payload), &rec) != nil ||
 		rec.Head == "" || rec.Worktree != step.WorkRoot {
 		return recordedHead{}, false, nil
 	}
@@ -141,21 +155,85 @@ func (e *Engine) liveHeadMoved(rec recordedHead, worktree string) bool {
 	return e.HeadFn == nil || e.HeadFn(worktree) != rec.Head
 }
 
-// worktreeClean reports whether dir has no tracked change and no untracked
-// file. Anything it cannot read counts as not clean.
+// worktreeClean reports whether dir, a worktree's top level, has no tracked
+// change and no untracked file a writer could have left. An untracked path
+// the sandbox placed there (sandboxStub) is nobody's work and does not count.
+// Anything it cannot read counts as not clean.
 func worktreeClean(dir string) bool {
 	// No fsmonitor hook and no index lock: this reads a tree the executor owns.
 	out, err := gitCommand("-c", "core.fsmonitor=false", "-C", dir,
-		"--no-optional-locks", "status", "--porcelain",
+		"--no-optional-locks", "status", "--porcelain", "-z",
 		"--untracked-files=all").Output()
-	return err == nil && len(strings.TrimSpace(string(out))) == 0
+	if err != nil {
+		return false
+	}
+	for entry := range strings.SplitSeq(string(out), "\x00") {
+		if entry == "" {
+			continue
+		}
+		// The first entry that is not untracked ends the walk, so the bare
+		// second path a rename entry carries is never read as an entry.
+		path, untracked := strings.CutPrefix(entry, "?? ")
+		if !untracked || !sandboxStub(dir, path) {
+			return false
+		}
+	}
+	return true
+}
+
+// sandboxStubPaths are the worktree-relative paths the Claude Code sandbox
+// was found to write-protect in a command's working directory. On Linux a
+// protected path that does not exist is masked with a bind of the null
+// device, and the mount point that bind needs is a zero-length file on disk,
+// which a command started while it exists sees as that file. Which form a
+// reader meets depends on what was on disk when its sandbox was set up.
+var sandboxStubPaths = map[string]bool{
+	".bash_profile": true, ".bashrc": true, ".gitconfig": true,
+	".gitmodules": true, ".idea": true, ".mcp.json": true, ".profile": true,
+	".ripgreprc": true, ".vscode": true, ".zprofile": true, ".zshrc": true,
+	".claude/agents": true, ".claude/commands": true, ".claude/hooks": true,
+	".claude/launch.json": true, ".claude/loop.md": true,
+	".claude/output-styles": true, ".claude/routines": true,
+	".claude/scheduled_tasks.json": true, ".claude/settings.json": true,
+	".claude/settings.local.json": true, ".claude/skills": true,
+	".claude/workflows": true,
+}
+
+// sandboxStub reports whether the untracked path, as git status spells it
+// from dir's top level, is a sandbox stub. The sandbox removes its mount
+// points when a command ends, so a protected path that is gone by the time it
+// is read was one; any other path that cannot be read is not. Below the top
+// level a status path does not resolve from dir, and a miss there says
+// nothing, so the path counts as the writer's.
+func sandboxStub(dir, path string) bool {
+	info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(path)))
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) || !sandboxStubPaths[path] {
+			return false
+		}
+		_, err = os.Lstat(filepath.Join(dir, ".git"))
+		return err == nil
+	}
+	return sandboxStubMode(path, info.Mode(), info.Size())
+}
+
+// sandboxStubMode is the rule sandboxStub applies. A character device is a
+// stub under any name: git cannot add one, so no commit could carry it. A
+// zero-length regular file is a stub only at a path the sandbox protects, so
+// an empty file a writer created anywhere else, and a file with content at a
+// protected path, still count as the writer's work.
+func sandboxStubMode(path string, mode fs.FileMode, size int64) bool {
+	if mode&fs.ModeCharDevice != 0 {
+		return true
+	}
+	return mode.IsRegular() && size == 0 && sandboxStubPaths[path]
 }
 
 // insertRecordedHeadTx records the commit a step's worktree holds, or, when
 // none reproduces it, a cleared record (an empty head) that supersedes any
 // earlier one: recordedHeadOf reads the newest row and honors only a head.
 func insertRecordedHeadTx(
-	tx *sql.Tx, step *db.Step, rec recordedHead, have bool, worktree string, nowMS int64,
+	tx store.LegacyTx, step *store.Step, rec recordedHead, have bool, worktree string, nowMS int64,
 ) error {
 	if !have {
 		rec = recordedHead{Worktree: worktree}
@@ -164,7 +242,7 @@ func insertRecordedHeadTx(
 	if err != nil {
 		return err
 	}
-	_, err = db.InsertArtifactTx(tx, db.Artifact{
+	_, err = store.TxOn(tx).InsertArtifactTx(store.Artifact{
 		RunID: step.RunID, StepID: step.ID, Kind: RecordedHeadArtifactKind,
 		Body: rec.Head, Payload: string(payload),
 		SHA256: workflow.SHA256([]byte(rec.Head)),
@@ -190,7 +268,7 @@ func commitInRepo(dir, sha string) bool {
 // record when it has one. A re-claimed step that records without a worktree
 // keeps its earlier work_root, so the first attempt's head would otherwise
 // stand for the second attempt.
-func clearRecordedHeadIfAnyTx(tx *sql.Tx, step *db.Step, nowMS int64) error {
+func clearRecordedHeadIfAnyTx(tx store.LegacyTx, step *store.Step, nowMS int64) error {
 	if step.WorkRoot == "" {
 		return nil
 	}

@@ -1,11 +1,11 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"sort"
 
 	"github.com/ALT-F4-LLC/docket/internal/exec"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -272,7 +272,7 @@ func joinList(names []string) string {
 // buildGatePreflightTx is BuildGatePreflight against an open transaction, for
 // the dry run — whose pinned definitions exist only inside the transaction it
 // is about to discard, and so cannot be read through the pool.
-func buildGatePreflightTx(tx *sql.Tx, runID int) ([]GatePreflight, error) {
+func buildGatePreflightTx(tx store.LegacyTx, runID int) ([]GatePreflight, error) {
 	defs, err := StepDefinitionsTx(tx, runID)
 	if err != nil {
 		return nil, err
@@ -313,7 +313,7 @@ type HoldPolicy struct {
 }
 
 // LoadHoldPolicy reads the run's project's hold-decision policy.
-func LoadHoldPolicy(conn *sql.DB, runID int) (HoldPolicy, error) {
+func LoadHoldPolicy(conn store.LegacyDB, runID int) (HoldPolicy, error) {
 	tally, err := loadHoldTally(conn, runID)
 	if err != nil {
 		return HoldPolicy{}, err

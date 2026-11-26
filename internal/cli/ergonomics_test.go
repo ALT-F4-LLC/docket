@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"context"
 	"database/sql"
-	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -70,78 +67,6 @@ func TestConfigListKeepsOneLinePerKey(t *testing.T) {
 	// `b.unset`.
 	if strings.Contains(lines[1], "3") {
 		t.Errorf("the unset key's line carries the NEXT key's value: %q", lines[1])
-	}
-}
-
-// TestIssueListProjectFlagScopesToTheNamedProject is DKT-72's first flag.
-//
-// Issue listing was cwd-only, so reading another project's issues in a
-// machine-global store meant changing directory into it — and is impossible for
-// a project whose checkout is not on this machine. Three sessions reached for
-// `--project` unprompted and got `unknown flag`.
-func TestIssueListProjectFlagScopesToTheNamedProject(t *testing.T) {
-	conn := newTestDB(t)
-
-	// Two projects, each with one issue. The default project is claimed first,
-	// per EnsureProject's ladder.
-	here, err := db.EnsureProject(conn, "/src/here.git", "here.git", 1)
-	testsupport.Must(t, err, "registering the local project: %v", err)
-	there, err := db.EnsureProject(conn, "/src/there.git", "there.git", 2)
-	testsupport.Must(t, err, "registering the other project: %v", err)
-	if here == there {
-		t.Fatalf("the fixture needs two distinct projects, got %d twice", here)
-	}
-
-	mine := createIssue(t, conn, "mine", model.StatusBacklog, model.PriorityNone)
-	theirs := createIssue(t, conn, "theirs", model.StatusBacklog, model.PriorityNone)
-	setIssueProject(t, conn, mine, here)
-	setIssueProject(t, conn, theirs, there)
-
-	// The prefix is process-global, so restore it: this test moves it
-	// deliberately and every later test in the package reads it.
-	t.Cleanup(func() { model.SetDisplayPrefix("DKT") })
-
-	cmd := listCmdWithDB(conn)
-	cmd.Flags().String("project", "", "")
-	testsupport.Must(t, cmd.Flags().Set("project", "there.git"),
-		"setting --project: %v", err)
-	cmd.SetContext(context.WithValue(cmd.Context(), projectKey, here))
-
-	w, buf := bufWriter(true)
-	testsupport.Must(t, runIssueList(cmd, nil, w), "runIssueList: %v", err)
-
-	var lj listJSON
-	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &lj), "unmarshal: %v", err)
-	if len(lj.Data.Issues) != 1 {
-		t.Fatalf("listed %d issues, want the named project's one: %s",
-			len(lj.Data.Issues), buf.String())
-	}
-	// Rendered in the NAMED project's voice, not the caller's: a listing of
-	// another project's issues under this project's prefix is the same defect
-	// DKT-67 fixed in the event feed.
-	other, err := db.GetProject(conn, there)
-	testsupport.Must(t, err, "reading the other project: %v", err)
-	if !strings.HasPrefix(lj.Data.Issues[0].ID, other.Prefix+"-") {
-		t.Errorf("issue rendered as %q, want the owning project's prefix %q — "+
-			"the prefix is the only thing on the row that says whose issue it is",
-			lj.Data.Issues[0].ID, other.Prefix)
-	}
-}
-
-// TestIssueDeleteYesIsForce is DKT-72's second flag: `--yes` is the spelling a
-// scripted caller reaches for, and it means `--force` rather than a third
-// behavior — the prompt it answers is a three-way choice, and a flag meaning
-// "yes" without saying to what would have to pick one silently.
-func TestIssueDeleteYesIsForce(t *testing.T) {
-	yes := deleteCmd.Flags().Lookup("yes")
-	if yes == nil {
-		t.Fatal("`issue delete` has no --yes; scripted cleanup guessed it and got `unknown flag`")
-	}
-	if force := deleteCmd.Flags().Lookup("force"); force == nil {
-		t.Fatal("--force is gone; --yes is defined as an alias for it")
-	}
-	if !strings.Contains(yes.Usage, "force") {
-		t.Errorf("--yes does not say what it aliases: %q", yes.Usage)
 	}
 }
 

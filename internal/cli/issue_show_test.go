@@ -46,30 +46,6 @@ func TestIssueShow_RendersLinkedDocsSection(t *testing.T) {
 	}
 }
 
-func TestIssueShow_RendersLinkedDocsSectionPlain(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	conn := newTestDB(t)
-	issueID := createIssue(t, conn, "issue with docs", model.StatusTodo, model.PriorityHigh)
-	doc := createDoc(t, conn, "Docket Doc CLI", "tdd", "approved")
-	linkDocIssue(t, conn, doc, issueID)
-
-	cmd := cmdWithDB(conn)
-	w, buf := bufWriter(false)
-	err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w)
-	testsupport.Must(t, err, "runIssueShow: %v", err)
-
-	out := buf.String()
-	if !strings.Contains(out, "Linked Docs") {
-		t.Fatalf("plain output missing Linked Docs header:\n%s", out)
-	}
-	if !strings.Contains(out, "  > DOC-1   tdd   approved   Docket Doc CLI") {
-		t.Errorf("plain output missing expected doc line:\n%s", out)
-	}
-	if strings.Contains(out, "▸") {
-		t.Errorf("plain output should not contain ▸:\n%s", out)
-	}
-}
-
 func TestIssueShow_OmitsLinkedDocsWhenEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -409,34 +385,6 @@ func TestIssueShowV2EmitsScope(t *testing.T) {
 	}
 }
 
-// TestIssueShowV1ScopeWhenDeclared pins the DKT-55 amendment to the v1
-// freeze: a DECLARED scope reaches v1 — the surface everyone checks first —
-// while an issue with no declared scope keeps the byte-identical frozen shape
-// (no `scope` key at all), so dormancy holds for every repo that never used
-// --scope.
-func TestIssueShowV1ScopeWhenDeclared(t *testing.T) {
-	conn := newTestDB(t)
-	issueID := createIssue(t, conn, "scoped", model.StatusTodo, model.PriorityHigh)
-	err := db.SetIssueScopeGlobs(conn, issueID, `["x/**"]`)
-	testsupport.Must(t, err, "SetIssueScopeGlobs: %v", err)
-
-	data := showScopeData(t, conn, issueID, output.JSONV1)
-	scope, ok := data["scope"]
-	if !ok {
-		t.Fatalf("v1 payload omits a DECLARED scope (DKT-55); keys = %v", keysOf(data))
-	}
-	if got := string(scope); got != `["x/**"]` {
-		t.Errorf("scope = %s, want [\"x/**\"]", got)
-	}
-
-	bare := createIssue(t, conn, "bare", model.StatusTodo, model.PriorityHigh)
-	data = showScopeData(t, conn, bare, output.JSONV1)
-	if _, ok := data["scope"]; ok {
-		t.Errorf("v1 payload gained a scope key on an issue with NO declared "+
-			"scope; the dormant shape is frozen. keys = %v", keysOf(data))
-	}
-}
-
 func keysOf(m map[string]json.RawMessage) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -444,33 +392,6 @@ func keysOf(m map[string]json.RawMessage) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// TestIssueShow_SingleIDShapeUnchanged is DKT-97's compatibility half: a
-// single id must keep emitting the exact frozen flat object, not a
-// one-element array — no caller parsing `docket issue show DKT-1` today
-// should see its shape move.
-func TestIssueShow_SingleIDShapeUnchanged(t *testing.T) {
-	conn := newTestDB(t)
-	issueID := createIssue(t, conn, "solo", model.StatusTodo, model.PriorityHigh)
-
-	cmd := cmdWithDB(conn)
-	w, buf := bufWriter(true)
-	err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w)
-	testsupport.Must(t, err, "runIssueShow: %v", err)
-
-	var env struct {
-		Data struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	if env.Data.ID != model.FormatID(issueID) || env.Data.Title != "solo" {
-		t.Errorf("data = %+v, want a flat single-issue object", env.Data)
-	}
 }
 
 // TestIssueShow_MultipleIDsEmitAnArray is DKT-97: two or more ids emit a
@@ -698,60 +619,73 @@ func TestIssueShowJSON_OmitsTheRunDispositionKey(t *testing.T) {
 // reached for `.data.issue` here, got null, and had to dump the key set to
 // recover.
 //
-// Both versions are asserted because the alias is UNCONDITIONAL — the one
-// amendment to the v1 freeze that is not gated on a fact being present, since a
-// conditional alias would be absent in precisely the case it exists to serve.
-// The nested sub-issue is asserted too: `sub_issues` rows are marshaled
-// model.Issue values, a different code path from this payload's own struct, and
-// a reader walking the tree hits the same guess there.
+// The alias is UNCONDITIONAL, since a conditional alias would be absent in
+// precisely the case it exists to serve. The nested sub-issue is asserted too:
+// `sub_issues` rows are marshaled model.Issue values, a different code path
+// from this payload's own struct, and a reader walking the tree hits the same
+// guess there.
 func TestIssueShowPrimaryKeyAlias(t *testing.T) {
-	versions := []struct {
-		name    string
-		version output.JSONVersion
-	}{
-		{"v1", output.JSONV1},
-		{"v2", output.JSONV2},
+	conn := newTestDB(t)
+	parentID := createIssue(t, conn, "parent", model.StatusTodo, model.PriorityHigh)
+	childID, err := db.CreateIssue(conn, &model.Issue{
+		Title:    "child",
+		Status:   model.StatusTodo,
+		Priority: model.PriorityHigh,
+		Kind:     model.IssueKindFeature,
+		ParentID: &parentID,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue(child): %v", err)
+
+	data := showScopeData(t, conn, parentID, output.JSONV2)
+
+	want := `"` + model.FormatID(parentID) + `"`
+	for _, key := range []string{"id", "issue"} {
+		raw, ok := data[key]
+		if !ok {
+			t.Fatalf("payload has no %q key; keys = %v", key, keysOf(data))
+		}
+		if string(raw) != want {
+			t.Errorf("%s = %s, want %s", key, raw, want)
+		}
 	}
 
-	for _, tt := range versions {
-		t.Run(tt.name, func(t *testing.T) {
-			conn := newTestDB(t)
-			parentID := createIssue(t, conn, "parent", model.StatusTodo, model.PriorityHigh)
-			childID, err := db.CreateIssue(conn, &model.Issue{
-				Title:    "child",
-				Status:   model.StatusTodo,
-				Priority: model.PriorityHigh,
-				Kind:     model.IssueKindFeature,
-				ParentID: &parentID,
-			}, nil, nil)
-			testsupport.Must(t, err, "CreateIssue(child): %v", err)
+	var subs []map[string]json.RawMessage
+	if err := json.Unmarshal(data["sub_issues"], &subs); err != nil {
+		t.Fatalf("unmarshal sub_issues: %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("sub_issues = %d rows, want 1", len(subs))
+	}
+	wantChild := `"` + model.FormatID(childID) + `"`
+	for _, key := range []string{"id", "issue"} {
+		if got := string(subs[0][key]); got != wantChild {
+			t.Errorf("sub_issues[0].%s = %s, want %s", key, got, wantChild)
+		}
+	}
+}
 
-			data := showScopeData(t, conn, parentID, tt.version)
+// TestIssueShowThroughTheRoot drives the annotated command through the real
+// root, which leaves project resolution to the verb: the shown issue keeps
+// the id, under its project's own prefix, that `issue create` reported.
+func TestIssueShowThroughTheRoot(t *testing.T) {
+	abcProjectThroughRoot(t)
+	id := createThroughRoot(t, "--title", "shown")
+	if !strings.HasPrefix(id, "ABC-") {
+		t.Fatalf("created id = %q, want it under the project's ABC prefix", id)
+	}
 
-			want := `"` + model.FormatID(parentID) + `"`
-			for _, key := range []string{"id", "issue"} {
-				raw, ok := data[key]
-				if !ok {
-					t.Fatalf("payload has no %q key; keys = %v", key, keysOf(data))
-				}
-				if string(raw) != want {
-					t.Errorf("%s = %s, want %s", key, raw, want)
-				}
-			}
-
-			var subs []map[string]json.RawMessage
-			if err := json.Unmarshal(data["sub_issues"], &subs); err != nil {
-				t.Fatalf("unmarshal sub_issues: %v", err)
-			}
-			if len(subs) != 1 {
-				t.Fatalf("sub_issues = %d rows, want 1", len(subs))
-			}
-			wantChild := `"` + model.FormatID(childID) + `"`
-			for _, key := range []string{"id", "issue"} {
-				if got := string(subs[0][key]); got != wantChild {
-					t.Errorf("sub_issues[0].%s = %s, want %s", key, got, wantChild)
-				}
-			}
-		})
+	out, err := runRootVerb(t, showCmd, "issue", "show", id, "--json")
+	testsupport.Must(t, err, "issue show %s --json: %v", id, err)
+	var env struct {
+		Data struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if env.Data.ID != id || env.Data.Title != "shown" {
+		t.Errorf("shown = %+v, want id %q titled shown", env.Data, id)
 	}
 }

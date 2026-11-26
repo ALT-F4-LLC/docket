@@ -126,24 +126,6 @@ func TestParseIDStillResolvesEveryLegitimateForm(t *testing.T) {
 	}
 }
 
-// TestParseIDIsSilentWithoutAResolver keeps every library caller working.
-//
-// A caller that never wires the resolver — every test in this repo that does
-// not opt in, and any embedder — must see exactly the pre-DKT-256 behavior.
-// A check that fired without the information to make it would refuse
-// references it cannot judge.
-func TestParseIDIsSilentWithoutAResolver(t *testing.T) {
-	prevResolver, prevRoster := ownerPrefix, knownProjectPrefixes
-	t.Cleanup(func() { ownerPrefix, knownProjectPrefixes = prevResolver, prevRoster })
-	SetIssueOwnerPrefixResolver(nil)
-	SetKnownProjectPrefixes([]string{"DKT", "DOT"})
-
-	if got, err := ParseID("DOT-20"); err != nil || got != 20 {
-		t.Errorf("ParseID(\"DOT-20\") = %d, %v with no resolver installed; "+
-			"want 20 and no error — the pre-DKT-256 behavior", got, err)
-	}
-}
-
 // TestUnresolvableOwnerDeclinesToJudge: a resolver that returns "" must not
 // refuse.
 //

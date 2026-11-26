@@ -15,15 +15,22 @@ import (
 //
 // release() is a defer inside the claim. A claim the harness backgrounded at
 // its tool timeout and terminated at the executor's turn end never reaches
-// it, and the detached worktree, its cache, and its administrative record in
-// the parent's .git/worktrees stayed registered across sessions with doctor
-// able only to report them. The sweep at dispatch open and close reclaims
-// exactly the trees whose claim is dead, and liveness is the sidecar flock —
-// released by the kernel on SIGKILL — not a pid or an age.
+// it, and the scratch tree, its git directory and its cache outlived their
+// session with doctor able only to report them. The sweep at dispatch open
+// and close reclaims exactly the trees whose claim is dead, and liveness is
+// the sidecar flock — released by the kernel on SIGKILL — not a pid or an age.
 
-// listedScratchTrees returns the scratch-prefixed worktrees the repo has
-// registered.
+// listedScratchTrees returns the scratch trees standing for the repo, found
+// the way the engine records them: the sidecars in the temp directory that
+// name the repo's object store. Git's worktree list knows none of them.
 func listedScratchTrees(t *testing.T, repo string) []string {
+	t.Helper()
+	return recordedScratchTrees(repo)
+}
+
+// registeredScratchTrees returns the scratch-prefixed worktrees the repo has
+// registered with git, which is where an earlier binary's trees are found.
+func registeredScratchTrees(t *testing.T, repo string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").Output()
 	testsupport.Must(t, err, "git worktree list: %v", err)
@@ -44,9 +51,9 @@ func exists(path string) bool {
 
 // TestKilledClaimScratchIsSweptAtDispatchOpen is the acceptance case: the
 // claim holding a scratch tree is SIGKILLed mid-pre-gate, and the next
-// dispatch open leaves no scratch entry in `git worktree list` and no
-// directory under the scratch root. While the claim is alive, the same sweep
-// leaves the tree alone.
+// dispatch open leaves no scratch tree recorded for the repository and
+// nothing of the tree in the temp directory. While the claim is alive, the
+// same sweep leaves the tree alone.
 func TestKilledClaimScratchIsSweptAtDispatchOpen(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
@@ -58,7 +65,9 @@ func TestKilledClaimScratchIsSweptAtDispatchOpen(t *testing.T) {
 	if scratch.Dir == "" || scratch.lock == nil {
 		t.Fatalf("reconstruction did not produce a locked scratch tree: %+v", scratch)
 	}
-	lockPath, cachePath := scratchLockPath(scratch.Dir), scratchCachePath(scratch.Dir)
+	if got := registeredScratchTrees(t, repoRoot); len(got) != 0 {
+		t.Fatalf("the scratch tree is registered with git as %v; it must be found without that", got)
+	}
 
 	// The lock must be held by a process this test can KILL, so that "the
 	// kernel released it" is what the sweep below actually observes. The
@@ -75,8 +84,13 @@ func TestKilledClaimScratchIsSweptAtDispatchOpen(t *testing.T) {
 	if swept := sweepStalePreGateScratch(repoRoot); len(swept) != 0 {
 		t.Fatalf("the sweep removed %v while its claim was alive", swept)
 	}
-	if got := listedScratchTrees(t, repoRoot); len(got) != 1 || got[0] != canonical(t, scratch.Dir) {
+	if got := listedScratchTrees(t, repoRoot); len(got) != 1 || got[0] != scratch.Dir {
 		t.Fatalf("scratch trees after a sweep under a live claim = %v, want [%s]", got, scratch.Dir)
+	}
+	for _, p := range scratchPaths(scratch.Dir) {
+		if !exists(p) {
+			t.Fatalf("%s was removed while its claim was alive", p)
+		}
 	}
 
 	// KILL -9. No defer runs, no handler fires.
@@ -89,9 +103,9 @@ func TestKilledClaimScratchIsSweptAtDispatchOpen(t *testing.T) {
 	testsupport.Must(t, err, "OpenDispatch: %v", err)
 
 	if got := listedScratchTrees(t, repoRoot); len(got) != 0 {
-		t.Errorf("scratch trees still registered after dispatch open: %v", got)
+		t.Errorf("scratch trees still recorded after dispatch open: %v", got)
 	}
-	for _, p := range []string{scratch.Dir, cachePath, lockPath} {
+	for _, p := range scratchPaths(scratch.Dir) {
 		if exists(p) {
 			t.Errorf("%s survived the sweep", p)
 		}
@@ -100,7 +114,9 @@ func TestKilledClaimScratchIsSweptAtDispatchOpen(t *testing.T) {
 
 // TestScratchWithoutASidecarLockIsSwept covers trees left by a binary that
 // predates the liveness lock: nothing can be holding a lock that does not
-// exist, so they are stale by the same rule and go on the first sweep.
+// exist, so they are stale by the same rule and go on the first sweep. Such a
+// tree is a worktree git registered, and that registry is where the sweep
+// still finds it.
 func TestScratchWithoutASidecarLockIsSwept(t *testing.T) {
 	repoRoot := t.TempDir()
 	sha := seedGitRepo(t, repoRoot, "measured.txt", "under review")
@@ -109,23 +125,31 @@ func TestScratchWithoutASidecarLockIsSwept(t *testing.T) {
 	err := exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", legacy, sha).Run()
 	testsupport.Must(t, err, "git worktree add: %v", err)
 
+	// A registered worktree keeps its git directory in the repository. A
+	// directory under the name this binary gives a scratch git directory is
+	// therefore not that tree's, and the sweep leaves it.
 	// Resolved BEFORE the sweep: git reports the resolved path, and a path
 	// that is gone cannot be resolved afterwards.
 	want := canonical(t, legacy)
+	bystander := scratchGitPath(want)
+	testsupport.Must(t, os.Mkdir(bystander, 0o700), "mkdir %s", bystander)
 	swept := sweepStalePreGateScratch(repoRoot)
 	if len(swept) != 1 || swept[0] != want {
 		t.Errorf("swept = %v, want [%s]", swept, want)
 	}
-	if got := listedScratchTrees(t, repoRoot); len(got) != 0 {
+	if got := registeredScratchTrees(t, repoRoot); len(got) != 0 {
 		t.Errorf("the lockless scratch tree is still registered: %v", got)
 	}
 	if exists(legacy) {
 		t.Errorf("%s survived the sweep", legacy)
 	}
+	if !exists(bystander) {
+		t.Errorf("%s is not the registered worktree's and was removed with it", bystander)
+	}
 }
 
 // TestReleaseRemovesTheSidecarLock: the normal path leaves nothing behind
-// either — tree, cache, and the lock that vouched for them.
+// either — tree, git directory, cache, and the lock that vouched for them.
 func TestReleaseRemovesTheSidecarLock(t *testing.T) {
 	conn := mustDB(t)
 	run, _ := activatedRun(t, conn)
@@ -137,17 +161,22 @@ func TestReleaseRemovesTheSidecarLock(t *testing.T) {
 	if scratch.Dir == "" {
 		t.Fatal("reconstruction did not produce a scratch tree")
 	}
-	if !exists(scratchLockPath(scratch.Dir)) || !exists(scratch.Cache) {
-		t.Fatalf("a live scratch tree must have its lock and cache beside it")
+	if scratch.Cache != scratchCachePath(scratch.Dir) {
+		t.Fatalf("the cache root %s is not the one derived from the tree", scratch.Cache)
+	}
+	for _, p := range scratchPaths(scratch.Dir) {
+		if !exists(p) {
+			t.Fatalf("a live scratch tree must have %s", p)
+		}
 	}
 	scratch.release()
-	for _, p := range []string{scratch.Dir, scratch.Cache, scratchLockPath(scratch.Dir)} {
+	for _, p := range scratchPaths(scratch.Dir) {
 		if exists(p) {
 			t.Errorf("%s survived release()", p)
 		}
 	}
 	if got := listedScratchTrees(t, repoRoot); len(got) != 0 {
-		t.Errorf("release() left the tree registered: %v", got)
+		t.Errorf("release() left the tree recorded: %v", got)
 	}
 }
 

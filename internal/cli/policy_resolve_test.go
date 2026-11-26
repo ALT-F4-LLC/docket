@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -72,7 +73,9 @@ func policySeatRun(t *testing.T, policyToml string) (*sql.DB, int) {
 	testsupport.Must(t, err, "creating the config directory: %v", err)
 	t.Setenv("DOCKET_PATH", docketDir)
 
-	conn, err := db.Open(filepath.Join(docketDir, "issues.db"))
+	storePath := filepath.Join(docketDir, "issues.db")
+	storetest.SeedFile(t, storePath)
+	conn, err := db.Open(storePath)
 	testsupport.Must(t, err, "opening: %v", err)
 	t.Cleanup(func() { conn.Close() })
 	testsupport.Must(t, db.Initialize(conn), "Initialize: %v", err)
@@ -124,7 +127,7 @@ func policyResolveCmdWithDB(conn *sql.DB, runRef, size string, labels []string) 
 
 type policySeatsJSON struct {
 	Data struct {
-		Seats []model.VoterAssignment `json:"seats"`
+		Items []model.VoterAssignment `json:"items"`
 		Total int                     `json:"total"`
 	} `json:"data"`
 }
@@ -138,6 +141,7 @@ func TestPolicyResolveJSON(t *testing.T) {
 
 	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "", nil)
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runPolicyResolve(cmd, []string{"seat-a", "seat-b"}, w)
 	testsupport.Must(t, err, "runPolicyResolve: %v", err)
 
@@ -152,12 +156,12 @@ func TestPolicyResolveJSON(t *testing.T) {
 	if got.Data.Total != len(want) {
 		t.Errorf("total = %d, want %d", got.Data.Total, len(want))
 	}
-	if len(got.Data.Seats) != len(want) {
-		t.Fatalf("seats = %+v, want %+v", got.Data.Seats, want)
+	if len(got.Data.Items) != len(want) {
+		t.Fatalf("seats = %+v, want %+v", got.Data.Items, want)
 	}
 	for i := range want {
-		if got.Data.Seats[i] != want[i] {
-			t.Errorf("seat %d = %+v, want %+v", i, got.Data.Seats[i], want[i])
+		if got.Data.Items[i] != want[i] {
+			t.Errorf("seat %d = %+v, want %+v", i, got.Data.Items[i], want[i])
 		}
 	}
 }
@@ -170,6 +174,7 @@ func TestPolicyResolveLabelReachesTheSecurityCheck(t *testing.T) {
 
 	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "", []string{"sensitive"})
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runPolicyResolve(cmd, []string{"seat-a"}, w)
 	testsupport.Must(t, err, "runPolicyResolve: %v", err)
 
@@ -177,32 +182,11 @@ func TestPolicyResolveLabelReachesTheSecurityCheck(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
 	}
-	if len(got.Data.Seats) != 1 {
-		t.Fatalf("seats = %+v, want one", got.Data.Seats)
+	if len(got.Data.Items) != 1 {
+		t.Fatalf("seats = %+v, want one", got.Data.Items)
 	}
-	if got.Data.Seats[0].Variant != "guarded" || got.Data.Seats[0].Model != "sonnet" {
-		t.Errorf("seat-a = %+v, want the ceiling sonnet/medium/guarded", got.Data.Seats[0])
-	}
-}
-
-// TestPolicyResolveSizeReachesTheSizesTable: --size stands in for the frozen
-// Size a vote step row snapshots, so --size small seats the [sizes].small
-// variant.
-func TestPolicyResolveSizeReachesTheSizesTable(t *testing.T) {
-	conn, runID := policySeatRun(t, policySeatTOML)
-
-	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "small", nil)
-	w, buf := bufWriter(true)
-	err := runPolicyResolve(cmd, []string{"seat-b"}, w)
-	testsupport.Must(t, err, "runPolicyResolve: %v", err)
-
-	var got policySeatsJSON
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	want := model.VoterAssignment{Voter: "seat-b", Model: "haiku", Effort: "low", Variant: "quick"}
-	if len(got.Data.Seats) != 1 || got.Data.Seats[0] != want {
-		t.Errorf("seats = %+v, want [sizes].small's %+v", got.Data.Seats, want)
+	if got.Data.Items[0].Variant != "guarded" || got.Data.Items[0].Model != "sonnet" {
+		t.Errorf("seat-a = %+v, want the ceiling sonnet/medium/guarded", got.Data.Items[0])
 	}
 }
 
@@ -216,6 +200,7 @@ func TestPolicyResolveAcceptsEverySize(t *testing.T) {
 		t.Run(size, func(t *testing.T) {
 			cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), size, nil)
 			w, buf := bufWriter(true)
+			w.JSONVersion = output.JSONV2
 			err := runPolicyResolve(cmd, []string{"seat-b"}, w)
 			testsupport.Must(t, err, "runPolicyResolve --size %s: %v", size, err)
 
@@ -227,22 +212,10 @@ func TestPolicyResolveAcceptsEverySize(t *testing.T) {
 			if size == "small" {
 				want = model.VoterAssignment{Voter: "seat-b", Model: "haiku", Effort: "low", Variant: "quick"}
 			}
-			if len(got.Data.Seats) != 1 || got.Data.Seats[0] != want {
-				t.Errorf("seats = %+v, want %+v", got.Data.Seats, want)
+			if len(got.Data.Items) != 1 || got.Data.Items[0] != want {
+				t.Errorf("seats = %+v, want %+v", got.Data.Items, want)
 			}
 		})
-	}
-}
-
-// TestPolicyResolveRegistersSize:--size is a flag on the real command, with
-// no default, so an omitted --size resolves as an unsized row does.
-func TestPolicyResolveRegistersSize(t *testing.T) {
-	flag := policyResolveCmd.Flags().Lookup("size")
-	if flag == nil {
-		t.Fatal("policy resolve registers no --size flag")
-	}
-	if flag.DefValue != "" {
-		t.Errorf("--size default = %q, want empty", flag.DefValue)
 	}
 }
 

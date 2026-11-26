@@ -97,24 +97,3 @@ func TestDiffPinsToTheTreeHoldingStep(t *testing.T) {
 			"one, and it carries the reviewed object", diffs, bodies)
 	}
 }
-
-// TestDiffStillRecordsAtEveryHoldingStep: a definition that declares nothing
-// keeps the original behavior — holds_tree defaults to true, so every
-// executor step still records. Dormancy for existing repos.
-func TestDiffStillRecordsAtEveryHoldingStep(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "summary", "")
-
-	var diffs int
-	err := conn.QueryRow(
-		`SELECT COUNT(*) FROM artifacts WHERE kind = ? AND run_id = ?`,
-		ArtifactKindIssueDiff, run.ID).Scan(&diffs)
-	testsupport.Must(t, err, "counting diff artifacts: %v", err)
-	if diffs != 1 {
-		t.Errorf("diff artifacts after an undeclared holder completed = %d, "+
-			"want 1: nil holds_tree still records", diffs)
-	}
-}

@@ -2,6 +2,8 @@ package db
 
 import (
 	"database/sql"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -71,26 +73,6 @@ func TestListIssuesDefaultSortOrder(t *testing.T) {
 			t.Fatalf("issues[%d].ID = %d, want %d\n  got order:  %v\n  want order: %v",
 				i, issues[i].ID, want, gotIDs, wantOrder)
 		}
-	}
-}
-
-// TestListIssuesEmptyIsNotNil pins ListIssues' zero-result contract: an
-// empty database returns a non-nil empty slice, not nil.
-func TestListIssuesEmptyIsNotNil(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize: %v", err)
-
-	issues, total, err := ListIssues(db, ListOptions{})
-	testsupport.Must(t, err, "ListIssues: %v", err)
-	if total != 0 {
-		t.Fatalf("total = %d, want 0", total)
-	}
-	if issues == nil {
-		t.Fatalf("ListIssues returned nil, want a non-nil empty slice")
-	}
-	if len(issues) != 0 {
-		t.Fatalf("len(issues) = %d, want 0", len(issues))
 	}
 }
 
@@ -375,5 +357,825 @@ func TestDoneTransitionClearsResolution(t *testing.T) {
 					c.prior, c.target, c.explicitResolution, got, c.wantClear)
 			}
 		})
+	}
+}
+
+// issueQueryStore is a migrated store with one workflow row, which the steps
+// the engine-query tests seed all name.
+type issueQueryStore struct {
+	db   *sql.DB
+	wfID int
+}
+
+func newIssueQueryStore(t *testing.T) issueQueryStore {
+	t.Helper()
+	db := newIdemDB(t)
+	res, err := db.Exec(
+		`INSERT INTO workflows (name, version, source_sha256, body, parsed, created_at_ms, row_version)
+		 VALUES ('wf', 1, 'sha', 'body', '{}', 1000, 1)`)
+	testsupport.Must(t, err, "seeding a workflow: %v", err)
+	wfID, _ := res.LastInsertId()
+	return issueQueryStore{db: db, wfID: int(wfID)}
+}
+
+func (s issueQueryStore) issue(t *testing.T, title string, status model.Status) int {
+	t.Helper()
+	id, err := CreateIssue(s.db, &model.Issue{
+		Title: title, Status: status, Priority: model.PriorityMedium, Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue(%q): %v", title, err)
+	return id
+}
+
+// step seeds one step of issueID in runID with the given status.
+func (s issueQueryStore) step(t *testing.T, runID, issueID int, instance, status string) int {
+	t.Helper()
+	tx, err := s.db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	err = InsertStepTx(tx, StepRow{
+		RunID: runID, IssueID: issueID, WorkflowID: s.wfID,
+		StepName: "implement", Instance: instance, Kind: "executor",
+		Executor: "worker", Class: "worker", Status: StepPending,
+	}, 1000)
+	testsupport.Must(t, err, "InsertStepTx: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit")
+
+	var id int
+	err = s.db.QueryRow(`SELECT id FROM steps WHERE run_id = ? AND issue_id = ? AND instance = ?`,
+		runID, issueID, instance).Scan(&id)
+	testsupport.Must(t, err, "reading the step id: %v", err)
+	mustExec(t, s.db, `UPDATE steps SET status = ? WHERE id = ?`, status, id)
+	return id
+}
+
+// artifact seeds one artifact; stepID 0 stores a NULL step.
+func (s issueQueryStore) artifact(t *testing.T, runID, stepID int, kind, body, payload string) int {
+	t.Helper()
+	tx, err := s.db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	id, err := InsertArtifactTx(tx, Artifact{
+		RunID: runID, StepID: stepID, Kind: kind, Body: body, Payload: payload, SHA256: "sha",
+	}, 1000)
+	testsupport.Must(t, err, "InsertArtifactTx: %v", err)
+	testsupport.Must(t, tx.Commit(), "Commit")
+	return id
+}
+
+func (s issueQueryStore) relate(t *testing.T, source, target int, rt model.RelationType) {
+	t.Helper()
+	_, err := CreateRelation(s.db, &model.Relation{SourceIssueID: source, TargetIssueID: target, RelationType: rt})
+	testsupport.Must(t, err, "CreateRelation(%d %s %d): %v", source, rt, target, err)
+}
+
+func TestIssueQueriesActivationIssueTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	id, err := CreateIssue(s.db, &model.Issue{
+		Title: "bind me", Description: "the body", Status: model.StatusBacklog,
+		Priority: model.PriorityHigh, Kind: model.IssueKindBug, Size: model.SizeBounded,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue: %v", err)
+	noDescription := s.issue(t, "no description", model.StatusTodo)
+	mustExec(t, s.db, `UPDATE issues SET description = NULL WHERE id = ?`, noDescription)
+	tx := beginEventTx(t, s.db)
+
+	got, err := ActivationIssueTx(tx, id)
+	testsupport.Must(t, err, "ActivationIssueTx: %v", err)
+	want := model.Issue{
+		ID: id, Title: "bind me", Description: "the body", Status: model.StatusBacklog,
+		Priority: model.PriorityHigh, Kind: model.IssueKindBug, Size: model.SizeBounded, Version: 1,
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Errorf("ActivationIssueTx = %+v, want %+v", *got, want)
+	}
+
+	bare, err := ActivationIssueTx(tx, noDescription)
+	testsupport.Must(t, err, "ActivationIssueTx(NULL description): %v", err)
+	if bare.Description != "" || bare.Title != "no description" {
+		t.Errorf("NULL description read as %+v, want title %q and an empty description", bare, "no description")
+	}
+
+	if _, err := ActivationIssueTx(tx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing issue: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestIssueQueriesIssueLabelsTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	id, err := CreateIssue(s.db, &model.Issue{
+		Title: "labelled", Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask,
+	}, []string{"zeta", "alpha", "mid"}, nil)
+	testsupport.Must(t, err, "CreateIssue: %v", err)
+	other, err := CreateIssue(s.db, &model.Issue{
+		Title: "other", Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask,
+	}, []string{"elsewhere"}, nil)
+	testsupport.Must(t, err, "CreateIssue: %v", err)
+	unlabelled := s.issue(t, "unlabelled", model.StatusTodo)
+	tx := beginEventTx(t, s.db)
+
+	got, err := IssueLabelsTx(tx, id)
+	testsupport.Must(t, err, "IssueLabelsTx: %v", err)
+	if want := []string{"alpha", "mid", "zeta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("IssueLabelsTx = %v, want %v", got, want)
+	}
+	got, err = IssueLabelsTx(tx, other)
+	testsupport.Must(t, err, "IssueLabelsTx(other): %v", err)
+	if want := []string{"elsewhere"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("IssueLabelsTx(other) = %v, want %v", got, want)
+	}
+
+	for _, missing := range []int{unlabelled, 999} {
+		got, err := IssueLabelsTx(tx, missing)
+		testsupport.Must(t, err, "IssueLabelsTx(%d): %v", missing, err)
+		if len(got) != 0 {
+			t.Errorf("IssueLabelsTx(%d) = %v, want no labels", missing, got)
+		}
+	}
+}
+
+func TestIssueQueriesWorkGraphRelationsTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	a := s.issue(t, "a", model.StatusTodo)
+	b := s.issue(t, "b", model.StatusTodo)
+	c := s.issue(t, "c", model.StatusTodo)
+	outside := s.issue(t, "outside", model.StatusTodo)
+	s.relate(t, a, b, model.RelationDependsOn)
+	s.relate(t, c, a, model.RelationBlocks)
+	s.relate(t, b, c, model.RelationRelatesTo)
+	s.relate(t, a, outside, model.RelationDependsOn)
+	tx := beginEventTx(t, s.db)
+
+	got, err := WorkGraphRelationsTx(tx, []int{a, b, c})
+	testsupport.Must(t, err, "WorkGraphRelationsTx: %v", err)
+	want := []model.Relation{
+		{SourceIssueID: a, TargetIssueID: b, RelationType: model.RelationDependsOn},
+		{SourceIssueID: c, TargetIssueID: a, RelationType: model.RelationBlocks},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("WorkGraphRelationsTx = %+v, want %+v", got, want)
+	}
+
+	for name, ids := range map[string][]int{"no issues": nil, "unrelated issues": {b, outside}} {
+		got, err := WorkGraphRelationsTx(tx, ids)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if len(got) != 0 {
+			t.Errorf("%s: WorkGraphRelationsTx = %+v, want none", name, got)
+		}
+	}
+}
+
+// statusActivityTx reads issueID's status-change activity rows inside tx as
+// "old->new@created_at by changed_by" strings, oldest first.
+func statusActivityTx(t *testing.T, tx *sql.Tx, issueID int) []string {
+	t.Helper()
+	rows, err := tx.Query(
+		`SELECT old_value, new_value, changed_by, created_at FROM activity_log
+		  WHERE issue_id = ? AND field_changed = 'status' ORDER BY id`, issueID)
+	testsupport.Must(t, err, "reading activity: %v", err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var oldVal, newVal, by, at string
+		testsupport.Must(t, rows.Scan(&oldVal, &newVal, &by, &at), "scanning activity")
+		out = append(out, oldVal+"->"+newVal+"@"+at+" by "+by)
+	}
+	testsupport.Must(t, rows.Err(), "iterating activity")
+	return out
+}
+
+func TestIssueQueriesMoveIssueStatusTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	backlog := s.issue(t, "backlog", model.StatusBacklog)
+	started := s.issue(t, "started", model.StatusInProgress)
+	tx := beginEventTx(t, s.db)
+	const nowMS = int64(1_700_000_000_000)
+	now := time.UnixMilli(nowMS).UTC().Format(time.RFC3339)
+
+	moved, err := MoveIssueStatusTx(tx, backlog, model.StatusBacklog, model.StatusTodo, nowMS)
+	testsupport.Must(t, err, "MoveIssueStatusTx: %v", err)
+	if !moved {
+		t.Fatal("a backlog issue did not move to todo")
+	}
+	var (
+		status    model.Status
+		updatedAt string
+		version   int
+	)
+	err = tx.QueryRow(`SELECT status, updated_at, version FROM issues WHERE id = ?`, backlog).
+		Scan(&status, &updatedAt, &version)
+	testsupport.Must(t, err, "reading the moved issue: %v", err)
+	if status != model.StatusTodo || updatedAt != now || version != 2 {
+		t.Errorf("moved issue = (%s, %s, v%d), want (todo, %s, v2)", status, updatedAt, version, now)
+	}
+	if got, want := statusActivityTx(t, tx, backlog), []string{"backlog->todo@" + now + " by "}; !reflect.DeepEqual(got, want) {
+		t.Errorf("activity = %v, want %v", got, want)
+	}
+
+	// The from-status guard: an issue already elsewhere, and a missing one,
+	// move nothing and leave no trail.
+	for name, id := range map[string]int{"wrong status": started, "missing issue": 999} {
+		moved, err := MoveIssueStatusTx(tx, id, model.StatusBacklog, model.StatusTodo, nowMS)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if moved {
+			t.Errorf("%s: moved = true, want false", name)
+		}
+		if got := statusActivityTx(t, tx, id); len(got) != 0 {
+			t.Errorf("%s: activity = %v, want none", name, got)
+		}
+	}
+	err = tx.QueryRow(`SELECT status, version FROM issues WHERE id = ?`, started).Scan(&status, &version)
+	testsupport.Must(t, err, "reading the unmoved issue: %v", err)
+	if status != model.StatusInProgress || version != 1 {
+		t.Errorf("unmoved issue = (%s, v%d), want (in-progress, v1)", status, version)
+	}
+}
+
+func TestIssueQueriesSetRunActiveTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	run := seedEventRun(t, s.db, model.RunPlanning, 1)
+	tx := beginEventTx(t, s.db)
+	readRun := func() (string, int64, sql.NullInt64, int) {
+		var (
+			status    string
+			updatedMS int64
+			activated sql.NullInt64
+			version   int
+		)
+		err := tx.QueryRow(`SELECT status, updated_at_ms, activated_at_ms, row_version FROM runs WHERE id = ?`, run).
+			Scan(&status, &updatedMS, &activated, &version)
+		testsupport.Must(t, err, "reading the run: %v", err)
+		return status, updatedMS, activated, version
+	}
+
+	testsupport.Must(t, SetRunActiveTx(tx, run, false, 5000), "SetRunActiveTx(first)")
+	status, updatedMS, activated, version := readRun()
+	if status != string(model.RunActive) || updatedMS != 5000 || activated.Int64 != 5000 || version != 2 {
+		t.Errorf("first activation = (%s, %d, %v, v%d), want (active, 5000, 5000, v2)",
+			status, updatedMS, activated, version)
+	}
+
+	testsupport.Must(t, SetRunActiveTx(tx, run, true, 9000), "SetRunActiveTx(re-activation)")
+	status, updatedMS, activated, version = readRun()
+	if status != string(model.RunActive) || updatedMS != 9000 || activated.Int64 != 5000 || version != 3 {
+		t.Errorf("re-activation = (%s, %d, %v, v%d), want (active, 9000, 5000, v3)",
+			status, updatedMS, activated, version)
+	}
+
+	if err := SetRunActiveTx(tx, 999, false, 5000); !errors.Is(err, ErrRunNotFound) {
+		t.Errorf("missing run: err = %v, want ErrRunNotFound", err)
+	}
+}
+
+func TestIssueQueriesIssueSchedulingFactsTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	scoped := s.issue(t, "scoped", model.StatusTodo)
+	mustExec(t, s.db, `UPDATE issues SET priority = ?, scope_globs = ? WHERE id = ?`,
+		string(model.PriorityCritical), `["internal/**"]`, scoped)
+	unscoped := s.issue(t, "unscoped", model.StatusTodo)
+	tx := beginEventTx(t, s.db)
+
+	priority, scope, err := IssueSchedulingFactsTx(tx, scoped)
+	testsupport.Must(t, err, "IssueSchedulingFactsTx: %v", err)
+	if priority != model.PriorityCritical || scope != `["internal/**"]` {
+		t.Errorf("scoped facts = (%s, %q), want (critical, %q)", priority, scope, `["internal/**"]`)
+	}
+	priority, scope, err = IssueSchedulingFactsTx(tx, unscoped)
+	testsupport.Must(t, err, "IssueSchedulingFactsTx(unscoped): %v", err)
+	if priority != model.PriorityMedium || scope != "" {
+		t.Errorf("unscoped facts = (%s, %q), want (medium, \"\")", priority, scope)
+	}
+
+	if _, _, err := IssueSchedulingFactsTx(tx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing issue: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestIssueQueriesIssueDependenciesDoneTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	done := s.issue(t, "done", model.StatusDone)
+	open := s.issue(t, "open", model.StatusTodo)
+	blocked := s.issue(t, "waits on open", model.StatusTodo)
+	ready := s.issue(t, "waits on done", model.StatusTodo)
+	unrelated := s.issue(t, "relates to open", model.StatusTodo)
+	s.relate(t, blocked, done, model.RelationDependsOn)
+	s.relate(t, blocked, open, model.RelationDependsOn)
+	s.relate(t, ready, done, model.RelationDependsOn)
+	s.relate(t, unrelated, open, model.RelationRelatesTo)
+	s.relate(t, open, ready, model.RelationBlocks)
+	tx := beginEventTx(t, s.db)
+
+	cases := []struct {
+		name string
+		id   int
+		want bool
+	}{
+		{"one predecessor still open", blocked, false},
+		{"every predecessor done", ready, true},
+		{"only a non-dependency relation to an open issue", unrelated, true},
+		{"no predecessors", done, true},
+		{"missing issue", 999, true},
+	}
+	for _, c := range cases {
+		got, err := IssueDependenciesDoneTx(tx, c.id)
+		testsupport.Must(t, err, "%s: %v", c.name, err)
+		if got != c.want {
+			t.Errorf("%s: IssueDependenciesDoneTx = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestIssueQueriesForeignHoldingStepsTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	here := seedEventRun(t, s.db, model.RunActive, 1)
+	other := seedEventRun(t, s.db, model.RunActive, 1)
+	finished := seedEventRun(t, s.db, model.RunDone, 1)
+	abandoned := seedEventRun(t, s.db, model.RunAbandoned, 1)
+	// The first identity claims the unclaimed default project 1 in place.
+	_, err := EnsureProject(s.db, "this-repo", "this", 1000)
+	testsupport.Must(t, err, "EnsureProject(this): %v", err)
+	otherProjectID, err := EnsureProject(s.db, "other-repo", "other", 1000)
+	testsupport.Must(t, err, "EnsureProject(other): %v", err)
+	otherProject := seedEventRun(t, s.db, model.RunActive, otherProjectID)
+	issue := s.issue(t, "subject", model.StatusInProgress)
+
+	s.step(t, here, issue, "own@0", StepClaimed)
+	claimed := s.step(t, other, issue, "claimed@0", StepClaimed)
+	running := s.step(t, other, issue, "running@0", StepRunning)
+	s.step(t, other, issue, "pending@0", StepPending)
+	s.step(t, other, issue, "gated@0", StepGated)
+	s.step(t, finished, issue, "finished@0", StepClaimed)
+	s.step(t, abandoned, issue, "abandoned@0", StepRunning)
+	s.step(t, otherProject, issue, "elsewhere@0", StepClaimed)
+	tx := beginEventTx(t, s.db)
+
+	type holder struct {
+		ID, IssueID int
+		Status      string
+	}
+	holders := func(steps []*Step) []holder {
+		var out []holder
+		for _, st := range steps {
+			out = append(out, holder{st.ID, st.IssueID, st.Status})
+		}
+		return out
+	}
+
+	got, err := ForeignHoldingStepsTx(tx, 1, here)
+	testsupport.Must(t, err, "ForeignHoldingStepsTx: %v", err)
+	if want := []holder{{claimed, issue, StepClaimed}, {running, issue, StepRunning}}; !reflect.DeepEqual(holders(got), want) {
+		t.Errorf("ForeignHoldingStepsTx = %+v, want %+v", holders(got), want)
+	}
+
+	got, err = ForeignHoldingStepsTx(tx, otherProjectID, otherProject)
+	testsupport.Must(t, err, "ForeignHoldingStepsTx(other project): %v", err)
+	if len(got) != 0 {
+		t.Errorf("the other project's only run sees %+v held elsewhere, want none", holders(got))
+	}
+}
+
+func TestIssueQueriesRelationTargetsTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	consumer := s.issue(t, "consumer", model.StatusTodo)
+	specA := s.issue(t, "spec a", model.StatusDone)
+	specB := s.issue(t, "spec b", model.StatusDone)
+	pointsBack := s.issue(t, "points back", model.StatusTodo)
+	s.relate(t, consumer, specB, model.RelationDependsOn)
+	s.relate(t, consumer, specA, model.RelationDependsOn)
+	s.relate(t, consumer, pointsBack, model.RelationRelatesTo)
+	s.relate(t, pointsBack, consumer, model.RelationBlocks)
+	tx := beginEventTx(t, s.db)
+
+	got, err := RelationTargetsTx(tx, consumer, model.RelationDependsOn)
+	testsupport.Must(t, err, "RelationTargetsTx: %v", err)
+	if want := []int{specA, specB}; !reflect.DeepEqual(got, want) {
+		t.Errorf("RelationTargetsTx(depends_on) = %v, want %v", got, want)
+	}
+
+	for name, args := range map[string]struct {
+		id int
+		rt model.RelationType
+	}{
+		"no relation of the type": {consumer, model.RelationBlocks},
+		"only the target side":    {specA, model.RelationDependsOn},
+		"missing issue":           {999, model.RelationDependsOn},
+	} {
+		got, err := RelationTargetsTx(tx, args.id, args.rt)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if len(got) != 0 {
+			t.Errorf("%s: RelationTargetsTx = %v, want none", name, got)
+		}
+	}
+}
+
+func TestIssueQueriesRelationSourcesTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	spec := s.issue(t, "spec", model.StatusDone)
+	consumerB := s.issue(t, "consumer b", model.StatusTodo)
+	consumerA := s.issue(t, "consumer a", model.StatusTodo)
+	s.relate(t, consumerB, spec, model.RelationDependsOn)
+	s.relate(t, consumerA, spec, model.RelationDependsOn)
+	s.relate(t, spec, consumerA, model.RelationRelatesTo)
+	tx := beginEventTx(t, s.db)
+
+	got, err := RelationSourcesTx(tx, spec, model.RelationDependsOn)
+	testsupport.Must(t, err, "RelationSourcesTx: %v", err)
+	if want := []int{consumerB, consumerA}; !reflect.DeepEqual(got, want) {
+		t.Errorf("RelationSourcesTx(depends_on) = %v, want %v", got, want)
+	}
+
+	for name, args := range map[string]struct {
+		id int
+		rt model.RelationType
+	}{
+		"no relation of the type": {spec, model.RelationBlocks},
+		"only the source side":    {consumerA, model.RelationDependsOn},
+		"missing issue":           {999, model.RelationDependsOn},
+	} {
+		got, err := RelationSourcesTx(tx, args.id, args.rt)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if len(got) != 0 {
+			t.Errorf("%s: RelationSourcesTx = %v, want none", name, got)
+		}
+	}
+}
+
+func TestIssueQueriesLatestRecordedArtifactIDTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	runA := seedEventRun(t, s.db, model.RunDone, 1)
+	runB := seedEventRun(t, s.db, model.RunActive, 1)
+	spec := s.issue(t, "spec", model.StatusDone)
+	other := s.issue(t, "other", model.StatusDone)
+	unrecorded := s.issue(t, "unrecorded", model.StatusTodo)
+
+	doneStep := s.step(t, runA, spec, "spec@0", StepDone)
+	supersededStep := s.step(t, runB, spec, "spec@0", StepSuperseded)
+	liveStep := s.step(t, runB, spec, "spec@1", StepRunning)
+	otherStep := s.step(t, runB, other, "spec@0", StepDone)
+	gatedStep := s.step(t, runB, unrecorded, "spec@0", StepGated)
+
+	s.artifact(t, runA, doneStep, "ux-spec", "first", "")
+	newest := s.artifact(t, runB, supersededStep, "ux-spec", "revised", "")
+	s.artifact(t, runB, liveStep, "ux-spec", "unrecorded", "")
+	s.artifact(t, runB, doneStep, "change-summary", "other kind", "")
+	s.artifact(t, runB, otherStep, "ux-spec", "other issue", "")
+	s.artifact(t, runB, gatedStep, "ux-spec", "gated", "")
+	tx := beginEventTx(t, s.db)
+
+	id, found, err := LatestRecordedArtifactIDTx(tx, spec, "ux-spec")
+	testsupport.Must(t, err, "LatestRecordedArtifactIDTx: %v", err)
+	if !found || id != newest {
+		t.Errorf("LatestRecordedArtifactIDTx = (%d, %v), want (%d, true)", id, found, newest)
+	}
+
+	for name, args := range map[string]struct {
+		issue int
+		kind  string
+	}{
+		"no recorded step":        {unrecorded, "ux-spec"},
+		"no artifact of the kind": {spec, "threat-model"},
+		"missing issue":           {999, "ux-spec"},
+	} {
+		id, found, err := LatestRecordedArtifactIDTx(tx, args.issue, args.kind)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if found || id != 0 {
+			t.Errorf("%s: LatestRecordedArtifactIDTx = (%d, %v), want (0, false)", name, id, found)
+		}
+	}
+}
+
+func TestIssueQueriesPinnedArtifactTx(t *testing.T) {
+	s := newIssueQueryStore(t)
+	run := seedEventRun(t, s.db, model.RunActive, 1)
+	spec := s.issue(t, "spec", model.StatusDone)
+	step := s.step(t, run, spec, "spec@0", StepDone)
+	produced := s.artifact(t, run, step, "ux-spec", "the spec", `{"ok":true}`)
+	orphan := s.artifact(t, run, 0, "note", "no producer", "")
+	tx := beginEventTx(t, s.db)
+
+	got, err := PinnedArtifactTx(tx, produced)
+	testsupport.Must(t, err, "PinnedArtifactTx: %v", err)
+	want := PinnedArtifact{
+		Kind: "ux-spec", Body: "the spec", Payload: `{"ok":true}`,
+		ProducerIssueID: spec, ProducerInstance: "spec@0",
+	}
+	if got != want {
+		t.Errorf("PinnedArtifactTx = %+v, want %+v", got, want)
+	}
+
+	got, err = PinnedArtifactTx(tx, orphan)
+	testsupport.Must(t, err, "PinnedArtifactTx(no step): %v", err)
+	if want := (PinnedArtifact{Kind: "note", Body: "no producer"}); got != want {
+		t.Errorf("PinnedArtifactTx(no step) = %+v, want %+v", got, want)
+	}
+
+	if _, err := PinnedArtifactTx(tx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing artifact: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestIssueQueriesIssueDeclaration(t *testing.T) {
+	s := newIssueQueryStore(t)
+	id, err := CreateIssue(s.db, &model.Issue{
+		Title: "described", Description: "the live body", Status: model.StatusTodo,
+		Priority: model.PriorityMedium, Kind: model.IssueKindTask,
+	}, nil, nil)
+	testsupport.Must(t, err, "CreateIssue: %v", err)
+	mustExec(t, s.db, `UPDATE issues SET scope_globs = ? WHERE id = ?`, `["internal/**"]`, id)
+	bare := s.issue(t, "bare", model.StatusTodo)
+	mustExec(t, s.db, `UPDATE issues SET description = NULL, scope_globs = NULL WHERE id = ?`, bare)
+
+	description, scope, err := IssueDeclaration(s.db, id)
+	testsupport.Must(t, err, "IssueDeclaration: %v", err)
+	if description != "the live body" || scope != `["internal/**"]` {
+		t.Errorf("IssueDeclaration = (%q, %q), want (%q, %q)",
+			description, scope, "the live body", `["internal/**"]`)
+	}
+	description, scope, err = IssueDeclaration(s.db, bare)
+	testsupport.Must(t, err, "IssueDeclaration(NULL): %v", err)
+	if description != "" || scope != "" {
+		t.Errorf("IssueDeclaration(NULL) = (%q, %q), want (\"\", \"\")", description, scope)
+	}
+
+	if _, _, err := IssueDeclaration(s.db, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing issue: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestIssueQueriesFrozenIssueBindings(t *testing.T) {
+	s := newIssueQueryStore(t)
+	issue := s.issue(t, "subject", model.StatusInProgress)
+	otherIssue := s.issue(t, "other", model.StatusInProgress)
+	unbound := s.issue(t, "unbound", model.StatusTodo)
+	live := seedEventRun(t, s.db, model.RunActive, 1)
+	parked := seedEventRun(t, s.db, model.RunWaitingHuman, 1)
+	allRecorded := seedEventRun(t, s.db, model.RunActive, 1)
+	unactivated := seedEventRun(t, s.db, model.RunPlanning, 1)
+	finished := seedEventRun(t, s.db, model.RunDone, 1)
+	abandoned := seedEventRun(t, s.db, model.RunAbandoned, 1)
+	for _, run := range []int{live, parked, allRecorded, unactivated, finished, abandoned} {
+		testsupport.Must(t, AddRunIssue(s.db, run, issue), "AddRunIssue")
+	}
+	testsupport.Must(t, AddRunIssue(s.db, live, otherIssue), "AddRunIssue(other)")
+	snapshot := func(run, issueID int, issueSnap string, body any) {
+		mustExec(t, s.db,
+			`UPDATE run_issues SET issue_snapshot = ?, body_snapshot = ? WHERE run_id = ? AND issue_id = ?`,
+			issueSnap, body, run, issueID)
+	}
+	snapshot(live, issue, `{"scope":["a/**"]}`, "frozen body")
+	snapshot(parked, issue, `{"scope":[]}`, nil)
+	snapshot(allRecorded, issue, `{}`, "x")
+	snapshot(finished, issue, `{}`, "x")
+	snapshot(abandoned, issue, `{}`, "x")
+	snapshot(live, otherIssue, `{}`, "other body")
+
+	s.step(t, live, issue, "implement@0", StepDone)
+	s.step(t, live, issue, "review@0", StepPending)
+	s.step(t, live, issue, "verify@0", StepWaitingHuman)
+	s.step(t, live, otherIssue, "implement@0", StepPending)
+	s.step(t, parked, issue, "implement@0", StepClaimed)
+	s.step(t, allRecorded, issue, "done@0", StepDone)
+	s.step(t, allRecorded, issue, "skipped@0", StepSkipped)
+	s.step(t, allRecorded, issue, "superseded@0", StepSuperseded)
+	s.step(t, allRecorded, issue, "routed@0", StepFailedRouted)
+	s.step(t, unactivated, issue, "implement@0", StepPending)
+	s.step(t, finished, issue, "implement@0", StepPending)
+	s.step(t, abandoned, issue, "implement@0", StepPending)
+
+	got, err := FrozenIssueBindings(s.db, issue)
+	testsupport.Must(t, err, "FrozenIssueBindings: %v", err)
+	want := []FrozenIssueBinding{
+		{RunID: live, IssueSnapshot: `{"scope":["a/**"]}`, BodySnapshot: "frozen body", LiveSteps: 2},
+		{RunID: parked, IssueSnapshot: `{"scope":[]}`, BodySnapshot: "", LiveSteps: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("FrozenIssueBindings = %+v, want %+v", got, want)
+	}
+
+	for name, id := range map[string]int{"unbound issue": unbound, "missing issue": 999} {
+		got, err := FrozenIssueBindings(s.db, id)
+		testsupport.Must(t, err, "%s: %v", name, err)
+		if len(got) != 0 {
+			t.Errorf("%s: FrozenIssueBindings = %+v, want none", name, got)
+		}
+	}
+}
+
+// TestIssueQueriesFrozenIssueBindingsLiveStepsFollowStepTerminal keeps the
+// helper's SQL status list and StepTerminal from drifting: one step in each
+// persisted status, and LiveSteps must count exactly the non-terminal ones.
+func TestIssueQueriesFrozenIssueBindingsLiveStepsFollowStepTerminal(t *testing.T) {
+	s := newIssueQueryStore(t)
+	issue := s.issue(t, "subject", model.StatusInProgress)
+	run := seedEventRun(t, s.db, model.RunActive, 1)
+	testsupport.Must(t, AddRunIssue(s.db, run, issue), "AddRunIssue")
+	mustExec(t, s.db,
+		`UPDATE run_issues SET issue_snapshot = '{}' WHERE run_id = ? AND issue_id = ?`, run, issue)
+
+	persisted := []string{
+		StepPending, StepClaimed, StepRunning, StepGated, StepDone,
+		StepWaitingHuman, StepSkipped, StepSuperseded, StepFailedRouted,
+	}
+	wantLive := 0
+	for _, status := range persisted {
+		s.step(t, run, issue, status+"@0", status)
+		if !StepTerminal(status) {
+			wantLive++
+		}
+	}
+
+	got, err := FrozenIssueBindings(s.db, issue)
+	testsupport.Must(t, err, "FrozenIssueBindings: %v", err)
+	if len(got) != 1 || got[0].LiveSteps != wantLive {
+		t.Errorf("FrozenIssueBindings = %+v, want one binding with LiveSteps %d", got, wantLive)
+	}
+}
+
+// importProbeRow is one seeded row pair of an import-probed table: the id of
+// the row project 1 owns and the id of the row project 2 owns. Child-table ids
+// differ from their parents' ids, so a probe matching the wrong column misses.
+type importProbeRow struct {
+	table          ImportTable
+	owned, foreign int
+}
+
+var importProbeRows = []importProbeRow{
+	{ImportIssues, 10, 20},
+	{ImportLabels, 131, 132},
+	{ImportComments, 31, 32},
+	{ImportIssueRelations, 41, 42},
+	{ImportActivityLog, 51, 52},
+	{ImportProposals, 60, 70},
+	{ImportVotes, 81, 82},
+	{ImportDocs, 90, 100},
+	{ImportDocRevisions, 111, 112},
+	{ImportDocComments, 121, 122},
+}
+
+// seedImportProbeRows gives each import-probed table one row in project 1
+// and one in project 2, with the ids importProbeRows lists. The higher id of
+// each pair is inserted first, so a table's newest row is not its highest id.
+func seedImportProbeRows(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, stmt := range []string{
+		`INSERT INTO projects (id, identity, name) VALUES (2, 'other', 'other')`,
+		`INSERT INTO issues (id, project_id, title, created_at, updated_at) VALUES
+			(20, 2, 'foreign', 't', 't'), (10, 1, 'owned', 't', 't')`,
+		`INSERT INTO labels (id, project_id, name) VALUES (132, 2, 'bug'), (131, 1, 'bug')`,
+		`INSERT INTO comments (id, issue_id, body, created_at) VALUES (32, 20, 'b', 't'), (31, 10, 'b', 't')`,
+		`INSERT INTO issue_relations (id, source_issue_id, target_issue_id, relation_type, created_at) VALUES
+			(42, 20, 10, 'blocks', 't'), (41, 10, 20, 'relates_to', 't')`,
+		`INSERT INTO activity_log (id, issue_id, field_changed, created_at) VALUES
+			(52, 20, 'status', 't'), (51, 10, 'status', 't')`,
+		`INSERT INTO proposals (id, project_id, description, required_voters, created_at, updated_at) VALUES
+			(70, 2, 'p', 1, 't', 't'), (60, 1, 'p', 1, 't', 't')`,
+		`INSERT INTO votes (id, proposal_id, voter_name, verdict, confidence, domain_relevance, created_at) VALUES
+			(82, 70, 'v', 'approve', 1, 1, 't'), (81, 60, 'v', 'approve', 1, 1, 't')`,
+		`INSERT INTO docs (id, project_id, type, title, created_at, updated_at) VALUES
+			(100, 2, 'adr', 'd', 't', 't'), (90, 1, 'adr', 'd', 't', 't')`,
+		`INSERT INTO doc_revisions (id, doc_id, revision_number, body, created_at) VALUES
+			(112, 100, 1, 'b', 't'), (111, 90, 1, 'b', 't')`,
+		`INSERT INTO doc_comments (id, doc_id, body, created_at) VALUES (122, 100, 'b', 't'), (121, 90, 'b', 't')`,
+	} {
+		mustExec(t, db, stmt)
+	}
+}
+
+func TestImportExportQueriesImportRowExistsTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	tx := beginEventTx(t, db)
+
+	for _, r := range importProbeRows {
+		for id, want := range map[int]bool{r.owned: true, r.foreign: true, 999: false} {
+			got, err := ImportRowExistsTx(tx, r.table, id)
+			testsupport.Must(t, err, "ImportRowExistsTx(%s, %d): %v", r.table, id, err)
+			if got != want {
+				t.Errorf("ImportRowExistsTx(%s, %d) = %v, want %v", r.table, id, got, want)
+			}
+		}
+	}
+	if got, err := ImportRowExistsTx(tx, ImportComments, 10); err != nil || got {
+		t.Errorf("ImportRowExistsTx(comments, an issue's id) = %v, %v; want false, nil", got, err)
+	}
+	for _, table := range []ImportTable{"projects", "issues WHERE 1=1 OR", ""} {
+		if _, err := ImportRowExistsTx(tx, table, 10); err == nil {
+			t.Errorf("ImportRowExistsTx(%q) succeeded, want an unknown-table error", table)
+		}
+	}
+}
+
+func TestImportExportQueriesImportMaxIDTx(t *testing.T) {
+	db := newIdemDB(t)
+	empty, err := db.Begin()
+	testsupport.Must(t, err, "Begin: %v", err)
+	for _, r := range importProbeRows {
+		got, err := ImportMaxIDTx(empty, r.table)
+		testsupport.Must(t, err, "ImportMaxIDTx(%s) on an empty table: %v", r.table, err)
+		if got != 0 {
+			t.Errorf("ImportMaxIDTx(%s) on an empty table = %d, want 0", r.table, got)
+		}
+	}
+	testsupport.Must(t, empty.Rollback(), "Rollback")
+
+	seedImportProbeRows(t, db)
+	tx := beginEventTx(t, db)
+	for _, r := range importProbeRows {
+		got, err := ImportMaxIDTx(tx, r.table)
+		testsupport.Must(t, err, "ImportMaxIDTx(%s): %v", r.table, err)
+		if want := max(r.owned, r.foreign); got != want {
+			t.Errorf("ImportMaxIDTx(%s) = %d, want %d", r.table, got, want)
+		}
+	}
+	if _, err := ImportMaxIDTx(tx, "projects"); err == nil {
+		t.Error("ImportMaxIDTx(projects) succeeded, want an unknown-table error")
+	}
+}
+
+func TestImportExportQueriesImportRowOwnedTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	tx := beginEventTx(t, db)
+
+	for _, r := range importProbeRows {
+		cases := []struct {
+			id, project int
+			want        bool
+		}{
+			{r.owned, 1, true},
+			{r.foreign, 2, true},
+			{r.foreign, 1, false},
+			{r.owned, 2, false},
+			{999, 1, false},
+		}
+		for _, c := range cases {
+			got, err := ImportRowOwnedTx(tx, r.table, c.id, c.project)
+			testsupport.Must(t, err, "ImportRowOwnedTx(%s, %d, %d): %v", r.table, c.id, c.project, err)
+			if got != c.want {
+				t.Errorf("ImportRowOwnedTx(%s, id %d, project %d) = %v, want %v", r.table, c.id, c.project, got, c.want)
+			}
+		}
+	}
+	if _, err := ImportRowOwnedTx(tx, "projects", 1, 1); err == nil {
+		t.Error("ImportRowOwnedTx(projects) succeeded, want an unknown-table error")
+	}
+}
+
+func TestImportExportQueriesLabelIDByNameTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	mustExec(t, db, `INSERT INTO labels (id, project_id, name) VALUES (133, 1, 'feature')`)
+	tx := beginEventTx(t, db)
+
+	cases := []struct {
+		project   int
+		name      string
+		wantID    int
+		wantFound bool
+	}{
+		{1, "bug", 131, true},
+		{2, "bug", 132, true},
+		{1, "feature", 133, true},
+		{2, "feature", 0, false},
+		{1, "absent", 0, false},
+		{3, "bug", 0, false},
+	}
+	for _, c := range cases {
+		id, found, err := LabelIDByNameTx(tx, c.project, c.name)
+		if err != nil {
+			t.Fatalf("LabelIDByNameTx(%d, %q): %v", c.project, c.name, err)
+		}
+		if id != c.wantID || found != c.wantFound {
+			t.Errorf("LabelIDByNameTx(%d, %q) = %d, %v; want %d, %v", c.project, c.name, id, found, c.wantID, c.wantFound)
+		}
+	}
+}
+
+func TestImportExportQueriesRestoreIssueParentTx(t *testing.T) {
+	db := newIdemDB(t)
+	seedImportProbeRows(t, db)
+	mustExec(t, db, `INSERT INTO issues (id, project_id, title, created_at, updated_at, version)
+		VALUES (30, 1, 'child', 'created', 'stamped', 4)`)
+	tx := beginEventTx(t, db)
+
+	testsupport.Must(t, RestoreIssueParentTx(tx, 30, 10), "RestoreIssueParentTx")
+	testsupport.Must(t, RestoreIssueParentTx(tx, 999, 10), "RestoreIssueParentTx(absent issue)")
+
+	rows, err := tx.Query(`SELECT id, COALESCE(parent_id, 0), updated_at, version FROM issues ORDER BY id`)
+	testsupport.Must(t, err, "reading issues: %v", err)
+	defer rows.Close()
+	type issueRow struct {
+		id, parent int
+		updatedAt  string
+		version    int
+	}
+	var got []issueRow
+	for rows.Next() {
+		var r issueRow
+		testsupport.Must(t, rows.Scan(&r.id, &r.parent, &r.updatedAt, &r.version), "scanning issues")
+		got = append(got, r)
+	}
+	testsupport.Must(t, rows.Err(), "iterating issues")
+	want := []issueRow{{10, 0, "t", 1}, {20, 0, "t", 1}, {30, 10, "stamped", 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("issues after RestoreIssueParentTx = %+v, want %+v", got, want)
 	}
 }

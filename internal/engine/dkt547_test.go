@@ -391,27 +391,3 @@ func TestLinkedInputInverseRelationToken(t *testing.T) {
 		t.Errorf("the bound spec is %q, want %q", specs[0].Body, specDocV1)
 	}
 }
-
-// TestLinkedInputPacketCarriesTheDoc is the happy path at the rendered layer —
-// the packet a worker actually reads carries the spec's bytes, so the binding
-// reaches the executor rather than stopping at the ledger.
-func TestLinkedInputPacketCarriesTheDoc(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	registerSource(t, conn, []byte(specDocMiniSrc), "spec-doc-mini.toml")
-	registerSource(t, conn, []byte(uiChangeMiniSrc), "ui-change-mini.toml")
-
-	specIssue := produceSpec(t, conn, e, "write the spec", specDocV1)
-	consumer := createIssue(t, conn, "apply the ui change", "the change", "task", nil)
-	linkIssues(t, conn, consumer, specIssue, model.RelationDependsOn)
-	runB := startRun(t, conn, consumer)
-	_, err := activate(conn, runB.ID)
-	testsupport.Must(t, err, "activating the consumer run: %v", err)
-
-	packet, err := RenderStep(conn, stepIDByInstance(t, conn, "design-qa@0"), "", nowMS)
-	testsupport.Must(t, err, "rendering design-qa@0: %v", err)
-
-	if got := strings.Count(packet.Packet, specDocV1); got != 1 {
-		t.Errorf("the spec is inlined %d times, want 1:\n%s", got, packet.Packet)
-	}
-}

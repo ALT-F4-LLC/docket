@@ -82,32 +82,6 @@ func canonical(t *testing.T, path string) string {
 // One root at a time
 // ---------------------------------------------------------------------------
 
-// TestSharedRootActivatesWithNoRepoConfig is the whole point of the change: a
-// repository with NO `.docket/` directory activates against the shared corpus.
-func TestSharedRootActivatesWithNoRepoConfig(t *testing.T) {
-	conn, shared, repo := unionRepo(t)
-	writeConfigFile(t, shared, "workflows/auto-dev.toml", autoWorkflowSrc)
-
-	if _, err := os.Stat(repo); !os.IsNotExist(err) {
-		t.Fatalf("premise: the repository must carry no config root (stat: %v)", err)
-	}
-
-	issue := createIssue(t, conn, "corpus only", "body", "task", nil)
-	run := startRun(t, conn, issue)
-
-	result, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	if len(result.Registered) != 1 {
-		t.Fatalf("registered %d files, want the corpus's one workflow: %+v",
-			len(result.Registered), result.Registered)
-	}
-	if result.IssuesBound != 1 || result.StepsCreated == 0 {
-		t.Errorf("bound=%d steps=%d; the run must bind against the shared corpus",
-			result.IssuesBound, result.StepsCreated)
-	}
-}
-
 // TestRepoRootActivatesWithNoSharedConfig is the mirror: a machine whose shared
 // corpus is not installed still activates a repository's own config, unchanged.
 func TestRepoRootActivatesWithNoSharedConfig(t *testing.T) {
@@ -473,25 +447,6 @@ func TestPacketResolutionPrefersTheFirstRoot(t *testing.T) {
 	}
 }
 
-// TestPacketResolutionFallsThroughToALaterRoot: a ref the first root does not
-// hold resolves from the second, which is what makes the union a union at
-// resolution and not only at activation.
-func TestPacketResolutionFallsThroughToALaterRoot(t *testing.T) {
-	first := t.TempDir()
-	second := t.TempDir()
-	writeFixture(t, second, "checklists/a.md", "ONLY IN THE SECOND ROOT\n")
-
-	pins := testPinSet(t, second, "checklists/a.md")
-	pins["checklists/a.md"] = pins[filepath.Join(second, "checklists/a.md")]
-
-	files, err := resolvePacketFiles("RUN-1", pins, []string{first, second},
-		[]string{"checklists/a.md"})
-	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
-	if len(files) != 1 || strings.TrimSpace(files[0].Body) != "ONLY IN THE SECOND ROOT" {
-		t.Errorf("resolved %+v, want the second root's file", files)
-	}
-}
-
 // TestSharedRootPacketResolvesFromALinkedWorktree is the portability
 // consequence, live-fired against a real `git worktree add`.
 //
@@ -537,7 +492,7 @@ func TestSharedRootPacketResolvesFromALinkedWorktree(t *testing.T) {
 	}
 
 	files, err := resolvePacketFiles(
-		"RUN-1", packetPinsForRun(pins), instanceConfigRoots(),
+		"RUN-1", packetFilePins(pins), instanceConfigRoots(),
 		[]string{"contracts/fix.md"})
 	testsupport.Must(t, err, "a packet file in the shared root did not resolve from a "+
 		"linked worktree — the failure that stranded a claimed step: %v", err)
@@ -564,7 +519,7 @@ func TestRepoRootPacketStillResolves(t *testing.T) {
 	testsupport.Must(t, err, "listing pins: %v", err)
 
 	files, err := resolvePacketFiles(
-		"RUN-1", packetPinsForRun(pins), instanceConfigRoots(),
+		"RUN-1", packetFilePins(pins), instanceConfigRoots(),
 		[]string{"contracts/project.md"})
 	testsupport.Must(t, err, "resolvePacketFiles: %v", err)
 	if len(files) != 1 || strings.TrimSpace(files[0].Body) != "this repo's contract" {

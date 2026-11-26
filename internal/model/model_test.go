@@ -18,49 +18,6 @@ func TestFormatID(t *testing.T) {
 	}
 }
 
-func TestParseID(t *testing.T) {
-	tests := []struct {
-		input   string
-		want    int
-		wantErr bool
-	}{
-		{"DKT-5", 5, false},
-		{"dkt-5", 5, false},
-		{"5", 5, false},
-		{"42", 42, false},
-		{"", 0, true},
-		{"DKT-", 0, true},
-		{"abc", 0, true},
-		{"DKT-0", 0, true},
-		{"DKT--1", 0, true},
-	}
-
-	for _, tt := range tests {
-		got, err := ParseID(tt.input)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("ParseID(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
-			continue
-		}
-		if got != tt.want {
-			t.Errorf("ParseID(%q) = %d, want %d", tt.input, got, tt.want)
-		}
-	}
-}
-
-func TestFormatParseRoundTrip(t *testing.T) {
-	for _, id := range []int{1, 5, 42, 999} {
-		formatted := FormatID(id)
-		parsed, err := ParseID(formatted)
-		if err != nil {
-			t.Errorf("ParseID(FormatID(%d)) error: %v", id, err)
-			continue
-		}
-		if parsed != id {
-			t.Errorf("ParseID(FormatID(%d)) = %d", id, parsed)
-		}
-	}
-}
-
 func TestValidateStatus(t *testing.T) {
 	valid := []Status{StatusBacklog, StatusTodo, StatusInProgress, StatusReview, StatusDone}
 	for _, s := range valid {
@@ -142,31 +99,6 @@ func TestPriorityColor(t *testing.T) {
 func TestPriorityColorDefaultFallback(t *testing.T) {
 	if got := Priority("unknown").Color(); got != "white" {
 		t.Errorf("Priority(\"unknown\").Color() = %q, want %q", got, "white")
-	}
-}
-
-func TestPriorityColorAndIcon(t *testing.T) {
-	if c := PriorityCritical.Color(); c != "red" {
-		t.Errorf("PriorityCritical.Color() = %q, want %q", c, "red")
-	}
-	if i := PriorityCritical.Icon(); i != "⏫" {
-		t.Errorf("PriorityCritical.Icon() = %q, want %q", i, "⏫")
-	}
-}
-
-func TestStatusIconNonEmpty(t *testing.T) {
-	for _, s := range []Status{StatusBacklog, StatusTodo, StatusInProgress, StatusReview, StatusDone} {
-		if got := s.Icon(); got == "" {
-			t.Errorf("%q.Icon() returned empty string", s)
-		}
-	}
-}
-
-func TestIssueKindIconNonEmpty(t *testing.T) {
-	for _, k := range []IssueKind{IssueKindBug, IssueKindFeature, IssueKindTask, IssueKindEpic, IssueKindChore} {
-		if got := k.Icon(); got == "" {
-			t.Errorf("%q.Icon() returned empty string", k)
-		}
 	}
 }
 

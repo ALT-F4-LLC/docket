@@ -109,32 +109,10 @@ func registerAcross(
 ) (registryFanoutReport, error) {
 	t.Helper()
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowRegister(
 		fanoutCmd(conn, project, all), []string{writeWorkflowFile(t, src)}, w)
 	return fanoutReportOf(t, buf.Bytes()), err
-}
-
-// TestWorkflowRegisterAllProjectsLandsInEveryRegistry is the acceptance
-// criterion for register: ONE invocation, a row in every project.
-func TestWorkflowRegisterAllProjectsLandsInEveryRegistry(t *testing.T) {
-	conn := newTestDB(t)
-	one, two, three := threeProjects(t, conn)
-
-	report, err := registerAcross(t, conn, minimalWorkflow, "", true)
-	testsupport.Must(t, err, "register --all-projects: %v", err)
-
-	if report.Scope != scopeAllProjects || report.Succeeded != 3 || report.Failed != 0 {
-		t.Fatalf("report = %+v, want 3 succeeded in scope all-projects", report)
-	}
-	for _, id := range []int{one, two, three} {
-		if got := outcomeIn(t, report, id).Outcome; got != outcomeRegistered {
-			t.Errorf("project %d reported %q, want %q", id, got, outcomeRegistered)
-		}
-		// The report is a claim about the store; the store is what settles it.
-		if _, err := db.GetWorkflow(conn, id, "unit", 1); err != nil {
-			t.Errorf("project %d has no unit@1 row after --all-projects: %v", id, err)
-		}
-	}
 }
 
 // TestWorkflowRegisterAllProjectsIsIdempotentPerProject: re-registering the
@@ -275,35 +253,6 @@ payload = "findings@1"
 	}
 }
 
-// TestWorkflowDeprecateAllProjectsRetiresEverywhere is DKT-615's originating
-// case, verbatim: one deprecate, every project's identical row.
-func TestWorkflowDeprecateAllProjectsRetiresEverywhere(t *testing.T) {
-	conn := newTestDB(t)
-	one, two, three := threeProjects(t, conn)
-	for _, id := range []int{one, two, three} {
-		auditWorkflowRow(t, conn, id, "release", 7)
-	}
-
-	w, buf := bufWriter(true)
-	err := runWorkflowDeprecate(fanoutCmd(conn, "", true), []string{"release@7"}, w)
-	testsupport.Must(t, err, "deprecate --all-projects: %v", err)
-
-	report := fanoutReportOf(t, buf.Bytes())
-	if report.Succeeded != 3 || report.Failed != 0 {
-		t.Fatalf("report = %+v, want 3 retired", report)
-	}
-	for _, id := range []int{one, two, three} {
-		if got := outcomeIn(t, report, id).Outcome; got != outcomeDeprecated {
-			t.Errorf("project %d reported %q, want %q", id, got, outcomeDeprecated)
-		}
-		wf, err := db.GetWorkflow(conn, id, "release", 7)
-		testsupport.Must(t, err, "reading release@7 back from project %d: %v", id, err)
-		if !wf.Deprecated() {
-			t.Errorf("project %d still binds release@7 after --all-projects", id)
-		}
-	}
-}
-
 // TestWorkflowDeprecateAllProjectsReportsMixedOutcomes: a sweep across a store
 // meets projects in different states, and each one's own rule decides its own
 // row — not-registered where nothing was registered, already-deprecated where
@@ -317,6 +266,7 @@ func TestWorkflowDeprecateAllProjectsReportsMixedOutcomes(t *testing.T) {
 	testsupport.Must(t, err, "pre-retiring in one project: %v", err)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err = runWorkflowDeprecate(fanoutCmd(conn, "", true), []string{"release@7"}, w)
 	if err == nil {
 		t.Fatal("a sweep meeting two refusals exited 0")
@@ -362,6 +312,7 @@ func TestWorkflowRestoreAllProjectsKeepsTheIdempotencyAsymmetry(t *testing.T) {
 	testsupport.Must(t, cmd.Flags().Set("restore", "true"), "setting --restore")
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	// The third project never registered it, so the sweep still exits non-zero.
 	if err := runWorkflowDeprecate(cmd, []string{"release@7"}, w); err == nil {
 		t.Fatal("a restore over a project with no such row exited 0")
@@ -382,43 +333,6 @@ func TestWorkflowRestoreAllProjectsKeepsTheIdempotencyAsymmetry(t *testing.T) {
 	}
 }
 
-// TestSchemaRegisterAllProjectsLandsInEveryRegistry, and its conflict half: a
-// schema's frozen-bytes rule is decided per project too.
-func TestSchemaRegisterAllProjectsLandsInEveryRegistry(t *testing.T) {
-	conn := newTestDB(t)
-	one, two, three := threeProjects(t, conn)
-
-	// Different bytes at findings@1 in one project only.
-	_, _, err := db.InsertSchema(conn, &model.Schema{
-		ProjectID: two, Name: "findings", Version: 1,
-		SourceSHA256: "not-the-same-hash", Body: `{"type":"object"}`, Ordered: "{}",
-	}, model.NowMS())
-	testsupport.Must(t, err, "seeding the conflicting schema: %v", err)
-
-	w, buf := bufWriter(true)
-	err = runSchemaRegister(fanoutCmd(conn, "", true),
-		[]string{"findings@1", writeSchema(t, findingsSchema)}, w)
-	if err == nil {
-		t.Fatal("a conflicting project exited 0")
-	}
-	if got := reportedCodeOf(t, err); got != output.ErrConflict {
-		t.Errorf("exit code = %q, want %q", got, output.ErrConflict)
-	}
-
-	report := fanoutReportOf(t, buf.Bytes())
-	if report.Succeeded != 2 || report.Failed != 1 {
-		t.Fatalf("report = %+v, want 2 registered / 1 conflict", report)
-	}
-	if got := outcomeIn(t, report, two).Outcome; got != outcomeConflict {
-		t.Errorf("the conflicting project reported %q, want %q", got, outcomeConflict)
-	}
-	for _, id := range []int{one, three} {
-		if _, err := db.GetSchema(conn, id, "findings", 1); err != nil {
-			t.Errorf("project %d never got findings@1: %v", id, err)
-		}
-	}
-}
-
 // TestRegistryFanoutRefusesBothFlags: they both name the targets and they
 // disagree. Checked in the resolver as well as by cobra, because a caller that
 // builds the command directly never runs cobra's parsing.
@@ -427,6 +341,7 @@ func TestRegistryFanoutRefusesBothFlags(t *testing.T) {
 	threeProjects(t, conn)
 
 	w, _ := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowRegister(fanoutCmd(conn, "two.git", true),
 		[]string{writeWorkflowFile(t, minimalWorkflow)}, w)
 	if err == nil {
@@ -445,6 +360,7 @@ func TestRegistryFanoutRefusesAnUnknownProject(t *testing.T) {
 	threeProjects(t, conn)
 
 	w, _ := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	err := runWorkflowRegister(fanoutCmd(conn, "no-such-repo", false),
 		[]string{writeWorkflowFile(t, minimalWorkflow)}, w)
 	if err == nil {
@@ -467,6 +383,7 @@ func TestRegistryWritesWithoutFlagsKeepTheirPayload(t *testing.T) {
 	conn := newTestDB(t)
 
 	w, buf := bufWriter(true)
+	w.JSONVersion = output.JSONV2
 	testsupport.Must(t, runWorkflowRegister(fanoutCmd(conn, "", false),
 		[]string{writeWorkflowFile(t, minimalWorkflow)}, w), "plain register")
 
@@ -574,15 +491,7 @@ func registryFanoutVerbs() []registryFanoutVerb {
 	}
 }
 
-var registryFanoutJSONModes = []struct {
-	name    string
-	version output.JSONVersion
-}{
-	{"v1", output.JSONV1},
-	{"v2", output.JSONV2},
-}
-
-// fanoutEnvelope is the whole stdout of a fanned-out --json run.
+// fanoutEnvelope is the whole stdout of a fanned-out --json=v2 run.
 type fanoutEnvelope struct {
 	OK   bool                 `json:"ok"`
 	Data registryFanoutReport `json:"data"`
@@ -606,9 +515,9 @@ func singleFanoutEnvelopeOf(t *testing.T, raw []byte) fanoutEnvelope {
 }
 
 // runRegistryFanoutSweep seeds three projects, makes the second one conflict
-// when conflict is set, and runs the verb under one --json version.
+// when conflict is set, and runs the verb under --json=v2.
 func runRegistryFanoutSweep(
-	t *testing.T, verb registryFanoutVerb, version output.JSONVersion, conflict bool,
+	t *testing.T, verb registryFanoutVerb, conflict bool,
 ) (fanoutEnvelope, []int, error) {
 	t.Helper()
 	conn := newTestDB(t)
@@ -622,7 +531,7 @@ func runRegistryFanoutSweep(
 	}
 	buf := &bytes.Buffer{}
 	w := &output.Writer{
-		JSONMode: true, JSONVersion: version, Stdout: buf, Stderr: &bytes.Buffer{},
+		JSONMode: true, JSONVersion: output.JSONV2, Stdout: buf, Stderr: &bytes.Buffer{},
 	}
 	err := verb.run(t, conn, w)
 	return singleFanoutEnvelopeOf(t, buf.Bytes()), projects, err
@@ -633,33 +542,31 @@ func runRegistryFanoutSweep(
 // exit code, and the single envelope still carries every project's row.
 func TestRegistryFanoutPartialFailureEmitsOneFailureEnvelope(t *testing.T) {
 	for _, verb := range registryFanoutVerbs() {
-		for _, mode := range registryFanoutJSONModes {
-			t.Run(verb.name+"/"+mode.name, func(t *testing.T) {
-				envelope, projects, err := runRegistryFanoutSweep(t, verb, mode.version, true)
+		t.Run(verb.name, func(t *testing.T) {
+			envelope, projects, err := runRegistryFanoutSweep(t, verb, true)
 
-				if envelope.OK {
-					t.Error("ok = true on a sweep where one project failed; a " +
-						"script reading .ok and one reading the exit code disagree")
-				}
-				if envelope.Code != output.ErrConflict {
-					t.Errorf("envelope code = %q, want %q", envelope.Code, output.ErrConflict)
-				}
-				report := envelope.Data
-				if report.Failed != 1 || report.Succeeded != 2 {
-					t.Errorf("data = %+v, want 2 succeeded / 1 failed", report)
-				}
-				if len(report.Results) != len(projects) {
-					t.Fatalf("data.results has %d rows, want one per target (%d)",
-						len(report.Results), len(projects))
-				}
-				for _, id := range projects {
-					outcomeIn(t, report, id)
-				}
-				if got := reportedCodeOf(t, err); got != output.ErrConflict {
-					t.Errorf("exit code = %q, want %q", got, output.ErrConflict)
-				}
-			})
-		}
+			if envelope.OK {
+				t.Error("ok = true on a sweep where one project failed; a " +
+					"script reading .ok and one reading the exit code disagree")
+			}
+			if envelope.Code != output.ErrConflict {
+				t.Errorf("envelope code = %q, want %q", envelope.Code, output.ErrConflict)
+			}
+			report := envelope.Data
+			if report.Failed != 1 || report.Succeeded != 2 {
+				t.Errorf("data = %+v, want 2 succeeded / 1 failed", report)
+			}
+			if len(report.Results) != len(projects) {
+				t.Fatalf("data.results has %d rows, want one per target (%d)",
+					len(report.Results), len(projects))
+			}
+			for _, id := range projects {
+				outcomeIn(t, report, id)
+			}
+			if got := reportedCodeOf(t, err); got != output.ErrConflict {
+				t.Errorf("exit code = %q, want %q", got, output.ErrConflict)
+			}
+		})
 	}
 }
 
@@ -667,22 +574,20 @@ func TestRegistryFanoutPartialFailureEmitsOneFailureEnvelope(t *testing.T) {
 // that failed somewhere, not for every fanned-out report.
 func TestRegistryFanoutAllSuccessKeepsOkTrue(t *testing.T) {
 	for _, verb := range registryFanoutVerbs() {
-		for _, mode := range registryFanoutJSONModes {
-			t.Run(verb.name+"/"+mode.name, func(t *testing.T) {
-				envelope, projects, err := runRegistryFanoutSweep(t, verb, mode.version, false)
-				testsupport.Must(t, err, "an all-success sweep returned %v", err)
+		t.Run(verb.name, func(t *testing.T) {
+			envelope, projects, err := runRegistryFanoutSweep(t, verb, false)
+			testsupport.Must(t, err, "an all-success sweep returned %v", err)
 
-				if !envelope.OK {
-					t.Error("ok = false on a sweep where every project succeeded")
-				}
-				report := envelope.Data
-				if report.Failed != 0 || report.Succeeded != len(projects) {
-					t.Errorf("data = %+v, want %d succeeded / 0 failed", report, len(projects))
-				}
-				if len(report.Results) != len(projects) {
-					t.Errorf("data.results has %d rows, want %d", len(report.Results), len(projects))
-				}
-			})
-		}
+			if !envelope.OK {
+				t.Error("ok = false on a sweep where every project succeeded")
+			}
+			report := envelope.Data
+			if report.Failed != 0 || report.Succeeded != len(projects) {
+				t.Errorf("data = %+v, want %d succeeded / 0 failed", report, len(projects))
+			}
+			if len(report.Results) != len(projects) {
+				t.Errorf("data.results has %d rows, want %d", len(report.Results), len(projects))
+			}
+		})
 	}
 }

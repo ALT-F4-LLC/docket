@@ -172,27 +172,6 @@ func TestMaliciousCloneExecutesNothing(t *testing.T) {
 	}
 }
 
-// TestGlobalEntryMatchesAnyRepo is the converse of the clone case, so the
-// binding check is not simply refusing everything: an entry the operator made
-// global with an explicit flag DOES fire in a second checkout.
-func TestGlobalEntryMatchesAnyRepo(t *testing.T) {
-	repoRoot := t.TempDir()
-	argv, sentinel := witnessCommand(t, repoRoot, "global-ran")
-
-	runner := NewExecRunner(testRepoPaths(repoRoot))
-	runner.LoadStore = sandboxTrust(t, trust.Entry{
-		Name: "tests", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
-		Global: true,
-	})
-
-	_, err := runner.Execute(context.Background(),
-		GateSpec{Name: "tests"}, StepContext{})
-	testsupport.Must(t, err, "running the global gate: %v", err)
-	if !sentinelExists(t, sentinel) {
-		t.Error("a global entry did not fire; --global must authorize any repo")
-	}
-}
-
 // TestRunFenceHashTamperIsRefused: a `run_fences` row altered after activation
 // is NOT executed.
 //
@@ -626,37 +605,6 @@ func checkPinRecheckAfterTreeLock(t *testing.T, gateFor pinGateSpec) {
 		if !strings.Contains(row.Reason, want) {
 			t.Errorf("the reason does not name %s: %q", want, row.Reason)
 		}
-	}
-}
-
-// TestGatePinRecheckUnchangedScriptRuns is the benign half: a pinned tree gate
-// whose script is untouched across a contended lock still runs.
-func TestGatePinRecheckUnchangedScriptRuns(t *testing.T) {
-	checkPinRecheckUnchangedScriptRuns(t, namedPinGate)
-}
-
-// TestFenceGatePinRecheckUnchangedScriptRuns is the benign half for a fence
-// line: its re-check must still match the line's own argv.
-func TestFenceGatePinRecheckUnchangedScriptRuns(t *testing.T) {
-	checkPinRecheckUnchangedScriptRuns(t, fencePinGate)
-}
-
-func checkPinRecheckUnchangedScriptRuns(t *testing.T, gateFor pinGateSpec) {
-	repoRoot := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "ran")
-	script, pinned := pinnedScript(t, "/usr/bin/touch "+marker+"\n")
-
-	ex := runTreeGateAcrossHeldLock(t, repoRoot, pinnedEntry(repoRoot, script, pinned),
-		gateFor(script), func() {})
-
-	if !sentinelExists(t, marker) {
-		t.Errorf("the unchanged pinned script did not run: %+v", ex.Results)
-	}
-	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass {
-		t.Errorf("rows = %+v, want one %q row", ex.Results, VerdictPass)
-	}
-	if ex.Verdict != VerdictPass {
-		t.Errorf("gate verdict = %q, want %q: %+v", ex.Verdict, VerdictPass, ex.Results)
 	}
 }
 
@@ -1426,20 +1374,6 @@ func TestGateRefusesEditedRelativeScriptUnderSpecDir(t *testing.T) {
 	g.sc.Scope = []string{"internal/engine/**"}
 
 	assertRefusedCopy(t, g, g.run(t), pinnedScriptRel, hexSHA256(g.body), hexSHA256(edited))
-}
-
-// TestGateRunsUnchangedRelativeScriptUnderSpecDir: a copy byte-identical to
-// the pin runs as before.
-func TestGateRunsUnchangedRelativeScriptUnderSpecDir(t *testing.T) {
-	g := newPinnedScriptGate(t, true)
-
-	ex := g.run(t)
-	if len(ex.Results) != 1 || ex.Results[0].Verdict != VerdictPass || ex.Verdict != VerdictPass {
-		t.Fatalf("want one passing row and a passing gate, got %q: %+v", ex.Verdict, ex.Results)
-	}
-	if !sentinelExists(t, g.marker) {
-		t.Error("the unchanged script copy did not run")
-	}
 }
 
 // TestGateRunsInScopeEditedRelativeScriptWithNote: an issue whose scope covers

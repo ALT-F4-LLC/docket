@@ -1,17 +1,18 @@
 package engine
 
 import (
-	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -24,7 +25,7 @@ import (
 
 // registerVoteRule sets a rule's two config keys, which is what makes it exist
 // (a rule exists iff vote.rule.<name>.threshold is set).
-func registerVoteRule(t *testing.T, conn *sql.DB, name, threshold, criticality string) {
+func registerVoteRule(t *testing.T, conn store.LegacyDB, name, threshold, criticality string) {
 	t.Helper()
 	err := db.SetConfig(conn, 0, db.VoteRuleThresholdKey(name), threshold)
 	testsupport.Must(t, err, "setting the rule threshold: %v", err)
@@ -300,6 +301,81 @@ func TestLoadVoteProposalsIsScopedPerIssue(t *testing.T) {
 	}
 }
 
+// TestVoteProposalReplayWithChangedFieldsReturnsExisting: a replay of one step
+// instance whose rebuilt proposal carries a different voter count and a
+// different Rationale returns the proposal the first call opened, and leaves
+// that proposal as it was opened.
+func TestVoteProposalReplayWithChangedFieldsReturnsExisting(t *testing.T) {
+	conn, panel, spec, firstID := openedTriagePanel(t)
+	opened, err := db.GetProposal(conn, firstID)
+	testsupport.Must(t, err, "reading the opened proposal: %v", err)
+
+	changeTriageEvidence(t, conn, panel, "the replay's gate output")
+	replaySpec := *spec
+	replaySpec.Voters = append(slices.Clone(spec.Voters), "seat-c")
+
+	replayID, err := OpenVoteProposal(conn, panel, &replaySpec, nowMS)
+	if err != nil {
+		t.Fatalf("replaying %s with a changed voter count and Rationale: %v",
+			panel.Instance, err)
+	}
+	if replayID != firstID {
+		t.Errorf("replay returned proposal %d, want the existing %d", replayID, firstID)
+	}
+
+	after, err := db.GetProposal(conn, firstID)
+	testsupport.Must(t, err, "reading the proposal after the replay: %v", err)
+	if after.RequiredVoters != opened.RequiredVoters || after.Rationale != opened.Rationale {
+		t.Errorf("the replay rewrote the proposal: required_voters %d -> %d, "+
+			"rationale changed %v", opened.RequiredVoters, after.RequiredVoters,
+			after.Rationale != opened.Rationale)
+	}
+	var proposals int
+	err = conn.QueryRow(`SELECT COUNT(*) FROM proposals`).Scan(&proposals)
+	testsupport.Must(t, err, "counting proposals: %v", err)
+	if proposals != 1 {
+		t.Errorf("%d proposals exist after the replay, want 1", proposals)
+	}
+}
+
+// openedTriagePanel drives the triage fixture until triage@0 has opened its
+// proposal, and returns the panel, its pinned spec, and that proposal's id.
+func openedTriagePanel(t *testing.T) (store.LegacyDB, *db.Step, *workflow.Step, int) {
+	t.Helper()
+	conn, run, _ := triageRun(t, "retry", "abandon-issue")
+	panel := mustStep(t, conn, "triage@0")
+	firstID, err := findVoteProposal(conn, panel)
+	testsupport.Must(t, err, "finding triage@0's proposal: %v", err)
+	if firstID == 0 {
+		t.Fatal("triage@0 opened no proposal; the fixture proves nothing")
+	}
+	defs, err := StepDefinitions(conn, run.ID)
+	testsupport.Must(t, err, "StepDefinitions: %v", err)
+	spec := workflow.StepByName(defs[panel.WorkflowID], panel.StepName)
+	if spec == nil || len(spec.Voters) < 2 {
+		t.Fatalf("triage spec = %+v, want a vote step with at least two voters", spec)
+	}
+	return conn, panel, spec, firstID
+}
+
+// changeTriageEvidence rewrites the triaged step's gate output so the
+// Rationale a replay rebuilds differs from the one the proposal was opened
+// with, and fails the test if it does not.
+func changeTriageEvidence(t *testing.T, conn store.LegacyDB, panel *db.Step, output string) {
+	t.Helper()
+	before, err := triageEvidence(conn, panel)
+	testsupport.Must(t, err, "triageEvidence: %v", err)
+	triaged := mustStep(t, conn, "implement@0")
+	_, err = conn.Exec(`UPDATE gate_results SET output = ? WHERE step_id = ?`,
+		output, triaged.ID)
+	testsupport.Must(t, err, "rewriting implement@0's gate output: %v", err)
+	after, err := triageEvidence(conn, panel)
+	testsupport.Must(t, err, "triageEvidence: %v", err)
+	if after == before || !strings.Contains(after, output) {
+		t.Fatalf("triage evidence did not change; it reads %q", after)
+	}
+}
+
 // TestVoteRequiredVotersComesFromTheStep: `required_voters` is
 // len(voters), and the voter hints are OPAQUE — core counts them and never
 // interprets one.
@@ -365,7 +441,7 @@ func TestVoteOutcomeMapsStatusToVerdict(t *testing.T) {
 // It builds its own definition rather than using the committed fixture, which
 // declares no vote step: adding one there would change every other test's
 // topology to serve this file.
-func seedVoteStep(t *testing.T, conn *sql.DB) (*db.Step, *workflow.Step) {
+func seedVoteStep(t *testing.T, conn store.LegacyDB) (*db.Step, *workflow.Step) {
 	t.Helper()
 
 	res, err := conn.Exec(
@@ -398,7 +474,7 @@ func seedVoteStep(t *testing.T, conn *sql.DB) (*db.Step, *workflow.Step) {
 // step at the SAME instance string, is exactly the shape that collided under
 // the old run-only idempotency key.
 func seedVoteStepInRun(
-	t *testing.T, conn *sql.DB, runID, wfID int64, instance string,
+	t *testing.T, conn store.LegacyDB, runID, wfID int64, instance string,
 ) *db.Step {
 	t.Helper()
 

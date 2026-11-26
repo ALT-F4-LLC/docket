@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -11,9 +10,10 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/ALT-F4-LLC/docket/internal/watch"
 	"github.com/spf13/cobra"
 )
@@ -54,29 +54,29 @@ func watchable(cmd *cobra.Command, args []string, run func(*cobra.Command, []str
 	return run(cmd, args, getWriter(cmd))
 }
 
-// issueArg parses an issue ID out of a command-line source (an args[]
-// element or a flag value) and wraps a parse failure in the VALIDATION_ERROR
-// every call site returns today.
-//
-// The source is passed as a string rather than an index or flag name because
-// call sites disagree on where the ID comes from — args[0], args[2], or a
-// --issue flag — and a single parameter that already holds the raw text
-// covers all three without the helper needing to know which.
-func issueArg(source string) (int, error) {
-	id, err := model.ParseID(source)
-	if err != nil {
-		return 0, cmdErr(fmt.Errorf("invalid issue ID: %w", err), output.ErrValidation)
-	}
-	return id, nil
+// fromVerb carries a verb call's result across to the CLI, re-coding a
+// *verb.Error as the *CmdError Execute renders.
+func fromVerb[T any](v T, err error) (T, error) {
+	return v, verbErr(err)
 }
 
-// notFound re-wraps db.ErrNotFound as the NOT_FOUND error every call site
+// verbErr re-codes a *verb.Error as a *CmdError with the same code and cause.
+// Any other error, nil included, passes through unchanged.
+func verbErr(err error) error {
+	var ve *verb.Error
+	if errors.As(err, &ve) {
+		return cmdErr(ve.Err, ve.Code)
+	}
+	return err
+}
+
+// notFound re-wraps store.ErrNotFound as the NOT_FOUND error every call site
 // reports with its own label, and returns nil for any other error so the
 // caller's existing fallback (typically a generic ErrGeneral wrap) still
 // applies unchanged.
 //
-// It mirrors leaseError and casError's shape (token.go, ifversion.go),
-// including their (err, label) parameter order: a dispatcher that returns a
+// It mirrors verb.LeaseError and verb.CASError's shape, including their
+// (err, label) parameter order: a dispatcher that returns a
 // *CmdError on the conditions it recognizes and nil otherwise, so a call
 // site reads as
 //
@@ -85,7 +85,7 @@ func issueArg(source string) (int, error) {
 //	}
 //	return cmdErr(fmt.Errorf("fetching issue: %w", err), output.ErrGeneral)
 func notFound(err error, label string) error {
-	if errors.Is(err, db.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
 		return cmdErr(fmt.Errorf("%s not found", label), output.ErrNotFound)
 	}
 	return nil
@@ -96,8 +96,8 @@ func notFound(err error, label string) error {
 // carrying label when the issue does not exist, and a generic ErrGeneral wrap
 // for anything else. label matches whatever text each call site already
 // passed to notFound, so error text is unchanged at every site.
-func getIssueOrErr(conn *sql.DB, id int, label string) (*model.Issue, error) {
-	issue, err := db.GetIssue(conn, id)
+func getIssueOrErr(conn store.LegacyDB, id int, label string) (*model.Issue, error) {
+	issue, err := store.StoreOn(conn).GetIssue(id)
 	if err != nil {
 		if e := notFound(err, label); e != nil {
 			return nil, e
@@ -110,8 +110,8 @@ func getIssueOrErr(conn *sql.DB, id int, label string) (*model.Issue, error) {
 // projectLabel renders a project for a refusal message: the row's name when it
 // has one, always with the numeric id — names are display-only, so the id is
 // what an operator can act on (`docket project list` speaks both).
-func projectLabel(conn *sql.DB, id int) string {
-	if p, err := db.GetProject(conn, id); err == nil && p.Name != "" {
+func projectLabel(conn store.LegacyDB, id int) string {
+	if p, err := store.StoreOn(conn).GetProject(id); err == nil && p.Name != "" {
 		return fmt.Sprintf("project %q (id %d)", p.Name, p.ID)
 	}
 	return fmt.Sprintf("project %d", id)
@@ -131,7 +131,7 @@ func projectLabel(conn *sql.DB, id int) string {
 // created in) — the comparison is issue-to-issue, never against the invoking
 // cwd, so editing another project's issue by id still reparents freely within
 // that issue's own project.
-func resolveParentIssue(conn *sql.DB, ref string, childProjectID int) (*model.Issue, error) {
+func resolveParentIssue(conn store.LegacyDB, ref string, childProjectID int) (*model.Issue, error) {
 	pid, err := model.ParseID(ref)
 	if err != nil {
 		return nil, cmdErr(fmt.Errorf("invalid parent ID: %w", err), output.ErrValidation)
@@ -151,40 +151,28 @@ func resolveParentIssue(conn *sql.DB, ref string, childProjectID int) (*model.Is
 	return parent, nil
 }
 
-// parseRunFlag parses a --run reference already read from a flag, wrapping a
-// malformed reference in the VALIDATION_ERROR every --run parser reports.
-// It holds the one piece of logic dispatchRunID, optionalRunFlag, and
-// requiredRunFlag shared byte-for-byte; each keeps its own handling of an
-// EMPTY ref (required vs. optional vs. falling through to ParseRunID's own
-// error), which is what actually differs between the three.
-func parseRunFlag(ref string) (int, error) {
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return 0, cmdErr(fmt.Errorf("invalid run ID: %w", err), output.ErrValidation)
-	}
-	return runID, nil
-}
-
 // hydrateIssueAssociations fills an issue's labels, files, and docs from their
-// join tables. db.GetIssue reads the issues row alone, so a struct straight
+// join tables. GetIssue reads the issues row alone, so a struct straight
 // out of it renders "labels":[] no matter what is linked — which reads as a
 // silent drop when the caller just supplied -l (DKT-240). Every command that
 // renders a refetched issue as its result payload runs this first, so what is
 // echoed back is what is stored.
-func hydrateIssueAssociations(conn *sql.DB, issue *model.Issue) error {
-	labels, err := db.GetIssueLabels(conn, issue.ID)
+func hydrateIssueAssociations(conn store.LegacyDB, issue *model.Issue) error {
+	st := store.StoreOn(conn)
+
+	labels, err := st.GetIssueLabels(issue.ID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching labels: %w", err), output.ErrGeneral)
 	}
 	issue.Labels = labels
 
-	files, err := db.GetIssueFiles(conn, issue.ID)
+	files, err := st.GetIssueFiles(issue.ID)
 	if err != nil {
 		return cmdErr(fmt.Errorf("fetching files: %w", err), output.ErrGeneral)
 	}
 	issue.Files = files
 
-	if err := db.HydrateDocs(conn, []*model.Issue{issue}); err != nil {
+	if err := st.HydrateDocs([]*model.Issue{issue}); err != nil {
 		return cmdErr(fmt.Errorf("fetching docs: %w", err), output.ErrGeneral)
 	}
 	return nil

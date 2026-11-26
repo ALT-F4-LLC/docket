@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -59,52 +59,34 @@ business, and core attaches no denomination to it.`,
 }
 
 func runRunBudget(cmd *cobra.Command, ref string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(ref)
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
-	}
-
-	// The READ form. Bare `run budget RUN-N` answers the question an operator
-	// asks before deciding what to set it to, so they do not have to run a
-	// report to find out what the run has spent.
-	if !cmd.Flags().Changed("set") {
-		result, err := engine.GetRunBudget(conn, runID)
+	// The READ form, without --set. Bare `run budget RUN-N` answers the
+	// question an operator asks before deciding what to set it to, so they do
+	// not have to run a report to find out what the run has spent.
+	in := verb.RunBudgetInput{Run: ref}
+	if cmd.Flags().Changed("set") {
+		budget, err := cmd.Flags().GetFloat64("set")
 		if err != nil {
-			return runErr(err)
+			return cmdErr(err, output.ErrValidation)
 		}
-		return emitRunBudget(w, result, "")
+		in.Set = &budget
+		in.Reason, _ = cmd.Flags().GetString("reason")
+		in.IfVersion = ifVersionFlagValue(cmd)
 	}
 
-	budget, err := cmd.Flags().GetFloat64("set")
+	res, err := verb.RunBudget(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+		return verbErr(err)
 	}
-	reason, _ := cmd.Flags().GetString("reason")
-
-	ifVersion, err := ifVersionOf(cmd)
-	if err != nil {
-		return err
+	if in.Set == nil {
+		return emitRunBudget(w, res.Budget, "")
 	}
 
-	result, err := engine.SetRunBudget(
-		conn, runID, budget, reason, ifVersion, model.NowMS())
-	if err != nil {
-		// A CAS mismatch is CONFLICT and a missing row is NOT_FOUND, mapped by
-		// the same helper every other `--if-version` verb uses — so the code a
-		// script tests for is the same one it already handles elsewhere.
-		if mapped := casError(err, model.FormatRunID(runID)); mapped != nil {
-			return mapped
-		}
-		return runErr(err)
+	message := fmt.Sprintf("%s budget set to %s", res.Budget.Run, formatCap(res.Budget.Budget))
+	if in.Reason != "" {
+		message += ": " + in.Reason
 	}
-
-	message := fmt.Sprintf("%s budget set to %s", result.Run, formatCap(result.Budget))
-	if reason != "" {
-		message += ": " + reason
-	}
-	return emitRunBudget(w, result, message)
+	return emitRunBudget(w, res.Budget, message)
 }
 
 func emitRunBudget(w *output.Writer, b *engine.RunBudget, message string) error {

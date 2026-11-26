@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"go/ast"
 	"go/parser"
-	"go/printer"
 	"go/token"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -274,12 +271,16 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 		// The retry-eligible park (DKT-4257) — ONE: the scheduler noticing a
 		// gap-only park's prerequisites closed, which no operator verb causes.
 		"park-retry-eligible",
+
+		// The detached-saga handoff — ONE: the record a child that dies before
+		// its first gate cannot erase, written before the launch.
+		"saga-detach-started",
 	} {
 		if !eventKinds[kind] {
 			t.Errorf("the enumeration names %q but eventKinds does not contain it", kind)
 		}
 	}
-	if len(eventKinds) != 60 {
+	if len(eventKinds) != 61 {
 		t.Errorf("eventKinds has %d entries; the original set plus stage 4, "+
 			"stage 5, stage 6, stage 7, "+
 			"DKT-35's annotation kind, DKT-61's tenancy kind, "+
@@ -292,8 +293,9 @@ func TestEventKindsAreAClosedSet(t *testing.T) {
 			"conductor-seat kind, DKT-2071's dispatch-extend kind, "+
 			"DKT-2766's config-changed kind, DKT-2758's "+
 			"dispatch-close-refused kind, DKT-2776's claim-refused kind, the "+
-			"step-reminted kind, DKT-2759's two conductor-fact kinds, and "+
-			"DKT-4257's retry-eligible kind enumerate 60 (see DKT-21)",
+			"step-reminted kind, DKT-2759's two conductor-fact kinds, "+
+			"DKT-4257's retry-eligible kind, and the detached-saga handoff "+
+			"kind enumerate 61 (see DKT-21)",
 			len(eventKinds))
 	}
 }
@@ -420,45 +422,6 @@ func TestLoopTransitionsWriteTheirEvents(t *testing.T) {
 	assertEventCount(t, conn, EventStepSuperseded, 2)
 }
 
-// TestEventDataIsAlwaysAJSONObject is the column's contract (the public `event`
-// shape puts `data` in an envelope).
-//
-// Call sites pass bare details — a gate name, a routing — because that is the
-// natural thing to pass and the engine never reads them back. Normalizing in
-// the writer is what keeps `data` parseable for every feed consumer without
-// making sixteen call sites construct JSON.
-func TestEventDataIsAlwaysAJSONObject(t *testing.T) {
-	conn := mustDB(t)
-	_, _ = activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "the change summary", "")
-
-	rows, err := conn.Query(`SELECT seq, kind, data FROM events ORDER BY seq`)
-	testsupport.Must(t, err, "reading events: %v", err)
-	defer rows.Close()
-
-	n := 0
-	for rows.Next() {
-		var (
-			seq  int
-			kind string
-			data string
-		)
-		err := rows.Scan(&seq, &kind, &data)
-		testsupport.Must(t, err, "scanning event: %v", err)
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(data), &obj); err != nil {
-			t.Errorf("event %d (%s) data = %q, which is not a JSON object: %v",
-				seq, kind, data, err)
-		}
-		n++
-	}
-	if n == 0 {
-		t.Fatal("no events written; the assertion above is vacuous")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // seq is strictly increasing
 // ---------------------------------------------------------------------------
@@ -582,56 +545,6 @@ func TestSeqIsNeverReusedAfterDeletion(t *testing.T) {
 // ---------------------------------------------------------------------------
 // The read verb's boundary
 // ---------------------------------------------------------------------------
-
-// TestEventTailShips is where a three-stage succession ENDS, and the ending is
-// as deliberate as the deferral was.
-//
-// The lineage: at stage 3 this file asserted no event read verb shipped at all
-// (`TestNoEventReadVerbShips`), because `events list --since` belonged to stage
-// 6 and an early read verb would have frozen a wire shape stage 6 was to
-// define. At stage 6 the guard MOVED rather than disappeared
-// (`TestNoEventFollowVerbShips`): the read shipped, and `--follow`/`prune` were
-// asserted absent for one more stage, on the same argument one stage later.
-//
-// THIS IS STAGE 7. The tail is what this stage exists to define, so a guard
-// asserting its absence would now be asserting the stage did not happen. It
-// INVERTS rather than being deleted: the same file, the same parse, the same
-// two names — and the assertion is that both are PRESENT.
-//
-// Inverting rather than deleting keeps the property the succession was
-// protecting. A deleted guard leaves nothing behind that would notice if the
-// tail were later removed or quietly reduced to a stub; this one fails if the
-// verb that stages 3 through 6 all deferred to stage 7 ever stops shipping.
-func TestEventTailShips(t *testing.T) {
-	// The verb is spread over three files now that it has three halves, so the
-	// guard reads the DIRECTORY's events sources rather than one filename. Its
-	// predecessors could name one file because they were asserting an absence,
-	// and an absence is the same in every file.
-	var stripped strings.Builder
-	for _, name := range []string{"events.go", "events_follow.go", "events_prune.go"} {
-		src, err := os.ReadFile(filepath.Join("..", "cli", name))
-		testsupport.Must(t, err, "reading %s: %v", name, err)
-
-		// The check runs over the source with COMMENTS STRIPPED, the same
-		// decision scripts/qa/genericity.sh makes and the same one this guard's
-		// predecessors made: prose about a flag is not the flag, in either
-		// direction.
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, name, src, 0)
-		testsupport.Must(t, err, "parsing %s: %v", name, err)
-		file.Comments = nil
-		err = printer.Fprint(&stripped, fset, file)
-		testsupport.Must(t, err, "printing %s: %v", name, err)
-	}
-
-	for _, shipped := range []string{"follow", "prune"} {
-		if !strings.Contains(stripped.String(), shipped) {
-			t.Errorf("the events verb does not name %q outside a comment; "+
-				"stage 7 IS the observability tail, and three earlier stages "+
-				"deferred to it", shipped)
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -1,0 +1,2120 @@
+[
+  {
+    "table": "action_results",
+    "column": "action",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "argv",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "action_results",
+    "column": "builtin",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "duration_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "exit",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "action_results",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "ordinal",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "output",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "reason",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "action_results",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "truncated",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "action_results",
+    "column": "verdict",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "activity_log",
+    "column": "changed_by",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "activity_log",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "activity_log",
+    "column": "field_changed",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "activity_log",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "activity_log",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "activity_log",
+    "column": "new_value",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "activity_log",
+    "column": "old_value",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "artifacts",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "payload",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "artifacts",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "artifacts",
+    "column": "stub",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "artifacts",
+    "column": "supersedes",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "comments",
+    "column": "author",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "comments",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "comments",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "comments",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "comments",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "dispatch_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "instance",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "position",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "row_json",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "row_sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "dispatch_rows",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "close_reason",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "dispatches",
+    "column": "closed_at_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "dispatches",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "expires_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "extended_seq",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "opened_seq",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "row_version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "dispatches",
+    "column": "status",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_comments",
+    "column": "author",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "doc_comments",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_comments",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_comments",
+    "column": "doc_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "doc_comments",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "doc_issue_links",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_issue_links",
+    "column": "doc_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "doc_issue_links",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "doc_revisions",
+    "column": "author",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "doc_revisions",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_revisions",
+    "column": "change_kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_revisions",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "doc_revisions",
+    "column": "doc_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "doc_revisions",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "doc_revisions",
+    "column": "revision_number",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "author",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "docs",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "status",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "title",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "type",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "updated_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "docs",
+    "column": "version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "event_low_watermark",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "event_low_watermark",
+    "column": "seq",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "events",
+    "column": "at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "events",
+    "column": "data",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "events",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "events",
+    "column": "kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "events",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "events",
+    "column": "seq",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "events",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "argv",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "covered_steps",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "exit",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "fingerprint",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "gate",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "note",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "origin_step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "reason",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_override_grants",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "argv",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "gate_results",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "duration_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "exit",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "gate_results",
+    "column": "fingerprint",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "gate",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "ordinal",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "output",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "pre",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "reason",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "gate_results",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "stub",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "stub_entry",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "target_sha",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "truncated",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "gate_results",
+    "column": "verdict",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "entity_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "fingerprint",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "key",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "scope",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "idempotency_keys",
+    "column": "seq",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issue_files",
+    "column": "file_path",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issue_files",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issue_labels",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issue_labels",
+    "column": "label_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issue_relations",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issue_relations",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issue_relations",
+    "column": "relation_type",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issue_relations",
+    "column": "source_issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issue_relations",
+    "column": "target_issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "assignee",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "attempt",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "description",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "expires_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "owner",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "parent_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "priority",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "resolution",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "scope_globs",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "size",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "status",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "title",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "token_hash",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "issues",
+    "column": "updated_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "issues",
+    "column": "version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "labels",
+    "column": "color",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "labels",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "labels",
+    "column": "name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "labels",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "labels",
+    "column": "version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "meta",
+    "column": "key",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "meta",
+    "column": "value",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "pins",
+    "column": "content",
+    "type": "BLOB",
+    "nullable": true
+  },
+  {
+    "table": "pins",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "pins",
+    "column": "kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "pins",
+    "column": "ref",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "pins",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "pins",
+    "column": "sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "projects",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "projects",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "projects",
+    "column": "identity",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "projects",
+    "column": "name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "projects",
+    "column": "prefix",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposal_docs",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposal_docs",
+    "column": "doc_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposal_docs",
+    "column": "proposal_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposal_issues",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposal_issues",
+    "column": "proposal_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "created_by",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "proposals",
+    "column": "criticality",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "description",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "domain_tags",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "escalation_reason",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "proposals",
+    "column": "files_changed",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "final_outcome",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "hold_on_dissent",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "rationale",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "required_voters",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "sealed",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "status",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "threshold",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "updated_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "proposals",
+    "column": "weighted_score",
+    "type": "REAL",
+    "nullable": true
+  },
+  {
+    "table": "reap_acks",
+    "column": "acked_at_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "reap_acks",
+    "column": "acked_by",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "reap_acks",
+    "column": "class",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "reap_acks",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "reap_acks",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "reap_acks",
+    "column": "reaped_seq",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "reap_acks",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "reap_acks",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "command",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "ordinal",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "run_fences",
+    "column": "tag",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "run_issues",
+    "column": "body_sha256",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "run_issues",
+    "column": "body_snapshot",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "run_issues",
+    "column": "expanded_at_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "run_issues",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_issues",
+    "column": "issue_snapshot",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "run_issues",
+    "column": "loop_count",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_issues",
+    "column": "loop_grants",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_issues",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_issues",
+    "column": "workflow_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "run_notes",
+    "column": "authority",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "run_notes",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_notes",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_notes",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "run_notes",
+    "column": "text",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "activated_at_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "runs",
+    "column": "branch",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "breach_reason",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "runs",
+    "column": "budget",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "commit_sha",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "conductor_token_hash",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "runs",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "exec_root",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "hostname",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "pause_origin",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "reason",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "runs",
+    "column": "request",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "row_version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "status",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "updated_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "usage_budget",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "runs",
+    "column": "usage_floor",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "builtin",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "deprecated_at_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "schemas",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "ordered",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "row_version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "source_path",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "schemas",
+    "column": "source_sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "schemas",
+    "column": "version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "stale_target_waivers",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "stale_target_waivers",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "stale_target_waivers",
+    "column": "note",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "stale_target_waivers",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "stale_target_waivers",
+    "column": "step_instance",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "stale_target_waivers",
+    "column": "target_sha",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "step_inputs",
+    "column": "artifact_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "step_inputs",
+    "column": "position",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "step_inputs",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "activity_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "attempt",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "attempt_base",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "authority",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "authority_ref",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "claim_phase",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "class",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "context_bytes",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "executor",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "expected_cost",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "expires_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "failed_attempts",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "gate_trail",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "instance",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "issue_id",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "last_claim_end",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "loop_cap",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "loop_latest_verdict",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "loop_rounds_run",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "loop_trigger_step",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "materialized",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "max_attempts",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "metadata",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "ordinal",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "owner",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "park_class",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "park_reason",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "reaped_claims",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "recorded_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "recovery_hash",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "routing",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "row_version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "saga_stage",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "sibling_index",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "started_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "status",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "step_name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "token_hash",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "steps",
+    "column": "updated_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "usage_recorded",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "work_root",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "steps",
+    "column": "workflow_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "argv_sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "entry_name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "gate",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "kind",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "matched",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "prefix",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "trust_cache",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "attempt",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "quantity",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "run_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "source",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "step_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "usage_ledger",
+    "column": "unit",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "vote_usage",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "vote_usage",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "vote_usage",
+    "column": "quantity",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "vote_usage",
+    "column": "source",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "vote_usage",
+    "column": "unit",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "vote_usage",
+    "column": "vote_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "confidence",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "created_at",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "domain_relevance",
+    "type": "REAL",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "findings",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "findings_json",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "votes",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "metadata",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "votes",
+    "column": "proposal_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "summary",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "verdict",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "voter_name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "votes",
+    "column": "voter_role",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "body",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "created_at_ms",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "deprecated_at_ms",
+    "type": "INTEGER",
+    "nullable": true
+  },
+  {
+    "table": "workflows",
+    "column": "description",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "workflows",
+    "column": "id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "name",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "parsed",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "project_id",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "row_version",
+    "type": "INTEGER",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "source_path",
+    "type": "TEXT",
+    "nullable": true
+  },
+  {
+    "table": "workflows",
+    "column": "source_sha256",
+    "type": "TEXT",
+    "nullable": false
+  },
+  {
+    "table": "workflows",
+    "column": "version",
+    "type": "INTEGER",
+    "nullable": false
+  }
+]

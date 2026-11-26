@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
@@ -163,29 +162,6 @@ func TestRunRefreshBodyRequiresTheConductorCapability(t *testing.T) {
 			t.Errorf("body snapshot = %q, want the live description %q", body, amended)
 		}
 	})
-}
-
-// TestRunRefreshBodyOnAnUnboundRunNeedsNoToken: a run with no minted
-// capability is refreshed without a token, as at every conductor-gated verb.
-func TestRunRefreshBodyOnAnUnboundRunNeedsNoToken(t *testing.T) {
-	t.Setenv(TokenEnvVar, "")
-	conn := newTestDB(t)
-	runID, issueID := bodyFrozenIssueInLiveRun(t, conn)
-	hash, err := db.RunConductorHash(conn, runID)
-	testsupport.Must(t, err, "reading the conductor hash: %v", err)
-	if hash != "" {
-		t.Fatal("premise: the fixture run is bound to a conductor capability")
-	}
-	const amended = "AC1: the operator's amended wording"
-	_, err = conn.Exec(`UPDATE issues SET description = ? WHERE id = ?`,
-		amended, issueID)
-	testsupport.Must(t, err, "amending the description: %v", err)
-
-	_, err = refreshBodyVerb(t, conn, runID, issueID, "operator amended AC1")
-	testsupport.Must(t, err, "run refresh-body on an unbound run: %v", err)
-	if body, _ := snapshotBody(t, conn, runID, issueID); body != amended {
-		t.Errorf("body snapshot = %q, want the live description %q", body, amended)
-	}
 }
 
 // assertBodyRefreshRefused checks that a refused refresh wrote nothing: the

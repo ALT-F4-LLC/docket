@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -108,7 +108,7 @@ func runErr(err error) error {
 		}
 	}
 	switch {
-	case errors.Is(err, db.ErrRunNotFound), errors.Is(err, db.ErrNotFound):
+	case errors.Is(err, store.ErrRunNotFound), errors.Is(err, store.ErrNotFound):
 		return cmdErr(err, output.ErrNotFound)
 	default:
 		return cmdErr(err, output.ErrGeneral)

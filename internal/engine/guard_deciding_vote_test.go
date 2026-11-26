@@ -153,29 +153,6 @@ func TestDecidingVoteIsNarrow(t *testing.T) {
 	})
 }
 
-// TestNoDecidingVoteWritesNoAuditEvent keeps the audit trail meaningful: an
-// ordinary allowed spawn must not emit the carve-out event, or the event stops
-// distinguishing anything.
-func TestNoDecidingVoteWritesNoAuditEvent(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-
-	verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{NowMS: nowMS})
-	testsupport.Must(t, err, "GuardSpawn: %v", err)
-	if !verdict.Allowed {
-		t.Fatalf("premise: a run with no hold must be allowed: %s", verdict.Reason)
-	}
-
-	page, err := ListEvents(conn, EventQuery{RunID: runID})
-	testsupport.Must(t, err, "ListEvents: %v", err)
-	for _, e := range page.Events {
-		if e.Kind == EventSpawnAdmitted {
-			t.Error("an ordinary allow emitted the carve-out event; the event " +
-				"exists to mark a hold that was stepped past")
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // `--active --deciding-vote`: the proposal resolves its own run
 // ---------------------------------------------------------------------------

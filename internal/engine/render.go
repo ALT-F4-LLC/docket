@@ -2,15 +2,14 @@ package engine
 
 import (
 	"bytes"
-	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"os"
 	"text/template"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -121,12 +120,19 @@ type RenderResult struct {
 //
 // `templatePath` is `--template F`, or "" for the shipped default.
 func RenderStep(
-	conn *sql.DB, stepID int, templatePath string, nowMS int64,
+	conn store.LegacyDB, stepID int, templatePath string, nowMS int64,
 ) (*RenderResult, error) {
 	return RenderStepAs(conn, stepID, templatePath, "", nowMS)
 }
 
-// RenderStepAs is RenderStep with the `{executor}` substitution resolved to a
+// RenderStepAs is RenderStepAsStore on store.StoreOn(conn).
+func RenderStepAs(
+	conn store.LegacyDB, stepID int, templatePath, executor string, nowMS int64,
+) (*RenderResult, error) {
+	return RenderStepAsStore(store.StoreOn(conn), stepID, templatePath, executor, nowMS)
+}
+
+// RenderStepAsStore is RenderStep with the `{executor}` substitution resolved to a
 // caller-supplied hint (DKT-70).
 //
 // The declared hint is a DECLARATION, and some instances resolve it further
@@ -148,9 +154,13 @@ func RenderStep(
 // An empty executor is the declared behavior, unchanged. The override also
 // lands on the rendered step row's `executor`, so the packet's `target:`
 // line names who the work is actually for.
-func RenderStepAs(
-	conn *sql.DB, stepID int, templatePath, executor string, nowMS int64,
+func RenderStepAsStore(
+	storage store.Store, stepID int, templatePath, executor string, nowMS int64,
 ) (*RenderResult, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	bundle, err := ReadContext(conn, stepID, nowMS)
 	if err != nil {
 		return nil, err
@@ -159,7 +169,7 @@ func RenderStepAs(
 		bundle.Step.Executor = executor
 	}
 
-	step, err := db.GetStep(conn, stepID)
+	step, err := store.StoreOn(conn).GetStep(stepID)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +229,7 @@ func RenderStepAs(
 	// the diff names, never the live checkout's working tree, so the same step
 	// renders the same packet however the shared checkout moves on.
 	execRoot, runCommit := runExecRoot(conn, step.RunID), ""
-	if run, err := db.GetRun(conn, step.RunID); err == nil {
+	if run, err := store.StoreOn(conn).GetRun(step.RunID); err == nil {
 		runCommit = run.CommitSHA
 	}
 	blobs := newBlobHeaderReader(execRoot)
@@ -263,7 +273,7 @@ func RenderStepAs(
 // two sibling pin reads above already propagate; a packet rendered over an
 // unreadable pin set would carry a contract line missing for a reason nothing
 // reports.
-func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) {
+func payloadRequiredKeys(conn store.LegacyDB, runID int, ref string) ([]string, error) {
 	if ref == "" {
 		return nil, nil
 	}
@@ -298,7 +308,7 @@ func payloadRequiredKeys(conn *sql.DB, runID int, ref string) ([]string, error) 
 // re-register with differing bytes and an `--if-version` mismatch, so
 // the taxonomy stays consistent and no new code is introduced.
 func templateSource(
-	conn *sql.DB, runID int, path string,
+	conn store.LegacyDB, runID int, path string,
 ) (source, name string, pinned bool, err error) {
 	if path == "" {
 		// The embedded default ships in the binary, so there is no file to
@@ -306,7 +316,7 @@ func templateSource(
 		return defaultPacket, "default", true, nil
 	}
 
-	pins, err := db.ListPins(conn, runID)
+	pins, err := store.StoreOn(conn).ListPins(runID)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -321,7 +331,7 @@ func templateSource(
 	}
 	var pinnedHash string
 	for _, p := range pins {
-		if p.Kind == db.PinKindFile && wanted[p.Ref] {
+		if p.Kind == store.PinKindFile && wanted[p.Ref] {
 			pinnedHash = p.SHA256
 			break
 		}

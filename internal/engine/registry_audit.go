@@ -1,14 +1,13 @@
 package engine
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"sort"
 	"sync"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // CROSS-PROJECT REGISTRY DRIFT (DKT-614): auto-registration adopts the corpus's
@@ -292,17 +291,29 @@ type RegistryAuditOptions struct {
 	ProjectID int
 }
 
-// AuditRegistries compares every project's registered workflow and schema rows
+// AuditRegistries is AuditRegistriesStore on store.StoreOn(conn).
+func AuditRegistries(
+	conn store.LegacyDB, index *CorpusIndex, opts RegistryAuditOptions,
+) (*RegistryAudit, error) {
+	return AuditRegistriesStore(store.StoreOn(conn), index, opts)
+}
+
+// AuditRegistriesStore compares every project's registered workflow and schema rows
 // against ONE scan of the shared corpus.
 //
 // The index is passed in rather than scanned here so the CALLER owns the two
 // refusals that precede any verdict — no root exists, and a root that would not
 // scan — and can word them for an operator. A report that silently classified
 // against an empty index would name every registration in the store.
-func AuditRegistries(
-	conn *sql.DB, index *CorpusIndex, opts RegistryAuditOptions,
+func AuditRegistriesStore(
+	storage store.Store, index *CorpusIndex, opts RegistryAuditOptions,
 ) (*RegistryAudit, error) {
-	projects, err := db.ListProjects(conn)
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	st := store.StoreOn(conn)
+	projects, err := st.ListProjects()
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
 	}
@@ -312,7 +323,7 @@ func AuditRegistries(
 		if opts.ProjectID != 0 && p.ID != opts.ProjectID {
 			continue
 		}
-		one, err := auditProject(conn, index, p)
+		one, err := auditProject(st, index, p)
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +344,7 @@ type registered struct {
 }
 
 func auditProject(
-	conn *sql.DB, index *CorpusIndex, p *model.Project,
+	st store.Store, index *CorpusIndex, p *model.Project,
 ) (*ProjectRegistryAudit, error) {
 	out := &ProjectRegistryAudit{
 		ProjectID: p.ID, Project: p.Name, Prefix: p.Prefix, Identity: p.Identity,
@@ -344,7 +355,7 @@ func auditProject(
 	// asking what the registry HOLDS. An orphan whose versions were all retired
 	// last week is a finished cleanup, and reporting it as finished is more use
 	// than not reporting it at all.
-	workflows, _, err := db.ListWorkflows(conn, db.WorkflowListOptions{ProjectID: p.ID})
+	workflows, _, err := st.ListWorkflows(store.WorkflowListOptions{ProjectID: p.ID})
 	if err != nil {
 		return nil, fmt.Errorf("listing workflows for project %d: %w", p.ID, err)
 	}
@@ -354,7 +365,7 @@ func auditProject(
 	}
 	out.Compared += classify(out, index, RegistrationKindWorkflow, byName)
 
-	schemas, _, err := db.ListSchemas(conn, db.SchemaListOptions{ProjectID: p.ID})
+	schemas, _, err := st.ListSchemas(store.SchemaListOptions{ProjectID: p.ID})
 	if err != nil {
 		return nil, fmt.Errorf("listing schemas for project %d: %w", p.ID, err)
 	}

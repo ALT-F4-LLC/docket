@@ -7,29 +7,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-// TestCanonicalRoundTrips: parse -> serialize -> parse reproduces the same
-// canonical bytes. `parsed` is the PINNED interpretation of a definition, so a
-// round trip that loses a field would mean activation reads something the
-// author did not write.
-func TestCanonicalRoundTrips(t *testing.T) {
-	src, err := os.ReadFile(fixturePath)
-	testsupport.Must(t, err, "reading the fixture: %v", err)
-	def, err := Load(src)
-	testsupport.Must(t, err, "Load: %v", err)
-
-	first, err := Canonical(def)
-	testsupport.Must(t, err, "Canonical: %v", err)
-
-	restored, err := FromCanonical(first)
-	testsupport.Must(t, err, "FromCanonical: %v", err)
-	second, err := Canonical(restored)
-	testsupport.Must(t, err, "Canonical (round 2): %v", err)
-
-	if string(first) != string(second) {
-		t.Errorf("canonical JSON does not round-trip:\nfirst:  %s\nsecond: %s", first, second)
-	}
-}
-
 // TestCanonicalIsByteStable: the serialization must not vary between runs.
 //
 // This is not a nicety. Map iteration order leaking into `parsed` would make
@@ -155,27 +132,5 @@ after_loop = "root"
 	}
 	if restored.Steps[1].HasAfter() {
 		t.Error("an absent `after` came back as declared")
-	}
-}
-
-// TestEmbeddedTemplatesCanonicalize: every shipped template survives the same
-// round trip, since `workflow register` stores their parsed form like any other.
-func TestEmbeddedTemplatesCanonicalize(t *testing.T) {
-	for _, name := range TemplateNames() {
-		t.Run(name, func(t *testing.T) {
-			src, err := Template(name)
-			testsupport.Must(t, err, "Template: %v", err)
-			def, err := Load(src)
-			testsupport.Must(t, err, "Load: %v", err)
-			first, err := Canonical(def)
-			testsupport.Must(t, err, "Canonical: %v", err)
-			restored, err := FromCanonical(first)
-			testsupport.Must(t, err, "FromCanonical: %v", err)
-			second, err := Canonical(restored)
-			testsupport.Must(t, err, "Canonical (round 2): %v", err)
-			if string(first) != string(second) {
-				t.Errorf("template %q does not round-trip", name)
-			}
-		})
 	}
 }

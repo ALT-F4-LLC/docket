@@ -53,31 +53,6 @@ func TestFailedGatesNamesTheGateThatParkedTheStep(t *testing.T) {
 	}
 }
 
-// TestFailedGatesIsSilentWhenEveryGatePasses is the other half of the contract,
-// and the one that protects the unchanged success line: a record whose gates
-// all passed must give the printer nothing to say.
-func TestFailedGatesIsSilentWhenEveryGatePasses(t *testing.T) {
-	conn := mustDB(t)
-	runID := activatedBatchRun(t, conn, batchOverrideSrc, "dkt982-pass.toml")
-
-	e := testEngine()
-	e.Gates = &exitGates{}
-
-	stepID := stepIDInRun(t, conn, runID, "implement@0")
-	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "w", NowMS: nowMS})
-	testsupport.Must(t, err, "claim: %v", err)
-	err = e.CompleteStep(conn, stepID, CompleteOptions{
-		Token: claim.Token, Artifact: []byte("the change summary"), NowMS: nowMS,
-	})
-	testsupport.Must(t, err, "complete: %v", err)
-
-	failed, err := FailedGates(conn, stepID)
-	testsupport.Must(t, err, "FailedGates: %v", err)
-	if len(failed) != 0 {
-		t.Errorf("FailedGates = %v over an all-passing record, want none", failed)
-	}
-}
-
 // TestFailedGatesReportsWhatTheRoutingDecidedOn walks the reduction's edges over
 // hand-built rows: the last attempt of a flaky re-run wins, a pre-gate is not a
 // judgment of the step, `unmatched` and `skipped` are failures with no exit

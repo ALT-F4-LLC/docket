@@ -14,7 +14,7 @@ import (
 
 func mustMigrated(t *testing.T) *sql.DB {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	err := Initialize(db)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = Migrate(db)
@@ -149,20 +149,6 @@ func TestInsertWorkflowConflictsOnDifferingBytes(t *testing.T) {
 	testsupport.Must(t, err, "GetWorkflow: %v", err)
 	if got.Body != "body one" {
 		t.Errorf("the refused registration overwrote the body: %q", got.Body)
-	}
-}
-
-// TestInsertWorkflowAllowsANewVersion: freezing name@version does not freeze
-// the name — a new version is an ordinary registration.
-func TestInsertWorkflowAllowsANewVersion(t *testing.T) {
-	db := mustMigrated(t)
-
-	_, _, err := InsertWorkflow(db, testWorkflow("w", 1, "one"), 1000)
-	testsupport.Must(t, err, "v1: %v", err)
-	if _, created, err := InsertWorkflow(db, testWorkflow("w", 2, "two"), 2000); err != nil {
-		t.Fatalf("v2: %v", err)
-	} else if !created {
-		t.Error("a new version reports created = false")
 	}
 }
 
@@ -327,17 +313,5 @@ func TestListWorkflowsExcludeDeprecatedDropsRetiredVersionsFromRowsAndTotal(t *t
 	if total != 2 || len(items) != 2 {
 		t.Errorf("the zero value filtered rows it was never asked to: %d/%d %+v",
 			len(items), total, items)
-	}
-}
-
-// TestWorkflowsTableIsDormantUntilRegistered is the phase-1 dormancy claim at
-// the storage layer.
-func TestWorkflowsTableIsDormantUntilRegistered(t *testing.T) {
-	db := mustMigrated(t)
-
-	items, total, err := ListWorkflows(db, WorkflowListOptions{})
-	testsupport.Must(t, err, "ListWorkflows: %v", err)
-	if total != 0 || len(items) != 0 {
-		t.Errorf("a repo that never registered a workflow reports %d/%d", len(items), total)
 	}
 }

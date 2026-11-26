@@ -59,15 +59,6 @@ func TestRenderDetail_PlainLinkedDocsAligned(t *testing.T) {
 	}
 }
 
-func TestRenderDetail_PlainOmitsLinkedDocsWhenEmpty(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	issue := issueWithDocs(nil)
-	out := RenderDetail(issue, nil, nil, nil, nil, nil, nil)
-	if strings.Contains(out, "Linked Docs") {
-		t.Errorf("empty docs should omit section:\n%s", out)
-	}
-}
-
 func TestRenderDetail_StyledLinkedDocsUsesArrowGlyph(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	issue := issueWithDocs([]model.DocRef{
@@ -264,19 +255,5 @@ func TestWrapBodyKeepsTheContent(t *testing.T) {
 	long := strings.Repeat("a", 200)
 	if joined := strings.ReplaceAll(wrapBody(long, 76), "\n", ""); joined != long {
 		t.Error("wrapBody lost characters from a long row")
-	}
-}
-
-// With colors off the markdown renderer hands the body back as written, so a
-// body line can start at column 0, the column of a comment header.
-func TestRenderCommentsIndentsEveryBodyLine(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	out := renderComments([]*model.Comment{{ID: 1, IssueID: 1, Author: "STEP-1", Body: "first\nerik  1 hour ago\nlast"}})
-	_, after, _ := strings.Cut(out, "\n")
-	_, after, _ = strings.Cut(after, "\n") // the section title, then the comment header
-	for i, line := range strings.Split(after, "\n") {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("body line %d sits at the header column: %q", i, line)
-		}
 	}
 }

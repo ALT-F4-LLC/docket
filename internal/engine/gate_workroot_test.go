@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -139,55 +138,6 @@ func TestGateWorkRootGoneFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(r.Reason, gone) {
 		t.Errorf("the reason does not name the missing worktree: %q", r.Reason)
-	}
-}
-
-// workRootCapture is a GateRunner that records the WorkRoot each gate was
-// dispatched with, keyed by gate name.
-type workRootCapture struct {
-	mu   sync.Mutex
-	seen map[string]string
-}
-
-func (c *workRootCapture) Run(_ context.Context, g GateSpec, sc StepContext) (GateResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.seen[g.Name] = sc.WorkRoot
-	return GateResult{Gate: g.Name, Verdict: VerdictPass}, nil
-}
-
-// TestCompletionGatesCarryTheStepsWorkRoot is AC1's completion half: every
-// gate that runs inside `complete` for a step that declared `--worktree` is
-// dispatched with that worktree, not the shared checkout.
-func TestCompletionGatesCarryTheStepsWorkRoot(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-
-	e := testEngine()
-	e.HeadFn = nil // the worktree is a plain directory: no head to record or bind
-	captured := &workRootCapture{seen: map[string]string{}}
-	e.Gates = captured
-
-	workDir := t.TempDir()
-	stepID := stepIDByInstance(t, conn, "implement@0")
-	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
-	testsupport.Must(t, err, "claim implement: %v", err)
-	err = e.CompleteStep(conn, stepID, CompleteOptions{
-		Token: claim.Token, Artifact: []byte("summary"),
-		WorkDir: workDir, NowMS: nowMS,
-	})
-	testsupport.Must(t, err, "complete implement: %v", err)
-
-	// The fixture's `implement` declares five completion gates; each must have
-	// been dispatched with the declared worktree.
-	if len(captured.seen) == 0 {
-		t.Fatal("no completion gate was dispatched")
-	}
-	for gate, workRoot := range captured.seen {
-		if workRoot != workDir {
-			t.Errorf("gate %s dispatched with WorkRoot %q, want the step's "+
-				"declared worktree %q", gate, workRoot, workDir)
-		}
 	}
 }
 

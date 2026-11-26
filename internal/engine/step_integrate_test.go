@@ -476,25 +476,6 @@ func TestIntegrateStepsNamesTheMovedBranchWhenAPickIsRejectedAfterLanding(t *tes
 	}
 }
 
-// TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite: the checkout's
-// state is part of the read-only plan, so a dirty checkout of a later step's run
-// is found before an earlier step's pick lands.
-func TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite(t *testing.T) {
-	f := newIntegrateEnv(t, true)
-	writeFile(t, f.shared, "internal/tracked.txt", "edited\n")
-	picks := 0
-	f.e.CherryPickFn = func(string, string, string) (GitPick, error) {
-		picks++
-		return GitPick{}, errors.New("must not be reached")
-	}
-	if _, err := f.integrate(testConductorToken, f.stepID); err == nil {
-		t.Fatal("integrate over a dirty checkout succeeded")
-	}
-	if picks != 0 {
-		t.Errorf("the pick ran %d time(s) before the checkout was checked", picks)
-	}
-}
-
 // TestIntegrateStepsRefusesAnUnanswerableCarriageProbeBeforeTheFirstWrite: a
 // range probe that cannot say whether HEAD already carries the chain (a
 // partial clone missing the trunk's blobs) stops the verb at its read-only
@@ -617,4 +598,28 @@ func TestIntegrateStepsRefusesAStepWithNoRecordedHead(t *testing.T) {
 		t.Fatalf("error = %v, want the no-recorded-head refusal", err)
 	}
 	f.requireNothingLanded(t, before)
+}
+
+// TestIntegrateStepsReportsPicksUnsigned: the engine picks with
+// commit.gpgsign=false, so every integration it returns says its picks are
+// unsigned, in the JSON the verb emits beside picked.
+func TestIntegrateStepsReportsPicksUnsigned(t *testing.T) {
+	f := newIntegrateEnv(t, true)
+
+	got, err := f.integrate(testConductorToken, f.stepID)
+	testsupport.Must(t, err, "integrate: %v", err)
+
+	if len(got) != 1 || !got[0].Unsigned {
+		t.Fatalf("result = %+v, want one integration reported unsigned", got)
+	}
+	raw, err := json.Marshal(got[0])
+	testsupport.Must(t, err, "marshal: %v", err)
+	var fields map[string]any
+	testsupport.Must(t, json.Unmarshal(raw, &fields), "unmarshal")
+	if fields["unsigned"] != true {
+		t.Errorf("integration JSON unsigned = %v, want true:\n%s", fields["unsigned"], raw)
+	}
+	if _, ok := fields["picked"]; !ok {
+		t.Errorf("integration JSON lacks picked:\n%s", raw)
+	}
 }

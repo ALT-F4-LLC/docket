@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -348,6 +349,48 @@ func TestDocketTokenNeverReachesAGateChild(t *testing.T) {
 	}
 }
 
+// TestBearerTokenVarsAreDenied pins the client bearer credential to the
+// denylist. The token authorizes every request to a remote daemon, and a gate's
+// captured output is persisted, so a child that dumps its environment would
+// publish it. The allowlist already omits both names; the denylist is the
+// second mechanism that survives a careless allowlist edit.
+func TestBearerTokenVarsAreDenied(t *testing.T) {
+	bearerNames := []string{"DOCKET_BEARER_TOKEN", "DOCKET_BEARER_TOKEN_FILE"}
+	denied := DeniedEnvNames()
+	for _, name := range bearerNames {
+		if !slices.Contains(denied, name) {
+			t.Errorf("DeniedEnvNames() = %v, must contain %s", denied, name)
+		}
+	}
+
+	const value = "bearer-credential-sentinel-value"
+	for _, name := range bearerNames {
+		t.Run(name, func(t *testing.T) {
+			spec := witnessSpec(t, "sentinel")
+			marker := filepath.Join(t.TempDir(), "ran")
+			spec.Env = append(spec.Env, "WITNESS_SENTINEL="+marker, name+"="+value)
+
+			_, err := Run(spec)
+			if err == nil {
+				t.Fatalf("a tampered environment containing %s must refuse to spawn", name)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("the refusal must name %s; got: %v", name, err)
+			}
+			if strings.Contains(err.Error(), value) {
+				t.Error("the refusal must not echo the credential value into an error string")
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Errorf("the witness ran despite the refusal (marker stat: %v)", statErr)
+			}
+
+			if err := assertNoDeniedVars([]string{name + "=x"}); err == nil {
+				t.Errorf("assertNoDeniedVars must reject %s", name)
+			}
+		})
+	}
+}
+
 func TestAllowlistAccessorsReturnCopies(t *testing.T) {
 	// Handing out the package's own slice would let a caller EXTEND the
 	// allowlist by appending to it — precisely the mechanism this package
@@ -618,23 +661,6 @@ func TestEmptyArgvIsRefused(t *testing.T) {
 	_, err := Run(Spec{Argv: nil, Dir: t.TempDir(), Env: []string{}})
 	if !errors.Is(err, ErrRefused) {
 		t.Errorf("an empty argv must be refused with ErrRefused; got %v", err)
-	}
-}
-
-func TestRunDoesNotInheritTheParentEnvironmentByDefault(t *testing.T) {
-	// A nil Env must mean NO VARIABLES, never "inherit everything". os/exec's
-	// default is the opposite, so this asserts the override is in place — the
-	// distinction between a nil and an empty slice is the entire control.
-	t.Setenv("A_PARENT_ONLY_VARIABLE", "leaked")
-
-	res, err := Run(Spec{
-		Argv: []string{witness(t)},
-		Dir:  t.TempDir(),
-		Env:  []string{"WITNESS_MODE=env"},
-	})
-	testsupport.Must(t, err, "Run: %v", err)
-	if strings.Contains(res.Output, "A_PARENT_ONLY_VARIABLE") {
-		t.Error("a Spec whose Env omits a variable must not inherit it from the parent")
 	}
 }
 

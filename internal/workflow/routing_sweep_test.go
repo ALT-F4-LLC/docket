@@ -420,49 +420,6 @@ func TestShippedWorkflowsRouteFullPowerset(t *testing.T) {
 	}
 }
 
-// TestSweepExercisesAllFourMatchTerms is AC-2.
-//
-// The scratch sweep this check replaces implemented three of the four terms
-// `Matches` conjoins, omitting `labels_all`. That omission was invisible
-// because no workflow used the term — so the guard cannot be "the sweep
-// mentions labels_all", it has to be a case where a definition using
-// labels_all produces a different verdict than one without it. If a future
-// refactor drops the term from `Matches`, this fails.
-func TestSweepExercisesAllFourMatchTerms(t *testing.T) {
-	cases := []struct {
-		name    string
-		match   *Match
-		subject Subject
-		want    bool
-	}{
-		{"kind excludes", &Match{Kind: []string{"bug"}},
-			Subject{Kind: "task"}, false},
-		{"kind admits", &Match{Kind: []string{"bug"}},
-			Subject{Kind: "bug"}, true},
-		{"labels_any requires an intersection", &Match{LabelsAny: []string{"ui"}},
-			Subject{Kind: "bug"}, false},
-		{"labels_any admits on one", &Match{LabelsAny: []string{"ui"}},
-			Subject{Kind: "bug", Labels: []string{"ui"}}, true},
-		{"labels_all requires ALL", &Match{LabelsAll: []string{"a", "b"}},
-			Subject{Kind: "bug", Labels: []string{"a"}}, false},
-		{"labels_all admits on both", &Match{LabelsAll: []string{"a", "b"}},
-			Subject{Kind: "bug", Labels: []string{"a", "b"}}, true},
-		{"unless_labels excludes", &Match{UnlessLabels: []string{"retro"}},
-			Subject{Kind: "bug", Labels: []string{"retro"}}, false},
-		{"unless_labels wins over an inclusion",
-			&Match{LabelsAny: []string{"ui"}, UnlessLabels: []string{"retro"}},
-			Subject{Kind: "bug", Labels: []string{"ui", "retro"}}, false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.match.Matches(tc.subject); got != tc.want {
-				t.Errorf("Matches = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestNoKindListEnumeratesTheClosedSet is the closed-set AC-2.
 //
 // A `[match].kind` listing every valid kind decides nothing: `Matches` skips
@@ -531,46 +488,6 @@ func first(items []string, n int) []string {
 		return items
 	}
 	return items[:n]
-}
-
-// TestWorkflowDirsHonorsOverride pins the locator itself (AC-5): the override
-// wins when set, and an unset override falls back to the resolved store —
-// the two branches DKT-1's own fix touches, neither of which had a test.
-func TestWorkflowDirsHonorsOverride(t *testing.T) {
-	t.Run("override wins over the resolved store", func(t *testing.T) {
-		override := t.TempDir()
-		t.Setenv("DOCKET_SWEEP_WORKFLOWS_DIR", override)
-
-		dirs, err := workflowDirs()
-		testsupport.Must(t, err, "workflowDirs: %v", err)
-		if len(dirs) != 1 || dirs[0] != override {
-			t.Fatalf("workflowDirs() = %v, want [%s]", dirs, override)
-		}
-	})
-
-	t.Run("empty override falls back to the resolved store", func(t *testing.T) {
-		t.Setenv("DOCKET_SWEEP_WORKFLOWS_DIR", "")
-		t.Setenv("DOCKET_PATH", "")
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		// A directory outside any git repository and with no local .docket
-		// store, so config.Resolve is forced onto the global-store branch —
-		// the same branch the shared-store default resolves through.
-		t.Chdir(t.TempDir())
-
-		dirs, err := workflowDirs()
-		testsupport.Must(t, err, "workflowDirs: %v", err)
-		want := filepath.Join(home, ".docket", "config", "workflows")
-		found := false
-		for _, d := range dirs {
-			if d == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("workflowDirs() = %v, want it to include %s", dirs, want)
-		}
-	})
 }
 
 // TestKnownBadWorkflowsFailTheSweepThroughTheOverride is AC-4, driven

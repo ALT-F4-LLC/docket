@@ -3,10 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
-	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -16,35 +14,22 @@ var docEditCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		w := getWriter(cmd)
-		conn := getDB(cmd)
 
-		id, err := model.ParseDocID(args[0])
-		if err != nil {
-			return cmdErr(fmt.Errorf("invalid doc ID: %w", err), output.ErrValidation)
-		}
-
-		if _, err := db.GetDoc(conn, id); err != nil {
-			if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
-		}
-
-		upd := db.DocUpdate{Author: config.DefaultAuthor()}
+		in := verb.DocEditInput{Doc: args[0]}
 
 		if cmd.Flags().Changed("title") {
 			title, _ := cmd.Flags().GetString("title")
-			upd.Title = &title
+			in.Title = &title
 		}
 
 		if cmd.Flags().Changed("type") {
 			docType, _ := cmd.Flags().GetString("type")
-			upd.Type = &docType
+			in.Type = &docType
 		}
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
-			upd.Status = &status
+			in.Status = &status
 		}
 
 		if cmd.Flags().Changed("description") {
@@ -53,14 +38,18 @@ var docEditCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			upd.Body = &loadedBody
+			in.Body = &loadedBody
 		}
 
-		if upd.Title == nil && upd.Type == nil && upd.Status == nil && upd.Body == nil {
-			doc, err := db.GetDoc(conn, id)
-			if err != nil {
-				return cmdErr(fmt.Errorf("fetching doc: %w", err), output.ErrGeneral)
-			}
+		env := verbEnv(cmd)
+		res, err := verb.DocEdit(cmd.Context(), env, in)
+		recordRegisteredProject(cmd, env, res.Registered)
+		if err != nil {
+			return verbErr(err)
+		}
+
+		doc := res.Doc
+		if !res.Changed {
 			if w.JSONMode {
 				w.Success(doc, "")
 			} else {
@@ -69,29 +58,7 @@ var docEditCmd = &cobra.Command{
 			return nil
 		}
 
-		rev, err := db.UpdateDoc(conn, id, upd)
-		if err != nil {
-			if e := notFound(err, fmt.Sprintf("doc %s", model.FormatDocID(id))); e != nil {
-				return e
-			}
-			return cmdErr(fmt.Errorf("updating doc: %w", err), output.ErrGeneral)
-		}
-
-		doc, err := db.GetDoc(conn, id)
-		if err != nil {
-			return cmdErr(fmt.Errorf("fetching updated doc: %w", err), output.ErrGeneral)
-		}
-
-		if rev == 0 {
-			if w.JSONMode {
-				w.Success(doc, "")
-			} else {
-				w.Info("No changes specified")
-			}
-			return nil
-		}
-
-		w.Success(doc, fmt.Sprintf("Updated %s: %s", model.FormatDocID(id), doc.Title))
+		w.Success(doc, fmt.Sprintf("Updated %s: %s", model.FormatDocID(doc.ID), doc.Title))
 
 		return nil
 	},

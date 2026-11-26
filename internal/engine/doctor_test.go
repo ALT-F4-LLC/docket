@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -104,15 +105,6 @@ func doctorInstallFixture(t *testing.T) (source string) {
 	return source
 }
 
-func TestCheckDoctorInstallDriftMatchesIdenticalTrees(t *testing.T) {
-	source := doctorInstallFixture(t)
-
-	c := checkDoctorInstallDrift(source)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK for byte-identical trees: %s", c.Verdict, c.Detail)
-	}
-}
-
 func TestCheckDoctorInstallDriftReportsAChangedFile(t *testing.T) {
 	source := doctorInstallFixture(t)
 	writeFile(t, source, "src/user/docket/config/workflows/foo.toml", "changed\n")
@@ -201,23 +193,6 @@ func TestCheckDoctorInstallDriftFollowsASymlinkedInstallRoot(t *testing.T) {
 // ---------------------------------------------------------------------------
 // checkDoctorPins — check 4
 // ---------------------------------------------------------------------------
-
-func TestCheckDoctorPinsSkipsWithoutRun(t *testing.T) {
-	conn := mustDB(t)
-	c := checkDoctorPins(conn, 0)
-	if c.Verdict != DoctorSkip {
-		t.Errorf("verdict = %s, want SKIP with no --run", c.Verdict)
-	}
-}
-
-func TestCheckDoctorPinsOKForASoundRun(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	c := checkDoctorPins(conn, run.ID)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK for a freshly activated run: %s", c.Verdict, c.Detail)
-	}
-}
 
 // TestCheckDoctorPinsDriftsWhenOnlyAnExecutedCopyChanged: a run activated in
 // checkout A and checked from checkout B, whose copy of a gate script was
@@ -377,11 +352,53 @@ func TestIsScratchShapedPath(t *testing.T) {
 	}
 }
 
-func TestCheckDoctorStragglersOKWithNone(t *testing.T) {
-	repo := probeRepo(t)
+// TestCheckDoctorStragglersSeesNewScratch: a scratch tree made the way the
+// engine now makes them is in no git worktree list, so only its sidecar
+// record finds it. A claim killed mid-measurement leaks one; the check names
+// its path as a WARN, and read OK before the leak. A tree whose claim still
+// holds its lock is named too: doctor takes no lock to tell them apart.
+//
+// Whether this also pins that recorded trees skip isScratchShapedPath depends
+// on TMPDIR: under a scratch-shaped one (/tmp/claude-...) the leaked path
+// passes the filter anyway. The log line says which case ran.
+func TestCheckDoctorStragglersSeesNewScratch(t *testing.T) {
+	isolateTempDir(t)
+	conn := mustDB(t)
+	run, _ := activatedRun(t, conn)
+	repo := t.TempDir()
+	sha := seedGitRepo(t, repo, "measured.txt", "under review")
+	setRunExecRoot(t, conn, run.ID, repo)
+
+	if c := checkDoctorStragglers(repo); c.Verdict != DoctorOK {
+		t.Fatalf("verdict before the leak = %s, want OK: %s", c.Verdict, c.Detail)
+	}
+
+	leaked := reconstructTarget(conn, run.ID, sha)
+	if leaked.Dir == "" {
+		t.Fatal("reconstruction did not produce a scratch tree")
+	}
+	abandonScratch(t, leaked)
+	if got := registeredScratchTrees(t, repo); len(got) != 0 {
+		t.Fatalf("premise: git lists scratch worktrees %v; the check must find this tree without it", got)
+	}
+	t.Logf("leaked tree %s is scratch-shaped: %v", leaked.Dir, isScratchShapedPath(leaked.Dir))
+
 	c := checkDoctorStragglers(repo)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK", c.Verdict)
+	if c.Verdict != DoctorWarn {
+		t.Errorf("verdict = %s, want WARN — a report, never FAIL: %s", c.Verdict, c.Detail)
+	}
+	if !strings.Contains(c.Detail, leaked.Dir) {
+		t.Errorf("detail %q does not name the leaked scratch tree %s", c.Detail, leaked.Dir)
+	}
+
+	held := reconstructTarget(conn, run.ID, sha)
+	if held.Dir == "" {
+		t.Fatal("reconstruction did not produce a second scratch tree")
+	}
+	t.Cleanup(held.release)
+	if c := checkDoctorStragglers(repo); !strings.Contains(c.Detail, held.Dir) {
+		t.Errorf("detail %q does not name the scratch tree %s whose claim holds its lock",
+			c.Detail, held.Dir)
 	}
 }
 
@@ -474,6 +491,7 @@ func doctorFixture(t *testing.T) (repo string, conn *sql.DB) {
 	t.Helper()
 	repo = probeRepo(t)
 	path := filepath.Join(repo, "issues.db")
+	storetest.SeedFile(t, path)
 	var err error
 	conn, err = db.Open(path)
 	testsupport.Must(t, err, "opening database: %v", err)

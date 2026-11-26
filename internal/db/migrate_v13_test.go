@@ -6,34 +6,10 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 )
 
-// v13 — the vote provenance column. Two obligations, one test each: the
+// v13 — the vote provenance column. Two obligations: the
 // column arrives on a migrated store, and the rewind guard converges a store
 // that carries the v13 STAMP without the v13 SHAPE (the U-case every
 // migration from v5 on pins for itself).
-
-func TestMigrateToV13(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-
-	for _, col := range v13ColumnSentinels {
-		if n := columnCount(t, db, col.table, col.column); n != 1 {
-			t.Errorf("%s.%s missing after migration (count %d)", col.table, col.column, n)
-		}
-	}
-}
 
 // TestV13RewindGuardConvergesAStampedStore is the trap v13ColumnSentinels
 // exists for: a database stamped 13 by a binary built mid-change carries

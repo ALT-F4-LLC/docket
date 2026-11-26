@@ -1,13 +1,12 @@
 package engine
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
+	"github.com/ALT-F4-LLC/docket/internal/store"
 )
 
 // `docket run budget RUN-N --set N` — raise or lower a live cap.
@@ -60,25 +59,35 @@ type RunBudget struct {
 	RowVersion  int     `json:"row_version"`
 }
 
-// SetRunBudget writes a run's cap, event-logged, in one transaction.
+// SetRunBudget is SetRunBudgetStore on store.StoreOn(conn).
+func SetRunBudget(conn store.LegacyDB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+	return SetRunBudgetStore(store.StoreOn(conn), runID, budget, reason, ifVersion, nowMS)
+}
+
+// SetRunBudgetStore writes a run's cap, event-logged, in one transaction.
 //
 // `budget` is the new cap; ZERO MEANS UNLIMITED, the meaning the flag has
 // always carried and the one `budgetSnapshot.unlimited()` enforces. Raising
 // and lowering are the same operation — the verb exists to "raise/lower a
 // live cap", and a verb that refused to lower would be a verb that half exists.
-func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+func SetRunBudgetStore(storage store.Store, runID int, budget float64, reason string, ifVersion *int, nowMS int64) (*RunBudget, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
 	if budget < 0 {
 		return nil, validationErr(
 			"--set must be >= 0, got %g (0 means unlimited)", budget)
 	}
 
-	tx, err := conn.Begin()
+	tx, err := store.BeginSQLiteTx(conn)
 	if err != nil {
 		return nil, fmt.Errorf("setting the budget: %w", err)
 	}
 	defer tx.Rollback()
+	st := store.TxOn(tx)
 
-	run, err := db.GetRunTx(tx, runID)
+	run, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
@@ -93,7 +102,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 			run.Ref(), run.Status)
 	}
 
-	if err := db.SetRunBudgetTx(tx, runID, budget, ifVersion, nowMS); err != nil {
+	if err := st.SetRunBudgetTx(runID, budget, ifVersion, nowMS); err != nil {
 		return nil, err
 	}
 
@@ -104,7 +113,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 	// misled a session into treating an advancing run as budget-walled. The
 	// row states what is true NOW; the history of the breach and of the raise
 	// lives in the `run-paused` and `run-budget-set` events.
-	facts, err := db.RunBudgetFactsTx(tx, runID)
+	facts, err := st.RunBudgetFactsTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +132,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 				budgetChangeReasonPrefix+"%g to %g after breach (was: %s); "+
 					"run resume to continue", run.Budget, budget, facts.BreachReason)
 		}
-		if err := db.ClearRunBreachTx(tx, runID, newReason, nowMS); err != nil {
+		if err := st.ClearRunBreachTx(runID, newReason, nowMS); err != nil {
 			return nil, err
 		}
 		breachCleared = true
@@ -147,7 +156,7 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 				budgetChangeReasonPrefix+"%g to %g; run resume to continue",
 				run.Budget, budget)
 		}
-		if err := db.ClearStaleBudgetReasonTx(tx, runID, newReason, nowMS); err != nil {
+		if err := st.ClearStaleBudgetReasonTx(runID, newReason, nowMS); err != nil {
 			return nil, err
 		}
 	}
@@ -198,15 +207,24 @@ func SetRunBudget(conn *sql.DB, runID int, budget float64, reason string, ifVers
 	// resolves it (DKT-80): the row states what is true now, and the trail —
 	// why the run stopped, and what was done about it — lives in the events.
 
-	if err := tx.Commit(); err != nil {
+	if err := commitWrite(tx); err != nil {
 		return nil, fmt.Errorf("setting the budget: %w", err)
 	}
 	return answer, nil
 }
 
-// GetRunBudget is the read form.
-func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
-	tx, err := conn.Begin()
+// GetRunBudget is GetRunBudgetStore on store.StoreOn(conn).
+func GetRunBudget(conn store.LegacyDB, runID int) (*RunBudget, error) {
+	return GetRunBudgetStore(store.StoreOn(conn), runID)
+}
+
+// GetRunBudgetStore is the read form.
+func GetRunBudgetStore(storage store.Store, runID int) (*RunBudget, error) {
+	conn, err := store.SQLDB(storage)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := store.BeginSQLiteReadSnapshot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("reading the budget: %w", err)
 	}
@@ -215,7 +233,7 @@ func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
 	// this package follows.
 	defer tx.Rollback()
 
-	if _, err := db.GetRunTx(tx, runID); err != nil {
+	if _, err := store.TxOn(tx).GetRunTx(runID); err != nil {
 		return nil, notFoundErr(err, "run %s not found", model.FormatRunID(runID))
 	}
 	return runBudgetTx(tx, runID)
@@ -224,13 +242,14 @@ func GetRunBudget(conn *sql.DB, runID int) (*RunBudget, error) {
 // runBudgetTx assembles the answer inside a caller's transaction.
 //
 // It recomputes the floor and the reported usage through the SAME helpers
-// enforcement and the report use (RunFloorTx, db.ReportedUsageTx), rather than
+// enforcement and the report use (RunFloorTx, ReportedUsageTx), rather than
 // reading `runs.usage_floor`. That column is a cache for the report and is never
 // read by anything that decides — and this verb's whole purpose is to
 // inform a decision about the number enforcement will compare, so it must show
 // the number enforcement will compare.
-func runBudgetTx(tx *sql.Tx, runID int) (*RunBudget, error) {
-	run, err := db.GetRunTx(tx, runID)
+func runBudgetTx(tx store.LegacyTx, runID int) (*RunBudget, error) {
+	st := store.TxOn(tx)
+	run, err := st.GetRunTx(runID)
 	if err != nil {
 		return nil, err
 	}
@@ -240,19 +259,19 @@ func runBudgetTx(tx *sql.Tx, runID int) (*RunBudget, error) {
 		return nil, err
 	}
 
-	unit, err := db.BudgetUnitTx(tx, run.ProjectID)
+	unit, err := st.BudgetUnitTx(run.ProjectID)
 	if err != nil {
 		return nil, err
 	}
 	var reported float64
 	if unit != "" {
-		reported, err = db.ReportedUsageTx(tx, runID, unit)
+		reported, err = st.ReportedUsageTx(runID, unit)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	configDefault, err := db.BudgetDefaultTx(tx, run.ProjectID)
+	configDefault, err := st.BudgetDefaultTx(run.ProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -263,12 +282,12 @@ func runBudgetTx(tx *sql.Tx, runID int) (*RunBudget, error) {
 	var usageUnit string
 	var usageSpend float64
 	if run.UsageBudget > 0 {
-		usageUnit, err = db.UsageBudgetUnitTx(tx, run.ProjectID)
+		usageUnit, err = st.UsageBudgetUnitTx(run.ProjectID)
 		if err != nil {
 			return nil, err
 		}
 		if usageUnit != "" {
-			usageSpend, err = db.ReportedUsageTx(tx, runID, usageUnit)
+			usageSpend, err = st.ReportedUsageTx(runID, usageUnit)
 			if err != nil {
 				return nil, err
 			}

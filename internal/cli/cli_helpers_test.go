@@ -10,6 +10,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -19,10 +20,7 @@ func newTestDB(t *testing.T) *sql.DB {
 	conn, err := db.Open(":memory:")
 	testsupport.Must(t, err, "Open(:memory:): %v", err)
 	t.Cleanup(func() { conn.Close() })
-	err = db.Initialize(conn)
-	testsupport.Must(t, err, "Initialize: %v", err)
-	err = db.Migrate(conn)
-	testsupport.Must(t, err, "Migrate: %v", err)
+	storetest.SeedMemory(t, conn)
 	return conn
 }
 
@@ -38,6 +36,9 @@ func cmdWithDB(conn *sql.DB) *cobra.Command {
 func bufWriter(jsonMode bool) (*output.Writer, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
 	w := &output.Writer{JSONMode: jsonMode, Stdout: buf, Stderr: &bytes.Buffer{}}
+	if jsonMode {
+		w.JSONVersion = output.JSONV2
+	}
 	return w, buf
 }
 

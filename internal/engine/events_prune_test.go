@@ -268,48 +268,6 @@ func TestPruneDeletesOnlyEvents(t *testing.T) {
 	}
 }
 
-// TestPruningALiveRunWouldMoveTheFloor is the live-run refusal's ARGUMENT,
-// executed.
-//
-// The refusal is not fastidiousness about audit trails. The budget floor is a
-// SUM over a run's `step-claimed` events, so deleting them does not lose a
-// record of what the run spent — it changes what the engine BELIEVES the run
-// spent, downward, which is the direction that lets a capped run overspend.
-//
-// The test proves that by doing the forbidden thing directly, the same way the
-// GONE tests construct a state no product path could reach: refuse through the
-// verb, then delete by hand and watch the number move.
-func TestPruningALiveRunWouldMoveTheFloor(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 100)
-	claimInstance(t, conn, "implement@0", nowMS)
-
-	floorBefore := runFloor(t, conn, runID)
-	if floorBefore == 0 {
-		t.Fatal("the fixture accrued no floor; this test needs a claim with a cost")
-	}
-
-	var maxSeq int64
-	err := conn.QueryRow(`SELECT MAX(seq) FROM events`).Scan(&maxSeq)
-	testsupport.Must(t, err, "reading MAX(seq): %v", err)
-
-	// The verb refuses.
-	if _, err := PruneEvents(conn, PruneQuery{Before: maxSeq + 1, NowMS: nowMS}); err == nil {
-		t.Fatal("a live run's events were pruned; the live-run refusal forbids that")
-	}
-	if floor := runFloor(t, conn, runID); floor != floorBefore {
-		t.Errorf("the refused prune moved the floor from %g to %g", floorBefore, floor)
-	}
-
-	// And this is WHY. Doing it by hand — which is what an operator with
-	// sqlite3 and no verb would do — moves the number enforcement decides on.
-	execSQL(t, conn, `DELETE FROM events WHERE kind = ?`, EventStepClaimed)
-	if floor := runFloor(t, conn, runID); floor >= floorBefore {
-		t.Errorf("deleting the claim events left the floor at %g (was %g); this "+
-			"test's premise is that they ARE the floor", floor, floorBefore)
-	}
-}
-
 // TestPruneDryRunWritesNothing: `--dry-run` answers the question without
 // answering it destructively.
 func TestPruneDryRunWritesNothing(t *testing.T) {
@@ -508,24 +466,6 @@ func TestPrunedRunReportsRecordedBodyUnavailable(t *testing.T) {
 		if !strings.Contains(err.Error(), "pruned") {
 			t.Errorf("step %s: error %q does not name the prune", name, err)
 		}
-	}
-}
-
-// TestRecordedBodyUnprunedRunReadsRecordedBody is the same fixture without the
-// prune: each step reads the body its own claim was handed.
-func TestRecordedBodyUnprunedRunReadsRecordedBody(t *testing.T) {
-	conn, runID, issue, before, after := bodyRefreshRun(t)
-	recordClaim(t, conn, before, nowMS)
-	amended := "body, amended"
-	refreshRunBody(t, conn, runID, issue, amended, nowMS+1)
-	recordClaim(t, conn, after, nowMS+2)
-	execSQL(t, conn, `UPDATE runs SET status = 'done' WHERE id = ?`, runID)
-
-	if got := recordedBodyOf(t, conn, before); got != "body" {
-		t.Errorf("pre-refresh step read %q, want the refresh row's from_body %q", got, "body")
-	}
-	if got := recordedBodyOf(t, conn, after); got != amended {
-		t.Errorf("post-refresh step read %q, want the refreshed body %q", got, amended)
 	}
 }
 

@@ -3,7 +3,12 @@ package config
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	osexec "os/exec"
 	"os/user"
@@ -12,7 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/ALT-F4-LLC/docket/internal/exec"
+	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
 
 const dbFileName = "issues.db"
@@ -64,8 +72,9 @@ type Config struct {
 	//
 	// It is true for the env and local stores — a `.docket` directory is an act
 	// of intent, and its parent is the project by construction — and for the
-	// global store only INSIDE a git worktree, where the identity is the
-	// repository's own common directory.
+	// global store only INSIDE a git worktree the repository registered as its
+	// own (see lookupGit), where the identity is that repository's common
+	// directory.
 	//
 	// Outside a repository the global store still fills Identity with the cwd,
 	// because a project row already bound to that path must keep resolving; but
@@ -152,7 +161,7 @@ func Resolve() (*Config, error) {
 	}
 	store := filepath.Join(home, ".docket")
 	execRoot, identity := cwd, cwd
-	if inRepo {
+	if git.Registered {
 		execRoot = git.Toplevel
 		identity = git.Identity
 	}
@@ -165,7 +174,7 @@ func Resolve() (*Config, error) {
 		// Only a git-derived identity is anchored here: the cwd fallback above
 		// is a guess about which project this is, and a guess must not create
 		// one (DKT-58).
-		Anchored: inRepo,
+		Anchored: git.Registered,
 	}, nil
 }
 
@@ -328,6 +337,231 @@ func (c *Config) Exists() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ClientConfigVersion is the only client-config format version this build
+// understands.
+const ClientConfigVersion = 1
+
+// ErrClientConfigParse is returned when the client config exists and passes
+// the integrity checks but does not parse: invalid TOML, an unknown key or
+// version, or a profile that cannot be used. Integrity failures wrap
+// trust.ErrIntegrity instead.
+var ErrClientConfigParse = errors.New("client config parse")
+
+// ClientConfig is the user-level client configuration: which daemon servers
+// the client knows by name. It holds no secret; the bearer token comes from
+// the environment, and which profile and daemon project a checkout uses comes
+// from the user-level link file.
+type ClientConfig struct {
+	// Version is the format version; anything but ClientConfigVersion is
+	// refused.
+	Version int `toml:"version"`
+	// DefaultProfile names the profile used when no flag, environment
+	// variable, or link entry selects one. Empty means the local daemon
+	// socket.
+	DefaultProfile string `toml:"default_profile"`
+	// Profiles are the named servers, one [profile.<name>] table each.
+	Profiles map[string]ServerProfile `toml:"profile"`
+	// Path is where the configuration was read from, for diagnostics.
+	Path string `toml:"-"`
+}
+
+// ServerProfile is one named daemon server.
+type ServerProfile struct {
+	// URL is the daemon's http or https base URL.
+	URL string `toml:"url"`
+}
+
+// ClientConfigPath returns the client config's location: client.toml in the
+// same directory as the trust file, resolved by the trust package so the two
+// can never drift apart. Like the trust file it has no repository-local or
+// flag-selected alternative.
+func ClientConfigPath() (string, error) {
+	trustPath, err := trust.StorePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(trustPath), "client.toml"), nil
+}
+
+// LoadClientConfig reads the client config after the trust file's integrity
+// checks pass on it: a regular file of mode 0600 owned by the calling user, in
+// a directory that only that user can write. A missing file is the empty
+// configuration.
+func LoadClientConfig() (*ClientConfig, error) {
+	path, err := ClientConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := trust.CheckPrivateFile(path, "the client config"); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &ClientConfig{Version: ClientConfigVersion, Path: path}, nil
+		}
+		return nil, fmt.Errorf("reading the client config %s: %w", path, err)
+	}
+	return parseClientConfig(data, path)
+}
+
+// parseClientConfig decodes the client config strictly: an unknown key is an
+// error, as in the trust file, so a typo never falls back to a default.
+func parseClientConfig(data []byte, path string) (*ClientConfig, error) {
+	var cc ClientConfig
+	md, err := toml.Decode(string(data), &cc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s is not valid TOML: %v", ErrClientConfigParse, path, err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		return nil, fmt.Errorf("%w: %s has unknown key %q", ErrClientConfigParse, path, undecoded[0].String())
+	}
+	if cc.Version != ClientConfigVersion {
+		return nil, fmt.Errorf("%w: %s declares version %d, but this build understands version %d only", ErrClientConfigParse, path, cc.Version, ClientConfigVersion)
+	}
+	for name, p := range cc.Profiles {
+		u, err := url.Parse(p.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("%w: %s profile %q has url %q; it must be an http or https URL with a host", ErrClientConfigParse, path, name, p.URL)
+		}
+	}
+	if _, ok := cc.Profiles[cc.DefaultProfile]; cc.DefaultProfile != "" && !ok {
+		return nil, fmt.Errorf("%w: %s sets default_profile %q, but no [profile.%s] table exists", ErrClientConfigParse, path, cc.DefaultProfile, cc.DefaultProfile)
+	}
+	cc.Path = path
+	return &cc, nil
+}
+
+// DaemonConfigVersion is the only daemon-config format version this build
+// understands.
+const DaemonConfigVersion = 1
+
+// minBearerSecretBytes is the shortest bearer secret the daemon accepts.
+const minBearerSecretBytes = 32
+
+// ErrDaemonConfigParse is returned when the daemon config passes the
+// integrity checks but does not parse or omits a required setting. Integrity
+// failures wrap trust.ErrIntegrity instead.
+var ErrDaemonConfigParse = errors.New("daemon config parse")
+
+// DaemonConfig is the user-level configuration of a daemon serving HTTPS. A
+// daemon reads it once at start; an edit takes effect on restart.
+type DaemonConfig struct {
+	// Version is the format version; anything but DaemonConfigVersion is
+	// refused.
+	Version int `toml:"version"`
+	// Listen is the TCP host:port the daemon binds.
+	Listen string `toml:"listen"`
+	// TLSCertFile and TLSKeyFile are the operator-supplied PEM certificate
+	// chain and private key the daemon serves TLS with.
+	TLSCertFile string `toml:"tls_cert_file"`
+	TLSKeyFile  string `toml:"tls_key_file"`
+	// BearerSecret is the secret every HTTP request must present.
+	BearerSecret BearerSecret `toml:"bearer_secret"`
+	// MinClientAPIMajor and MaxClientAPIMajor bound, inclusively, the API
+	// majors a client may declare in its handshake. Both are required. A
+	// client that declares no major sends 0, so only a window starting at 0
+	// admits it.
+	MinClientAPIMajor uint32 `toml:"min_client_api_major"`
+	MaxClientAPIMajor uint32 `toml:"max_client_api_major"`
+	// Path is where the configuration was read from, for diagnostics.
+	Path string `toml:"-"`
+}
+
+// BearerSecret is the daemon's static bearer secret. It keeps only the
+// secret's SHA-256 digest, so no copy of the secret survives the parse and
+// formatting it prints nothing secret. The zero value matches no token.
+type BearerSecret struct {
+	digest [sha256.Size]byte
+	set    bool
+}
+
+// UnmarshalText accepts a secret of at least minBearerSecretBytes printable,
+// non-space ASCII bytes. Its errors never quote the value.
+func (s *BearerSecret) UnmarshalText(text []byte) error {
+	if err := checkBearerToken(string(text)); err != nil {
+		return err
+	}
+	if len(text) < minBearerSecretBytes {
+		return fmt.Errorf("the secret is shorter than %d bytes", minBearerSecretBytes)
+	}
+	*s = BearerSecret{digest: sha256.Sum256(text), set: true}
+	return nil
+}
+
+// Matches reports whether token is the secret. Comparing fixed-size digests
+// in constant time keeps the response time from revealing how much of a
+// guess, or its length, was right.
+func (s BearerSecret) Matches(token string) bool {
+	presented := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(presented[:], s.digest[:]) == 1 && s.set
+}
+
+func (BearerSecret) String() string   { return "[redacted]" }
+func (BearerSecret) GoString() string { return "config.BearerSecret{[redacted]}" }
+
+// DaemonConfigPath returns the daemon config's location: daemon.toml beside
+// the trust file. Like the trust file it has no repository-local or
+// flag-selected alternative, so repository content cannot choose the secret.
+func DaemonConfigPath() (string, error) {
+	trustPath, err := trust.StorePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(trustPath), "daemon.toml"), nil
+}
+
+// LoadDaemonConfig reads the daemon config after the trust file's integrity
+// checks pass on it. Unlike the client config, a missing file is an error: a
+// daemon with no secret must not serve.
+func LoadDaemonConfig() (*DaemonConfig, error) {
+	path, err := DaemonConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := trust.CheckPrivateFile(path, "the daemon config"); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading the daemon config %s: %w", path, err)
+	}
+	return parseDaemonConfig(data, path)
+}
+
+// parseDaemonConfig decodes the daemon config strictly and requires every
+// setting the HTTPS listener needs.
+func parseDaemonConfig(data []byte, path string) (*DaemonConfig, error) {
+	var dc DaemonConfig
+	md, err := toml.Decode(string(data), &dc)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s is not valid TOML: %v", ErrDaemonConfigParse, path, err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		return nil, fmt.Errorf("%w: %s has unknown key %q", ErrDaemonConfigParse, path, undecoded[0].String())
+	}
+	if dc.Version != DaemonConfigVersion {
+		return nil, fmt.Errorf("%w: %s declares version %d, but this build understands version %d only", ErrDaemonConfigParse, path, dc.Version, DaemonConfigVersion)
+	}
+	if _, _, err := net.SplitHostPort(dc.Listen); err != nil {
+		return nil, fmt.Errorf("%w: %s has listen %q; it must be a host:port address", ErrDaemonConfigParse, path, dc.Listen)
+	}
+	if dc.TLSCertFile == "" || dc.TLSKeyFile == "" {
+		return nil, fmt.Errorf("%w: %s must set both tls_cert_file and tls_key_file", ErrDaemonConfigParse, path)
+	}
+	if !dc.BearerSecret.set {
+		return nil, fmt.Errorf("%w: %s must set bearer_secret", ErrDaemonConfigParse, path)
+	}
+	if !md.IsDefined("min_client_api_major") || !md.IsDefined("max_client_api_major") {
+		return nil, fmt.Errorf("%w: %s must set both min_client_api_major and max_client_api_major", ErrDaemonConfigParse, path)
+	}
+	if dc.MinClientAPIMajor > dc.MaxClientAPIMajor {
+		return nil, fmt.Errorf("%w: %s has min_client_api_major %d above max_client_api_major %d", ErrDaemonConfigParse, path, dc.MinClientAPIMajor, dc.MaxClientAPIMajor)
+	}
+	dc.Path = path
+	return &dc, nil
 }
 
 var (

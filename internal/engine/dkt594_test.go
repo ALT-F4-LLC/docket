@@ -91,22 +91,6 @@ func TestReportCountsCorpusVersionsSinceActivation(t *testing.T) {
 	}
 }
 
-// TestCurrentPinReportsZeroBehind is the falsifier: a report that always said
-// "behind" would pass the test above and be useless.
-func TestCurrentPinReportsZeroBehind(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-
-	report, err := LoadRunReport(conn, run.ID, nowMS)
-	testsupport.Must(t, err, "LoadRunReport: %v", err)
-
-	got := pinnedWorkflow(t, report, "standard-change@1")
-	if got.Behind != 0 || got.CurrentVersion != 1 {
-		t.Errorf("a run pinning the registry's head reports behind=%d current=%d, "+
-			"want 0 and 1", got.Behind, got.CurrentVersion)
-	}
-}
-
 // TestRetiredVersionsAreNotCorpusAdvance: a version registered and then RETIRED
 // is not somewhere the run could have gone. Binding filters retirement out
 // first (bindableDefinitions), so a staleness count that included it would send

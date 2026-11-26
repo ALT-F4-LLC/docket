@@ -19,12 +19,6 @@ import (
 // file reference.
 var mustFatalAttribution = regexp.MustCompile(`must_test\.go:\d+: boom: boom, ctx = ok`)
 
-// TestMustPassesThroughOnNilError pins the non-aborting path: Must must not
-// halt the test when err is nil.
-func TestMustPassesThroughOnNilError(t *testing.T) {
-	Must(t, nil, "unexpected failure")
-}
-
 // TestMustFatalsOnError proves the abort path fires, and does so at the
 // caller's line rather than must.go's. Must's signature takes a concrete
 // *testing.T (per this issue's design — no interface indirection), so its

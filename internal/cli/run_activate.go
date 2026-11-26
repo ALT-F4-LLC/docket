@@ -9,6 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -242,34 +243,45 @@ type activateResult struct {
 	ConductorToken string `json:"conductor_token,omitempty"`
 }
 
-func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	runID, err := model.ParseRunID(args[0])
-	if err != nil {
-		return cmdErr(err, output.ErrValidation)
+// warnScopeWarnings prints the scope lints on the warning channel. Each
+// warning's Reason names its own remedy except the unscoped-holder lint's, so
+// that one alone gains the `--scope` remedy: an operator reading "no scope is
+// declared" needs to know that scope is set on the ISSUE, not in the workflow
+// named beside it.
+//
+// engine.ScopeWarning carries no kind, so the unscoped-holder warning is
+// recognized by the opening of the Reason lintUnscopedHolders writes.
+func warnScopeWarnings(w *output.Writer, warnings []engine.ScopeWarning) {
+	for _, warning := range warnings {
+		line := warning.IssueID + ": " + warning.Reason
+		if warning.Workflow != "" {
+			line = warning.IssueID + " is bound to " + warning.Workflow + " and " + warning.Reason
+		}
+		if strings.HasPrefix(warning.Reason, "no scope is declared") {
+			line += "; declare one with `docket issue edit " + warning.IssueID + " --scope GLOB`"
+		}
+		w.Warn("%s", line)
 	}
+}
 
+func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 	pins, _ := cmd.Flags().GetStringSlice("pin")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	reason, _ := cmd.Flags().GetString("reason")
 
-	opts := engine.ActivateOptions{
-		FilePins: pins,
-		NowMS:    model.NowMS(),
-		DryRun:   dryRun,
-		Reason:   reason,
-	}
+	in := verb.RunActivateInput{Run: args[0], Pins: pins, DryRun: dryRun, Reason: reason}
 	// The activating checkout's head rides on the run-activated event
 	// (DKT-3263), read the same best-effort way `run start` records its
 	// execution context.
 	if cfg := getCfg(cmd); cfg != nil && cfg.ExecRoot != "" {
-		opts.HeadBranch, opts.HeadCommit = config.GitHead(cfg.ExecRoot)
+		in.HeadBranch, in.HeadCommit = config.GitHead(cfg.ExecRoot)
 	}
-	result, err := engine.Activate(conn, runID, opts)
+	res, err := verb.RunActivate(cmd.Context(), verbEnv(cmd), in)
+	recordProjectRegistration(cmd, res.Registered)
 	if err != nil {
-		return runErr(err)
+		return verbErr(err)
 	}
+	result := res.Activation
 
 	// The WARN cap reports and proceeds; only the ERROR cap refuses. Warn
 	// writes to stderr in human mode and is a no-op in JSON mode, where the
@@ -282,16 +294,7 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.Bytes, warning.Cap)
 	}
 
-	// The unscoped-holder lint, on the same channel and for the same reason. It
-	// names the remedy as well as the fact: an operator reading "declares no
-	// scope" needs to know that scope is set on the ISSUE, not in the workflow
-	// that happens to be named beside it.
-	for _, warning := range result.ScopeWarnings {
-		w.Warn("%s is bound to %s and %s; declare one with "+
-			"`docket issue edit %s --scope GLOB`",
-			warning.IssueID, warning.Workflow, warning.Reason,
-			warning.IssueID)
-	}
+	warnScopeWarnings(w, result.ScopeWarnings)
 
 	// The label-vs-scope lint (DKT-1182), same channel again. It names the
 	// remedy the same way: the binding follows the LABELS, so an operator who
@@ -314,24 +317,44 @@ func runRunActivate(cmd *cobra.Command, args []string, w *output.Writer) error {
 			warning.Issue, warning.Reason, warning.Issue, warning.Label)
 	}
 	// An empty list is not a clearance: say so when the lint had nothing to
-	// compare against, and name what it skipped when it did.
+	// compare against, and name what it skipped when it did. The overlap check
+	// compares a pair only when both issues attach files or both declare a glob
+	// with a literal prefix, so a linted issue can be comparable in general and
+	// still meet no labelled issue it compares with: Uncompared, not
+	// ComparablePairs or Unscoped, is the count that says so. With no labelled
+	// issue bound there was no pair to compare, so that alone earns no line.
 	if lint := result.RoutingLint; lint != nil {
+		unscoped := ""
+		if lint.Unscoped > 0 {
+			unscoped = fmt.Sprintf("; %d of them attach no file and have no glob with "+
+				"a literal prefix, and attaching a file or declaring such a glob makes "+
+				"an issue comparable", lint.Unscoped)
+		}
 		switch {
 		case lint.Label == "":
 			w.Warn("the security-routing lint is off (routing.security_label is empty)")
 		case lint.CheckedNothing():
 			w.Warn("the security-routing lint checked nothing: no lexicon terms are "+
-				"configured and no bound issue with a comparable scope carries the %s "+
-				"label; judge each "+
-				"issue's sensitivity yourself", lint.Label)
-		case lint.LabelledIssues == 0 && lint.Unscoped > 0:
+				"configured and none of the %d linted issue(s) formed a comparable pair "+
+				"with a bound issue carrying the %s label%s; judge each issue's "+
+				"sensitivity yourself", lint.Linted, lint.Label, unscoped)
+		case lint.LabelledBound == 0 && lint.Unscoped > 0:
 			w.Warn("the security-routing lint compared no scopes: no bound issue carries "+
-				"the %s label with a comparable scope, and %d of %d issue(s) have no "+
-				"glob with a literal prefix; only the lexicon was checked", lint.Label, lint.Unscoped, lint.Linted)
-		case lint.Unscoped > 0:
-			w.Warn("the security-routing lint could not compare the scope of %d of %d "+
-				"issue(s): none of their globs has a literal prefix",
-				lint.Unscoped, lint.Linted)
+				"the %s label, and %d of %d linted issue(s) attach no file and have no "+
+				"glob with a literal prefix (attaching a file or declaring such a glob "+
+				"makes an issue comparable); only the lexicon was checked",
+				lint.Label, lint.Unscoped, lint.Linted)
+		case lint.LabelledBound > 0 && lint.Uncompared > 0:
+			// A pair elsewhere compared, so CheckedNothing is false even with no
+			// lexicon; the tail must not then claim a lexicon covered these issues.
+			checked := "only the lexicon was checked for them"
+			if lint.LexiconTerms == 0 {
+				checked = "nothing was checked for them, since no lexicon terms are configured"
+			}
+			w.Warn("the security-routing lint found %d of %d linted issue(s) was "+
+				"compared against no labelled issue: a pair compares only when both issues "+
+				"attach files or both declare a glob with a literal prefix%s; %s",
+				lint.Uncompared, lint.Linted, unscoped, checked)
 		}
 	}
 

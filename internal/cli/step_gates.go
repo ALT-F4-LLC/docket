@@ -3,16 +3,15 @@ package cli
 import (
 	"strings"
 
-	"github.com/ALT-F4-LLC/docket/internal/db"
-	"github.com/ALT-F4-LLC/docket/internal/engine"
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/render"
+	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
 // stepGateResult is one recorded gate execution on the wire. It mirrors
-// db.GateResultRow minus the row id and foreign keys, which name the storage
+// store.GateResultRow minus the row id and foreign keys, which name the storage
 // rather than the fact.
 //
 // Exit is a pointer because NULL is meaningful: an unmatched gate never ran,
@@ -137,26 +136,14 @@ fact about a step that is not there.`,
 }
 
 func runStepGates(cmd *cobra.Command, args []string, w *output.Writer) error {
-	conn := getDB(cmd)
-
-	id, err := stepArg(args[0])
+	res, err := verb.StepGates(cmd.Context(), verbEnv(cmd), verb.StepGatesInput{Step: args[0]})
 	if err != nil {
-		return err
+		return verbErr(err)
 	}
-
-	// Existence first, so a typoed id is NOT_FOUND instead of an empty
-	// listing. LoadStepView is the same read `step show` performs.
-	if _, err := engine.LoadStepView(conn, id, model.NowMS()); err != nil {
-		return stepErr(err, stepLabel(id))
-	}
-
-	rows, err := db.GateResultsForStep(conn, id)
-	if err != nil {
-		return stepErr(err, stepLabel(id))
-	}
+	rows := res.Gates
 
 	scope := gateOutputScopeOf(cmd)
-	result := buildStepGatesResult(model.FormatStepID(id), rows, scope)
+	result := buildStepGatesResult(res.Step, rows, scope)
 
 	var message string
 	if !w.JSONMode {
@@ -223,7 +210,7 @@ func (s gateOutputScope) requested() bool {
 // It is a pure function of (rows, scope) so the payload can be asserted on
 // directly: what this verb RETURNS by default is the whole of DKT-425, and a
 // test of it has to be able to weigh the answer.
-func buildStepGatesResult(step string, rows []db.GateResultRow, scope gateOutputScope) stepGatesResult {
+func buildStepGatesResult(step string, rows []store.GateResultRow, scope gateOutputScope) stepGatesResult {
 	result := stepGatesResult{
 		Step:  step,
 		Gates: make([]stepGateResult, 0, len(rows)),
@@ -260,7 +247,7 @@ func buildStepGatesResult(step string, rows []db.GateResultRow, scope gateOutput
 			// the complete capture, repeats included. `--full` means full.
 			body := r.Output
 			row.Output = &body
-		case r.Verdict == db.GateVerdictPass:
+		case r.Verdict == store.GateVerdictPass:
 			// A pass carries no body at all. Its verdict, exit, and size are
 			// the whole of what it has to say.
 		case row.SameOutputAsOrdinal != nil:
@@ -302,10 +289,10 @@ func gateSummaryTail(out string) string {
 	return tail
 }
 
-// gateRows converts db rows into the renderer's shape, per artifactRows: the
+// gateRows converts store rows into the renderer's shape, per artifactRows: the
 // conversion lives here so internal/render keeps its independence from
 // internal/db.
-func gateRows(rows []db.GateResultRow) []render.StepGateRow {
+func gateRows(rows []store.GateResultRow) []render.StepGateRow {
 	out := make([]render.StepGateRow, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, render.StepGateRow{

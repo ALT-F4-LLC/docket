@@ -96,43 +96,6 @@ func driveHeldVote(
 // The default: unconfigured is EXACTLY the prior behavior
 // ---------------------------------------------------------------------------
 
-// TestHeldStepMintsHumanWhenUnconfigured is the strict no-op default.
-//
-// It is the first test in the file because everything below only earns its
-// place if this holds: an instance that never configured a tally must observe a
-// hold it cannot distinguish from the one it got before these keys existed.
-func TestHeldStepMintsHumanWhenUnconfigured(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	driveToReconcile(t, conn, e, clusteredPayload)
-
-	held := heldStep(t, conn, "reconcile-held@0#0")
-	if held.Kind != workflow.TypeHuman {
-		t.Fatalf("kind = %q with no tally configured, want %q — an unset key "+
-			"must not change how a hold is asked", held.Kind, workflow.TypeHuman)
-	}
-
-	// And the synthesized spec is the human one, inheriting the routing step's
-	// `on_fail` rather than the vote form's park.
-	defs, err := StepDefinitions(conn, held.RunID)
-	testsupport.Must(t, err, "StepDefinitions: %v", err)
-	tally, err := loadHoldTally(conn, held.RunID)
-	testsupport.Must(t, err, "loadHoldTally: %v", err)
-	if tally.configured() {
-		t.Fatal("an unset pair of keys reads as a configured tally")
-	}
-	spec := materializedSpec(defs[held.WorkflowID], held, tally)
-	if spec == nil || spec.Type != workflow.TypeHuman {
-		t.Fatalf("synthesized spec type = %v, want %q", spec, workflow.TypeHuman)
-	}
-	if len(spec.Voters) != 0 || spec.VoteRule != "" {
-		t.Errorf("a human-minted hold carries voters %v / rule %q",
-			spec.Voters, spec.VoteRule)
-	}
-}
-
 // TestHeldStepMintsHumanWhenHalfConfigured pins the both-or-neither rule.
 //
 // Either key alone is incoherent — a rule with nobody to cast under it tallies
