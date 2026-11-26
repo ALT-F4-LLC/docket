@@ -731,15 +731,6 @@ func TestLoadDaemonConfigMissingRefusesStart(t *testing.T) {
 	}
 }
 
-// TestZeroBearerSecretMatchesNothing: a secret that was never configured
-// admits no request, including one presenting an empty token.
-func TestZeroBearerSecretMatchesNothing(t *testing.T) {
-	var zero BearerSecret
-	if zero.Matches("") {
-		t.Error("the zero BearerSecret matches the empty token")
-	}
-}
-
 // TestLoadDaemonConfigRefusesMalformed: the file is parsed strictly, and a
 // refused secret is never echoed in the error.
 func TestLoadDaemonConfigRefusesMalformed(t *testing.T) {

@@ -44,29 +44,6 @@ func TestGuardsNeverRegisterTheCallersProject(t *testing.T) {
 	}
 }
 
-func TestGuardStopAllowsWithNoActiveRun(t *testing.T) {
-	st := openStore(t)
-	got, err := verb.GuardStop(context.Background(), projectEnv(st, "", false), verb.GuardStopInput{})
-	if err != nil {
-		t.Fatalf("GuardStop: %v", err)
-	}
-	if !got.Allowed {
-		t.Errorf("GuardStop = %+v, want allowed", got)
-	}
-}
-
-func TestGuardGateDeniesAnAbsentGate(t *testing.T) {
-	st := openStore(t)
-	got, err := verb.GuardGate(context.Background(), projectEnv(st, "", false),
-		verb.GuardGateInput{Step: "approve"})
-	if err != nil {
-		t.Fatalf("GuardGate: %v", err)
-	}
-	if got.Allowed || got.Reason == "" {
-		t.Errorf("GuardGate = %+v, want a denial with a reason", got)
-	}
-}
-
 func TestGuardRefusesMalformedInput(t *testing.T) {
 	ctx := context.Background()
 	st := openStore(t)

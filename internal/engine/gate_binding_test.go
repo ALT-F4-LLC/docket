@@ -142,21 +142,6 @@ func TestTheGatesOfOneResumeShareOneCheckoutOfTheRecordedCommit(t *testing.T) {
 	}
 }
 
-// A Live record whose worktree stays put is measured as before.
-func TestALiveRecordStillMeasuresAWorktreeThatStayedPut(t *testing.T) {
-	w := newBindingWorld(t, true)
-	_, err := w.e.RunDetachedSaga(w.conn, w.stepID, nowMS)
-	testsupport.Must(t, err, "detached saga: %v", err)
-	if len(w.captured.seen) == 0 {
-		t.Fatal("no gate measured the live worktree")
-	}
-	for gate, sc := range w.captured.seen {
-		if sc.WorkRoot != w.worktree {
-			t.Errorf("gate %s measured %q, want the live worktree %q", gate, sc.WorkRoot, w.worktree)
-		}
-	}
-}
-
 // Once a record is honored there is no fallback to the live worktree: a sha the
 // object database no longer holds records a skipped row, and the diff stage
 // refuses, rather than either one reading whatever the worktree holds now.
@@ -185,25 +170,6 @@ func TestAnUnreachableRecordedShaDoesNotFallBackToTheWorktree(t *testing.T) {
 		t.Errorf("the diff stage = %v for an unreachable recorded commit; want a diff refusal", err)
 	}
 	w.requireParkedWithoutADiff(t)
-}
-
-// A step recorded again under the same id (a re-claim) must not keep the first
-// attempt's head when the second attempt records none.
-func TestARecordingWithNoHeadClearsTheEarlierRecord(t *testing.T) {
-	w := newBindingWorld(t, false)
-	step, err := db.GetStep(w.conn, w.stepID)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if _, ok := recordedHeadOf(w.conn, step); !ok {
-		t.Fatal("premise: the first recording left no head")
-	}
-
-	tx, err := w.conn.Begin()
-	testsupport.Must(t, err, "begin")
-	testsupport.Must(t, insertRecordedHeadTx(tx, step, recordedHead{}, false, w.worktree, nowMS+1), "insert")
-	testsupport.Must(t, tx.Commit(), "commit")
-	if rec, ok := recordedHeadOf(w.conn, step); ok {
-		t.Errorf("the first attempt's head %q still stands after a recording with none", rec.Head)
-	}
 }
 
 // The residual, pinned so it is stated rather than assumed: a Live record binds

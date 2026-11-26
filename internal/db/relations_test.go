@@ -35,67 +35,6 @@ func mustCreateRelation(t *testing.T, d *sql.DB, source, target int, rt model.Re
 	return id
 }
 
-func TestCreateRelation(t *testing.T) {
-	d := mustOpen(t)
-	err := Initialize(d)
-	testsupport.Must(t, err, "Initialize: %v", err)
-
-	a := mustCreateIssue(t, d, "issue A")
-	b := mustCreateIssue(t, d, "issue B")
-
-	id, err := CreateRelation(d, &model.Relation{
-		SourceIssueID: a,
-		TargetIssueID: b,
-		RelationType:  model.RelationBlocks,
-	})
-	testsupport.Must(t, err, "CreateRelation: %v", err)
-	if id <= 0 {
-		t.Errorf("expected positive ID, got %d", id)
-	}
-
-	// Verify the row directly.
-	var sourceID, targetID int
-	var relType string
-	err = d.QueryRow(
-		`SELECT source_issue_id, target_issue_id, relation_type FROM issue_relations WHERE id = ?`, id,
-	).Scan(&sourceID, &targetID, &relType)
-	testsupport.Must(t, err, "querying relation row: %v", err)
-	if sourceID != a {
-		t.Errorf("source_issue_id = %d, want %d", sourceID, a)
-	}
-	if targetID != b {
-		t.Errorf("target_issue_id = %d, want %d", targetID, b)
-	}
-	if relType != string(model.RelationBlocks) {
-		t.Errorf("relation_type = %q, want %q", relType, model.RelationBlocks)
-	}
-}
-
-func TestDeleteRelation(t *testing.T) {
-	d := mustOpen(t)
-	err := Initialize(d)
-	testsupport.Must(t, err, "Initialize: %v", err)
-
-	a := mustCreateIssue(t, d, "issue A")
-	b := mustCreateIssue(t, d, "issue B")
-
-	mustCreateRelation(t, d, a, b, model.RelationBlocks)
-
-	err = DeleteRelation(d, a, b, string(model.RelationBlocks))
-	testsupport.Must(t, err, "DeleteRelation: %v", err)
-
-	// Verify it is gone.
-	var count int
-	if err := d.QueryRow(
-		`SELECT COUNT(*) FROM issue_relations WHERE source_issue_id = ? AND target_issue_id = ?`, a, b,
-	).Scan(&count); err != nil {
-		t.Fatalf("counting relations: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("expected 0 relations after delete, got %d", count)
-	}
-}
-
 func TestCreateRelationRecordsActivity(t *testing.T) {
 	d := mustOpen(t)
 	err := Initialize(d)

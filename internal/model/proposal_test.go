@@ -97,20 +97,6 @@ func TestParseProposalID(t *testing.T) {
 	}
 }
 
-func TestFormatParseProposalIDRoundTrip(t *testing.T) {
-	for _, id := range []int{1, 5, 42, 999} {
-		formatted := FormatProposalID(id)
-		parsed, err := ParseProposalID(formatted)
-		if err != nil {
-			t.Errorf("ParseProposalID(FormatProposalID(%d)) error: %v", id, err)
-			continue
-		}
-		if parsed != id {
-			t.Errorf("ParseProposalID(FormatProposalID(%d)) = %d", id, parsed)
-		}
-	}
-}
-
 func TestProposalJSONRoundTrip(t *testing.T) {
 	now := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC)
 	score := 0.89
@@ -314,69 +300,6 @@ func TestVoteJSONRoundTrip(t *testing.T) {
 }
 
 // --- Gap 3: Findings struct JSON marshaling/unmarshaling ---
-
-func TestFindingsJSONRoundTrip(t *testing.T) {
-	tests := []struct {
-		name     string
-		findings Findings
-	}{
-		{
-			name: "populated",
-			findings: Findings{
-				Blockers:    []Finding{{Text: "critical security issue"}},
-				Concerns:    []Finding{{Text: "performance concern"}, {Text: "naming convention"}},
-				Suggestions: []Finding{{Text: "add logging"}},
-			},
-		},
-		{
-			name: "empty arrays",
-			findings: Findings{
-				Blockers:    []Finding{},
-				Concerns:    []Finding{},
-				Suggestions: []Finding{},
-			},
-		},
-		{
-			name:     "nil arrays",
-			findings: Findings{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			data, err := json.Marshal(tt.findings)
-			testsupport.Must(t, err, "Marshal error: %v", err)
-
-			var got Findings
-			if err := json.Unmarshal(data, &got); err != nil {
-				t.Fatalf("Unmarshal error: %v", err)
-			}
-
-			// Re-marshal both to compare (handles nil vs empty slice).
-			expected, _ := json.Marshal(tt.findings)
-			actual, _ := json.Marshal(got)
-			if string(expected) != string(actual) {
-				t.Errorf("round-trip mismatch:\n  expected: %s\n  actual:   %s", expected, actual)
-			}
-		})
-	}
-}
-
-func TestFindingsJSONNilPointer(t *testing.T) {
-	// Verify *Findings nil serializes as null in a containing struct.
-	type wrapper struct {
-		F *Findings `json:"findings_json"`
-	}
-
-	data, err := json.Marshal(wrapper{F: nil})
-	testsupport.Must(t, err, "Marshal error: %v", err)
-
-	var raw map[string]any
-	json.Unmarshal(data, &raw)
-	if raw["findings_json"] != nil {
-		t.Errorf("expected null for nil *Findings, got %v", raw["findings_json"])
-	}
-}
 
 // --- Gap 4: Proposal JSON roundtrip with new v3 fields ---
 

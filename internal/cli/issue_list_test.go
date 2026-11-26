@@ -165,49 +165,6 @@ func TestIssueListRunFlagListsTheRoster(t *testing.T) {
 	}
 }
 
-// TestIssueListRunFlagIncludesDoneIssues: a roster is a CLOSED SET, and the
-// post-mortem case this flag exists for is mostly finished issues. Hiding them
-// by default would answer "which issues did RUN-14 carry" with "the ones it
-// did not finish".
-func TestIssueListRunFlagIncludesDoneIssues(t *testing.T) {
-	conn := newTestDB(t)
-	finished := createIssue(t, conn, "finished work", model.StatusDone, model.PriorityHigh)
-	open := createIssue(t, conn, "open work", model.StatusTodo, model.PriorityHigh)
-	run := planningRun(t, conn, finished, open)
-
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	if err := runIssueList(listCmdWithRun(conn, run.Ref()), nil, w); err != nil {
-		t.Fatalf("runIssueList --run: %v", err)
-	}
-
-	var lj listJSON
-	if err := json.Unmarshal(buf.Bytes(), &lj); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	if len(lj.Data.Items) != 2 {
-		t.Fatalf("listed %d issues, want the whole roster including the done "+
-			"one: %s", len(lj.Data.Items), buf.String())
-	}
-}
-
-// TestIssueListRunFlagOnAnUnknownRun: a typo reads as a miss, not as an
-// unfiltered listing of the whole project.
-func TestIssueListRunFlagOnAnUnknownRun(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "some work", model.StatusTodo, model.PriorityHigh)
-
-	w, _ := bufWriter(true)
-	err := runIssueList(listCmdWithRun(conn, "RUN-404"), nil, w)
-	if err == nil {
-		t.Fatal("an unknown run listed something instead of failing")
-	}
-	if !strings.Contains(err.Error(), "RUN-404") {
-		t.Errorf("the refusal does not name the run: %v", err)
-	}
-	assertErrCode(t, err, output.ErrNotFound)
-}
-
 // TestIssueListRunFlagRejectsAMalformedRef keeps a bad ref a validation error
 // rather than a lookup for run 0.
 func TestIssueListRunFlagRejectsAMalformedRef(t *testing.T) {

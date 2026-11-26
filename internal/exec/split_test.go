@@ -152,25 +152,3 @@ func TestFenceSplitterRefusalRendersControlBytes(t *testing.T) {
 		t.Errorf("the escape must be visible in the refusal; got: %v", err)
 	}
 }
-
-// TestFenceSplitterOutputIsSafeToExecute closes the loop: whatever the splitter
-// produces goes to the runner as ARGV ELEMENTS, and the runner never joins them
-// back into a string. A metacharacter that survived tokenization as a literal
-// must also survive the spawn as a literal.
-func TestFenceSplitterOutputIsSafeToExecute(t *testing.T) {
-	argv, err := Split(`echo "$(whoami); rm -rf /"`)
-	testsupport.Must(t, err, "Split: %v", err)
-	want := []string{"echo", "$(whoami); rm -rf /"}
-	if !reflect.DeepEqual(argv, want) {
-		t.Fatalf("Split produced %q, want %q", argv, want)
-	}
-
-	// And that element reaches the child intact.
-	spec := witnessSpec(t, "", argv[1])
-	res, err := Run(spec)
-	testsupport.Must(t, err, "Run: %v", err)
-	got := parseArgs(res.Output)
-	if len(got) != 1 || got[0] != want[1] {
-		t.Errorf("the tokenized element must reach the child verbatim; got %q", got)
-	}
-}

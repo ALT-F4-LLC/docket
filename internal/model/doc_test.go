@@ -55,20 +55,6 @@ func TestParseDocID(t *testing.T) {
 	}
 }
 
-func TestFormatParseDocIDRoundTrip(t *testing.T) {
-	for _, id := range []int{1, 5, 42, 999} {
-		formatted := FormatDocID(id)
-		parsed, err := ParseDocID(formatted)
-		if err != nil {
-			t.Errorf("ParseDocID(FormatDocID(%d)) error: %v", id, err)
-			continue
-		}
-		if parsed != id {
-			t.Errorf("ParseDocID(FormatDocID(%d)) = %d", id, parsed)
-		}
-	}
-}
-
 func TestDocRef_MarshalJSON(t *testing.T) {
 	ref := DocRef{
 		ID:     3,

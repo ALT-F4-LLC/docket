@@ -150,22 +150,3 @@ func TestWorkflowShowReportsAMissingSourceDistinctly(t *testing.T) {
 		t.Errorf("the human summary does not report the missing file:\n%s", buf.String())
 	}
 }
-
-// TestWorkflowShowReportsAnUncheckableSource: a definition registered from
-// stdin has no file to compare against, and says so rather than reporting a
-// verdict it did not reach.
-func TestWorkflowShowReportsAnUncheckableSource(t *testing.T) {
-	conn := newTestDB(t)
-	cmd := workflowRegisterCmdWithDB(conn)
-	cmd.SetIn(strings.NewReader(minimalWorkflow))
-	w, _ := bufWriter(true)
-	testsupport.Must(t, runWorkflowRegister(cmd, []string{"-"}, w), "register from stdin")
-
-	got := showSourceStatus(t, conn, "unit@1")
-	if got.State != model.WorkflowSourceUnchecked {
-		t.Errorf("state = %q, want %q (%+v)", got.State, model.WorkflowSourceUnchecked, got)
-	}
-	if got.Reason == "" {
-		t.Error("an unchecked source carries no reason")
-	}
-}

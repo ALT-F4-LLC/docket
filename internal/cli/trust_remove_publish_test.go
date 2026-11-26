@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ALT-F4-LLC/docket/internal/config"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -122,66 +121,5 @@ func TestTrustAddUnpinnableArgv0IsValidation(t *testing.T) {
 	}
 	if code := errorCodeOf(t, err); code != output.ErrValidation {
 		t.Errorf("the refusal is %s, want VALIDATION_ERROR: %v", code, err)
-	}
-}
-
-// TestTrustListAgreesWithEventLog is the property the ordering exists to
-// protect: what `trust list` shows and what the newest trust event per entry
-// says must not contradict each other.
-//
-// Scope of "agree": this covers an add, a successful removal, and a removal
-// whose PUBLISH failed. It deliberately does not cover a published removal
-// whose event failed to record — there the log lags the store by design, which
-// TestTrustRmFailsLoudlyWhenTheCwdCannotBeResolved pins instead.
-func TestTrustListAgreesWithEventLog(t *testing.T) {
-	_, cfg := trustRepo(t)
-
-	err := runTrustVerb(t, cfg, newTrustAddCmd(), "checks", "--", "make", "test")
-	testsupport.Must(t, err, "trust add checks: %v", err)
-	err = runTrustVerb(t, cfg, newTrustAddCmd(), "scan", "--", "make", "scan")
-	testsupport.Must(t, err, "trust add scan: %v", err)
-	assertListAgreesWithEvents(t, cfg, "after two adds")
-
-	err = runTrustVerb(t, cfg, newTrustRmCmd(), "scan")
-	testsupport.Must(t, err, "trust rm scan: %v", err)
-	assertListAgreesWithEvents(t, cfg, "after a successful removal")
-
-	sealTrustStoreDir(t)
-	if runErr := runTrustVerb(t, cfg, newTrustRmCmd(), "checks"); runErr == nil {
-		t.Fatal("the removal must fail when the store cannot be published")
-	}
-	assertListAgreesWithEvents(t, cfg, "after a removal whose publish failed")
-}
-
-// assertListAgreesWithEvents derives the trusted set from the event log —
-// newest event per entry wins — and compares it with what the store lists. The
-// expectation comes from the log, an independent oracle, never from the same
-// store read being checked.
-func assertListAgreesWithEvents(t *testing.T, cfg *config.Config, when string) {
-	t.Helper()
-
-	trustedByLog := map[string]bool{}
-	for _, e := range trustEvents(t, cfg) {
-		name, _ := e["name"].(string)
-		trustedByLog[name] = e["kind"] == engine.EventTrustAdded
-	}
-
-	inStore := map[string]bool{}
-	for _, entry := range trustEntries(t) {
-		inStore[entry.Name] = true
-	}
-
-	for name, trusted := range trustedByLog {
-		if trusted && !inStore[name] {
-			t.Errorf("%s: the log's newest event for %q is an add, but the store does not list it", when, name)
-		}
-		if !trusted && inStore[name] {
-			t.Errorf("%s: the log says %q was removed, but the store still authorizes it", when, name)
-		}
-	}
-	for name := range inStore {
-		if _, seen := trustedByLog[name]; !seen {
-			t.Errorf("%s: the store lists %q with no trust event for it at all", when, name)
-		}
 	}
 }

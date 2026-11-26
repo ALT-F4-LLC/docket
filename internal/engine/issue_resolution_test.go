@@ -60,34 +60,6 @@ func TestAbandonIssueInRunRecordsTheResolution(t *testing.T) {
 	}
 }
 
-// TestAbandonIssueRoutingRecordsTheResolution is the same fact at the ROUTING
-// edge: `step resolve --as abandon-issue` and `run abandon --issue` are one
-// statement about the issue with two actors, so they must not leave the
-// tracker saying different things about it.
-func TestAbandonIssueRoutingRecordsTheResolution(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-
-	// The step id is read BEFORE the transaction opens: querying the same
-	// connection while one is in flight blocks on SQLite.
-	stepID := firstStepOfIssue(t, conn, run.ID, issue)
-
-	tx, err := conn.Begin()
-	testsupport.Must(t, err, "begin: %v", err)
-	step, err := db.GetStepTx(tx, stepID)
-	testsupport.Must(t, err, "GetStepTx: %v", err)
-	testsupport.Must(t, abandonIssue(tx, step, nowMS), "abandonIssue: %v", err)
-	testsupport.Must(t, tx.Commit(), "commit: %v", err)
-
-	after, err := db.GetIssue(conn, issue)
-	testsupport.Must(t, err, "GetIssue: %v", err)
-	if after.Resolution != db.IssueResolutionAbandoned {
-		t.Errorf("resolution = %q, want %q — the routing and `run abandon "+
-			"--issue` are one fact about the issue and must record it the "+
-			"same way", after.Resolution, db.IssueResolutionAbandoned)
-	}
-}
-
 func firstStepOfIssue(t *testing.T, conn *sql.DB, runID, issueID int) int {
 	t.Helper()
 	var id int

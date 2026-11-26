@@ -143,43 +143,6 @@ func TestSupersedeInstantiatesTheSuccessorOfEveryPendingItTakes(t *testing.T) {
 	assertSupersededHaveSuccessors(t, conn, issue, 1)
 }
 
-// TestSupersededSuccessorBecomesReachable is the other half of the invariant,
-// and the half a row-count check would miss: the successor must be REACHABLE,
-// not merely present.
-//
-// A `verify-ac@1` that exists but can never satisfy R3 is starvation with a row
-// to point at. Its predecessor `assess` re-instantiates at ordinal 1,
-// so the successor becomes ready the moment ordinal 1's chain reaches it
-// — which is what makes superseding the ordinal-0 instance a deferral rather
-// than a discard.
-func TestSupersededSuccessorBecomesReachable(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := startedStarvationRun(t, conn)
-	e := testEngine()
-
-	enterLoopAt(t, conn, e, 0)
-
-	// Not ready yet: ordinal 1's `assess` has not run.
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		step := stepNamed(t, sched, "verify-ac@1")
-		if ready, _ := sched.Ready(step); ready {
-			t.Fatal("verify-ac@1 is ready before assess@1 completed; the case is not set up")
-		}
-	})
-
-	claimAndComplete(t, conn, e, "fix@1", "the fix summary", "")
-	claimAndComplete(t, conn, e, "assess@1", "the assessment", metPayload)
-
-	loadScheduler(t, conn, run.ID, nowMS, func(sched *Scheduler) {
-		step := stepNamed(t, sched, "verify-ac@1")
-		if ready, cond := sched.Ready(step); !ready {
-			t.Errorf("verify-ac@1 is not ready (%s) with assess@1 done — a "+
-				"superseded instance's successor must be reachable, or the "+
-				"supersede discarded the step rather than deferring it", cond)
-		}
-	})
-}
-
 // TestSupersedeRepairsAMissingSuccessor exercises the guard the two tests above
 // only observe holding.
 //

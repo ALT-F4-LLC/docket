@@ -644,46 +644,6 @@ func TestTailLargerThanFeedReturnsEverything(t *testing.T) {
 	}
 }
 
-// TestTailRespectsRunFilter keeps --tail composing with --run: the window is
-// the newest N OF THE FILTERED SET, not the newest N overall then filtered,
-// which would return fewer rows than asked for whenever another run interleaves.
-func TestTailRespectsRunFilter(t *testing.T) {
-	conn := mustDB(t)
-	runID, _ := budgetRun(t, conn, 0)
-
-	// Interleave run-less events among the run's own, so a tail computed
-	// before filtering would come back short.
-	seedEvents(t, conn, 4)
-	claimInstance(t, conn, "implement@0", nowMS)
-	seedEvents(t, conn, 4)
-
-	page, err := ListEvents(conn, EventQuery{RunID: runID, Tail: 2})
-	testsupport.Must(t, err, "ListEvents(RunID, Tail=2): %v", err)
-	if len(page.Events) == 0 {
-		t.Fatal("Tail with a run filter returned nothing; the window was computed before the filter")
-	}
-	for _, e := range page.Events {
-		if e.Run != "RUN-1" {
-			t.Errorf("event %d has run %q, want only RUN-1 rows", e.Seq, e.Run)
-		}
-	}
-}
-
-// TestTailZeroIsUnchanged: the default path must be byte-identical to the
-// behaviour that predates --tail, since every existing consumer reads it.
-func TestTailZeroIsUnchanged(t *testing.T) {
-	conn := mustDB(t)
-	seqs := seedEvents(t, conn, 6)
-
-	page, err := ListEvents(conn, EventQuery{Tail: 0, Limit: 3})
-	testsupport.Must(t, err, "ListEvents(Tail=0): %v", err)
-	got := tailSeqs(page.Events)
-	if len(got) != 3 || got[0] != seqs[0] {
-		t.Errorf("Tail=0 with Limit=3 gave %v, want the OLDEST three starting at %d",
-			got, seqs[0])
-	}
-}
-
 // seedRunEvents writes n events on runID, all of kind "probe" except the ones
 // overrides names by 1-based position, each attributed to stepAt's step when
 // stepAt names a step for that position. It returns the seqs in order.

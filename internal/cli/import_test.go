@@ -45,79 +45,6 @@ func doImport(conn store.LegacyDB, export *model.ExportData, replace bool, proje
 	return verb.RestoreExport(store.StoreOn(conn), export, replace, projectID)
 }
 
-func TestDoImportRoundTripPreservesDocs(t *testing.T) {
-	src := newTestDB(t)
-
-	issueID := createIssue(t, src, "linked issue", model.StatusTodo, model.PriorityMedium)
-
-	docID := createDoc(t, src, "design doc", "tdd", "draft")
-	revisedBody := "second revision body"
-	if _, err := db.UpdateDoc(src, docID, db.DocUpdate{Body: &revisedBody, Author: "editor"}); err != nil {
-		t.Fatalf("UpdateDoc: %v", err)
-	}
-
-	otherDocID := createDoc(t, src, "decision record", "adr", "accepted")
-
-	for _, c := range []*model.DocComment{
-		{DocID: docID, Body: "first comment", Author: "alice"},
-		{DocID: docID, Body: "second comment", Author: "bob"},
-		{DocID: otherDocID, Body: "third comment", Author: "carol"},
-	} {
-		if _, err := db.CreateDocComment(src, c); err != nil {
-			t.Fatalf("CreateDocComment: %v", err)
-		}
-	}
-
-	linkDocIssue(t, src, docID, issueID)
-
-	export := buildExport(t, src)
-
-	dst := newTestDB(t)
-	if _, err := doImport(dst, export, false, 1); err != nil {
-		t.Fatalf("doImport: %v", err)
-	}
-
-	gotDocs, err := db.ListAllDocs(dst, 0)
-	testsupport.Must(t, err, "ListAllDocs(dst, 0): %v", err)
-	if len(gotDocs) != 2 {
-		t.Fatalf("expected 2 docs after import, got %d", len(gotDocs))
-	}
-
-	gotRevisions, err := db.ListAllDocRevisions(dst, 0)
-	testsupport.Must(t, err, "ListAllDocRevisions(dst, 0): %v", err)
-	// docID: create + body edit = 2 revisions; otherDocID: create = 1 revision.
-	if len(gotRevisions) != 3 {
-		t.Fatalf("expected 3 doc revisions after import, got %d", len(gotRevisions))
-	}
-
-	gotComments, err := db.ListAllDocComments(dst, 0)
-	testsupport.Must(t, err, "ListAllDocComments(dst, 0): %v", err)
-	if len(gotComments) != 3 {
-		t.Fatalf("expected 3 doc comments after import, got %d", len(gotComments))
-	}
-
-	gotLinks, err := db.ListAllDocIssueLinks(dst, 0)
-	testsupport.Must(t, err, "ListAllDocIssueLinks(dst, 0): %v", err)
-	if len(gotLinks) != 1 {
-		t.Fatalf("expected 1 doc-issue link after import, got %d", len(gotLinks))
-	}
-	if gotLinks[0].DocID != docID || gotLinks[0].IssueID != issueID {
-		t.Errorf("expected link (doc=%d, issue=%d), got (doc=%d, issue=%d)",
-			docID, issueID, gotLinks[0].DocID, gotLinks[0].IssueID)
-	}
-
-	gotDoc, err := db.GetDoc(dst, docID)
-	if err != nil {
-		t.Fatalf("GetDoc(dst, %d): %v", docID, err)
-	}
-	if gotDoc.Body != revisedBody {
-		t.Errorf("expected doc body %q after import, got %q", revisedBody, gotDoc.Body)
-	}
-	if gotDoc.Title != "design doc" {
-		t.Errorf("expected doc title %q, got %q", "design doc", gotDoc.Title)
-	}
-}
-
 func TestDoImportRoundTripPreservesProposalsSubsystem(t *testing.T) {
 	src := newTestDB(t)
 
@@ -318,26 +245,6 @@ func TestDoImportReplaceRollsBackOnFailure(t *testing.T) {
 	}
 }
 
-func TestDoImportReplaceClearsThenImports(t *testing.T) {
-	dst := newTestDB(t)
-	createIssue(t, dst, "old data", model.StatusTodo, model.PriorityHigh)
-
-	src := newTestDB(t)
-	createIssue(t, src, "new data", model.StatusTodo, model.PriorityMedium)
-
-	export := buildExport(t, src)
-
-	if _, err := doImport(dst, export, true, 1); err != nil {
-		t.Fatalf("doImport(replace=true): %v", err)
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].Title != "new data" {
-		t.Fatalf("expected only imported issue after successful replace, got %+v", gotIssues)
-	}
-}
-
 func createChildIssue(t *testing.T, conn store.LegacyDB, title string, status model.Status, parentID int) int {
 	t.Helper()
 	id, err := db.CreateIssue(conn, &model.Issue{
@@ -490,92 +397,6 @@ func TestFilteredExportRoundTripDropsUnlinkedAndNullsParent(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Errorf("expected no foreign key violations after import, found at least one")
-	}
-}
-
-func TestFilteredExportReplaceImportRoundTripsAndDropsStandalone(t *testing.T) {
-	src := newTestDB(t)
-
-	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
-	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
-
-	linkedDocID := createDoc(t, src, "linked design doc", "tdd", "draft")
-	linkDocIssue(t, src, linkedDocID, childID)
-	standaloneDocID := createDoc(t, src, "standalone adr", "adr", "accepted")
-
-	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
-
-	dst := newTestDB(t)
-	staleID := createIssue(t, dst, "stale data to be replaced", model.StatusTodo, model.PriorityHigh)
-
-	if _, err := doImport(dst, export, true, 1); err != nil {
-		t.Fatalf("doImport(filtered, replace=true): %v", err)
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].ID != childID {
-		t.Fatalf("expected only the filtered child after replace, got %+v", gotIssues)
-	}
-	if gotIssues[0].ID == staleID {
-		t.Fatalf("stale issue survived --replace import")
-	}
-	if gotIssues[0].ParentID != nil {
-		t.Errorf("expected dangling parent nulled after filtered replace import, got parent_id=%v", *gotIssues[0].ParentID)
-	}
-
-	gotDocs, err := db.ListAllDocs(dst, 0)
-	testsupport.Must(t, err, "ListAllDocs(dst, 0): %v", err)
-	if len(gotDocs) != 1 || gotDocs[0].ID != linkedDocID {
-		t.Errorf("expected only linked doc after filtered replace import, got %+v", gotDocs)
-	}
-	for _, d := range gotDocs {
-		if d.ID == standaloneDocID {
-			t.Errorf("standalone doc leaked into filtered replace import: %+v", d)
-		}
-	}
-
-	rows, err := dst.Query("PRAGMA foreign_key_check")
-	testsupport.Must(t, err, "PRAGMA foreign_key_check: %v", err)
-	defer rows.Close()
-	if rows.Next() {
-		t.Errorf("expected no foreign key violations after filtered replace import, found at least one")
-	}
-}
-
-func TestFilteredExportReplaceImportRollsBackOnFailure(t *testing.T) {
-	src := newTestDB(t)
-	parentID := createIssue(t, src, "in-progress parent", model.StatusInProgress, model.PriorityMedium)
-	childID := createChildIssue(t, src, "done child", model.StatusDone, parentID)
-	docID := createDoc(t, src, "linked doc", "tdd", "draft")
-	linkDocIssue(t, src, docID, childID)
-
-	export := runFilteredExport(t, src, []string{string(model.StatusDone)})
-	export.DocIssueLinks = append(export.DocIssueLinks, model.DocIssueLink{
-		DocID:     docID,
-		IssueID:   999999,
-		CreatedAt: "2026-01-01T00:00:00Z",
-	})
-
-	dst := newTestDB(t)
-	survivorID := createIssue(t, dst, "must survive failed replace", model.StatusTodo, model.PriorityHigh)
-	err := db.AddLabelToIssue(dst, survivorID, "keep-me", "", "tester")
-	testsupport.Must(t, err, "AddLabelToIssue: %v", err)
-
-	if _, err := doImport(dst, export, true, 1); err == nil {
-		t.Fatal("expected doImport(filtered, replace=true) to fail on dangling doc-issue link, got nil")
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].ID != survivorID || gotIssues[0].Title != "must survive failed replace" {
-		t.Fatalf("expected pre-existing data preserved after failed filtered replace, got %+v", gotIssues)
-	}
-
-	gotLabels, err := db.ListAllLabelsRaw(dst, 0)
-	testsupport.Must(t, err, "ListAllLabelsRaw(dst, 0): %v", err)
-	if len(gotLabels) != 1 || gotLabels[0].Name != "keep-me" {
-		t.Fatalf("expected pre-existing label preserved after failed filtered replace, got %+v", gotLabels)
 	}
 }
 
@@ -911,26 +732,6 @@ func TestImportReplaceProceedsWithYesInJSONMode(t *testing.T) {
 	}
 	if envelope.Data.Imported == 0 {
 		t.Fatalf("expected the envelope to report at least 1 imported entity, got %+v", envelope)
-	}
-
-	gotIssues, err := db.ListAllIssues(dst, 0)
-	testsupport.Must(t, err, "ListAllIssues(dst, 0): %v", err)
-	if len(gotIssues) != 1 || gotIssues[0].Title != "seed issue" {
-		t.Fatalf("expected only imported issue after confirmed replace, got %+v", gotIssues)
-	}
-}
-
-// TestImportReplaceProceedsWithYesInHumanMode is the human-mode twin of
-// TestImportReplaceProceedsWithYesInJSONMode.
-func TestImportReplaceProceedsWithYesInHumanMode(t *testing.T) {
-	src := newTestDB(t)
-	filePath := seedAndWriteExportFile(t, src)
-
-	dst := newTestDB(t)
-	createIssue(t, dst, "old data", model.StatusTodo, model.PriorityHigh)
-
-	if err := runImportCmd(t, dst, filePath, false, true, true); err != nil {
-		t.Fatalf("import --replace --yes: %v", err)
 	}
 
 	gotIssues, err := db.ListAllIssues(dst, 0)

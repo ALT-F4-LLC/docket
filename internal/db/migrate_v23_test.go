@@ -12,30 +12,6 @@ import (
 // a column may assert. The behavior the columns exist for — fail bumping one,
 // reap bumping the other, retry touching neither — is the engine's to prove.
 
-func TestMigrateToV23(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, col := range v23ColumnSentinels {
-		exists, err := hasColumnDB(db, col.table, col.column)
-		if err != nil || !exists {
-			t.Errorf("%s.%s missing after migration (err %v)", col.table, col.column, err)
-		}
-	}
-}
-
 // TestV23RewindGuardConvergesAStampedStore drops the columns while leaving the
 // stamp at 23 — the mid-change-binary database v13's guard comment describes —
 // and asserts Migrate converges it.

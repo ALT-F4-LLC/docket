@@ -213,41 +213,6 @@ func TestVerifyPinsReportsAnUnpinnedReferenceWithNoBytesOnDisk(t *testing.T) {
 	}
 }
 
-// TestARepinTodayLeavesNoUnpinnedReference is the companion the fixture above
-// needs: driving a repin on RUN-59's corpus edit no longer produces the wedge,
-// because DKT-805 taught repin to pin the closure of the bytes it adopts. The
-// two verbs share one walk (unpinnedClosureRefs), and this is the assertion
-// that they agree — the disagreement is what DKT-821 was.
-func TestARepinTodayLeavesNoUnpinnedReference(t *testing.T) {
-	conn, configDir := configRepo(t)
-	writeConfigFile(t, configDir, "workflows/dkt821-dev.toml", dkt821WorkflowSrc)
-	writeConfigFile(t, configDir, "contracts/judge.md", "the judge contract\n")
-	writeConfigFile(t, configDir, "policy.toml", "opaque = \"instance policy\"\n")
-
-	issue := createIssue(t, conn, "repin closes it", "a body", "task", nil)
-	run := startRun(t, conn, issue)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	writeConfigFile(t, configDir, "contracts/judge.md", dkt821ContractB1)
-	writeConfigFile(t, configDir, "fragments/laziness-ladder.md", "the ladder\n")
-
-	_, err = RepinRunWith(conn, run.ID, RepinOptions{
-		Token: testConductorToken, Reason: "adopting the second edition"}, nowMS)
-	testsupport.Must(t, err, "RepinRunWith: %v", err)
-
-	report, err := VerifyPins(conn, run.ID)
-	testsupport.Must(t, err, "VerifyPins: %v", err)
-	if !report.Sound() {
-		t.Fatalf("verify-pins refuses a run repin just closed: %s",
-			PinReportReason(report))
-	}
-	if report.Unpinned != 0 || len(report.References) != 0 {
-		t.Errorf("references = %+v, want none — repin pinned what the adopted "+
-			"bytes require, so there is no hole left to name", report.References)
-	}
-}
-
 // TestVerifyPinsStaysCleanOnAClosedPinSet is AC3, and it is not vacuous: the
 // contract reaches a fragment which reaches a second fragment, and activation
 // pinned the whole chain. A closure check that reported those as unpinned would

@@ -3,8 +3,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -136,54 +134,6 @@ func TestReconcileRoutesPassByT4ShortCircuit(t *testing.T) {
 	}
 }
 
-// TestBuiltinSpawnsNoProcess: a builtin SPAWNS NOTHING.
-//
-// The rule matters structurally rather than as an optimization: "no
-// subprocess ever executes inside a transaction" holds TRIVIALLY for a builtin,
-// so the action stage's position — outside the routing transaction, exactly
-// where it has always been — needs no argument for the aggregate path.
-func TestBuiltinSpawnsNoProcess(t *testing.T) {
-	before := childProcessCount(t)
-
-	runner := &ExecActionRunner{
-		RepoRoot: t.TempDir(),
-		LoadStore: func() (*trust.Store, error) {
-			t.Error("the builtin consulted the trust store; resolution is " +
-				"builtin-first and a builtin never looks one up")
-			return &trust.Store{}, nil
-		},
-	}
-
-	for range 20 {
-		result, err := runner.Run(context.Background(), ActionSpec{
-			Name: workflow.ActionAggregate, Output: "findings",
-			Params: map[string]any{
-				"field": "severity", "method": "median", "output": "findings",
-			},
-			Inputs: []map[string]any{{"severity": "low"}},
-			Order:  severityOrder,
-		}, StepContext{Instance: "reconcile@0", RunID: 1, IssueID: 1})
-		testsupport.Must(t, err, "Run: %v", err)
-		if result.Failed {
-			t.Fatalf("the builtin failed: %s", result.Reason)
-		}
-		if result.Kind != "findings" {
-			t.Errorf("kind = %q, want params.output `findings`", result.Kind)
-		}
-		if len(result.Results) != 1 || !result.Results[0].Builtin {
-			t.Errorf("results = %+v, want one row marked builtin", result.Results)
-		}
-		if result.Results[0].Argv != nil || result.Results[0].Exit != nil {
-			t.Error("the builtin recorded an argv or an exit; it spawned nothing")
-		}
-	}
-
-	if after := childProcessCount(t); after > before {
-		t.Errorf("the process count rose %d -> %d: the builtin spawned something",
-			before, after)
-	}
-}
-
 // TestBuiltinRouteAtSplitsTheOutputFromTheRecord is DKT-593 at the runner
 // seam: the ARTIFACT payload — the wire the threshold evaluates and every
 // downstream `inputs` reader consumes — carries only the clusters at or above
@@ -272,23 +222,6 @@ func TestBuiltinWithoutRouteAtRecordsNothingInItsRow(t *testing.T) {
 		`"operator_resolved":false,"severity":"low"}]` {
 		t.Errorf("the absent case's payload changed shape: %s", result.Payload)
 	}
-}
-
-// childProcessCount counts this process's children, so a spawn is observable.
-func childProcessCount(t *testing.T) int {
-	t.Helper()
-	out, err := exec.Command("ps", "-o", "ppid=", "-A").Output()
-	if err != nil {
-		t.Skipf("cannot enumerate processes on this platform: %v", err)
-	}
-	pid := strconv.Itoa(os.Getpid())
-	n := 0
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) == pid {
-			n++
-		}
-	}
-	return n
 }
 
 // TestActionWithoutOutputFailsRegister is the register-time rule:

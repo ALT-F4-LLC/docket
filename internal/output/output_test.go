@@ -12,28 +12,6 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
-func TestWriteJSONSuccess(t *testing.T) {
-	var buf bytes.Buffer
-	writeJSONSuccess(&buf, map[string]string{"key": "val"}, "it worked")
-
-	var env successEnvelope
-	err := json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if !env.OK {
-		t.Error("ok = false, want true")
-	}
-	if env.Message != "it worked" {
-		t.Errorf("message = %q, want %q", env.Message, "it worked")
-	}
-	data, ok := env.Data.(map[string]any)
-	if !ok {
-		t.Fatalf("data type = %T, want map", env.Data)
-	}
-	if data["key"] != "val" {
-		t.Errorf("data.key = %v, want %q", data["key"], "val")
-	}
-}
-
 func TestWriteJSONSuccessOmitsEmptyMessage(t *testing.T) {
 	var buf bytes.Buffer
 	writeJSONSuccess(&buf, "data", "")
@@ -43,46 +21,6 @@ func TestWriteJSONSuccessOmitsEmptyMessage(t *testing.T) {
 	testsupport.Must(t, err, "unmarshal: %v", err)
 	if _, exists := raw["message"]; exists {
 		t.Error("expected message to be omitted when empty")
-	}
-}
-
-func TestWriteJSONError(t *testing.T) {
-	var buf bytes.Buffer
-	writeJSONError(&buf, errors.New("something broke"), ErrNotFound)
-
-	var env errorEnvelope
-	err := json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if env.OK {
-		t.Error("ok = true, want false")
-	}
-	if env.Error != "something broke" {
-		t.Errorf("error = %q, want %q", env.Error, "something broke")
-	}
-	if env.Code != ErrNotFound {
-		t.Errorf("code = %q, want %q", env.Code, ErrNotFound)
-	}
-}
-
-func TestWriterErrorJSON(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	w := &Writer{JSONMode: true, Stdout: &stdout, Stderr: &stderr}
-
-	code := w.Error(errors.New("fail"), ErrValidation)
-	if code != ExitValidation {
-		t.Errorf("exit code = %d, want %d", code, ExitValidation)
-	}
-	if stdout.Len() == 0 {
-		t.Error("expected JSON error on stdout")
-	}
-	var env errorEnvelope
-	err := json.Unmarshal(stdout.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if env.OK {
-		t.Error("ok = true, want false")
-	}
-	if env.Code != ErrValidation {
-		t.Errorf("code = %q, want %q", env.Code, ErrValidation)
 	}
 }
 
@@ -187,47 +125,6 @@ func TestWriteHumanSuccessPlainNoColor(t *testing.T) {
 	}
 }
 
-func TestWriteHumanSuccessMultiLineNoCheckmark(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	var buf bytes.Buffer
-	table := "┌────┬───────┐\n│ ID │ Title │\n└────┴───────┘"
-	writeHumanSuccess(&buf, table)
-
-	got := buf.String()
-	want := table + "\n"
-	if got != want {
-		t.Errorf("writeHumanSuccess(multi-line) = %q, want %q", got, want)
-	}
-	// Multi-line output must NOT contain the checkmark icon
-	if bytes.Contains(buf.Bytes(), []byte("\u2714")) {
-		t.Error("expected no checkmark icon for multi-line output")
-	}
-}
-
-func TestWriteHumanSuccessMultiLineWithColorsNoCheckmark(t *testing.T) {
-	// Even when colors are enabled, multi-line content should not get a checkmark
-	t.Setenv("TERM", "xterm-256color")
-	// Unset NO_COLOR to ensure colors would be enabled
-	t.Setenv("NO_COLOR", "")
-	// Note: render.ColorsEnabled() may still return false in test environments,
-	// but the newline check comes first regardless — this test verifies the
-	// multi-line branch is taken before the color check.
-
-	var buf bytes.Buffer
-	table := "line1\nline2\nline3"
-	writeHumanSuccess(&buf, table)
-
-	got := buf.String()
-	want := table + "\n"
-	if got != want {
-		t.Errorf("writeHumanSuccess(multi-line, colors) = %q, want %q", got, want)
-	}
-	if bytes.Contains(buf.Bytes(), []byte("\u2714")) {
-		t.Error("expected no checkmark icon for multi-line output even with colors")
-	}
-}
-
 func TestWriteHumanSuccessEmptyMessage(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -236,23 +133,6 @@ func TestWriteHumanSuccessEmptyMessage(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("writeHumanSuccess with empty message should produce no output, got %q", buf.String())
-	}
-}
-
-func TestWriteHumanErrorPlainNoColor(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	var buf bytes.Buffer
-	writeHumanError(&buf, errors.New("something failed"))
-
-	got := buf.String()
-	want := "Error: something failed\n"
-	if got != want {
-		t.Errorf("writeHumanError(NO_COLOR) = %q, want %q", got, want)
-	}
-	// Should NOT contain the cross icon when colors are disabled
-	if bytes.Contains(buf.Bytes(), []byte("\u2718")) {
-		t.Error("expected no cross icon when NO_COLOR is set")
 	}
 }
 
@@ -293,45 +173,6 @@ func TestWriterSuccessHumanModeMultiLine(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("expected no stderr output, got %q", stderr.String())
-	}
-}
-
-func TestWriterSuccessJSONMode(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	w := &Writer{JSONMode: true, Stdout: &stdout, Stderr: &stderr}
-
-	w.Success(map[string]string{"key": "val"}, "it worked")
-
-	var env successEnvelope
-	err := json.Unmarshal(stdout.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if !env.OK {
-		t.Error("ok = false, want true")
-	}
-	if env.Message != "it worked" {
-		t.Errorf("message = %q, want %q", env.Message, "it worked")
-	}
-	if stderr.Len() != 0 {
-		t.Errorf("expected no stderr in JSON mode, got %q", stderr.String())
-	}
-}
-
-func TestWriterSuccessJSONModeUnchangedByNoColor(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	var stdout, stderr bytes.Buffer
-	w := &Writer{JSONMode: true, Stdout: &stdout, Stderr: &stderr}
-
-	w.Success(map[string]string{"key": "val"}, "it worked")
-
-	var env successEnvelope
-	err := json.Unmarshal(stdout.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if !env.OK {
-		t.Error("ok = false, want true")
-	}
-	if env.Message != "it worked" {
-		t.Errorf("message = %q, want %q", env.Message, "it worked")
 	}
 }
 

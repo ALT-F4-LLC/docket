@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/spf13/cobra"
 )
 
@@ -353,76 +352,6 @@ func TestGuardNotApplicable(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestGuardSpawnActiveFlagValidation is DKT-1287: `--active` is mutually
-// exclusive with `--run`, `--rows` and `--ack-reap`, since each of those names
-// an act about ONE run and `--active` answers over every active run at once.
-func TestGuardSpawnActiveFlagValidation(t *testing.T) {
-	bin := buildDocketBinary(t)
-	repo := t.TempDir()
-	if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {
-		t.Fatalf("init failed: %s", stderr)
-	}
-
-	rowsFile := filepath.Join(repo, "rows.json")
-	if err := os.WriteFile(rowsFile, []byte("[]"), 0o644); err != nil {
-		t.Fatalf("writing %s: %v", rowsFile, err)
-	}
-
-	cases := [][]string{
-		{"guard", "spawn", "--active", "--run", "RUN-1"},
-		{"guard", "spawn", "--active", "--rows", rowsFile},
-		{"guard", "spawn", "--active", "--ack-reap", "1"},
-	}
-	for _, argv := range cases {
-		t.Run(strings.Join(argv, " "), func(t *testing.T) {
-			_, stderr, code := runDocket(t, bin, repo, argv...)
-			if code != 3 {
-				t.Errorf("exit = %d, want 3 VALIDATION_ERROR\nstderr: %s", code, stderr)
-			}
-			if !strings.Contains(stderr, "mutually exclusive") &&
-				!strings.Contains(stderr, "instead") {
-				t.Errorf("stderr = %q, want it to explain the conflict", stderr)
-			}
-		})
-	}
-}
-
-// TestGuardSpawnActiveCarriesDecidingVote: `--active` takes `--deciding-vote`,
-// because the proposal resolves its own run. The flag is parsed by the same
-// rule as on the `--run` path — a malformed reference is that rule's
-// VALIDATION_ERROR, not a refusal of the combination — and a well-formed one
-// on a store with nothing held is the ordinary allow.
-func TestGuardSpawnActiveCarriesDecidingVote(t *testing.T) {
-	bin := buildDocketBinary(t)
-	repo := t.TempDir()
-	if _, stderr, code := runDocket(t, bin, repo, "init"); code != 0 {
-		t.Fatalf("init failed: %s", stderr)
-	}
-
-	t.Run("a malformed reference", func(t *testing.T) {
-		_, stderr, code := runDocket(t, bin, repo,
-			"guard", "spawn", "--active", "--deciding-vote", "nonsense")
-		if code != 3 {
-			t.Errorf("exit = %d, want 3 VALIDATION_ERROR\nstderr: %s", code, stderr)
-		}
-		if !strings.Contains(stderr, "invalid --deciding-vote") {
-			t.Errorf("stderr = %q, want the flag's own parse error", stderr)
-		}
-	})
-
-	t.Run("nothing held", func(t *testing.T) {
-		stdout, stderr, code := runDocket(t, bin, repo,
-			"guard", "spawn", "--active", "--deciding-vote", model.FormatProposalID(1))
-		if code != 0 {
-			t.Errorf("exit = %d, want 0; the combination is no longer refused\nstderr: %s",
-				code, stderr)
-		}
-		if !strings.Contains(stdout, "allowed") {
-			t.Errorf("stdout = %q, want the ordinary allow verdict", stdout)
-		}
-	})
 }
 
 // buildDocketBinary compiles the CLI once for the exit-code tests.

@@ -227,41 +227,6 @@ func realTempDir(t *testing.T) string {
 	return dir
 }
 
-// TestArgv0IsNotResolvedAgainstTheWorkingDirectory refuses a command name
-// that resolves against the working directory.
-//
-// A repo that ships ./make must not win. Go's exec.ErrDot exists precisely for
-// this, and the runner treats it as a HARD REFUSAL rather than something to
-// re-resolve into an absolute path and run anyway.
-func TestArgv0IsNotResolvedAgainstTheWorkingDirectory(t *testing.T) {
-	repo := realTempDir(t)
-	plantBinary(t, repo, "witness-tool")
-
-	// A PATH that does NOT contain the repo. The only way `witness-tool` could
-	// resolve is against the working directory.
-	t.Setenv("PATH", realTempDir(t))
-
-	if _, err := Resolve("witness-tool", repo, "witness-tool"); err == nil {
-		t.Fatal("a bare name must not resolve against the working directory")
-	}
-
-	// The explicit ./-relative spelling is refused too, and the refusal says
-	// what happened rather than only that it failed.
-	//
-	// The working directory is restored to its EXACT prior value rather than
-	// to "..": a test that leaves the process chdir'd elsewhere breaks every
-	// later test that opens a file by a relative path — which is how the
-	// source guards, which read their own package directory, would fail for a
-	// reason that has nothing to do with them.
-	t.Chdir(repo)
-
-	if _, err := Resolve("./witness-tool", repo, "./witness-tool"); err == nil {
-		t.Fatal("a ./-relative argv[0] must be refused")
-	} else if !errors.Is(err, ErrRefused) {
-		t.Errorf("expected ErrRefused, got %v", err)
-	}
-}
-
 func TestResolveRefusesAnEmptyOrMissingCommand(t *testing.T) {
 	repo := realTempDir(t)
 

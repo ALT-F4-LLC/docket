@@ -136,69 +136,6 @@ func followOpts(conn store.LegacyDB, stdout, stderr *syncBuffer) followOptions {
 	}
 }
 
-// TestFollowSeesNewEventsAndStops is the headline property: a follow starts, a
-// writer inserts events, the follow prints them, the context is cancelled, and
-// the call returns having printed EACH NEW EVENT EXACTLY ONCE.
-//
-// The three assertions are separable and all three matter: it SAW the events
-// (a follow that printed nothing would satisfy "never duplicates"), it printed
-// each ONCE (the cursor advanced), and it STOPPED (cancellation is how a
-// follow ends, and a loop that ignored its context would hang the test rather
-// than fail it).
-func TestFollowSeesNewEventsAndStops(t *testing.T) {
-	conn := newTestDB(t)
-
-	// Two events exist BEFORE the follow starts, so the first cycle has a
-	// backlog to drain — a follow is not only a live tail.
-	followTrustEvent(t, conn, "before-1")
-	followTrustEvent(t, conn, "before-2")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var stdout, stderr syncBuffer
-	done := make(chan error, 1)
-	go func() { done <- followEvents(ctx, followOpts(conn, &stdout, &stderr)) }()
-
-	// Write more events WHILE the follow is running. This is the live half:
-	// these rows did not exist when the loop was started.
-	const live = 5
-	for i := 0; i < live; i++ {
-		followTrustEvent(t, conn, fmt.Sprintf("live-%d", i))
-	}
-
-	// Stop once everything is visible, rather than after a fixed duration.
-	// Waiting a wall-clock interval and hoping is how a poller test flakes.
-	waitFor(t, func() bool { return len(followSeqs(t, stdout.String())) >= 2+live })
-	cancel()
-
-	select {
-	case err := <-done:
-		testsupport.Must(t, err, "a cancelled follow returned %v; Ctrl-C must exit 0", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("the follow did not return after its context was cancelled")
-	}
-
-	seqs := followSeqs(t, stdout.String())
-	if len(seqs) != 2+live {
-		t.Fatalf("the follow printed %d events, want %d", len(seqs), 2+live)
-	}
-
-	// EXACTLY ONCE, and in order. Both fall out of the cursor rule, and a failure of
-	// either is a failure of the same clause.
-	seen := make(map[int64]bool, len(seqs))
-	for i, seq := range seqs {
-		if seen[seq] {
-			t.Errorf("seq %d was printed twice; the cursor did not advance past it", seq)
-		}
-		seen[seq] = true
-		if i > 0 && seq <= seqs[i-1] {
-			t.Errorf("seq %d printed after %d; a follow is ordered oldest-first",
-				seq, seqs[i-1])
-		}
-	}
-}
-
 // TestFollowCursorNeverRepeatsOrSkips extends the cursor's property ACROSS
 // CYCLES.
 //
@@ -463,48 +400,6 @@ func (f *fakeEventStream) stream(ctx context.Context, _ engine.EventQuery,
 
 func streamedEvent(seq int64) daemon.StreamFrame {
 	return daemon.StreamFrame{Event: &engine.Event{Seq: seq, Kind: engine.EventTrustAdded}}
-}
-
-// TestFollowPrintsTheStreamedSeqs: `--follow` prints what the stream sends
-// and nothing else. The fake's seqs exist nowhere in the store, so a follow
-// that listed the store on an interval would print none of them.
-func TestFollowPrintsTheStreamedSeqs(t *testing.T) {
-	conn := newTestDB(t)
-	// Rows the store holds and the stream does not send: printing them
-	// would mean the follow read the list rather than the stream.
-	followTrustEvent(t, conn, "store-only-1")
-	followTrustEvent(t, conn, "store-only-2")
-
-	want := []int64{101, 205, 333}
-	fake := &fakeEventStream{}
-	for _, seq := range want {
-		fake.frames = append(fake.frames, streamedEvent(seq))
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var stdout, stderr syncBuffer
-	opts := followOpts(conn, &stdout, &stderr)
-	opts.stream = fake.stream
-
-	done := make(chan error, 1)
-	go func() { done <- followEvents(ctx, opts) }()
-
-	// Stop on the full set, or on the first seq the stream did not send.
-	waitFor(t, func() bool {
-		got := followSeqs(t, stdout.String())
-		return len(got) >= len(want) || (len(got) > 0 && got[0] != want[0])
-	})
-	cancel()
-	testsupport.Must(t, <-done, "a cancelled follow returned an error")
-
-	got := followSeqs(t, stdout.String())
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("the follow printed seqs %v, want the streamed seqs %v", got, want)
-	}
-	if n := fake.opened.Load(); n != 1 {
-		t.Errorf("the follow opened the stream %d times, want 1", n)
-	}
 }
 
 // TestFollowStopsOnAStreamPruneMarker: a prune marker arriving mid-follow

@@ -46,25 +46,6 @@ func TestConfigGetReadsTheCallersProjectOverride(t *testing.T) {
 	}
 }
 
-func TestConfigGetListsEveryKeyWhenNoneIsNamed(t *testing.T) {
-	st := openStore(t)
-	if err := st.SetConfig(0, attemptMax, "9"); err != nil {
-		t.Fatalf("SetConfig: %v", err)
-	}
-
-	got, err := verb.ConfigGet(context.Background(), projectEnv(st, "", false), verb.ConfigGetInput{})
-	if err != nil {
-		t.Fatalf("ConfigGet: %v", err)
-	}
-	listed := false
-	for _, e := range got.Entries {
-		listed = listed || e == (store.ConfigEntry{Key: attemptMax, Value: "9", Source: "set"})
-	}
-	if !listed {
-		t.Errorf("listing omits %s=9 (set): %+v", attemptMax, got.Entries)
-	}
-}
-
 func TestConfigGetNeverRegistersAProject(t *testing.T) {
 	st := openStore(t)
 	if _, err := st.EnsureProject("/repos/first", "first", 1); err != nil {

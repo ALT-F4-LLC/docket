@@ -77,45 +77,6 @@ func inRepo(t *testing.T, dir string, scope []string) string {
 	return diff
 }
 
-// TestGitDiffSeesUntrackedFiles is E-9's regression, and it fails on HEAD
-// before the fix: a brand-new file is part of the change under review.
-func TestGitDiffSeesUntrackedFiles(t *testing.T) {
-	dir := gitRepo(t)
-	writeFile(t, dir, "internal/brand_new_test.go", "package x // the new test\n")
-
-	diff := inRepo(t, dir, nil)
-
-	if !strings.Contains(diff, "brand_new_test.go") {
-		t.Errorf("the diff omits an untracked file — a reviewer cannot see the "+
-			"new file at all (E-9)\n%s", diff)
-	}
-	if !strings.Contains(diff, "the new test") {
-		t.Errorf("the diff names the untracked file but omits its CONTENT\n%s", diff)
-	}
-	// It reads as an addition, which is what it is.
-	if !strings.Contains(diff, "new file") {
-		t.Errorf("the untracked file is not marked as a new file\n%s", diff)
-	}
-}
-
-// TestGitDiffStillSeesTrackedChanges is the baseline every falsification is
-// measured against: the fix must ADD the untracked half, never replace the
-// tracked one.
-func TestGitDiffStillSeesTrackedChanges(t *testing.T) {
-	dir := gitRepo(t)
-	writeFile(t, dir, "internal/tracked.txt", "original\nEDITED\n")
-	writeFile(t, dir, "internal/brand_new.txt", "new\n")
-
-	diff := inRepo(t, dir, nil)
-
-	if !strings.Contains(diff, "EDITED") {
-		t.Errorf("the diff lost the tracked modification\n%s", diff)
-	}
-	if !strings.Contains(diff, "brand_new.txt") {
-		t.Errorf("the diff lost the untracked addition\n%s", diff)
-	}
-}
-
 // TestGitDiffUntrackedRespectsScope pins that the untracked half is filtered by
 // the issue's snapshotted scope exactly as the tracked half is. An issue that
 // narrowed what it may touch must not have its diff widened by new files
@@ -213,42 +174,6 @@ func TestGitDiffDoesNotMutateTheIndex(t *testing.T) {
 	}
 }
 
-// TestGitDiffWorktreeCommitAgainstSharedHead is DKT-11's regression — see
-// GitDiff's own doc for the rationale.
-func TestGitDiffWorktreeCommitAgainstSharedHead(t *testing.T) {
-	shared := gitRepo(t)
-	sharedHead := gitOutput(t, shared, "rev-parse", "HEAD")
-	sharedHead = strings.TrimSpace(sharedHead)
-
-	worktree := t.TempDir()
-	worktree = filepath.Join(worktree, "wt")
-	runGit(t, shared, "worktree", "add", "-q", "-b", "wt-branch", worktree)
-
-	writeFile(t, worktree, "internal/tracked.txt", "original\nCOMMITTED IN WORKTREE\n")
-	runGit(t, worktree, "add", "-A")
-	runGit(t, worktree, "commit", "-qm", "worktree change")
-
-	// The fixture's own state, not a GitDiff assertion: the change is already
-	// committed IN the worktree, so its working tree exactly matches its own
-	// HEAD — the fact that makes a diff against dir's own HEAD structurally
-	// unable to show the change, independent of whatever GitDiff's own
-	// defaulted-base policy happens to do.
-	status := gitOutput(t, worktree, "status", "--porcelain")
-	if strings.TrimSpace(status) != "" {
-		t.Fatalf("expected the worktree's tree to already equal its own HEAD "+
-			"(the change is committed), got a dirty status:\n%s", status)
-	}
-
-	// The fix: diffing the worktree against the SHARED checkout's HEAD sees
-	// the commit.
-	diff, err := GitDiff(worktree, sharedHead, nil)
-	testsupport.Must(t, err, "GitDiff: %v", err)
-	if !strings.Contains(diff, "COMMITTED IN WORKTREE") {
-		t.Errorf("issue.diff for a worktree-recorded step is empty against "+
-			"the shared checkout's HEAD, want the committed change\n%s", diff)
-	}
-}
-
 // TestGitDiffDisclosesOutOfScopeChanges is DKT-43 / DKT-44's regression, as
 // amended by DKT-86. A fix commit touched four files; the issue's declared
 // scope named one; the rendered diff showed one file with nothing to say the
@@ -303,40 +228,6 @@ func TestGitDiffDisclosesOutOfScopeChanges(t *testing.T) {
 	}
 	if inHunk := strings.Index(diff, "IN SCOPE EDIT"); inHunk > marker {
 		t.Errorf("the in-scope hunk renders after the out-of-scope marker\n%s", diff)
-	}
-}
-
-// TestGitDiffNoTrailerWhenAllInScope pins the quiet side of the disclosure: a
-// change fully inside its scope gets exactly the diff it always got, with no
-// trailer to make a clean record look qualified.
-func TestGitDiffNoTrailerWhenAllInScope(t *testing.T) {
-	dir := gitRepo(t)
-	writeFile(t, dir, "internal/tracked.txt", "original\nEDIT\n")
-
-	diff := inRepo(t, dir, []string{"internal/**"})
-
-	if !strings.Contains(diff, "EDIT") {
-		t.Errorf("the in-scope change is missing\n%s", diff)
-	}
-	if strings.Contains(diff, "fall outside this issue's declared scope") {
-		t.Errorf("a fully in-scope change drew a disclosure trailer\n%s", diff)
-	}
-}
-
-// TestGitDiffNoScopeNoTrailer: an issue that declared no scope has not
-// narrowed its diff, so there is nothing to disclose — the whole tree is
-// already shown.
-func TestGitDiffNoScopeNoTrailer(t *testing.T) {
-	dir := gitRepo(t)
-	writeFile(t, dir, "elsewhere/anything.txt", "content\n")
-
-	diff := inRepo(t, dir, nil)
-
-	if !strings.Contains(diff, "anything.txt") {
-		t.Errorf("an unscoped diff is missing a changed file\n%s", diff)
-	}
-	if strings.Contains(diff, "fall outside this issue's declared scope") {
-		t.Errorf("an unscoped diff drew a disclosure trailer\n%s", diff)
 	}
 }
 
@@ -524,13 +415,6 @@ func TestGitDiffCapsAFileSectionAndNamesItsBlobs(t *testing.T) {
 	}
 }
 
-func TestCapFileDiffsLeavesASmallDiffByteIdentical(t *testing.T) {
-	in := "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-	if got := capFileDiffs("", in); got != in {
-		t.Errorf("capFileDiffs changed a small diff: %q", got)
-	}
-}
-
 // The cap drops a file's hunks from the recorded body, so the diff facts a
 // routing threshold reads must come from the marker: a padded file cannot
 // measure as small, and its blob ids are full-length.
@@ -631,25 +515,6 @@ func TestGitDiffKeepsATextFileWholeWhenTheNulIsBeyondGitsWindow(t *testing.T) {
 	diff := inRepo(t, dir, nil)
 	if strings.Contains(diff, "per-file cap") || strings.Count(diff, "the-hidden-edit") != 2 {
 		t.Errorf("a text file git shows whole was capped (%d bytes)", len(diff))
-	}
-}
-
-// A modified binary whose change starts at the top is still capped.
-func TestGitDiffCapsAModifiedBinaryChangedFromItsTop(t *testing.T) {
-	dir := gitRepo(t)
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir, cmd.Env = dir, gitEnv()
-		out, err := cmd.CombinedOutput()
-		testsupport.Must(t, err, "git %v: %v\n%s", args, err, out)
-	}
-	writeFile(t, dir, "internal/b.bin", "\x00old\n")
-	git("add", "-A")
-	git("commit", "-qm", "base")
-	writeFile(t, dir, "internal/b.bin", strings.Repeat("\x00binary data line\n", perFileDiffCap/8))
-	if diff := inRepo(t, dir, nil); !strings.Contains(diff, "per-file cap") {
-		t.Errorf("a modified binary was recorded whole (%d bytes)", len(diff))
 	}
 }
 

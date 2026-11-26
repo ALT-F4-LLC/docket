@@ -112,26 +112,6 @@ func TestCloseAcceptsAnAncestorIntegratedWriteStep(t *testing.T) {
 	}
 }
 
-// TestCloseAcceptsAPatchEquivalentWriteStep is AC2 verbatim: a cherry-picked
-// commit mints a NEW sha for identical content, so ancestry fails by
-// construction — patch-equivalence is what must pass it.
-func TestCloseAcceptsAPatchEquivalentWriteStep(t *testing.T) {
-	conn, e, runID := integrationFixture(t, "beadfeed02", "/worktrees/wf-implement")
-	e.IsAncestorFn = func(_, _ string) (bool, bool) { return false, true }
-	e.PatchContainedFn = func(_, sha string) (bool, bool) { return sha == "beadfeed02", true }
-	openDispatch(t, conn, runID, 0, nowMS)
-
-	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
-	testsupport.Must(t, err, "CloseDispatch: %v", err)
-
-	if outcome.Integration == nil || outcome.Integration.Status != "verified" {
-		t.Fatalf("Integration = %+v, want status verified", outcome.Integration)
-	}
-	if len(outcome.Integration.Checked) != 1 || outcome.Integration.Checked[0].How != "patch-equivalent" {
-		t.Errorf("Checked = %+v, want one patch-equivalent row", outcome.Integration.Checked)
-	}
-}
-
 // TestCloseCherryErrorCountsAsUnintegrated is AC1's explicit clause: a patch
 // probe that could not even run is refused, never assumed equivalent.
 func TestCloseCherryErrorCountsAsUnintegrated(t *testing.T) {

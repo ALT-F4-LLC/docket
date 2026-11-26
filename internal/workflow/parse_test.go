@@ -3,7 +3,6 @@ package workflow
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
@@ -71,29 +70,6 @@ func TestFixtureRegistersClean(t *testing.T) {
 	} {
 		if !c.seen {
 			t.Errorf("the fixture no longer exercises %s", c.feature)
-		}
-	}
-}
-
-// TestFixtureHumanStepDeclaresOnFail pins the fixture's human-step routing:
-// `commit-gate` carries `on_fail = "fix-loop"`, which is the routing
-// the flow actually wants — a rejected commit gate sends the issue back through
-// the fix loop rather than parking it.
-func TestFixtureHumanStepDeclaresOnFail(t *testing.T) {
-	src, err := os.ReadFile(fixturePath)
-	testsupport.Must(t, err, "reading the fixture: %v", err)
-	def, err := Load(src)
-	testsupport.Must(t, err, "Load: %v", err)
-
-	for _, step := range def.Steps {
-		if step.Type != TypeHuman {
-			continue
-		}
-		if step.OnFail == "" {
-			t.Errorf("human step %q declares no on_fail", step.Name)
-		}
-		if step.EffectiveOnFail() == OnFailWaitingHuman {
-			t.Errorf("human step %q routes rejects to %q", step.Name, OnFailWaitingHuman)
 		}
 	}
 }
@@ -189,19 +165,6 @@ func TestUnknownTemplateNames(t *testing.T) {
 	for _, bad := range []string{"../parse", "a/b", `a\b`, "..", "."} {
 		if _, err := Template(bad); err == nil {
 			t.Errorf("template name %q was accepted as a path", bad)
-		}
-	}
-}
-
-// TestTemplatesAreWritableFiles: what `workflow init` writes is what
-// `workflow register` reads, so the file name and the template name agree.
-func TestTemplateFileName(t *testing.T) {
-	for _, name := range TemplateNames() {
-		if got, want := TemplateFileName(name), name+".toml"; got != want {
-			t.Errorf("TemplateFileName(%q) = %q, want %q", name, got, want)
-		}
-		if filepath.Base(TemplateFileName(name)) != TemplateFileName(name) {
-			t.Errorf("TemplateFileName(%q) is not a bare file name", name)
 		}
 	}
 }

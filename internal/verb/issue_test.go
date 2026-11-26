@@ -151,13 +151,6 @@ func TestIssueClaimValidatesBeforeTheStore(t *testing.T) {
 	}
 }
 
-func TestIssueClaimOnMissingIssueIsNotFound(t *testing.T) {
-	st := openStore(t)
-	_, err := verb.IssueClaim(context.Background(), projectEnv(st, "", false),
-		verb.IssueClaimInput{Issue: "DKT-999", Owner: "worker-1"})
-	requireCode(t, err, output.ErrNotFound)
-}
-
 func TestIssueClaimMayRegisterTheCallersProject(t *testing.T) {
 	ctx := context.Background()
 

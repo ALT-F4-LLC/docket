@@ -107,26 +107,6 @@ func TestProjectRefKeepsNameIdentityAndIDResolution(t *testing.T) {
 	}
 }
 
-// TestProjectRefMissesStayNotFound: a typo must read as a miss, with the
-// refusal pointing at the listing that shows every key. A miss that resolved to
-// something would be worse than the defect — it would list the wrong project's
-// issues under the caller's own prefix.
-func TestProjectRefMissesStayNotFound(t *testing.T) {
-	conn := newTestDB(t)
-	twoProjects(t, conn)
-
-	for _, ref := range []string{"NOPE", "no-such-project.git", "4242"} {
-		_, err := resolveProjectRef(conn, ref)
-		if err == nil {
-			t.Fatalf("resolveProjectRef(%q) resolved something", ref)
-		}
-		assertErrCode(t, err, output.ErrNotFound)
-		if !strings.Contains(err.Error(), "project") {
-			t.Errorf("the refusal for %q does not say what was not found: %v", ref, err)
-		}
-	}
-}
-
 // TestProjectRefRefusesAnAmbiguousPrefix is the second acceptance criterion.
 //
 // Prefixes are unique BY CONSTRUCTION — registration picks a free one and

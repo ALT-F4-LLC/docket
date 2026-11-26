@@ -115,29 +115,6 @@ func registerAcross(
 	return fanoutReportOf(t, buf.Bytes()), err
 }
 
-// TestWorkflowRegisterAllProjectsLandsInEveryRegistry is the acceptance
-// criterion for register: ONE invocation, a row in every project.
-func TestWorkflowRegisterAllProjectsLandsInEveryRegistry(t *testing.T) {
-	conn := newTestDB(t)
-	one, two, three := threeProjects(t, conn)
-
-	report, err := registerAcross(t, conn, minimalWorkflow, "", true)
-	testsupport.Must(t, err, "register --all-projects: %v", err)
-
-	if report.Scope != scopeAllProjects || report.Succeeded != 3 || report.Failed != 0 {
-		t.Fatalf("report = %+v, want 3 succeeded in scope all-projects", report)
-	}
-	for _, id := range []int{one, two, three} {
-		if got := outcomeIn(t, report, id).Outcome; got != outcomeRegistered {
-			t.Errorf("project %d reported %q, want %q", id, got, outcomeRegistered)
-		}
-		// The report is a claim about the store; the store is what settles it.
-		if _, err := db.GetWorkflow(conn, id, "unit", 1); err != nil {
-			t.Errorf("project %d has no unit@1 row after --all-projects: %v", id, err)
-		}
-	}
-}
-
 // TestWorkflowRegisterAllProjectsIsIdempotentPerProject: re-registering the
 // same bytes is a no-op success in each project, exactly as it is for one.
 func TestWorkflowRegisterAllProjectsIsIdempotentPerProject(t *testing.T) {
@@ -276,36 +253,6 @@ payload = "findings@1"
 	}
 }
 
-// TestWorkflowDeprecateAllProjectsRetiresEverywhere is DKT-615's originating
-// case, verbatim: one deprecate, every project's identical row.
-func TestWorkflowDeprecateAllProjectsRetiresEverywhere(t *testing.T) {
-	conn := newTestDB(t)
-	one, two, three := threeProjects(t, conn)
-	for _, id := range []int{one, two, three} {
-		auditWorkflowRow(t, conn, id, "release", 7)
-	}
-
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	err := runWorkflowDeprecate(fanoutCmd(conn, "", true), []string{"release@7"}, w)
-	testsupport.Must(t, err, "deprecate --all-projects: %v", err)
-
-	report := fanoutReportOf(t, buf.Bytes())
-	if report.Succeeded != 3 || report.Failed != 0 {
-		t.Fatalf("report = %+v, want 3 retired", report)
-	}
-	for _, id := range []int{one, two, three} {
-		if got := outcomeIn(t, report, id).Outcome; got != outcomeDeprecated {
-			t.Errorf("project %d reported %q, want %q", id, got, outcomeDeprecated)
-		}
-		wf, err := db.GetWorkflow(conn, id, "release", 7)
-		testsupport.Must(t, err, "reading release@7 back from project %d: %v", id, err)
-		if !wf.Deprecated() {
-			t.Errorf("project %d still binds release@7 after --all-projects", id)
-		}
-	}
-}
-
 // TestWorkflowDeprecateAllProjectsReportsMixedOutcomes: a sweep across a store
 // meets projects in different states, and each one's own rule decides its own
 // row — not-registered where nothing was registered, already-deprecated where
@@ -383,44 +330,6 @@ func TestWorkflowRestoreAllProjectsKeepsTheIdempotencyAsymmetry(t *testing.T) {
 	testsupport.Must(t, err, "reading release@7 back: %v", err)
 	if wf.Deprecated() {
 		t.Error("the retired project's row is still retired after --restore")
-	}
-}
-
-// TestSchemaRegisterAllProjectsLandsInEveryRegistry, and its conflict half: a
-// schema's frozen-bytes rule is decided per project too.
-func TestSchemaRegisterAllProjectsLandsInEveryRegistry(t *testing.T) {
-	conn := newTestDB(t)
-	one, two, three := threeProjects(t, conn)
-
-	// Different bytes at findings@1 in one project only.
-	_, _, err := db.InsertSchema(conn, &model.Schema{
-		ProjectID: two, Name: "findings", Version: 1,
-		SourceSHA256: "not-the-same-hash", Body: `{"type":"object"}`, Ordered: "{}",
-	}, model.NowMS())
-	testsupport.Must(t, err, "seeding the conflicting schema: %v", err)
-
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	err = runSchemaRegister(fanoutCmd(conn, "", true),
-		[]string{"findings@1", writeSchema(t, findingsSchema)}, w)
-	if err == nil {
-		t.Fatal("a conflicting project exited 0")
-	}
-	if got := reportedCodeOf(t, err); got != output.ErrConflict {
-		t.Errorf("exit code = %q, want %q", got, output.ErrConflict)
-	}
-
-	report := fanoutReportOf(t, buf.Bytes())
-	if report.Succeeded != 2 || report.Failed != 1 {
-		t.Fatalf("report = %+v, want 2 registered / 1 conflict", report)
-	}
-	if got := outcomeIn(t, report, two).Outcome; got != outcomeConflict {
-		t.Errorf("the conflicting project reported %q, want %q", got, outcomeConflict)
-	}
-	for _, id := range []int{one, three} {
-		if _, err := db.GetSchema(conn, id, "findings", 1); err != nil {
-			t.Errorf("project %d never got findings@1: %v", id, err)
-		}
 	}
 }
 

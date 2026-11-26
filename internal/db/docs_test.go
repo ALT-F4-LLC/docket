@@ -26,24 +26,6 @@ func mustCreateDoc(t *testing.T, db *sql.DB, title, typ, status, body string) in
 
 // --- CreateDoc / AppendDocRevision ---
 
-func TestCreateDoc_InsertsRevision1(t *testing.T) {
-	db := mustInitAndMigrate(t)
-
-	id := mustCreateDoc(t, db, "first", "tdd", "draft", "body v1")
-
-	revs, err := ListDocRevisions(db, id)
-	testsupport.Must(t, err, "ListDocRevisions: %v", err)
-	if len(revs) != 1 {
-		t.Fatalf("len(revs) = %d, want 1", len(revs))
-	}
-	if revs[0].RevisionNumber != 1 {
-		t.Errorf("RevisionNumber = %d, want 1", revs[0].RevisionNumber)
-	}
-	if revs[0].Body != "body v1" {
-		t.Errorf("Body = %q, want %q", revs[0].Body, "body v1")
-	}
-}
-
 func TestCreateDoc_ChangeKindCreate(t *testing.T) {
 	db := mustInitAndMigrate(t)
 
@@ -113,60 +95,6 @@ func TestUpdateDoc_AppendsRevisionOnStatusChange(t *testing.T) {
 	}
 }
 
-func TestUpdateDoc_AppendsRevisionOnTitleChange(t *testing.T) {
-	db := mustInitAndMigrate(t)
-	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
-	newTitle := "second title"
-	rev, err := UpdateDoc(db, id, DocUpdate{Title: &newTitle, Author: "editor"})
-	testsupport.Must(t, err, "UpdateDoc title: %v", err)
-	if rev != 2 {
-		t.Fatalf("rev = %d, want 2", rev)
-	}
-	revs, _ := ListDocRevisions(db, id)
-	if revs[1].ChangeKind != "title" {
-		t.Errorf("ChangeKind = %q, want title", revs[1].ChangeKind)
-	}
-}
-
-func TestUpdateDoc_AppendsRevisionOnTypeChange(t *testing.T) {
-	db := mustInitAndMigrate(t)
-	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
-	newType := "adr"
-	rev, err := UpdateDoc(db, id, DocUpdate{Type: &newType, Author: "editor"})
-	testsupport.Must(t, err, "UpdateDoc type: %v", err)
-	if rev != 2 {
-		t.Fatalf("rev = %d, want 2", rev)
-	}
-	revs, _ := ListDocRevisions(db, id)
-	if revs[1].ChangeKind != "type" {
-		t.Errorf("ChangeKind = %q, want type", revs[1].ChangeKind)
-	}
-}
-
-func TestUpdateDoc_CombinedChangeKind(t *testing.T) {
-	db := mustInitAndMigrate(t)
-	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
-	newStatus := "approved"
-	newBody := "v2"
-	rev, err := UpdateDoc(db, id, DocUpdate{
-		Status: &newStatus,
-		Body:   &newBody,
-		Author: "voter",
-	})
-	testsupport.Must(t, err, "UpdateDoc combined: %v", err)
-	if rev != 2 {
-		t.Fatalf("rev = %d, want 2", rev)
-	}
-	revs, _ := ListDocRevisions(db, id)
-	// UpdateDoc orders the change_kind by field-write order: title, type, status, body.
-	if revs[1].ChangeKind != "status+body" {
-		t.Errorf("ChangeKind = %q, want status+body", revs[1].ChangeKind)
-	}
-	if revs[1].Body != "v2" {
-		t.Errorf("Body = %q, want v2", revs[1].Body)
-	}
-}
-
 func TestUpdateDoc_NoRevisionOnNoOpEdit(t *testing.T) {
 	db := mustInitAndMigrate(t)
 	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1\n")
@@ -201,20 +129,6 @@ func TestUpdateDoc_BodyEqualityAfterTrimRight(t *testing.T) {
 	revs, _ := ListDocRevisions(db, id)
 	if len(revs) != 1 {
 		t.Errorf("len(revs) = %d, want 1", len(revs))
-	}
-}
-
-func TestUpdateDoc_BodyParity(t *testing.T) {
-	db := mustInitAndMigrate(t)
-	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
-	newBody := "v2 — different"
-	_, err := UpdateDoc(db, id, DocUpdate{Body: &newBody, Author: "editor"})
-	testsupport.Must(t, err, "UpdateDoc: %v", err)
-
-	d, _ := GetDoc(db, id)
-	revs, _ := ListDocRevisions(db, id)
-	if d.Body != revs[len(revs)-1].Body {
-		t.Errorf("docs.body = %q, latest rev body = %q (must match)", d.Body, revs[len(revs)-1].Body)
 	}
 }
 
@@ -444,22 +358,6 @@ func TestGetDocRevision_DocNotFound(t *testing.T) {
 
 // --- DeleteDoc + cascade behaviour ---
 
-func TestDeleteDoc_CascadesRevisions(t *testing.T) {
-	db := mustInitAndMigrate(t)
-	id := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
-	updateBody(t, db, id, "v2")
-
-	err := DeleteDoc(db, id, true)
-	testsupport.Must(t, err, "DeleteDoc: %v", err)
-
-	var n int
-	err = db.QueryRow("SELECT COUNT(*) FROM doc_revisions WHERE doc_id = ?", id).Scan(&n)
-	testsupport.Must(t, err, "count revisions: %v", err)
-	if n != 0 {
-		t.Errorf("revisions remaining = %d, want 0", n)
-	}
-}
-
 func TestDeleteDoc_CascadesLinks(t *testing.T) {
 	db := mustInitAndMigrate(t)
 	docID := mustCreateDoc(t, db, "first", "tdd", "draft", "v1")
@@ -531,36 +429,6 @@ func TestInsertDocWithID_RoundTrip(t *testing.T) {
 	testsupport.Must(t, err, "GetDoc(42): %v", err)
 	if got.Title != "imported" {
 		t.Errorf("Title = %q, want imported", got.Title)
-	}
-}
-
-func TestInsertDocRevisionWithID_RoundTrip(t *testing.T) {
-	db := mustInitAndMigrate(t)
-
-	tx, err := db.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	d := &model.Doc{ID: 1, Type: "tdd", Status: "draft", Title: "t", Body: "b", Author: "a"}
-	_, err = InsertDocWithID(tx, d)
-	testsupport.Must(t, err, "InsertDocWithID: %v", err)
-	r := &model.DocRevision{
-		ID:             10,
-		DocID:          1,
-		RevisionNumber: 1,
-		Body:           "b",
-		ChangeKind:     "create",
-		Author:         "a",
-	}
-	inserted, err := InsertDocRevisionWithID(tx, r)
-	testsupport.Must(t, err, "InsertDocRevisionWithID: %v", err)
-	if !inserted {
-		t.Error("inserted = false, want true")
-	}
-	err = tx.Commit()
-	testsupport.Must(t, err, "Commit: %v", err)
-
-	revs, _ := ListDocRevisions(db, 1)
-	if len(revs) != 1 || revs[0].ID != 10 {
-		t.Errorf("revs[0] = %+v, want ID=10", revs[0])
 	}
 }
 

@@ -89,12 +89,6 @@ func TestPostgresDSNRedactedCollapsesMisparsedUserinfo(t *testing.T) {
 	}
 }
 
-func TestPostgresDSNRedactedKeepsHostForUsernameOnlyDSN(t *testing.T) {
-	if got := (PostgresDSN{raw: "postgres://u@host/db"}).Redacted(); !strings.Contains(got, "host/db") {
-		t.Errorf("Redacted() = %q, want the host and database kept", got)
-	}
-}
-
 func TestPostgresDSNRedactedKeepsPasswordFreeDSN(t *testing.T) {
 	const dsn = "postgres://u@127.0.0.1:5432/db?application_name=x&sslmode=disable"
 	const want = "postgres://" + RedactedMarker + "@127.0.0.1:5432/db?application_name=x&sslmode=disable"

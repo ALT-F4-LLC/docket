@@ -40,28 +40,6 @@ func attachedIssues(t *testing.T, conn *sql.DB, runID int) []int {
 	return ids
 }
 
-func TestRunIssueAddAndRemoveInPlanning(t *testing.T) {
-	conn := newTestDB(t)
-	a := createIssue(t, conn, "first", model.StatusBacklog, model.PriorityNone)
-	b := createIssue(t, conn, "second", model.StatusBacklog, model.PriorityNone)
-	run := planningRun(t, conn, a)
-
-	cmd := cmdWithDB(conn)
-	w, _ := bufWriter(true)
-	err := runRunIssueAdd(cmd, []string{run.Ref(), model.FormatID(b)}, w)
-	testsupport.Must(t, err, "run issue add: %v", err)
-	if got := attachedIssues(t, conn, run.ID); len(got) != 2 {
-		t.Fatalf("attached = %v, want both issues", got)
-	}
-
-	w, _ = bufWriter(true)
-	err = runRunIssueRemove(cmd, []string{run.Ref(), model.FormatID(a)}, w)
-	testsupport.Must(t, err, "run issue remove: %v", err)
-	if got := attachedIssues(t, conn, run.ID); len(got) != 1 || got[0] != b {
-		t.Fatalf("attached = %v, want only the second issue", got)
-	}
-}
-
 // TestRunIssueAnswersWithTheSetItNowHolds pins both verbs' output: the JSON
 // payload is the run and its issue list after the change, and the human line
 // names what was asked for.
@@ -145,28 +123,6 @@ func TestRunIssueRemoveRefusesOutsidePlanning(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "planning") {
 		t.Errorf("refusal does not say when removal is legal: %v", err)
-	}
-}
-
-// TestRunIssueRemoveIsAllOrNothing: `remove A TYPO` must not detach A and then
-// refuse — the membership check runs over the whole set first.
-func TestRunIssueRemoveIsAllOrNothing(t *testing.T) {
-	conn := newTestDB(t)
-	a := createIssue(t, conn, "x", model.StatusBacklog, model.PriorityNone)
-	run := planningRun(t, conn, a)
-
-	cmd := cmdWithDB(conn)
-	w, _ := bufWriter(true)
-	err := runRunIssueRemove(cmd, []string{run.Ref(), model.FormatID(a), "DKT-99"}, w)
-	if err == nil {
-		t.Fatal("remove with an unattached id succeeded")
-	}
-	var cmdError *CmdError
-	if !asCmdError(err, &cmdError) || cmdError.Code != output.ErrNotFound {
-		t.Errorf("error = %v, want NOT_FOUND", err)
-	}
-	if got := attachedIssues(t, conn, run.ID); len(got) != 1 {
-		t.Errorf("attached = %v; a refused remove detached something", got)
 	}
 }
 

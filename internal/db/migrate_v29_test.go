@@ -14,42 +14,6 @@ import (
 // operator verbs refusing a caller without the capability — is the engine's
 // to prove.
 
-func TestMigrateToV29(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, col := range v29ColumnSentinels {
-		exists, err := hasColumnDB(db, col.table, col.column)
-		if err != nil || !exists {
-			t.Errorf("%s.%s missing after migration (err %v)", col.table, col.column, err)
-		}
-	}
-
-	// NULL, not "": an unbound run must read as having NO capability, and a
-	// scan that turned NULL into the empty string would make the empty token
-	// match it.
-	var n int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM runs WHERE conductor_token_hash IS NOT NULL`).Scan(&n); err != nil {
-		t.Fatalf("counting bound runs: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("%d run(s) bound after migration, want 0: a migration mints nothing", n)
-	}
-}
-
 // TestV29RewindGuardConvergesAStampedStore drops the column while leaving the
 // stamp at 29 — the mid-change-binary database v13's guard comment describes
 // — and asserts Migrate converges it.

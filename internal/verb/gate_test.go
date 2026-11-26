@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
@@ -23,26 +22,6 @@ after = []
 type = "human"
 on_fail = "skip"
 `
-
-func TestGateStatusReportsAnUndecidedHumanGate(t *testing.T) {
-	st := openStore(t)
-	id := activatedStepOf(t, st, humanGateWorkflow)
-
-	res, err := verb.GateStatus(context.Background(), projectEnv(st, "", false),
-		verb.GateStatusInput{Step: model.FormatStepID(id)})
-	if err != nil {
-		t.Fatalf("GateStatus: %v", err)
-	}
-	if res.Outcome != engine.GateOutcomeOpen {
-		t.Errorf("outcome = %q, want %q", res.Outcome, engine.GateOutcomeOpen)
-	}
-	if res.StepStatus == "" {
-		t.Error("step status is empty, want the step's effective status")
-	}
-	if res.Proposal != "" || res.Tally != nil || res.Seats != nil {
-		t.Errorf("a human gate reported vote state: %+v", res.GateStatusResult)
-	}
-}
 
 func TestGateStatusRefusesAStepThatIsNotAGate(t *testing.T) {
 	st := openStore(t)

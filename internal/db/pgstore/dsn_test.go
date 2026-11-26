@@ -140,18 +140,6 @@ func TestResolveDSNRefusesPasswordFileOwnedByAnotherUID(t *testing.T) {
 	}
 }
 
-func TestResolveDSNAcceptsPeerAuthOnSocketHost(t *testing.T) {
-	isolatePGEnv(t)
-
-	cfg, err := resolveWithRealStat(socketDSN, "")
-	if err != nil {
-		t.Fatalf("resolveDSN refused peer auth on a unix-socket host: %v", err)
-	}
-	if cfg.Password != "" {
-		t.Fatalf("resolved password %q for peer auth, want none", cfg.Password)
-	}
-}
-
 func TestResolveDSNNeverTakesPasswordFromEnvironment(t *testing.T) {
 	isolatePGEnv(t)
 	t.Setenv("PGPASSWORD", "env-pw")

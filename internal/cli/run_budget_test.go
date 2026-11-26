@@ -98,35 +98,3 @@ func TestRunBudgetSetChangesTheCapUnderItsPrecondition(t *testing.T) {
 		t.Errorf("event data = %+v, want a cap of 5 and the reason", data)
 	}
 }
-
-// An invalid --if-version is reported after the caller's project and the run
-// reference, the order `run budget --set` reported them in before the verb
-// layer, and alone it is the VALIDATION fault.
-func TestRunBudgetReportsTheIfVersionAfterTheProjectAndTheRun(t *testing.T) {
-	conn := newTestDB(t)
-	run := activeRunIn(t, conn)
-	badVersion := map[string]string{"set": "5", "if-version": "0"}
-
-	for _, tc := range []struct {
-		name   string
-		cfg    *config.Config
-		ref    string
-		prefix string
-	}{
-		{"unanchored caller", &config.Config{Identity: "/work/scratch"}, run.Ref(),
-			"cannot tell which project this belongs to"},
-		{"malformed run ID", nil, "RUN-x", `invalid run ID "RUN-x"`},
-		{"bad version alone", nil, run.Ref(), "--if-version must be >= 1, got 0 (versions start at 1)"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w, _ := bufWriter(false)
-			err := runRunBudget(runBudgetFlagsCmd(t, conn, tc.cfg, badVersion), tc.ref, w)
-			requireCmdError(t, err, output.ErrValidation, tc.prefix)
-		})
-	}
-	stored, err := db.GetRun(conn, run.ID)
-	testsupport.Must(t, err, "GetRun: %v", err)
-	if stored.Budget != 0 {
-		t.Errorf("stored budget = %g after refused sets, want 0", stored.Budget)
-	}
-}

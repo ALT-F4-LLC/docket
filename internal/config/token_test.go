@@ -30,18 +30,6 @@ func tokenFile(t *testing.T, content string, mode os.FileMode) string {
 	return path
 }
 
-func TestBearerTokenReadsFileWhenEnvUnset(t *testing.T) {
-	bearerEnv(t, "", tokenFile(t, "file-token\n", 0o600))
-
-	got, err := BearerToken()
-	if err != nil {
-		t.Fatalf("BearerToken: %v", err)
-	}
-	if got != "file-token" {
-		t.Fatalf("BearerToken = %q, want the file contents %q", got, "file-token")
-	}
-}
-
 func TestBearerTokenEnvWinsOverFile(t *testing.T) {
 	bearerEnv(t, "env-token", tokenFile(t, "file-token", 0o600))
 

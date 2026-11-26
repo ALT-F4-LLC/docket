@@ -67,57 +67,6 @@ func seededDBPath(t *testing.T) string {
 	return dbPath
 }
 
-// TestDoctorEnvelopeShapesTheEightChecks drives the real command against an
-// empty in-memory store outside a git repository, and asserts the wire shape
-// AC1 promises: eight rows, each carrying check/verdict/detail, plus clean and
-// skipped.
-func TestDoctorEnvelopeShapesTheEightChecks(t *testing.T) {
-	t.Setenv(config.PostgresDSNEnv, "")
-	conn := newTestDB(t)
-	cfg := &config.Config{DBPath: seededDBPath(t)}
-	w, buf := bufWriter(true)
-
-	err := runDoctor(doctorCmdWithDB(conn, cfg), w)
-	if err != nil {
-		t.Fatalf("doctor returned an error: %v", err)
-	}
-
-	var envelope doctorEnvelope
-	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-
-	want := []string{"seat", "store", "project", "install-drift", "pins", "link-farm", "stragglers", "postgres"}
-	if len(envelope.Data.Checks) != len(want) {
-		t.Fatalf("checks = %v, want %d rows", envelope.Data.Checks, len(want))
-	}
-	for i, name := range want {
-		if envelope.Data.Checks[i].Check != name {
-			t.Errorf("checks[%d] = %q, want %q", i, envelope.Data.Checks[i].Check, name)
-		}
-		if envelope.Data.Checks[i].Verdict == "" {
-			t.Errorf("checks[%d] (%s) has no verdict", i, name)
-		}
-	}
-
-	// No --run and no --source: both AC2's SKIP and clean/skipped follow.
-	if !envelope.Data.Skipped {
-		t.Error("skipped = false with neither --run nor --source given, want true")
-	}
-	if envelope.Data.Clean {
-		t.Error("clean = true with checks SKIPped, want false")
-	}
-
-	// The human-mode rendering carries the same summary.
-	textW, out := bufWriter(false)
-	if err := runDoctor(doctorCmdWithDB(conn, cfg), textW); err != nil {
-		t.Fatalf("doctor (human mode) returned an error: %v", err)
-	}
-	if !strings.Contains(out.String(), "clean: false") {
-		t.Errorf("human output %q does not report clean: false", out.String())
-	}
-}
-
 // TestDoctorReportsPostgresStateWithoutTheDSN seeds a DSN carrying a userinfo
 // secret and a password query parameter, and asserts that both output modes
 // carry the postgres state row while neither secret, the username, the

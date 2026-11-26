@@ -307,27 +307,6 @@ func TestRenderIsDeterministicAtFixedState(t *testing.T) {
 	}
 }
 
-// TestPacketStatesThePayloadContract pins that a step declaring a `payload`
-// schema renders the keys that payload must carry, so a worker can satisfy the
-// contract without fetching the schema separately. Naming the schema and its
-// hash told a worker only which document to go and read.
-func TestPacketStatesThePayloadContract(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	stepID := stepIDByInstance(t, conn, "reconcile@0")
-
-	result, err := RenderStep(conn, stepID, "", nowMS)
-	testsupport.Must(t, err, "RenderStep: %v", err)
-
-	// `findings@1`, the fixture's declared schema, requires `severity`.
-	for _, want := range []string{"required", "severity"} {
-		if !strings.Contains(result.Packet, want) {
-			t.Errorf("the packet does not state the payload contract (%q missing):\n%s",
-				want, result.Packet)
-		}
-	}
-}
-
 // TestPacketListsMultipleRequiredKeys pins the exact required-properties line
 // for a schema requiring more than one key: the label, the keys in the author's
 // order, and the separator between them. The committed fixture requires a

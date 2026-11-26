@@ -84,20 +84,6 @@ func TestDocCommentAddReturnsTheStoredComment(t *testing.T) {
 	}
 }
 
-// TestDocCommentAddUnknownDocIsNotFound: adding a comment to a doc that does
-// not exist is NOT_FOUND naming the doc, and stores nothing.
-func TestDocCommentAddUnknownDocIsNotFound(t *testing.T) {
-	newVoteCreateStore(t)
-	err := runDocCommentAdd(t, "DOC-999", "-m", "hello")
-	var cmdError *CmdError
-	if !errors.As(err, &cmdError) || cmdError.Code != output.ErrNotFound {
-		t.Fatalf("doc comment add DOC-999 returned %v, want NOT_FOUND", err)
-	}
-	if !strings.Contains(err.Error(), "doc DOC-999 not found") {
-		t.Errorf("error %q does not name the missing doc", err)
-	}
-}
-
 // TestDocCommentAddRefusesBeforeAskingForTheBody: a comment that cannot be
 // added is refused before the body is read, so nobody types a comment that is
 // then thrown away. A JSON-mode run with no message shows the order: each

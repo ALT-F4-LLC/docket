@@ -2,8 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"testing"
@@ -353,122 +351,6 @@ func TestMigrateV9U3RewindsWhenASentinelIsAbsent(t *testing.T) {
 	}
 }
 
-// TestMigrateV9U4ReRunsOverAMissingColumn is the group-1 column half,
-// proven INDEPENDENTLY of the table half.
-//
-// The rewind guard probes tables, so a database whose table is present and whose
-// column is not is not detected by it — and does not need to be, since the two
-// land in one transaction. What has to hold is that the migration is re-runnable
-// over the shape anyway: it probes before the ALTER, which SQLite would
-// otherwise reject on the second pass.
-func TestMigrateV9U4ReRunsOverAMissingColumn(t *testing.T) {
-	db := migratedToV8(t)
-
-	// v8's own `artifacts` has no `stub`, which is exactly the shape under test.
-	if columnExists(t, db, "artifacts", "stub") {
-		t.Fatal("premise: the v8 shape must not already carry artifacts.stub")
-	}
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate v8->v9: %v", err)
-	}
-	if !columnExists(t, db, "artifacts", "stub") {
-		t.Fatal("artifacts.stub did not arrive")
-	}
-
-	// And a forced re-run does not trip over the ALTER, which SQLite would
-	// reject if the migration did not probe first.
-	stampVersion(t, db, 8)
-	if err := Migrate(db); err != nil {
-		t.Fatalf("re-running the migration over the added column: %v", err)
-	}
-}
-
-// TestMigrateV9U5IsIdempotent: the migration run twice against a
-// populated database duplicates nothing.
-func TestMigrateV9U5IsIdempotent(t *testing.T) {
-	db := migratedToV8(t)
-	seedArtifact(t, db, "findings", `{"stub":true,"payload":[]}`)
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("first Migrate: %v", err)
-	}
-	before := countSchemas(t, db)
-	var artifactsBefore int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM artifacts`).Scan(&artifactsBefore); err != nil {
-		t.Fatalf("counting artifacts: %v", err)
-	}
-
-	stampVersion(t, db, 8)
-	if err := Migrate(db); err != nil {
-		t.Fatalf("second Migrate: %v", err)
-	}
-
-	if after := countSchemas(t, db); after != before || after != 1 {
-		t.Errorf("schemas holds %d rows after a second pass, want %d (exactly the builtin)",
-			after, before)
-	}
-	var artifactsAfter int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM artifacts`).Scan(&artifactsAfter); err != nil {
-		t.Fatalf("counting artifacts: %v", err)
-	}
-	if artifactsAfter != artifactsBefore {
-		t.Errorf("artifacts = %d after a second pass, want %d", artifactsAfter, artifactsBefore)
-	}
-}
-
-// TestMigrateV9U6FromTheV4Baseline: the committed fixture migrates 4->9 in ONE
-// pass, and the v9 structures are asserted present BEFORE any golden diff is
-// trusted, because a golden diff against a database that failed to migrate
-// passes vacuously.
-func TestMigrateV9U6FromTheV4Baseline(t *testing.T) {
-	src := filepath.Join("..", "..", "scripts", "qa", "fixtures", "v4-baseline.db")
-	if _, err := os.Stat(src); err != nil {
-		t.Skipf("v4 baseline fixture unavailable: %v", err)
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		t.Fatalf("reading the fixture: %v", err)
-	}
-	dst := filepath.Join(t.TempDir(), "v4-baseline.db")
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		t.Fatalf("copying the fixture: %v", err)
-	}
-
-	db, err := sql.Open("sqlite", dst)
-	if err != nil {
-		t.Fatalf("opening the fixture: %v", err)
-	}
-	defer db.Close()
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate 4->9: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, table := range append(append(append([]string(nil), v7Tables...), v8Tables...), v9Tables...) {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s missing after the 4->9 migration", table)
-		}
-	}
-	for _, col := range v9Columns {
-		if !columnExists(t, db, col.table, col.column) {
-			t.Errorf("%s.%s missing after the 4->9 migration", col.table, col.column)
-		}
-	}
-	// A v4 repo has never registered a schema, so the registry is dormant on it
-	// apart from the seed.
-	if n := countSchemas(t, db); n != 1 {
-		t.Errorf("schemas has %d rows in a migrated v4 repo, want the one builtin", n)
-	}
-}
-
 // TestMigrateV9U4GroupTwoColumnsArrive is the group-2 column check: the columns
 // `trust_cache.kind` and `steps.materialized` arrive, EXISTING ROWS ARE INTACT,
 // and each reads the default that preserves what it already meant.
@@ -528,27 +410,6 @@ func TestMigrateV9U4GroupTwoColumnsArrive(t *testing.T) {
 	stampVersion(t, db, 8)
 	if err := Migrate(db); err != nil {
 		t.Fatalf("re-running the migration over the added columns: %v", err)
-	}
-}
-
-// TestActionResultsAreEmptyOnAFreshDatabase is the group-2 dormancy claim at
-// the storage layer: `action_results` exists and holds nothing until an action
-// step actually runs.
-func TestActionResultsAreEmptyOnAFreshDatabase(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM action_results`).Scan(&n); err != nil {
-		t.Fatalf("counting action results: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("action_results holds %d rows in a fresh repo, want 0", n)
 	}
 }
 

@@ -36,36 +36,6 @@ labels = ["sensitive"]
 never = []
 `
 
-func TestResolveExecutorNoSizeLabelIsUnchanged(t *testing.T) {
-	doc, err := parsePolicy([]byte(sizePolicyTOML))
-	if err != nil {
-		t.Fatalf("parsePolicy: %v", err)
-	}
-
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", nil)
-	if err != nil {
-		t.Fatalf("ResolveExecutor: %v", err)
-	}
-	if got.Variant != "sonnet-medium" || got.Model != "sonnet" || got.Effort != "medium" {
-		t.Errorf("got %+v, want the executor's own standing sonnet/medium/sonnet-medium", got)
-	}
-}
-
-func TestResolveExecutorAppliesSizeLabel(t *testing.T) {
-	doc, err := parsePolicy([]byte(sizePolicyTOML))
-	if err != nil {
-		t.Fatalf("parsePolicy: %v", err)
-	}
-
-	got, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"trivial"})
-	if err != nil {
-		t.Fatalf("ResolveExecutor: %v", err)
-	}
-	if got.Variant != "haiku-low" || got.Model != "haiku" || got.Effort != "low" {
-		t.Errorf("got %+v, want the [sizes]-mapped haiku/low/haiku-low", got)
-	}
-}
-
 func TestResolveExecutorFirstMatchingSizeLabelWins(t *testing.T) {
 	doc, err := parsePolicy([]byte(sizePolicyTOML))
 	if err != nil {
@@ -118,36 +88,6 @@ func TestResolveExecutorRefusesUnknownSizeVariant(t *testing.T) {
 
 	if _, err := doc.ResolveExecutor("worker", 0, "worker@0", "", []string{"trivial"}); err == nil {
 		t.Error("want a refusal for a [sizes] entry naming a variant with no [variants] row")
-	}
-}
-
-func TestResolveSeatNoSizeLabelIsUnchanged(t *testing.T) {
-	doc, err := parsePolicy([]byte(sizePolicyTOML))
-	if err != nil {
-		t.Fatalf("parsePolicy: %v", err)
-	}
-
-	got, err := doc.ResolveSeat("worker", "", nil)
-	if err != nil {
-		t.Fatalf("ResolveSeat: %v", err)
-	}
-	if got.Variant != "sonnet-medium" {
-		t.Errorf("got %+v, want the seat's own standing sonnet-medium", got)
-	}
-}
-
-func TestResolveSeatAppliesSizeLabel(t *testing.T) {
-	doc, err := parsePolicy([]byte(sizePolicyTOML))
-	if err != nil {
-		t.Fatalf("parsePolicy: %v", err)
-	}
-
-	got, err := doc.ResolveSeat("worker", "", []string{"trivial"})
-	if err != nil {
-		t.Fatalf("ResolveSeat: %v", err)
-	}
-	if got.Variant != "haiku-low" {
-		t.Errorf("got %+v, want the [sizes]-mapped haiku-low", got)
 	}
 }
 

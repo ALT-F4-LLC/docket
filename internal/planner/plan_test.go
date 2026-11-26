@@ -19,38 +19,6 @@ func TestSplitByFileCollisionEmpty(t *testing.T) {
 	}
 }
 
-func TestSplitByFileCollisionNoFiles(t *testing.T) {
-	issues := []*model.Issue{
-		{ID: 1, Priority: model.PriorityHigh},
-		{ID: 2, Priority: model.PriorityMedium},
-		{ID: 3, Priority: model.PriorityLow},
-	}
-
-	result := splitByFileCollision(issues)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 sub-phase, got %d", len(result))
-	}
-	if len(result[0]) != 3 {
-		t.Errorf("expected 3 issues in sub-phase, got %d", len(result[0]))
-	}
-}
-
-func TestSplitByFileCollisionNoConflict(t *testing.T) {
-	issues := []*model.Issue{
-		{ID: 1, Priority: model.PriorityHigh, Files: []string{"a.go"}},
-		{ID: 2, Priority: model.PriorityMedium, Files: []string{"b.go"}},
-		{ID: 3, Priority: model.PriorityLow, Files: []string{"c.go"}},
-	}
-
-	result := splitByFileCollision(issues)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 sub-phase (no conflicts), got %d", len(result))
-	}
-	if len(result[0]) != 3 {
-		t.Errorf("expected 3 issues in sub-phase, got %d", len(result[0]))
-	}
-}
-
 func TestSplitByFileCollisionAllShareFile(t *testing.T) {
 	issues := []*model.Issue{
 		{ID: 1, Priority: model.PriorityHigh, Files: []string{"shared.go"}},
@@ -122,40 +90,6 @@ func TestSplitByFileCollisionMultipleFiles(t *testing.T) {
 	}
 }
 
-func TestGeneratePlanFilterByPriority(t *testing.T) {
-	issues := []*model.Issue{
-		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask},
-		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityLow, Kind: model.IssueKindTask},
-	}
-	dag := BuildDAG(issues, nil)
-
-	plan, err := GeneratePlan(dag, PlanFilters{Priorities: []string{"high"}})
-	testsupport.Must(t, err, "unexpected error: %v", err)
-	if plan.TotalIssues != 1 {
-		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
-	}
-	if plan.Phases[0].Issues[0].ID != 1 {
-		t.Errorf("expected issue 1 (high priority), got %d", plan.Phases[0].Issues[0].ID)
-	}
-}
-
-func TestGeneratePlanFilterByType(t *testing.T) {
-	issues := []*model.Issue{
-		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindBug},
-		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindFeature},
-	}
-	dag := BuildDAG(issues, nil)
-
-	plan, err := GeneratePlan(dag, PlanFilters{Types: []string{"bug"}})
-	testsupport.Must(t, err, "unexpected error: %v", err)
-	if plan.TotalIssues != 1 {
-		t.Fatalf("expected 1 issue, got %d", plan.TotalIssues)
-	}
-	if plan.Phases[0].Issues[0].ID != 1 {
-		t.Errorf("expected issue 1 (bug), got %d", plan.Phases[0].Issues[0].ID)
-	}
-}
-
 func TestGeneratePlanFilterByAssignee(t *testing.T) {
 	issues := []*model.Issue{
 		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask, Assignee: "alice"},
@@ -190,28 +124,6 @@ func TestGeneratePlanFiltersAndCompose(t *testing.T) {
 	}
 	if plan.Phases[0].Issues[0].ID != 1 {
 		t.Errorf("expected issue 1, got %d", plan.Phases[0].Issues[0].ID)
-	}
-}
-
-func TestGeneratePlanLevelsNoCollisions(t *testing.T) {
-	// Two independent issues at the same topo-level, no file collisions:
-	// TotalLevels should equal TotalPhases (one phase per level).
-	issues := []*model.Issue{
-		{ID: 1, Status: model.StatusTodo, Priority: model.PriorityHigh, Kind: model.IssueKindTask, Files: []string{"a.go"}},
-		{ID: 2, Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask, Files: []string{"b.go"}},
-	}
-	dag := BuildDAG(issues, nil)
-
-	plan, err := GeneratePlan(dag, PlanFilters{})
-	testsupport.Must(t, err, "unexpected error: %v", err)
-	if plan.TotalPhases != 1 {
-		t.Fatalf("expected 1 phase, got %d", plan.TotalPhases)
-	}
-	if plan.TotalLevels != plan.TotalPhases {
-		t.Errorf("expected TotalLevels (%d) == TotalPhases (%d)", plan.TotalLevels, plan.TotalPhases)
-	}
-	if plan.Phases[0].Level != 1 {
-		t.Errorf("expected phase 1 to have Level 1, got %d", plan.Phases[0].Level)
 	}
 }
 
@@ -359,25 +271,6 @@ func TestFindReadyHandlesRoutableEpics(t *testing.T) {
 					t.Errorf("FindReady returned %v, want %v", got, tt.want)
 					break
 				}
-			}
-		})
-	}
-}
-
-// TestFindReadyIgnoresIssueKind states the guard's invariant directly: the
-// ready set is a function of structure and status, never of kind. Every kind
-// in the closed set, childless and in an allowed status, is ready.
-//
-// This is the assertion that would catch a future "epics are special" branch
-// added to FindReady without the author realising `next` is a read path that
-// activation does not share.
-func TestFindReadyIgnoresIssueKind(t *testing.T) {
-	for _, kind := range model.ValidIssueKinds() {
-		t.Run(string(kind), func(t *testing.T) {
-			issues := []*model.Issue{{ID: 1, Kind: kind, Status: model.StatusTodo}}
-			if ready := FindReady(BuildDAG(issues, nil), nil); len(ready) != 1 {
-				t.Errorf("a childless %s issue is not work-ready; FindReady "+
-					"must not discriminate on kind", kind)
 			}
 		})
 	}

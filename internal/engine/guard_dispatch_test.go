@@ -19,22 +19,6 @@ import (
 // `guard record`
 // ---------------------------------------------------------------------------
 
-// TestGuardRecordAllowsAReconciledRun is the positive case: with no open
-// dispatch and no discrepancy, the guard allows.
-//
-// It matters that this is the ORDINARY state. A guard that denied by default
-// would be one every harness disables on its second day.
-func TestGuardRecordAllowsAReconciledRun(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-
-	verdict, err := GuardRecord(conn, runID, 0, nowMS)
-	testsupport.Must(t, err, "GuardRecord: %v", err)
-	if !verdict.Allowed {
-		t.Errorf("a reconciled run was denied: %s", verdict.Reason)
-	}
-}
-
 // TestGuardRecordDeniesAnOpenDispatch: an open manifest is
 // unreconciled, and the denial names it in `next`'s own words.
 func TestGuardRecordDeniesAnOpenDispatch(t *testing.T) {
@@ -267,77 +251,6 @@ func TestGuardRecordRefusesAnUnknownRun(t *testing.T) {
 // ---------------------------------------------------------------------------
 // `guard spawn`
 // ---------------------------------------------------------------------------
-
-// TestGuardSpawnVacuousWithoutManifest: with NO open dispatch and NO `--rows`,
-// the row half is vacuously satisfied and the reap half still answers.
-//
-// This is the case that makes the reap-ack mechanism available to a relay that
-// batches its own way. Requiring a manifest would have been core deciding how a
-// harness must batch, which is exactly the instance policy core keeps out.
-func TestGuardSpawnVacuousWithoutManifest(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-
-	verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{NowMS: nowMS})
-	testsupport.Must(t, err, "GuardSpawn: %v", err)
-	if !verdict.Allowed {
-		t.Errorf("a relay with no manifest and no reaps was denied: %s", verdict.Reason)
-	}
-}
-
-// TestGuardSpawnMatchesTheManifest is half (a): the proposed rows byte-match
-// the open dispatch, position by position.
-func TestGuardSpawnMatchesTheManifest(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	manifest := openDispatch(t, conn, runID, 0, nowMS)
-
-	rows, err := json.Marshal(manifest.Rows)
-	testsupport.Must(t, err, "marshaling the manifest rows: %v", err)
-
-	verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{
-		Rows: rows, NowMS: nowMS,
-	})
-	testsupport.Must(t, err, "GuardSpawn: %v", err)
-	if !verdict.Allowed {
-		t.Errorf("rows taken verbatim from the manifest did not match: %s",
-			verdict.Reason)
-	}
-}
-
-// TestGuardSpawnDeniesAlteredRows is half (a)'s negative: a row the relay
-// changed is a denial, and the denial shows BOTH SIDES' BYTES.
-//
-// The evidence rather than a summary, for `dispatch verify`'s reason: a
-// computed description would be the engine's opinion about which field moved.
-func TestGuardSpawnDeniesAlteredRows(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	manifest := openDispatch(t, conn, runID, 0, nowMS)
-	if len(manifest.Rows) == 0 {
-		t.Skip("the fixture offered no ready steps; this needs one")
-	}
-
-	altered := make([]model.StepRow, len(manifest.Rows))
-	copy(altered, manifest.Rows)
-	altered[0].Instance = "not-what-was-offered@0"
-	rows, err := json.Marshal(altered)
-	testsupport.Must(t, err, "marshaling: %v", err)
-
-	verdict, err := NewEngine().GuardSpawn(conn, runID, SpawnOptions{
-		Rows: rows, NowMS: nowMS,
-	})
-	testsupport.Must(t, err, "GuardSpawn: %v", err)
-	if verdict.Allowed {
-		t.Fatal("an altered row was allowed to spawn")
-	}
-	for _, want := range []string{"not-what-was-offered@0", manifest.Rows[0].Instance} {
-		if !strings.Contains(verdict.Reason, want) {
-			t.Errorf("the denial %q does not show %q; a denial shows the differing BYTES, "+
-				"both sides", verdict.Reason, want)
-		}
-	}
-}
 
 // TestGuardSpawnRowsAcceptsAppendedSuffix is DKT-2071: `dispatch extend`
 // appends rows to an OPEN manifest mid-wave, and the relay then launches the

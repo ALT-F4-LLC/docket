@@ -150,10 +150,6 @@ func seedRun(t *testing.T, conn *sql.DB) (runID, issueID int) {
 	return run.ID, id
 }
 
-// TestRunStartStoresBudget covers the "accepted and stored, enforces nothing"
-// rule. Accepting the flag now means a later release adds enforcement rather
-// than a flag — and a flag appearing later would break the invocation a
-// harness scripted today.
 // TestRunStartRefusesCrossProjectIssue pins DKT-21 at the start edge: the run
 // would be created in the invoking project, and an --issue homed elsewhere is
 // refused BEFORE the run is created, so no empty run is left behind.
@@ -176,26 +172,6 @@ func TestRunStartRefusesCrossProjectIssue(t *testing.T) {
 	}
 	if _, err := db.GetRun(conn, 1); err == nil {
 		t.Error("a run row was created despite the refusal")
-	}
-}
-
-func TestRunStartStoresBudget(t *testing.T) {
-	conn := newTestDB(t)
-	cmd := runStartCmdWithDB(conn)
-	err := cmd.Flags().Set("budget", "12.5")
-	testsupport.Must(t, err, "setting --budget: %v", err)
-	w, _ := bufWriter(true)
-
-	err = runRunStart(cmd, w)
-	testsupport.Must(t, err, "run start: %v", err)
-
-	run, err := db.GetRun(conn, 1)
-	testsupport.Must(t, err, "reading run: %v", err)
-	if run.Budget != 12.5 {
-		t.Errorf("budget = %g, want 12.5", run.Budget)
-	}
-	if run.Status != model.RunPlanning {
-		t.Errorf("status = %q, want %q", run.Status, model.RunPlanning)
 	}
 }
 

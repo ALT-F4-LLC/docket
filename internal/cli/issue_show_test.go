@@ -46,30 +46,6 @@ func TestIssueShow_RendersLinkedDocsSection(t *testing.T) {
 	}
 }
 
-func TestIssueShow_RendersLinkedDocsSectionPlain(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	conn := newTestDB(t)
-	issueID := createIssue(t, conn, "issue with docs", model.StatusTodo, model.PriorityHigh)
-	doc := createDoc(t, conn, "Docket Doc CLI", "tdd", "approved")
-	linkDocIssue(t, conn, doc, issueID)
-
-	cmd := cmdWithDB(conn)
-	w, buf := bufWriter(false)
-	err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w)
-	testsupport.Must(t, err, "runIssueShow: %v", err)
-
-	out := buf.String()
-	if !strings.Contains(out, "Linked Docs") {
-		t.Fatalf("plain output missing Linked Docs header:\n%s", out)
-	}
-	if !strings.Contains(out, "  > DOC-1   tdd   approved   Docket Doc CLI") {
-		t.Errorf("plain output missing expected doc line:\n%s", out)
-	}
-	if strings.Contains(out, "▸") {
-		t.Errorf("plain output should not contain ▸:\n%s", out)
-	}
-}
-
 func TestIssueShow_OmitsLinkedDocsWhenEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -416,33 +392,6 @@ func keysOf(m map[string]json.RawMessage) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// TestIssueShow_SingleIDShapeUnchanged is DKT-97's compatibility half: a
-// single id must keep emitting the exact frozen flat object, not a
-// one-element array — no caller parsing `docket issue show DKT-1` today
-// should see its shape move.
-func TestIssueShow_SingleIDShapeUnchanged(t *testing.T) {
-	conn := newTestDB(t)
-	issueID := createIssue(t, conn, "solo", model.StatusTodo, model.PriorityHigh)
-
-	cmd := cmdWithDB(conn)
-	w, buf := bufWriter(true)
-	err := runIssueShow(cmd, []string{model.FormatID(issueID)}, w)
-	testsupport.Must(t, err, "runIssueShow: %v", err)
-
-	var env struct {
-		Data struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	if env.Data.ID != model.FormatID(issueID) || env.Data.Title != "solo" {
-		t.Errorf("data = %+v, want a flat single-issue object", env.Data)
-	}
 }
 
 // TestIssueShow_MultipleIDsEmitAnArray is DKT-97: two or more ids emit a

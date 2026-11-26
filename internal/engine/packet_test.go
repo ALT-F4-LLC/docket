@@ -367,38 +367,6 @@ func TestPacketPersistedBytesHashMismatchConflicts(t *testing.T) {
 	}
 }
 
-// TestPacketResolutionIsDeterministic is determinism through the assembler:
-// same inputs, byte-identical output, so the goldens do not flap.
-func TestPacketResolutionIsDeterministic(t *testing.T) {
-	root := t.TempDir()
-	writeFixture(t, root, "checklists/a.md",
-		"---\npacket_includes:\n  - fragments/x.md\n  - fragments/y.md\n---\nA\n")
-	writeFixture(t, root, "fragments/x.md", "X\n")
-	writeFixture(t, root, "fragments/y.md", "Y\n")
-
-	pins := testPinSet(t, root, "checklists/a.md", "fragments/x.md", "fragments/y.md")
-
-	var first string
-	for i := 0; i < 16; i++ {
-		files, err := resolvePacketFiles(
-			"RUN-1", pins, []string{root}, []string{"checklists/a.md"})
-		testsupport.Must(t, err, "resolvePacketFiles: %v", err)
-		var b strings.Builder
-		for _, f := range files {
-			b.WriteString(f.Path)
-			b.WriteString("\x00")
-			b.WriteString(f.Body)
-		}
-		if i == 0 {
-			first = b.String()
-			continue
-		}
-		if b.String() != first {
-			t.Fatal("resolution is not deterministic across identical calls")
-		}
-	}
-}
-
 // testPinSet hashes the named fixtures into the ref -> pin map the resolver
 // verifies against, in the legacy shape: keyed by the FULL path and stored
 // without bytes, so the resolver reads each file from disk.

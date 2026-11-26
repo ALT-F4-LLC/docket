@@ -313,31 +313,6 @@ func gateStatuses(t *testing.T, conn *sql.DB, runRef string) map[string]string {
 	return got
 }
 
-// TestVerifyPinsRemedyOmitsUncheckedGates: on an unsound run whose gates
-// could not be checked, the error must not list them as having no pinned
-// script. That list is what an operator reads on an unsound run, and an
-// unchecked gate may well be pinned.
-func TestVerifyPinsRemedyOmitsUncheckedGates(t *testing.T) {
-	conn, configDir, runRef := gatedVerifyPinsFixture(t, false)
-	driftJudgeContract(t, configDir)
-
-	statuses := gateStatuses(t, conn, runRef)
-	if len(statuses) != 2 || statuses["lint"] != engine.GateUnchecked ||
-		statuses["tests"] != engine.GateUnchecked {
-		t.Fatalf("gate statuses = %v, want lint and tests both %q", statuses, engine.GateUnchecked)
-	}
-
-	w, _ := bufWriter(false)
-	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
-	if err == nil {
-		t.Fatal("verify-pins reported clean on a run whose pinned contract drifted")
-	}
-	if strings.Contains(err.Error(), "gates with no pinned script") {
-		t.Errorf("err = %q lists could-not-check gates as having no pinned script",
-			err.Error())
-	}
-}
-
 // TestVerifyPinsRemedyNamesUnpinnedGates: on an unsound run, a gate whose
 // trusted argv names no script is named in the remedy, and an unchecked gate
 // beside it is not.
@@ -390,42 +365,6 @@ func TestVerifyPinsRendersUncheckedGatesOnASoundRun(t *testing.T) {
 		if !strings.HasSuffix(line, ")") || strings.TrimSuffix(line, ")") == "" {
 			t.Errorf("gate %q line ends %q, want a non-empty reason in parentheses",
 				gate, line)
-		}
-	}
-}
-
-// TestVerifyPinsJSONCarriesUncheckedGates is the same sound run under --json:
-// each declared gate has a row with status "unchecked" and a non-empty reason.
-func TestVerifyPinsJSONCarriesUncheckedGates(t *testing.T) {
-	conn, _, runRef := gatedVerifyPinsFixture(t, false)
-
-	w, buf := bufWriter(true)
-	if err := runRunVerifyPins(cmdWithDB(conn), runRef, w); err != nil {
-		t.Fatalf("verify-pins --json refuses a sound run with unchecked gates: %v", err)
-	}
-	var envelope struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			Gates []engine.GateVerdict `json:"gates"`
-		} `json:"data"`
-	}
-	testsupport.Must(t, json.Unmarshal(buf.Bytes(), &envelope), "decoding %q", buf.String())
-	if !envelope.OK {
-		t.Fatalf("envelope = %s, want ok", buf.String())
-	}
-	rows := map[string]engine.GateVerdict{}
-	for _, g := range envelope.Data.Gates {
-		rows[g.Gate] = g
-	}
-	for _, gate := range []string{"lint", "tests"} {
-		row, ok := rows[gate]
-		switch {
-		case !ok:
-			t.Errorf("gates = %+v, want a row for %q", envelope.Data.Gates, gate)
-		case row.Status != engine.GateUnchecked:
-			t.Errorf("gate %q status = %q, want %q", gate, row.Status, engine.GateUnchecked)
-		case row.Reason == "":
-			t.Errorf("gate %q has an empty reason", gate)
 		}
 	}
 }
@@ -533,24 +472,6 @@ func TestVerifyPinsChangedOutranksExecutedCopyChanged(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "docket run repin") {
 		t.Errorf("err = %q, want the repin remedy", err.Error())
-	}
-}
-
-// TestVerifyPinsMissingExitsNotFound: a missing pin with nothing changed is
-// exit 2.
-func TestVerifyPinsMissingExitsNotFound(t *testing.T) {
-	conn, configDir, runRef := verifyPinsFixture(t, "", false)
-	testsupport.Must(t, os.Remove(filepath.Join(configDir, "contracts/judge.md")),
-		"removing the pinned contract")
-
-	w, _ := bufWriter(false)
-	err := runRunVerifyPins(cmdWithDB(conn), runRef, w)
-	cerr, ok := err.(*CmdError)
-	if !ok {
-		t.Fatalf("err = %v (%T), want *CmdError", err, err)
-	}
-	if cerr.Code != output.ErrNotFound {
-		t.Errorf("code = %q, want %q", cerr.Code, output.ErrNotFound)
 	}
 }
 

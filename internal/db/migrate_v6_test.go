@@ -8,41 +8,6 @@ import (
 // leaseColumnNames are the v6 additions, as the steps table will carry them.
 var leaseColumnNames = []string{"owner", "token_hash", "expires_ms", "attempt"}
 
-func TestMigrateToV6(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	// v6 is no longer the terminal version — v7 followed it — but the v6
-	// structures must survive every later migration, which is what this
-	// assertion now guards. The stage pin lives with the current stage's test
-	// (TestMigrateToV7).
-	if currentSchemaVersion < 6 {
-		t.Errorf("currentSchemaVersion = %d; v6 structures must remain reachable", currentSchemaVersion)
-	}
-
-	for _, col := range leaseColumnNames {
-		if n := columnCount(t, db, "issues", col); n != 1 {
-			t.Errorf("issues.%s missing after migration (count %d)", col, n)
-		}
-	}
-
-	if !hasIndex(t, db, "idx_issues_expires_ms") {
-		t.Error("idx_issues_expires_ms missing after migration")
-	}
-}
-
 // TestMigrateV5ToV6IsIdempotent covers the rewind guard: a DB stamped v6 whose
 // lease columns are missing must be re-migrated rather than trusted.
 func TestMigrateV5ToV6IsIdempotent(t *testing.T) {

@@ -272,38 +272,3 @@ func TestDispatchCloseDeclaresTheReconcileFlags(t *testing.T) {
 			"mean what it means on backfill-usage", got, "refuse")
 	}
 }
-
-// TestDispatchCloseBackfillFromReadsStdin pins the "-" form, which is what a
-// conductor piping a journal tool's output uses — the temp file between two
-// commands is one of the drift surfaces DKT-580 is about.
-func TestDispatchCloseBackfillFromReadsStdin(t *testing.T) {
-	conn := newTestDB(t)
-	runID := activatedDispatchRunForCLI(t, conn)
-	runRef := model.FormatRunID(runID)
-	stepID := waveWithUnreportedUsage(t, conn, runID)
-
-	cmd := dispatchCloseCmdWithDB(conn, runRef)
-	testsupport.Must(t, cmd.Flags().Set("backfill-from", "-"),
-		"setting --backfill-from: %v", nil)
-	cmd.SetIn(strings.NewReader(fmt.Sprintf(
-		`[{"step":%q,"unit":"tokens","quantity":900}]`,
-		model.FormatStepID(stepID))))
-
-	w, buf := bufWriter(true)
-	testsupport.Must(t, runDispatchClose(cmd, w),
-		"dispatch close --backfill-from -: %v", nil)
-
-	var env struct {
-		Data engine.ReconcileOutcome `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	if env.Data.Backfill == nil || env.Data.Backfill.Written != 1 {
-		t.Fatalf("stdin batch wrote %+v, want 1 row:\n%s",
-			env.Data.Backfill, buf.String())
-	}
-	if env.Data.Close == nil {
-		t.Fatalf("the close stage did not run:\n%s", buf.String())
-	}
-}

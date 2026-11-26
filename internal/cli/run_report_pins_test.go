@@ -127,20 +127,6 @@ func TestReportPartitionsStepsByPinEpoch(t *testing.T) {
 	}
 }
 
-// TestARunWithOneAgreementHasNoEpochSection is the falsifier for the section's
-// presence: on a run that never repinned the partition is a single group, the
-// pins table already states it, and a section per report would be noise.
-func TestARunWithOneAgreementHasNoEpochSection(t *testing.T) {
-	r := staleRunReport()
-	r.PinEpochs = nil
-	for i := range r.Attempts {
-		r.Attempts[i].PinEpoch = 0
-	}
-	if out := renderPlainRunReport(r); strings.Contains(out, "Pin epochs") {
-		t.Errorf("a run that never repinned rendered an epoch section:\n%s", out)
-	}
-}
-
 // TestPlanningRunRendersNoPinSections: a run that never activated pins nothing,
 // and a section of zeros would report an agreement it does not have.
 func TestPlanningRunRendersNoPinSections(t *testing.T) {

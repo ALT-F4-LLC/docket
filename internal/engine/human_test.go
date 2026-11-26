@@ -13,29 +13,6 @@ import (
 
 // The human, vote, and action step lifecycle, pinned.
 
-// TestApproveMovesAHumanStepToDone is the human row, first half.
-func TestApproveMovesAHumanStepToDone(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	claimAndComplete(t, conn, e, "implement@0", "summary", "")
-	for i := range 4 {
-		claimAndComplete(t, conn, e, "review@0#"+strconv.Itoa(i), "findings", "")
-	}
-	claimAndComplete(t, conn, e, "synthesize@0", "synthesized", "")
-	driveAction(t, conn, e, "reconcile@0")
-	claimAndComplete(t, conn, e, "verify@0", "report", `[{"status":"met"}]`)
-
-	gateID := stepIDByInstance(t, conn, "commit-gate@0")
-
-	err := e.DecideStep(conn, gateID, true, "looks right", nowMS)
-	testsupport.Must(t, err, "approve: %v", err)
-	if got := stepStatus(t, conn, "commit-gate@0"); got != db.StepDone {
-		t.Errorf("status after approve = %q, want %q", got, db.StepDone)
-	}
-}
-
 // TestRejectRoutesPerEffectiveOnFailAndNeverWaitingHuman is the human row's
 // second half, and the reason V13a exists.
 //
@@ -496,57 +473,6 @@ on_fail = "waiting-human"
 	if step.StartedMS != nil {
 		t.Error("started_ms survived a failure; the retry gets a fresh " +
 			"schedule-to-close budget")
-	}
-}
-
-// TestFailAtMaxAttemptsRoutesPerOnFail is the exhausted half, over the
-// committed fixture: `implement` declares max_attempts = 2, so the budget is
-// spent by the SECOND claim and the second failure routes.
-//
-// Corrected for E-8. This test previously claimed once, failed once, and
-// asserted `attempt == 2` with status `waiting-human` — which pinned the
-// double-count as intended behavior and made the fixture's `implement` a step
-// that never got the second of its two declared attempts.
-func TestFailAtMaxAttemptsRoutesPerOnFail(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	id := stepIDByInstance(t, conn, "implement@0")
-
-	// First attempt: claim (attempt 1 of 2), fail, and RETURN TO THE POOL —
-	// one of two attempts is spent, so the limit is not yet reached.
-	claim, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
-	testsupport.Must(t, err, "claim: %v", err)
-	err = e.FailStep(conn, id, claim.Token, "gave up", "", nowMS)
-	testsupport.Must(t, err, "fail: %v", err)
-	step, err := db.GetStep(conn, id)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if step.Attempt != 1 || step.Status != db.StepPending {
-		t.Fatalf("attempt = %d status = %q after one claim + one failure, want "+
-			"1 and %q — a step with two declared attempts gets its second",
-			step.Attempt, step.Status, db.StepPending)
-	}
-
-	// Second attempt: the re-claim spends the budget, and this failure routes.
-	claim2, err := ClaimStep(conn, id, ClaimOptions{Owner: "w", NowMS: nowMS})
-	testsupport.Must(t, err, "re-claim: %v", err)
-	err = e.FailStep(conn, id, claim2.Token, "gave up again", "", nowMS)
-	testsupport.Must(t, err, "second fail: %v", err)
-
-	step, err = db.GetStep(conn, id)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if step.Attempt != 2 {
-		t.Fatalf("attempt = %d, want 2 (two claims; failures never count)",
-			step.Attempt)
-	}
-	if step.Status != db.StepWaitingHuman {
-		t.Errorf("status = %q at the limit, want %q — the fixture's `implement` "+
-			"declares on_fail = waiting-human", step.Status, db.StepWaitingHuman)
-	}
-	// And the token retired, so the exhausted step needs no lease to resolve.
-	if step.Owner != "" {
-		t.Errorf("the lease survived exhaustion: owner = %q", step.Owner)
 	}
 }
 

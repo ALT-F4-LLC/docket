@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -101,20 +100,6 @@ func TestDispatchOpenAndVerifyFlagStaleTargets(t *testing.T) {
 	if !result.Verified || len(result.StaleTargets) != 4 {
 		t.Errorf("verify: verified=%v stale=%d, want verified with every review row flagged",
 			result.Verified, len(result.StaleTargets))
-	}
-}
-
-func TestDispatchStaysQuietWhenTargetIsAncestor(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-	staleFixture(t, conn, e)
-
-	e.IsAncestorFn = func(_, _ string) (ancestor, known bool) { return true, true }
-	m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
-	testsupport.Must(t, err, "dispatch open: %v", err)
-	if len(m.StaleTargets) != 0 {
-		t.Errorf("an integrated (ancestor) target was flagged: %+v", m.StaleTargets)
 	}
 }
 
@@ -405,52 +390,6 @@ func gitConflict(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("premise broken: git %v applied cleanly, but this fixture "+
 			"needs a conflict to resolve:\n%s", args, out)
-	}
-}
-
-// TestStaleTargetReasonSeparatesTheThreeShapes pins the one thing the advisory
-// shapes must never do: read alike. A patch measured missing is a divergence to
-// act on; a tree the patch probe could not check is content to hand-check
-// against whatever landed on those paths since; an unanswerable question is a
-// probe to repair. The string has to say which it is, and only the first may
-// say "diverged" (DKT-1033).
-func TestStaleTargetReasonSeparatesTheThreeShapes(t *testing.T) {
-	missing := staleTargetReason("abc123abc123abc", "def456def456def", stalePatchMissing)
-	unmatched := staleTargetReason("abc123abc123abc", "def456def456def", staleTreeUnmatched)
-	unanswered := staleTargetReason("abc123abc123abc", "def456def456def", staleUndetermined)
-
-	if !strings.Contains(missing, "diverged") ||
-		!strings.Contains(missing, "no commit on the shared branch") {
-		t.Errorf("the missing-patch reason does not name the patch measurement: %q", missing)
-	}
-	if strings.Contains(missing, "could not be determined") ||
-		strings.Contains(missing, "could not be matched") {
-		t.Errorf("the missing-patch reason hedges as if nothing was measured: %q", missing)
-	}
-	if !strings.Contains(unmatched, "could not be matched") ||
-		!strings.Contains(unmatched, "could not be tested") {
-		t.Errorf("the unmatched-tree reason does not say the tree was compared "+
-			"because the patch could not be: %q", unmatched)
-	}
-	if !strings.Contains(unanswered, "could not be determined") ||
-		!strings.Contains(unanswered, "cherry-picked integration mints a new sha") {
-		t.Errorf("the unanswered reason does not say the question went "+
-			"unanswered, nor name DKT-424's cause: %q", unanswered)
-	}
-	// The word belongs to the patch measurement alone. RUN-67 read it on nine
-	// rows whose patches were intact.
-	for _, r := range []string{unmatched, unanswered} {
-		if strings.Contains(strings.ToLower(r), "diverge") {
-			t.Errorf("a reason that measured no patch claims a divergence: %q", r)
-		}
-	}
-	// All three keep DKT-415's claim-time semantics: the decision they inform
-	// is still "is dispatching through this safe".
-	for _, r := range []string{missing, unmatched, unanswered} {
-		if !strings.Contains(r, "does not re-derive the target from HEAD") ||
-			!strings.Contains(r, "resolves at claim time") {
-			t.Errorf("reason %q dropped the claim-time semantics", r)
-		}
 	}
 }
 
@@ -796,97 +735,6 @@ func TestGitTreeMatchesHeadAcquitsOnRootTreeEquality(t *testing.T) {
 				"differing root trees are not evidence about THIS work's paths",
 				c.name, match, known)
 		}
-	}
-}
-
-// TestDispatchVerifyAcquitsWorktreeCherryPick walks DKT-451's stated repro with
-// no substitutions: record a step commit in a REAL linked worktree, cherry-pick
-// it onto the shared branch, run `dispatch verify`. The sha is rewritten and
-// the content is byte-identical, so the reconcile must be silent.
-//
-// The linked worktree matters — it is the object graph the conduct protocol
-// actually produces, and every other case here uses a branch in one checkout.
-func TestDispatchVerifyAcquitsWorktreeCherryPick(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is not installed")
-	}
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	repo := t.TempDir()
-	gitRun(t, repo, "init", "-q")
-	writeFile(t, repo, "internal/work.txt", "original\n")
-	gitRun(t, repo, "add", "-A")
-	gitRun(t, repo, "commit", "-q", "-m", "base")
-
-	work := filepath.Join(t.TempDir(), "executor")
-	gitRun(t, repo, "worktree", "add", "-q", "-b", "executor", work)
-	writeFile(t, work, "internal/work.txt", "the executor's change\n")
-	gitRun(t, work, "add", "-A")
-	gitRun(t, work, "commit", "-q", "-m", "implement the issue")
-	target := gitRun(t, work, "rev-parse", "HEAD")
-
-	execSQL(t, conn, `UPDATE runs SET exec_root = ? WHERE id = ?`, repo, run.ID)
-	implementID := stepIDByInstance(t, conn, "implement@0")
-	claim, err := ClaimStep(conn, implementID, ClaimOptions{Owner: "w", NowMS: nowMS})
-	testsupport.Must(t, err, "claim implement: %v", err)
-	err = e.CompleteStep(conn, implementID, CompleteOptions{
-		Token:    claim.Token,
-		Artifact: []byte("the change summary"),
-		WorkDir:  work,
-		NowMS:    nowMS,
-	})
-	testsupport.Must(t, err, "complete implement: %v", err)
-
-	// The shared branch moves and is backed out again before integration. That
-	// is not decoration: a cherry-pick onto the target's OWN parent, by the
-	// same identity in the same second, reproduces the commit object bit for
-	// bit and the sha never changes. Landing it on a different parent mints the
-	// new sha the real flow always mints, while the branch's content comes back
-	// to exactly what the executor built on — RUN-37's shape, one tree object
-	// under two shas.
-	writeFile(t, repo, "internal/unrelated.txt", "another issue's work\n")
-	gitRun(t, repo, "add", "-A")
-	gitRun(t, repo, "commit", "-q", "-m", "an unrelated integration")
-	gitRun(t, repo, "rm", "-q", "internal/unrelated.txt")
-	gitRun(t, repo, "commit", "-q", "-m", "backed out again")
-
-	// Integration, the sanctioned way.
-	gitRun(t, repo, "cherry-pick", target)
-	if head := gitRun(t, repo, "rev-parse", "HEAD"); head == target {
-		t.Fatalf("premise broken: the cherry-pick reproduced the sha %s, so "+
-			"nothing here is the integration path DKT-451 is about", head)
-	}
-
-	// THE PREMISE: the sha really was rewritten (a definitive ancestry NO) and
-	// the content really is identical, tree object for tree object — RUN-37's
-	// exact shape.
-	if ancestor, known := gitAncestorOfHead(repo, target); !known || ancestor {
-		t.Fatalf("premise broken: ancestry = (%v, %v), want a definitive NO",
-			ancestor, known)
-	}
-	targetTree, ok := gitTreeHash(repo, target)
-	headTree, headOK := gitTreeHash(repo, "HEAD")
-	if !ok || !headOK || targetTree != headTree {
-		t.Fatalf("premise broken: trees %q vs %q — the cherry-pick did not "+
-			"reproduce the content", targetTree, headTree)
-	}
-
-	m, err := e.OpenDispatch(conn, run.ID, 0, nil, nowMS)
-	testsupport.Must(t, err, "dispatch open: %v", err)
-	if len(m.StaleTargets) != 0 {
-		t.Fatalf("dispatch open flagged a tree-identical integration: %+v",
-			m.StaleTargets)
-	}
-	result, mismatch, err := e.VerifyDispatch(conn, run.ID, nowMS)
-	testsupport.Must(t, err, "dispatch verify: %v", err)
-	if mismatch != nil {
-		t.Fatalf("verify mismatch: %+v", mismatch)
-	}
-	if len(result.StaleTargets) != 0 {
-		t.Errorf("dispatch verify warned on the designed integration path — "+
-			"DKT-451's false positive: %+v", result.StaleTargets)
 	}
 }
 

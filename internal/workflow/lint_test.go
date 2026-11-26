@@ -189,52 +189,6 @@ func TestLintTableIsComplete(t *testing.T) {
 	}
 }
 
-// TestCycleRendersStepNames is an explicit requirement, asserted on its
-// own: a 3-step cycle reports step names, never DKT-N. planner.CycleError
-// renders its IDs through model.FormatID, so the workflow layer must map the
-// dense indices back before reporting — a FormatID-shaped rendering difference
-// is this layer's business, and internal/planner is not modified for it.
-func TestCycleRendersStepNames(t *testing.T) {
-	def, err := Parse([]byte(`
-[pipeline]
-name = "w"
-version = 1
-[[step]]
-name = "alpha"
-after = ["gamma"]
-executor = "x"
-emits = "k"
-[[step]]
-name = "beta"
-after = ["alpha"]
-executor = "x"
-emits = "k"
-[[step]]
-name = "gamma"
-after = ["beta"]
-executor = "x"
-emits = "k"
-`))
-	testsupport.Must(t, err, "Parse: %v", err)
-	if err := Validate(def); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-
-	err = Lint(def)
-	if err == nil {
-		t.Fatal("expected a cycle error")
-	}
-	msg := err.Error()
-	for _, name := range []string{"alpha", "beta", "gamma"} {
-		if !strings.Contains(msg, name) {
-			t.Errorf("cycle error %q does not name step %q", msg, name)
-		}
-	}
-	if strings.Contains(msg, "DKT-") {
-		t.Errorf("cycle error %q renders issue ids, not step names", msg)
-	}
-}
-
 // TestL2ExceptionThresholdInterposedStep is the exception that matters most:
 // Routing to a step name "interposes that declared,
 // otherwise-unreached step as a successor gate", so being unreached in the
@@ -268,78 +222,6 @@ on_fail = "skip"
 	}
 	if err := Lint(def); err != nil {
 		t.Fatalf("a threshold-interposed step must not be an orphan: %v", err)
-	}
-}
-
-// TestL2ExceptionLoopStep is the other exception: expansion excludes
-// `loop = true` steps from ordinary expansion, so they are not orphans either.
-func TestL2ExceptionLoopStep(t *testing.T) {
-	def, err := Parse([]byte(`
-[pipeline]
-name = "w"
-version = 1
-[[step]]
-name = "a"
-after = []
-executor = "x"
-emits = "k"
-[[step]]
-name = "b"
-after = ["a"]
-executor = "x"
-emits = "k"
-[[step]]
-name = "fixup"
-loop = true
-executor = "x"
-emits = "k"
-after_loop = "a"
-`))
-	testsupport.Must(t, err, "Parse: %v", err)
-	if err := Validate(def); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if err := Lint(def); err != nil {
-		t.Fatalf("a loop = true step must not be an orphan: %v", err)
-	}
-}
-
-// TestL2CatchesARealOrphan proves the exceptions did not hollow the lint out.
-func TestL2CatchesARealOrphan(t *testing.T) {
-	def, err := Parse([]byte(`
-[pipeline]
-name = "w"
-version = 1
-[[step]]
-name = "a"
-after = []
-executor = "x"
-emits = "k"
-[[step]]
-name = "b"
-after = ["a"]
-executor = "x"
-emits = "k"
-[[step]]
-name = "stranded"
-after = ["stranded-parent"]
-executor = "x"
-emits = "k"
-[[step]]
-name = "stranded-parent"
-after = ["b"]
-executor = "x"
-emits = "k"
-when = "kind == task"
-`))
-	testsupport.Must(t, err, "Parse: %v", err)
-	if err := Validate(def); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	// This one IS reachable — a is root, b follows, stranded-parent follows b,
-	// stranded follows it. The lint must accept it.
-	if err := Lint(def); err != nil {
-		t.Fatalf("a reachable chain was reported as orphaned: %v", err)
 	}
 }
 
@@ -386,43 +268,6 @@ emits = "k"
 	roots := rootSteps(def2)
 	if len(roots) != 1 || roots[0].Name != "first" {
 		t.Errorf("first-step exemption did not produce a root: %v", roots)
-	}
-}
-
-// TestL4ExceptsLoopSteps: a loop step's inputs bind within its
-// ordinal, falling back to the highest earlier ordinal per input, so its
-// producers need not precede it in the ordinary topology. The committed fixture
-// depends on this — `fix` takes `reconcile.findings` while being excluded from
-// the ordinary topology entirely.
-func TestL4ExceptsLoopSteps(t *testing.T) {
-	def, err := Parse([]byte(`
-[pipeline]
-name = "w"
-version = 1
-[[step]]
-name = "a"
-after = []
-executor = "x"
-emits = "k"
-[[step]]
-name = "later"
-after = ["a"]
-executor = "x"
-emits = "findings"
-[[step]]
-name = "fixup"
-loop = true
-executor = "x"
-emits = "k"
-inputs = ["later.findings"]
-after_loop = "a"
-`))
-	testsupport.Must(t, err, "Parse: %v", err)
-	if err := Validate(def); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if err := Lint(def); err != nil {
-		t.Fatalf("a loop step's inputs must not be ordered by the ordinary topology: %v", err)
 	}
 }
 

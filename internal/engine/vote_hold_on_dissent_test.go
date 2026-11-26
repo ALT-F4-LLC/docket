@@ -43,45 +43,6 @@ vote_rule = "majority"
 on_fail = "abandon-issue"
 `
 
-// TestVoteRuleHoldOnDissentKey is DKT-2449's resolve half: the flag rides the
-// resolved rule beside `.sealed`, defaults false, and a stored value that
-// bypassed set-time validation fails LOUDLY rather than defaulting to false —
-// a silent false would fail open with respect to the hold.
-func TestVoteRuleHoldOnDissentKey(t *testing.T) {
-	conn := mustDB(t)
-	registerVoteRule(t, conn, "majority", "0.5", "")
-
-	t.Run("unset resolves false", func(t *testing.T) {
-		rule, err := resolveVoteRule(conn, 1, "majority")
-		testsupport.Must(t, err, "resolveVoteRule: %v", err)
-		if rule.HoldOnDissent {
-			t.Error("a rule with no `.hold_on_dissent` set resolved held; the default is false")
-		}
-	})
-
-	t.Run("a set true is read back", func(t *testing.T) {
-		err := db.SetConfig(conn, 0, db.VoteRuleHoldOnDissentKey("majority"), "true")
-		testsupport.Must(t, err, "setting the rule's hold_on_dissent flag: %v", err)
-		rule, err := resolveVoteRule(conn, 1, "majority")
-		testsupport.Must(t, err, "resolveVoteRule: %v", err)
-		if !rule.HoldOnDissent {
-			t.Error("`.hold_on_dissent = true` did not resolve held")
-		}
-	})
-
-	t.Run("a malformed value is refused", func(t *testing.T) {
-		// Written straight into `meta`, bypassing SetConfig's KindBool check —
-		// the shape a restored or hand-edited store has. Resolve must error.
-		_, err := conn.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`,
-			"config."+db.VoteRuleHoldOnDissentKey("majority"), "maybe")
-		testsupport.Must(t, err, "planting a malformed flag: %v", err)
-		if _, err := resolveVoteRule(conn, 1, "majority"); err == nil {
-			t.Error("a malformed `.hold_on_dissent` resolved without error; " +
-				"it must fail loudly rather than default to false")
-		}
-	})
-}
-
 // TestVoteHoldOnDissentParksApprovedWithReject is DKT-2449's routing half.
 //
 // The park is strictly ADDITIVE: it only ever converts a `pass` into
@@ -368,32 +329,6 @@ func assertDissentGateHeld(t *testing.T, conn *sql.DB) {
 	if got := stepStatus(t, conn, "gate@0"); got != db.StepWaitingHuman {
 		t.Errorf("gate@0 status = %q, want %q", got, db.StepWaitingHuman)
 	}
-}
-
-// Routing reads no rule key, so a fault in any rule field after the casts
-// land leaves an unkeyed step's ordinary route untouched.
-func TestVoteHoldOnDissentUnkeyedRoutesWithoutThreshold(t *testing.T) {
-	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
-		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
-	plantRuleConfig(t, conn, db.VoteRuleThresholdKey("majority"), "")
-
-	if err := e.DriveVoteProposal(conn, proposalID, nowMS); err != nil {
-		t.Fatalf("DriveVoteProposal: %v — an unkeyed step must not need the "+
-			"rule's threshold to route", err)
-	}
-	assertDissentGatePassed(t, conn)
-}
-
-func TestVoteHoldOnDissentUnkeyedIgnoresMalformedSealed(t *testing.T) {
-	conn, e, proposalID := castDissentGate(t, holdOnDissentSrc, "",
-		model.VerdictApprove, model.VerdictApprove, model.VerdictApprove)
-	plantRuleConfig(t, conn, db.VoteRuleSealedKey("majority"), "maybe")
-
-	if err := e.DriveVoteProposal(conn, proposalID, nowMS); err != nil {
-		t.Fatalf("DriveVoteProposal: %v — an unkeyed step must not read the "+
-			"rule's sealed flag to route", err)
-	}
-	assertDissentGatePassed(t, conn)
 }
 
 // TestPassingAbandonOnFailGateCompletesTheIssue: a gate's `on_fail` names

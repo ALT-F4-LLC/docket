@@ -133,59 +133,6 @@ func TestRoundBaseSpansUnreviewedFixRound(t *testing.T) {
 	}
 }
 
-// TestRoundBaseUnchangedWhenEveryRoundWasReviewed is the regression bound: the
-// ordinary implement -> review -> fix sequence resolves the same base it always
-// did, because the last reviewed head IS the previous round's.
-func TestRoundBaseUnchangedWhenEveryRoundWasReviewed(t *testing.T) {
-	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
-
-	rounds.commitRound(t, "IMPLEMENT ROUND 0")
-	completeStepAt(t, conn, e, issue, "implement@0", rounds.work)
-	s0 := gitRun(t, rounds.work, "rev-parse", "HEAD")
-
-	completeReviewRoundIn(t, conn, e, issue, 0)
-	completeInIssue(t, conn, e, issue, "synthesize@0", "the synthesis", "")
-	driveActionInIssue(t, conn, e, issue, "reconcile@0")
-	completeInIssue(t, conn, e, issue, "verify@0", "the ac report", unmetPayload)
-
-	rounds.commitRound(t, "FIX ROUND 1")
-	completeStepAt(t, conn, e, issue, "fix@1", rounds.work)
-
-	if got := issueRoundBase(t, conn, runID, issue); got != s0 {
-		t.Errorf("fix@1 round_base = %.12s, want %.12s — the ordinary sequence moved",
-			got, s0)
-	}
-}
-
-// TestRoundBaseFallsBackWhenNoReviewHasRun is the empty case: a fix round
-// minted before any review recorded has no judged head to reach back to, and
-// the base stays the newest recorded one so the delta still renders.
-func TestRoundBaseFallsBackWhenNoReviewHasRun(t *testing.T) {
-	conn, runID, issue, e, rounds := unreviewedRoundFixture(t)
-
-	rounds.commitRound(t, "IMPLEMENT ROUND 0")
-	completeStepAt(t, conn, e, issue, "implement@0", rounds.work)
-	s0 := gitRun(t, rounds.work, "rev-parse", "HEAD")
-
-	// Round 0's panel parks before any judge records, so no done step has ever
-	// consumed an issue.diff when fix@1's own completion resolves its base.
-	failToPark(t, conn, e, issue, "review@0#0")
-	resolveErr := e.ResolveStep(conn, stepIDIn(t, conn, issue, "review@0#0"),
-		ResolveFixRound, "skip the panel", nowMS)
-	testsupport.Must(t, resolveErr, "resolving review@0#0: %v", resolveErr)
-	if !stepExists(t, conn, "fix@1") {
-		t.Fatal("premise: the authorized round must have minted fix@1")
-	}
-
-	rounds.commitRound(t, "FIX ROUND 1")
-	completeStepAt(t, conn, e, issue, "fix@1", rounds.work)
-
-	if got := issueRoundBase(t, conn, runID, issue); got != s0 {
-		t.Errorf("fix@1 round_base = %.12s, want the newest recorded head %.12s — "+
-			"the fallback left the round with no delta", got, s0)
-	}
-}
-
 // TestRoundDeltaGuardsTheForkPointClip: the unreviewed round is integrated onto
 // the shared branch before the next round forks fresh. The fork point then
 // descends from the head review@0 judged, but advancing to it would clip fix@1

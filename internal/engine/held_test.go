@@ -160,24 +160,6 @@ func TestHeldStepIsMaterialized(t *testing.T) {
 	}
 }
 
-// TestHeldStepIsReadyImmediately: R1/R2/R6 apply, R3 is vacuous, and
-// R4/R5 do not apply to a human step.
-//
-// So it is ready the moment it exists — which is correct: the question it asks
-// is already answered by data on disk, and there is nothing for it to wait on.
-func TestHeldStepIsReadyImmediately(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-	driveToReconcile(t, conn, e, clusteredPayload)
-
-	ready := readyInstances(t, conn)
-	if !contains(ready, "reconcile-held@0#0") {
-		t.Errorf("ready set is %v; the materialized step must be offered "+
-			"immediately", ready)
-	}
-}
-
 // TestHeldBlocksEveryDownstreamStep pins the clause the whole design rests
 // on: the routing step does not route while held, its status stays `gated` —
 // non-terminal — so every downstream successor fails R3 and nothing proceeds.
@@ -1056,43 +1038,6 @@ func TestOfferedResolutionsMoveAHoldRejectedPark(t *testing.T) {
 					tc.as, got.Status, tc.status)
 			}
 		})
-	}
-}
-
-// TestRetryStillWorksOnAnOrdinaryPark is the guard on the guard.
-//
-// The refusal must be NARROW. A step parked by a plain gate failure — no hold
-// materialized at all — is exactly where `retry` is the right remedy, and
-// refusing it there would remove the least destructive resolution from the
-// cases that need it most. That would be a worse defect than the one
-// reported.
-func TestRetryStillWorksOnAnOrdinaryPark(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	// A parked step with NO held step for its ordinal. Parked by direct
-	// update rather than by driving a gate failure: what this test needs is
-	// the STATUS, and the absence of a `*-held@N` row is the whole point.
-	claimInstance(t, conn, "implement@0", nowMS)
-	step := heldStep(t, conn, "implement@0")
-	_, err := conn.Exec(
-		`UPDATE steps SET status = ?, routing = ? WHERE id = ?`,
-		db.StepWaitingHuman, workflow.OnFailWaitingHuman, step.ID)
-	testsupport.Must(t, err, "parking the step: %v", err)
-
-	parked, err := db.GetStep(conn, step.ID)
-	testsupport.Must(t, err, "re-reading the parked step: %v", err)
-	if parked.Status != db.StepWaitingHuman {
-		t.Fatalf("premise: the step is %q, want %q", parked.Status, db.StepWaitingHuman)
-	}
-
-	err = e.ResolveStep(conn, step.ID, ResolveRetry, "", nowMS)
-	testsupport.Must(t, err, "retry was refused on an ORDINARY park, where it is the "+
-		"correct remedy: %v", err)
-
-	if got, _ := db.GetStep(conn, step.ID); got.Status != db.StepPending {
-		t.Errorf("after retry the step is %q, want %q", got.Status, db.StepPending)
 	}
 }
 

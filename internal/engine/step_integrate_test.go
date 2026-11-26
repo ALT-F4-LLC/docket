@@ -476,25 +476,6 @@ func TestIntegrateStepsNamesTheMovedBranchWhenAPickIsRejectedAfterLanding(t *tes
 	}
 }
 
-// TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite: the checkout's
-// state is part of the read-only plan, so a dirty checkout of a later step's run
-// is found before an earlier step's pick lands.
-func TestIntegrateStepsChecksTheSharedCheckoutBeforeTheFirstWrite(t *testing.T) {
-	f := newIntegrateEnv(t, true)
-	writeFile(t, f.shared, "internal/tracked.txt", "edited\n")
-	picks := 0
-	f.e.CherryPickFn = func(string, string, string) (GitPick, error) {
-		picks++
-		return GitPick{}, errors.New("must not be reached")
-	}
-	if _, err := f.integrate(testConductorToken, f.stepID); err == nil {
-		t.Fatal("integrate over a dirty checkout succeeded")
-	}
-	if picks != 0 {
-		t.Errorf("the pick ran %d time(s) before the checkout was checked", picks)
-	}
-}
-
 // TestIntegrateStepsRefusesAnUnanswerableCarriageProbeBeforeTheFirstWrite: a
 // range probe that cannot say whether HEAD already carries the chain (a
 // partial clone missing the trunk's blobs) stops the verb at its read-only

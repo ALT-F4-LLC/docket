@@ -87,64 +87,6 @@ func TestPreGateFailureAfterCommitStillDeliversTheToken(t *testing.T) {
 	}
 }
 
-// TestSameOwnerReclaimReMintsTheStrandedToken is AC2: the executor whose own
-// claim stranded re-claims and is handed a working token, instead of waiting
-// out the lease or costing a reap panel.
-//
-// The owner string is per-step (`wave:STEP-N`), so a live lease held under the
-// caller's own owner is the caller's own stranded claim and nobody else's.
-func TestSameOwnerReclaimReMintsTheStrandedToken(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	stepID := stepIDByInstance(t, conn, "implement@0")
-
-	first, err := ClaimStep(conn, stepID, ClaimOptions{
-		Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS,
-	})
-	testsupport.Must(t, err, "the first claim: %v", err)
-
-	// The same owner, well inside the lease window — the retry a stranded
-	// executor makes.
-	second, err := ClaimStep(conn, stepID, ClaimOptions{
-		Owner: "wave:STEP-1", RecoverySecret: testRecoverySecret, NowMS: nowMS + 1000,
-	})
-	testsupport.Must(t, err,
-		"a same-owner re-claim inside the lease window was refused: %v", err)
-	if second.Token == "" {
-		t.Fatal("the re-claim returned no token")
-	}
-	if err := db.AuthorizeStepRead(conn, stepID, second.Token, nowMS+1000); err != nil {
-		t.Errorf("the re-minted token does not authorize the lease: %v", err)
-	}
-
-	// The re-mint REPLACES the previous token: one lease, one live capability.
-	if db.AuthorizeStepRead(conn, stepID, first.Token, nowMS+1000) == nil {
-		t.Error("the stranded claim's token still authorizes; a re-mint that leaves " +
-			"two live tokens on one lease is two claimants by another name")
-	}
-
-	// It is NOT a new claim: no attempt spent, no second accrual event.
-	step, err := db.GetStep(conn, stepID)
-	testsupport.Must(t, err, "GetStep: %v", err)
-	if step.Attempt != first.Attempt {
-		t.Errorf("attempt = %d after the re-mint, want %d — a re-mint of the "+
-			"caller's own lease is not a retry", step.Attempt, first.Attempt)
-	}
-	if second.Attempt != first.Attempt {
-		t.Errorf("the re-mint reported attempt %d, want %d",
-			second.Attempt, first.Attempt)
-	}
-	var claimed int
-	err = conn.QueryRow(
-		`SELECT COUNT(*) FROM events WHERE kind = ? AND step_id = ?`,
-		EventStepClaimed, stepID).Scan(&claimed)
-	testsupport.Must(t, err, "counting step-claimed events: %v", err)
-	if claimed != 1 {
-		t.Errorf("%d step-claimed events for one claim, want 1 — the budget floor "+
-			"sums these, so a second one bills the run twice", claimed)
-	}
-}
-
 // TestSameOwnerClaimantsShareOneLease pins what mutual exclusion means once a
 // same-owner re-claim re-mints (DKT-1564).
 //

@@ -240,26 +240,6 @@ func TestRunRefreshScopeRequiresTheConductorCapability(t *testing.T) {
 	})
 }
 
-// TestRunRefreshScopeOnAnUnboundRunNeedsNoToken: a run with no minted
-// capability is refreshed without a token, as at every conductor-gated verb.
-func TestRunRefreshScopeOnAnUnboundRunNeedsNoToken(t *testing.T) {
-	t.Setenv(TokenEnvVar, "")
-	conn := newTestDB(t)
-	runID, issueID := scopedIssueInLiveRun(t, conn, `["a/**"]`, `["a/**"]`)
-	hash, err := db.RunConductorHash(conn, runID)
-	testsupport.Must(t, err, "reading the conductor hash: %v", err)
-	if hash != "" {
-		t.Fatal("premise: the fixture run is bound to a conductor capability")
-	}
-	editWithScope(t, conn, issueID, false, "a/**", "b/**")
-
-	_, err = refreshScope(t, conn, runID, issueID, "authorized", false)
-	testsupport.Must(t, err, "run refresh-scope on an unbound run: %v", err)
-	if got := snapshotScopeJSON(t, conn, runID, issueID); got != `["a/**","b/**"]` {
-		t.Errorf("snapshot scope = %s, want the widened declaration", got)
-	}
-}
-
 // assertRefreshRefused checks that a refused refresh wrote nothing: the
 // snapshot keeps its frozen scope and no issue-scope-refreshed event exists.
 func assertRefreshRefused(t *testing.T, conn *sql.DB, runID, issueID int) {

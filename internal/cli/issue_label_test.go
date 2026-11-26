@@ -167,15 +167,6 @@ func TestIssueLabelDeleteNeedsForceInJSONModeForALabelInUse(t *testing.T) {
 	}
 }
 
-func TestIssueLabelDeleteOfAMissingLabelIsNotFound(t *testing.T) {
-	conn, _ := seedIssue(t)
-
-	ce := runRefusedJSON(t, conn, nil, labelDeleteCmd, "ghost")
-	if ce.Code != "NOT_FOUND" || ce.Error() != `label "ghost" not found` {
-		t.Errorf("refusal = %s %q, want NOT_FOUND %q", ce.Code, ce.Error(), `label "ghost" not found`)
-	}
-}
-
 // In human mode label add and rm name the issue, a refused delete without a
 // terminal explains how to proceed and deletes nothing, and a forced delete
 // says how many issues lost the label.

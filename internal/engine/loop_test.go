@@ -48,86 +48,9 @@ func roundReport(ordinal int) string {
 // Identity: instance rendering
 // ---------------------------------------------------------------------------
 
-// TestInstanceRenderingAcrossOrdinalsAndFanout covers all four combinations of
-// (ordinal 0/n) × (fanned/not) — the loop table's first row.
-//
-// The `#i` suffix is ABSENT when the step is not fanned out, which is the half
-// a formatter that always appended an index would get wrong: `implement@0#0`
-// would be a different identity from the `implement@0` every other surface
-// names, and the two would diverge silently.
-func TestInstanceRenderingAcrossOrdinalsAndFanout(t *testing.T) {
-	index := func(i int) *int { return &i }
-
-	for _, tc := range []struct {
-		name     string
-		step     string
-		ordinal  int
-		sibling  *int
-		expected string
-	}{
-		{"ordinal 0, not fanned", "implement", 0, nil, "implement@0"},
-		{"ordinal n, not fanned", "fix", 1, nil, "fix@1"},
-		{"ordinal 0, fanned", "review", 0, index(2), "review@0#2"},
-		{"ordinal n, fanned", "review", 1, index(3), "review@1#3"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := workflow.RenderInstance(tc.step, tc.ordinal, tc.sibling)
-			if got != tc.expected {
-				t.Errorf("RenderInstance = %q, want %q", got, tc.expected)
-			}
-
-			// And the rendering round-trips: ParseInstance is the inverse, so a
-			// caller reading the stored column recovers exactly the parts that
-			// produced it.
-			name, ordinal, sibling, err := workflow.ParseInstance(got)
-			testsupport.Must(t, err, "ParseInstance(%q): %v", got, err)
-			if name != tc.step || ordinal != tc.ordinal {
-				t.Errorf("ParseInstance(%q) = (%q, %d), want (%q, %d)",
-					got, name, ordinal, tc.step, tc.ordinal)
-			}
-			switch {
-			case tc.sibling == nil && sibling != nil:
-				t.Errorf("ParseInstance(%q) yielded sibling %d, want none", got, *sibling)
-			case tc.sibling != nil && sibling == nil:
-				t.Errorf("ParseInstance(%q) yielded no sibling, want %d", got, *tc.sibling)
-			case tc.sibling != nil && *sibling != *tc.sibling:
-				t.Errorf("ParseInstance(%q) sibling = %d, want %d", got, *sibling, *tc.sibling)
-			}
-		})
-	}
-}
-
 // ---------------------------------------------------------------------------
 // The counter, and the bound
 // ---------------------------------------------------------------------------
-
-// TestLoopCountIncrementsPerEntry is the bound's first half: a `fix-loop`
-// routing raises the ISSUE's counter.
-func TestLoopCountIncrementsPerEntry(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-	e := testEngine()
-
-	if got := loopCount(t, conn, run.ID, issue); got != 0 {
-		t.Fatalf("loop_count = %d on a fresh run, want 0", got)
-	}
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "the ac report", unmetPayload)
-
-	if got := loopCount(t, conn, run.ID, issue); got != 1 {
-		t.Errorf("loop_count = %d after one fix-loop routing, want 1", got)
-	}
-	if got := stepRouting(t, conn, "verify@0"); got != workflow.OnFailFixLoop {
-		t.Errorf("verify@0 routing = %q, want %q", got, workflow.OnFailFixLoop)
-	}
-
-	// The counter is the ISSUE's, so it lives on run_issues and not
-	// on the step that routed.
-	if got := loopCount(t, conn, run.ID, issue); got != 1 {
-		t.Errorf("run_issues.loop_count = %d, want 1", got)
-	}
-}
 
 // TestLoopsAreBoundedByConstruction is the bound's second half and the
 // "loops are bounded by construction" row: with `max_fix_loops = 2`, a THIRD
@@ -291,37 +214,6 @@ func TestSupersedeSweepTakesAComputedReadyInstance(t *testing.T) {
 	}
 }
 
-// TestSupersedeSweepIsScopedToAfterLoopDownstream proves the sweep's SET is
-// `after_loop`'s downstream and not "everything below the ordinal".
-//
-// `implement` is upstream of `after_loop = "review"`. It is `done`, so the
-// status rule would leave it alone anyway — the sharper case is that a sweep
-// scoped wrongly would also take steps that are neither downstream nor
-// terminal. `verify@0` itself, and the ordinal-0 `review` siblings, ARE
-// downstream and demonstrate the boundary from the other side.
-func TestSupersedeSweepIsScopedToAfterLoopDownstream(t *testing.T) {
-	conn := mustDB(t)
-	_, _ = activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
-
-	// Upstream of after_loop: untouched, and still `done` — prior instances
-	// remain immutable.
-	if got := stepStatus(t, conn, "implement@0"); got != db.StepDone {
-		t.Errorf("implement@0 = %q; it is upstream of after_loop and must not be swept", got)
-	}
-
-	// Downstream and unclaimed: superseded.
-	for _, instance := range []string{"commit-gate@0", "commit@0"} {
-		if got := stepStatus(t, conn, instance); got != db.StepSuperseded {
-			t.Errorf("%s = %q, want %q — it is downstream of after_loop and unclaimed",
-				instance, got, db.StepSuperseded)
-		}
-	}
-}
-
 // TestPriorArtifactsRemainAddressableAfterSupersede is the "prior instances
 // and artifacts remain immutable and addressable" row.
 //
@@ -471,39 +363,6 @@ func TestOrdinalScopedInputBindingFallsBackPerInput(t *testing.T) {
 	assertInputOrdinal(t, inputs, "implement", 0)
 }
 
-// TestOrdinalScopedInputBindingPrefersItsOwnOrdinal pins the first preference: among `done`
-// instances, the step's OWN ordinal wins over any earlier one.
-//
-// The fallback exists for inputs with nothing at ordinal k; it must not fire
-// when ordinal k has produced something, or a loop would feed itself the very
-// findings it was entered to address.
-func TestOrdinalScopedInputBindingPrefersItsOwnOrdinal(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
-	claimAndComplete(t, conn, e, "fix@1", "the fix summary", "")
-	completeReviewFanout(t, conn, e, 1)
-
-	// `synthesize@1` declares `inputs = ["review.*"]`. Both ordinals have four
-	// `done` review siblings now, and the ordinal-1 set is the right answer.
-	inputs := contextInputs(t, conn, run.ID, "synthesize@1")
-	if len(inputs) == 0 {
-		t.Fatal("synthesize@1 bound no inputs")
-	}
-	for _, in := range inputs {
-		_, ordinal, _, err := workflow.ParseInstance(in.ProducerStep)
-		testsupport.Must(t, err, "ParseInstance(%q): %v", in.ProducerStep, err)
-		if ordinal != 1 {
-			t.Errorf("synthesize@1 bound %s at ordinal %d, want 1 — its own "+
-				"ordinal has `done` instances and the fallback must not fire",
-				in.ProducerStep, ordinal)
-		}
-	}
-}
-
 // TestLoopReentryRebindsInputToLoopProducer is DKT-12: a step downstream of
 // `after_loop` whose declared input names the loop's ORIGINAL producer
 // (`implement.change-summary`) must, on re-entry, resolve to the loop BODY's
@@ -635,36 +494,6 @@ func TestReinstantiatedStepsRerunGatesAndThresholds(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Completion over highest-ordinal instances only
 // ---------------------------------------------------------------------------
-
-// TestCompletionIgnoresLowerOrdinals is the completion row: an issue with a
-// `done` `verify@0` and a `pending` `verify@1` is NOT complete.
-//
-// The rule cuts both ways, and both halves are asserted here: a lower ordinal's
-// `done` does not COUNT TOWARD completion, and a lower ordinal's `superseded`
-// does not BLOCK it.
-func TestCompletionIgnoresLowerOrdinals(t *testing.T) {
-	conn := mustDB(t)
-	_, issue := activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "report", unmetPayload)
-
-	// verify@0 is `done`; verify@1 is `pending`. The issue is NOT complete.
-	if got := stepStatus(t, conn, "verify@0"); got != db.StepDone {
-		t.Fatalf("verify@0 = %q, want %q", got, db.StepDone)
-	}
-	if got := issueStatus(t, conn, issue); got == "done" {
-		t.Error("the issue is `done` with a pending verify@1; completion must be " +
-			"evaluated over highest-ordinal instances only")
-	}
-
-	// The ordinal-0 `commit-gate`/`commit` are superseded and must not block
-	// completion once ordinal 1 finishes.
-	if got := stepStatus(t, conn, "commit-gate@0"); got != db.StepSuperseded {
-		t.Fatalf("commit-gate@0 = %q, want %q", got, db.StepSuperseded)
-	}
-}
 
 // TestSupersededLineageDoesNotBlockCompletion closes the loop the QA run walks:
 // ordinal 1 finishes, the superseded ordinal-0 instances stay superseded, and

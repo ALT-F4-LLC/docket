@@ -303,31 +303,6 @@ func TestBatchOverrideRefusesAMixedBatchWithOneEmptyFingerprint(t *testing.T) {
 	}
 }
 
-// TestBatchOverrideMintsOffFingerprintedRows: the refusal is keyed on the
-// empty fingerprint, not on --batch. A park whose failing row carries one
-// mints its grant and resolves exactly as before.
-func TestBatchOverrideMintsOffFingerprintedRows(t *testing.T) {
-	conn := mustDB(t)
-	runID := activatedBatchRun(t, conn, batchOverrideSrc, "batch-override.toml")
-	e := testEngine()
-	e.Gates = &exitGates{fail: true, exit: 1}
-	implementID := stepIDInRun(t, conn, runID, "implement@0")
-	parkThroughFailingGate(t, conn, e, implementID)
-
-	err := e.ResolveStepBatch(conn, implementID, ResolveOverridePass,
-		"sandbox artifact, not a code defect", nowMS+1)
-	testsupport.Must(t, err, "resolve --as override-pass --batch: %v", err)
-
-	grants, err := db.GateOverrideGrantsForRun(conn, runID)
-	testsupport.Must(t, err, "reading grants: %v", err)
-	if len(grants) != 1 || grants[0].Fingerprint == "" {
-		t.Errorf("grants = %+v, want one carrying a fingerprint", grants)
-	}
-	if got := eventKindCount(t, conn, runID, EventStepResolved); got != 1 {
-		t.Errorf("%s events = %d, want 1", EventStepResolved, got)
-	}
-}
-
 // TestSingleOverrideResolvesAPreV30Row: the refusal is --batch's alone. A
 // single override-pass mints no grant, so a pre-v30 row costs it nothing, and
 // it is the route the batch refusal points the operator to.

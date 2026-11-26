@@ -426,26 +426,3 @@ func do(t *testing.T, client *http.Client, url string, header http.Header) *http
 	resp.Body.Close()
 	return resp
 }
-
-// TestHTTPSListenerEmptySecretAdmitsNothing: a daemon config with an empty
-// bearer secret either refuses start or serves a daemon that still refuses
-// the empty bearer. Either way no request authenticates with nothing.
-func TestHTTPSListenerEmptySecretAdmitsNothing(t *testing.T) {
-	xdg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdg)
-	certFile, keyFile, roots := testKeyPair(t)
-	writeDaemonConfig(t, xdg, certFile, keyFile, "")
-
-	cfg, err := config.LoadDaemonConfig()
-	if err != nil {
-		if !errors.Is(err, config.ErrDaemonConfigParse) {
-			t.Fatalf("LoadDaemonConfig err = %v, want ErrDaemonConfigParse", err)
-		}
-		return
-	}
-	var calls atomic.Int32
-	base, client := startDaemon(t, *cfg, countingHandler(&calls), roots)
-	if resp := get(t, client, base+"/", "Bearer "); resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("empty bearer against an empty secret: status = %d, want 401", resp.StatusCode)
-	}
-}

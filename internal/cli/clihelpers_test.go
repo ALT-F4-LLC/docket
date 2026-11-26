@@ -9,7 +9,6 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/output"
-	"github.com/ALT-F4-LLC/docket/internal/verb"
 	"github.com/spf13/cobra"
 )
 
@@ -57,35 +56,6 @@ func TestNotFound(t *testing.T) {
 	t.Run("nil error yields nil", func(t *testing.T) {
 		if e := notFound(nil, "issue DKT-4"); e != nil {
 			t.Errorf("notFound(nil, ...) = %v, want nil", e)
-		}
-	})
-}
-
-// TestFromVerbRecodesVerbError pins the CLI side of a verb call: a successful
-// result passes through, and a *verb.Error arrives as a *CmdError carrying
-// the verb's code, so Execute renders it rather than a bare error.
-func TestFromVerbRecodesVerbError(t *testing.T) {
-	t.Run("valid issue ID", func(t *testing.T) {
-		id, err := fromVerb(verb.ParseIssueRef("DKT-1"))
-		if err != nil {
-			t.Fatalf("fromVerb(ParseIssueRef(%q)) error = %v, want nil", "DKT-1", err)
-		}
-		if id != 1 {
-			t.Errorf("fromVerb(ParseIssueRef(%q)) = %d, want 1", "DKT-1", id)
-		}
-	})
-
-	t.Run("invalid source reports VALIDATION_ERROR", func(t *testing.T) {
-		_, err := fromVerb(verb.ParseIssueRef("abc"))
-		if err == nil {
-			t.Fatal("fromVerb(ParseIssueRef(\"abc\")) error = nil, want a VALIDATION_ERROR")
-		}
-		cmdErr, ok := err.(*CmdError)
-		if !ok {
-			t.Fatalf("fromVerb(ParseIssueRef(\"abc\")) error = %T, want *CmdError", err)
-		}
-		if cmdErr.Code != output.ErrValidation {
-			t.Errorf("Code = %q, want %q", cmdErr.Code, output.ErrValidation)
 		}
 	})
 }

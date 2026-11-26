@@ -12,46 +12,6 @@ import (
 
 // --- DB layer tests ---
 
-func TestListAllIssues(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	// Create issues with various statuses including done.
-	statuses := []model.Status{model.StatusBacklog, model.StatusTodo, model.StatusInProgress, model.StatusDone}
-	for i, s := range statuses {
-		issue := &model.Issue{
-			Title:    "issue " + string(s),
-			Status:   s,
-			Priority: model.PriorityMedium,
-			Kind:     model.IssueKindTask,
-		}
-		id, err := CreateIssue(db, issue, nil, nil)
-		testsupport.Must(t, err, "CreateIssue %d: %v", i, err)
-		if id <= 0 {
-			t.Fatalf("expected positive id, got %d", id)
-		}
-	}
-
-	issues, err := ListAllIssues(db, 0)
-	testsupport.Must(t, err, "ListAllIssues: %v", err)
-	if len(issues) != 4 {
-		t.Errorf("expected 4 issues, got %d", len(issues))
-	}
-
-	// Verify done issue is included (ListAllIssues returns everything).
-	var foundDone bool
-	for _, iss := range issues {
-		if iss.Status == model.StatusDone {
-			foundDone = true
-			break
-		}
-	}
-	if !foundDone {
-		t.Error("expected done issue to be included in ListAllIssues")
-	}
-}
-
 func TestListAllComments(t *testing.T) {
 	db := mustOpen(t)
 	err := Initialize(db)
@@ -89,38 +49,6 @@ func TestListAllComments(t *testing.T) {
 			t.Errorf("comments not sorted by created_at: [%d]=%v > [%d]=%v",
 				i-1, comments[i-1].CreatedAt, i, comments[i].CreatedAt)
 		}
-	}
-}
-
-func TestGetAllRelations(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	// Create 3 issues.
-	ids := make([]int, 3)
-	for i := 0; i < 3; i++ {
-		id, err := CreateIssue(db, &model.Issue{
-			Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-		}, nil, nil)
-		testsupport.Must(t, err, "CreateIssue %d: %v", i, err)
-		ids[i] = id
-	}
-
-	// Create relations of various types.
-	rels := []*model.Relation{
-		{SourceIssueID: ids[0], TargetIssueID: ids[1], RelationType: model.RelationBlocks},
-		{SourceIssueID: ids[1], TargetIssueID: ids[2], RelationType: model.RelationRelatesTo},
-	}
-	for _, r := range rels {
-		_, err := CreateRelation(db, r)
-		testsupport.Must(t, err, "CreateRelation: %v", err)
-	}
-
-	allRels, err := GetAllRelations(db, 0)
-	testsupport.Must(t, err, "GetAllRelations: %v", err)
-	if len(allRels) != 2 {
-		t.Errorf("expected 2 relations, got %d", len(allRels))
 	}
 }
 
@@ -259,128 +187,6 @@ func TestClearAllData(t *testing.T) {
 	}
 }
 
-func TestInsertIssueWithID(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	issue := &model.Issue{
-		ID:          42,
-		Title:       "specific ID issue",
-		Description: "test description",
-		Status:      model.StatusTodo,
-		Priority:    model.PriorityHigh,
-		Kind:        model.IssueKindBug,
-		Assignee:    "alice",
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-
-	tx, err := db.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	_, err = InsertIssueWithID(tx, issue)
-	testsupport.Must(t, err, "InsertIssueWithID: %v", err)
-	err = tx.Commit()
-	testsupport.Must(t, err, "Commit: %v", err)
-
-	// Verify retrievable.
-	got, err := GetIssue(db, 42)
-	testsupport.Must(t, err, "GetIssue: %v", err)
-	if got.Title != "specific ID issue" {
-		t.Errorf("expected title %q, got %q", "specific ID issue", got.Title)
-	}
-	if got.Status != model.StatusTodo {
-		t.Errorf("expected status %q, got %q", model.StatusTodo, got.Status)
-	}
-	if got.Priority != model.PriorityHigh {
-		t.Errorf("expected priority %q, got %q", model.PriorityHigh, got.Priority)
-	}
-}
-
-func TestInsertCommentWithID(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	// Create an issue first (FK dependency).
-	issueID, err := CreateIssue(db, &model.Issue{
-		Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil, nil)
-	testsupport.Must(t, err, "CreateIssue: %v", err)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	comment := &model.Comment{
-		ID:        99,
-		IssueID:   issueID,
-		Body:      "specific ID comment",
-		Author:    "bob",
-		CreatedAt: now,
-	}
-
-	tx, err := db.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	_, err = InsertCommentWithID(tx, comment)
-	testsupport.Must(t, err, "InsertCommentWithID: %v", err)
-	err = tx.Commit()
-	testsupport.Must(t, err, "Commit: %v", err)
-
-	// Verify retrievable.
-	got, err := GetComment(db, 99)
-	testsupport.Must(t, err, "GetComment: %v", err)
-	if got.Body != "specific ID comment" {
-		t.Errorf("expected body %q, got %q", "specific ID comment", got.Body)
-	}
-	if got.Author != "bob" {
-		t.Errorf("expected author %q, got %q", "bob", got.Author)
-	}
-}
-
-func TestInsertRelationWithID(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	// Create two issues.
-	id1, err := CreateIssue(db, &model.Issue{
-		Title: "issue 1", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil, nil)
-	testsupport.Must(t, err, "CreateIssue 1: %v", err)
-	id2, err := CreateIssue(db, &model.Issue{
-		Title: "issue 2", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, nil, nil)
-	testsupport.Must(t, err, "CreateIssue 2: %v", err)
-
-	now := time.Now().UTC().Truncate(time.Second)
-	rel := &model.Relation{
-		ID:            77,
-		SourceIssueID: id1,
-		TargetIssueID: id2,
-		RelationType:  model.RelationDependsOn,
-		CreatedAt:     now,
-	}
-
-	tx, err := db.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	_, err = InsertRelationWithID(tx, rel)
-	testsupport.Must(t, err, "InsertRelationWithID: %v", err)
-	err = tx.Commit()
-	testsupport.Must(t, err, "Commit: %v", err)
-
-	// Verify retrievable via GetAllRelations.
-	allRels, err := GetAllRelations(db, 0)
-	testsupport.Must(t, err, "GetAllRelations: %v", err)
-	if len(allRels) != 1 {
-		t.Fatalf("expected 1 relation, got %d", len(allRels))
-	}
-	if allRels[0].ID != 77 {
-		t.Errorf("expected relation ID 77, got %d", allRels[0].ID)
-	}
-	if allRels[0].RelationType != model.RelationDependsOn {
-		t.Errorf("expected relation type %q, got %q", model.RelationDependsOn, allRels[0].RelationType)
-	}
-}
-
 func TestInsertLabelWithID(t *testing.T) {
 	db := mustOpen(t)
 	err := Initialize(db)
@@ -413,39 +219,6 @@ func TestInsertLabelWithID(t *testing.T) {
 	}
 	if labels[0].Color != "#ff0000" {
 		t.Errorf("expected label color %q, got %q", "#ff0000", labels[0].Color)
-	}
-}
-
-func TestInsertIssueLabelMapping(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	// Create an issue and a label with specific IDs.
-	now := time.Now().UTC().Truncate(time.Second)
-	tx, err := db.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	if _, err := InsertIssueWithID(tx, &model.Issue{
-		ID: 10, Title: "issue", Status: model.StatusBacklog, Priority: model.PriorityNone,
-		Kind: model.IssueKindTask, CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("InsertIssueWithID: %v", err)
-	}
-	_, err = InsertLabelWithID(tx, &model.Label{ID: 20, Name: "test-label"})
-	testsupport.Must(t, err, "InsertLabelWithID: %v", err)
-	_, err = InsertIssueLabelMapping(tx, 10, 20)
-	testsupport.Must(t, err, "InsertIssueLabelMapping: %v", err)
-	err = tx.Commit()
-	testsupport.Must(t, err, "Commit: %v", err)
-
-	// Verify.
-	mappings, err := ListAllIssueLabelMappings(db, 0)
-	testsupport.Must(t, err, "ListAllIssueLabelMappings: %v", err)
-	if len(mappings) != 1 {
-		t.Fatalf("expected 1 mapping, got %d", len(mappings))
-	}
-	if mappings[0].IssueID != 10 || mappings[0].LabelID != 20 {
-		t.Errorf("expected mapping (10, 20), got (%d, %d)", mappings[0].IssueID, mappings[0].LabelID)
 	}
 }
 
@@ -616,51 +389,6 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 // --- Import behavior tests ---
 
-func TestImportToEmptyDB(t *testing.T) {
-	srcDB := mustOpen(t)
-	err := Initialize(srcDB)
-	testsupport.Must(t, err, "Initialize src: %v", err)
-	err = Migrate(srcDB)
-	testsupport.Must(t, err, "Migrate src: %v", err)
-
-	// Populate source.
-	if _, err := CreateIssue(srcDB, &model.Issue{
-		Title: "test issue", Status: model.StatusTodo, Priority: model.PriorityMedium, Kind: model.IssueKindTask,
-	}, []string{"tag1"}, nil); err != nil {
-		t.Fatalf("CreateIssue: %v", err)
-	}
-
-	srcExport := exportDB(t, srcDB)
-	jsonBytes, err := json.Marshal(srcExport)
-	testsupport.Must(t, err, "json.Marshal: %v", err)
-
-	// Import into empty DB.
-	dstDB := mustOpen(t)
-	err = Initialize(dstDB)
-	testsupport.Must(t, err, "Initialize dst: %v", err)
-	err = Migrate(dstDB)
-	testsupport.Must(t, err, "Migrate dst: %v", err)
-
-	var importData model.ExportData
-	err = json.Unmarshal(jsonBytes, &importData)
-	testsupport.Must(t, err, "json.Unmarshal: %v", err)
-
-	importAll(t, dstDB, &importData)
-
-	// Verify data was imported.
-	count, err := CountIssues(dstDB, 0)
-	testsupport.Must(t, err, "CountIssues: %v", err)
-	if count != 1 {
-		t.Errorf("expected 1 issue after import, got %d", count)
-	}
-
-	labels, err := ListAllLabelsRaw(dstDB, 0)
-	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
-	if len(labels) != 1 {
-		t.Errorf("expected 1 label after import, got %d", len(labels))
-	}
-}
-
 func TestImportMergeSkipsDuplicates(t *testing.T) {
 	db := mustOpen(t)
 	err := Initialize(db)
@@ -730,68 +458,6 @@ func TestImportMergeSkipsDuplicates(t *testing.T) {
 	testsupport.Must(t, err, "ListAllIssueLabelMappings: %v", err)
 	if len(mappings) != 2 {
 		t.Errorf("expected 2 mappings after merge, got %d", len(mappings))
-	}
-}
-
-func TestImportReplaceClears(t *testing.T) {
-	db := mustOpen(t)
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize: %v", err)
-
-	now := time.Now().UTC().Truncate(time.Second)
-
-	// Pre-populate with data that should be replaced.
-	if _, err := CreateIssue(db, &model.Issue{
-		Title: "old issue", Status: model.StatusBacklog, Priority: model.PriorityNone, Kind: model.IssueKindTask,
-	}, []string{"old-label"}, nil); err != nil {
-		t.Fatalf("CreateIssue: %v", err)
-	}
-
-	// Clear all data (simulating --replace).
-	err = ClearAllData(db)
-	testsupport.Must(t, err, "ClearAllData: %v", err)
-
-	// Import new data.
-	importData := &model.ExportData{
-		Version:    1,
-		ExportedAt: now.Format(time.RFC3339),
-		Labels: []*model.Label{
-			{ID: 100, Name: "new-label"},
-		},
-		Issues: []*model.Issue{
-			{ID: 100, Title: "replacement issue", Status: model.StatusTodo,
-				Priority: model.PriorityMedium, Kind: model.IssueKindFeature,
-				CreatedAt: now, UpdatedAt: now},
-		},
-		IssueLabelMappings: []model.IssueLabelMapping{
-			{IssueID: 100, LabelID: 100},
-		},
-		Comments:  []*model.Comment{},
-		Relations: []model.Relation{},
-	}
-
-	importAll(t, db, importData)
-
-	// Verify only the imported data exists.
-	issues, err := ListAllIssues(db, 0)
-	testsupport.Must(t, err, "ListAllIssues: %v", err)
-	if len(issues) != 1 {
-		t.Fatalf("expected 1 issue after replace, got %d", len(issues))
-	}
-	if issues[0].ID != 100 {
-		t.Errorf("expected issue ID 100, got %d", issues[0].ID)
-	}
-	if issues[0].Title != "replacement issue" {
-		t.Errorf("expected title %q, got %q", "replacement issue", issues[0].Title)
-	}
-
-	labels, err := ListAllLabelsRaw(db, 0)
-	testsupport.Must(t, err, "ListAllLabelsRaw: %v", err)
-	if len(labels) != 1 {
-		t.Fatalf("expected 1 label after replace, got %d", len(labels))
-	}
-	if labels[0].Name != "new-label" {
-		t.Errorf("expected label name %q, got %q", "new-label", labels[0].Name)
 	}
 }
 

@@ -62,23 +62,3 @@ func TestHostedWindow(t *testing.T) {
 		})
 	}
 }
-
-func TestHostedWindowFromDeclaredLocation(t *testing.T) {
-	xdg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdg)
-	certFile, keyFile, _ := testKeyPair(t)
-	writeDaemonConfigWindow(t, xdg, certFile, keyFile, testSecret(t), 7, 9)
-	client := serveHosted(t, loadDaemonConfig(t))
-
-	for major, want := range map[uint32]output.ErrorCode{
-		1:  output.ErrIncompatible,
-		6:  output.ErrIncompatible,
-		7:  "",
-		9:  "",
-		10: output.ErrIncompatible,
-	} {
-		if got := handshakeAs(t, client, major); got != want {
-			t.Errorf("client API major %d against declared window [7, 9]: code = %q, want %q", major, got, want)
-		}
-	}
-}

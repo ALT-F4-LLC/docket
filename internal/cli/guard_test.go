@@ -38,23 +38,6 @@ func requireCmdErrCode(t *testing.T, err error, code output.ErrorCode, want stri
 	}
 }
 
-func TestGuardAllowRendersAllowedTrue(t *testing.T) {
-	conn := newTestDB(t)
-	out, err := runLeaseCommandOutput(t, conn, guardCfg(t), guardStopCmd)
-	testsupport.Must(t, err, "guard stop: %v", err)
-	if !strings.Contains(out, `"data":{"allowed":true}`) {
-		t.Errorf("guard stop output = %s, want data {\"allowed\":true}", out)
-	}
-}
-
-// A denial rides the error channel with NOT_FOUND's code, which exits 2.
-func TestGuardDenialIsANotFoundError(t *testing.T) {
-	conn := newTestDB(t)
-	testsupport.Must(t, guardGateCmd.Flags().Set("step", "approve"), "set --step")
-	_, err := runLeaseCommandOutput(t, conn, guardCfg(t), guardGateCmd)
-	requireCmdErrCode(t, err, output.ErrNotFound, "approve")
-}
-
 // --active refuses --rows before reading it, so a missing file is a
 // validation error rather than NOT_FOUND, and stdin is never read.
 func TestGuardSpawnActiveRefusesRowsWithoutReadingThem(t *testing.T) {

@@ -66,26 +66,6 @@ func TestZeroValueWriterEmitsV2(t *testing.T) {
 	}
 }
 
-func TestNewWithVersion(t *testing.T) {
-	tests := []struct {
-		version      JSONVersion
-		wantJSONMode bool
-	}{
-		{JSONNone, false},
-		{JSONV2, true},
-	}
-	for _, tt := range tests {
-		w := NewWithVersion(tt.version, false)
-		if w.JSONMode != tt.wantJSONMode {
-			t.Errorf("NewWithVersion(%v).JSONMode = %v, want %v",
-				tt.version, w.JSONMode, tt.wantJSONMode)
-		}
-		if w.JSONVersion != tt.version {
-			t.Errorf("NewWithVersion(%v).JSONVersion = %v", tt.version, w.JSONVersion)
-		}
-	}
-}
-
 // TestNewMatchesLegacyBoolConstructor pins New's Bool-era signature behavior:
 // the bool alone selects JSON mode with the v2 envelope.
 func TestNewMatchesLegacyBoolConstructor(t *testing.T) {

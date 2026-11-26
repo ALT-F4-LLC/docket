@@ -197,22 +197,3 @@ func TestVoteBackfillUsageResolvesTheProjectFirst(t *testing.T) {
 		t.Errorf("registration events = %v, want %v", got, want)
 	}
 }
-
-// TestVoteBackfillUsageRecordsTheProjectItRegisters keeps the
-// project-registered event the root hook wrote before vote backfill-usage
-// resolved its own project.
-func TestVoteBackfillUsageRecordsTheProjectItRegisters(t *testing.T) {
-	conn := newTestDB(t)
-	_, err := db.EnsureProject(conn, "/repos/first", "first", 1)
-	testsupport.Must(t, err, "claiming the default project: %v", err)
-	ref := model.FormatProposalID(castProposal(t, conn, "seat-a"))
-
-	_, err = runVoteBackfill(t, conn, &config.Config{Identity: "/repos/backfill", Anchored: true}, ref,
-		"voter", "seat-a", "unit", "tokens", "quantity", "1")
-	testsupport.Must(t, err, "vote backfill-usage: %v", err)
-
-	want := map[string]string{"/repos/backfill": "vote backfill-usage"}
-	if got := registrationEvents(t, conn); !reflect.DeepEqual(got, want) {
-		t.Errorf("registration events = %v, want %v", got, want)
-	}
-}

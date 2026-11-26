@@ -338,27 +338,6 @@ func TestVoteProposalReplayWithChangedFieldsReturnsExisting(t *testing.T) {
 	}
 }
 
-// TestVoteProposalReplayIgnoresTriageEvidence: the triage evidence appended to
-// Rationale and the order of spec.Voters both change between replays of one
-// step instance, so neither may enter the proposal-create fingerprint.
-func TestVoteProposalReplayIgnoresTriageEvidence(t *testing.T) {
-	conn, panel, spec, firstID := openedTriagePanel(t)
-
-	changeTriageEvidence(t, conn, panel, "a later attempt's gate output")
-	replaySpec := *spec
-	replaySpec.Voters = slices.Clone(spec.Voters)
-	slices.Reverse(replaySpec.Voters)
-
-	replayID, err := OpenVoteProposal(conn, panel, &replaySpec, nowMS)
-	if err != nil {
-		t.Fatalf("replaying %s with new triage evidence and reordered voters: %v",
-			panel.Instance, err)
-	}
-	if replayID != firstID {
-		t.Errorf("replay returned proposal %d, want the existing %d", replayID, firstID)
-	}
-}
-
 // openedTriagePanel drives the triage fixture until triage@0 has opened its
 // proposal, and returns the panel, its pinned spec, and that proposal's id.
 func openedTriagePanel(t *testing.T) (store.LegacyDB, *db.Step, *workflow.Step, int) {

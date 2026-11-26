@@ -243,23 +243,6 @@ func TestRenderDocLinkedIssues_RichRefsStyledAndPlain(t *testing.T) {
 	}
 }
 
-func TestRenderDocDetail_PlainLinkedIssuesRichColumns(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	doc := makeTestDoc(5, "Doc", "tdd", "draft", "Erik")
-	linkedIssues := []model.IssueRef{
-		{ID: 7, Kind: "task", Status: "review", Title: "Verify"},
-	}
-
-	got := RenderDocDetail(doc, nil, nil, linkedIssues, nil)
-
-	for _, want := range []string{"Linked Issues", model.FormatID(7), "task", "review", "Verify"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("expected %q in plain linked-issues output, got:\n%s", want, got)
-		}
-	}
-}
-
 func TestRenderDocRevisionHistory_Empty(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 

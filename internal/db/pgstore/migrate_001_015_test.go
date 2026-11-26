@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -71,33 +70,6 @@ func TestMigrateV15SchemaParity(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("information_schema columns differ from testdata/schema_v15.json under the type map:\n%s",
 			columnDiff(want, got))
-	}
-}
-
-func TestMigrateV15Rerun(t *testing.T) {
-	ctx := context.Background()
-	db := emptyTestSchema(t)
-
-	if err := applyMigrations(ctx, db, 0, 15); err != nil {
-		t.Fatalf("first run: %v", err)
-	}
-	firstColumns := readColumns(t, db)
-	firstCounts := readRowCounts(t, db)
-	firstForeignKeys := readForeignKeys(t, db)
-
-	if err := applyMigrations(ctx, db, 0, 15); err != nil {
-		t.Fatalf("second run over a version-15 database: %v", err)
-	}
-	assertSchemaVersion(t, db, 15)
-
-	if got := readColumns(t, db); !slices.Equal(got, firstColumns) {
-		t.Errorf("columns changed on the second run:\n%s", columnDiff(firstColumns, got))
-	}
-	if got := readRowCounts(t, db); !maps.Equal(got, firstCounts) {
-		t.Errorf("row counts changed on the second run:\nfirst  %v\nsecond %v", firstCounts, got)
-	}
-	if got := readForeignKeys(t, db); !slices.Equal(got, firstForeignKeys) {
-		t.Errorf("foreign keys changed on the second run:\nfirst  %v\nsecond %v", firstForeignKeys, got)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
-	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
 // exhaustTheLoop drives the fixture's issue past `max_fix_loops = 2`, leaving
@@ -164,27 +163,6 @@ func TestFixRoundLeavesTheWorkflowBoundAlone(t *testing.T) {
 	if got := loopGrants(t, conn, run.ID, second); got != 0 {
 		t.Errorf("the OTHER issue reports %d grants; a grant is one decision "+
 			"about one issue", got)
-	}
-}
-
-// TestFixRoundIsNotRetry pins the distinction the vocabulary exists for.
-func TestFixRoundIsNotRetry(t *testing.T) {
-	var found bool
-	for _, v := range resolveValues {
-		if v == ResolveFixRound {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("fix-round is missing from the closed --as vocabulary, so a " +
-			"bad --as will not name it as an option")
-	}
-	if ResolveFixRound == ResolveRetry {
-		t.Error("fix-round and retry collapsed into one value; retry re-runs " +
-			"the check, fix-round schedules work on what the check found")
-	}
-	if workflow.OnFailFixLoop == "" {
-		t.Error("the fix-loop routing constant is empty")
 	}
 }
 

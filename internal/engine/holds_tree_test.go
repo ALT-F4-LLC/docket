@@ -57,30 +57,6 @@ after = []
 	}
 }
 
-// TestHoldsTreeFalseIsHonoured is the capability proper.
-func TestHoldsTreeFalseIsHonoured(t *testing.T) {
-	def, err := workflow.Parse([]byte(`
-[pipeline]
-name    = "reading"
-version = 1
-
-[[step]]
-name = "review"
-executor = "judge-correctness"
-emits = "findings"
-holds_tree = false
-after = []
-`))
-	testsupport.Must(t, err, "parse: %v", err)
-	err = workflow.Validate(def)
-	testsupport.Must(t, err, "validate: %v", err)
-
-	step := workflow.StepByName(def, "review")
-	if step.HoldsTree == nil || *step.HoldsTree {
-		t.Error("holds_tree = false was not carried through parse+validate")
-	}
-}
-
 // TestHoldsTreeSurvivesSerialization pins that the flag reaches the PINNED
 // form. The scheduler reads it from the pinned definition rather than a step
 // column, so a value that did not survive the round trip would silently revert

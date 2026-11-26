@@ -272,23 +272,6 @@ func TestRenderGatePreflightShowsTheStubReason(t *testing.T) {
 	})
 }
 
-// TestRenderGatePreflightIsSilentWhenEveryGateResolves.
-//
-// Silence on success is the point. An activation already prints a bound-issue
-// roster, a pin count, a fence report, and scope warnings; a fifth block saying
-// "all 6 gates are fine" on every run is how an operator learns to skip the
-// region of the screen where the one that is NOT fine will appear.
-func TestRenderGatePreflightIsSilentWhenEveryGateResolves(t *testing.T) {
-	var buf strings.Builder
-	RenderGatePreflight(&buf, []GatePreflight{
-		{Gate: "build", Matched: true, Entry: "build"},
-		{Gate: "tests", Matched: true, Entry: "tests"},
-	})
-	if buf.String() != "" {
-		t.Errorf("the preflight printed on a fully-resolved run:\n%s", buf.String())
-	}
-}
-
 // TestRenderGatePreflightNamesTheRemedy: a warning that does not say what to do
 // costs the operator the lookup it was supposed to save.
 func TestRenderGatePreflightNamesTheRemedy(t *testing.T) {

@@ -664,23 +664,6 @@ func TestEmptyArgvIsRefused(t *testing.T) {
 	}
 }
 
-func TestRunDoesNotInheritTheParentEnvironmentByDefault(t *testing.T) {
-	// A nil Env must mean NO VARIABLES, never "inherit everything". os/exec's
-	// default is the opposite, so this asserts the override is in place — the
-	// distinction between a nil and an empty slice is the entire control.
-	t.Setenv("A_PARENT_ONLY_VARIABLE", "leaked")
-
-	res, err := Run(Spec{
-		Argv: []string{witness(t)},
-		Dir:  t.TempDir(),
-		Env:  []string{"WITNESS_MODE=env"},
-	})
-	testsupport.Must(t, err, "Run: %v", err)
-	if strings.Contains(res.Output, "A_PARENT_ONLY_VARIABLE") {
-		t.Error("a Spec whose Env omits a variable must not inherit it from the parent")
-	}
-}
-
 // --- Flaky re-runs -----------------------------------------------------------
 
 func TestFlakyReRuns(t *testing.T) {

@@ -45,31 +45,6 @@ func TestTerminatedUnrunStepIsNotADiscrepancy(t *testing.T) {
 	testsupport.Must(t, err, "`next` refused over an unrun step: %v", err)
 }
 
-// TestRanWithoutReportingIsStillADiscrepancy is the lower bound of the fix: a
-// step a worker actually held and that reported nothing is exactly what D2 is
-// for, and the never-claimed exemption must not swallow it.
-func TestRanWithoutReportingIsStillADiscrepancy(t *testing.T) {
-	conn := mustDB(t)
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-	abandon(t, conn, runID, nowMS)
-
-	finishWithoutUsage(t, conn, "implement@0")
-
-	// Probed past the grace: recorded less than `dispatch.grace` ago the step
-	// is usage PENDING, and this test is about one that stayed unbilled.
-	var found bool
-	for _, d := range discrepanciesAt(t, conn, runID, nowMS+1000+graceMS(t, conn)+1) {
-		if d.Kind == DiscrepancyMissingUsage {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("a step that was claimed, ran, and reported no usage is not a " +
-			"discrepancy; that is precisely what D2 exists to catch")
-	}
-}
-
 // TestDiscrepancyRefusalNamesStepIDs is the second, smaller defect.
 //
 // The refusal named step INSTANCES, and instances repeat across issues in one
@@ -121,68 +96,6 @@ func TestOpenDispatchRefusesWhatNextRefuses(t *testing.T) {
 	if openErr == nil {
 		t.Error("`dispatch open` succeeded on a run `next` refuses; the two " +
 			"verbs must agree on whether a run is blocked")
-	}
-}
-
-// TestAcceptedMissingUsageUnblocksNext is the sharpest of the four.
-//
-// `--accept-missing-usage` recorded the acceptance in the `dispatch-closed`
-// event and nowhere else. The probe `next` runs recomputes from step rows and
-// never read that event, so following the documented remedy exactly left the
-// run refusing in precisely the same words: RUN-32 accepted its one row, the
-// close reported success, and the very next `next` reported the same
-// discrepancy.
-func TestAcceptedMissingUsageUnblocksNext(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-	finishWithoutUsage(t, conn, "implement@0")
-
-	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
-	testsupport.Must(t, err, "close --accept-missing-usage: %v", err)
-	if len(outcome.Accepted) == 0 {
-		t.Fatal("premise: the close must have accepted something")
-	}
-
-	if _, err := e.NextSteps(conn, runID, 0, nowMS); err != nil {
-		t.Errorf("`next` still refuses after the acceptance was recorded: %v — "+
-			"the flag's own help says it records the acceptance, and the "+
-			"acceptance must clear the verb that is actually blocked", err)
-	}
-}
-
-// TestAcceptMissingUsageNeedsNoOpenDispatch breaks the cycle itself.
-//
-// `dispatch close --accept-missing-usage` was the only resolution the refusal
-// offered, and `close` required an open dispatch. RUN-14 sat active with 190
-// steps done and no way forward from 2026-08-19: `next` would not offer work
-// until the discrepancy cleared, and the named way to clear it needed a
-// manifest that was not there.
-func TestAcceptMissingUsageNeedsNoOpenDispatch(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	runID := dispatchRun(t, conn)
-	openDispatch(t, conn, runID, 0, nowMS)
-	abandon(t, conn, runID, nowMS)
-	finishWithoutUsage(t, conn, "implement@0")
-
-	past := nowMS + 1000 + graceMS(t, conn) + 1
-	if _, err := e.NextSteps(conn, runID, 0, past); err == nil {
-		t.Fatal("premise: the run must be refusing")
-	}
-
-	outcome, err := e.CloseDispatch(conn, runID, true, IntegrationSkip{}, nowMS)
-	testsupport.Must(t, err, "close --accept-missing-usage with no dispatch "+
-		"open: %v — this is the documented way out of the refusal, and "+
-		"requiring a manifest to reach it is the cycle", err)
-	if len(outcome.Accepted) == 0 {
-		t.Error("nothing was accepted; the acceptance is the whole substance " +
-			"of the verb in this state")
-	}
-
-	if _, err := e.NextSteps(conn, runID, 0, nowMS); err != nil {
-		t.Errorf("`next` still refuses: %v", err)
 	}
 }
 

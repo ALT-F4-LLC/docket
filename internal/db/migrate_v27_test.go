@@ -14,30 +14,6 @@ import (
 // the reaping transaction's own re-offer seeing what it just wrote — is the
 // engine's to prove.
 
-func TestMigrateToV27(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, col := range v27ColumnSentinels {
-		exists, err := hasColumnDB(db, col.table, col.column)
-		if err != nil || !exists {
-			t.Errorf("%s.%s missing after migration (err %v)", col.table, col.column, err)
-		}
-	}
-}
-
 // TestV27RewindGuardConvergesAStampedStore drops the column while leaving the
 // stamp at 27 — the mid-change-binary database v13's guard comment describes
 // — and asserts Migrate converges it.

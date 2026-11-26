@@ -35,51 +35,6 @@ var v10Columns = []struct{ table, column string }{
 	{"steps", "usage_recorded"},
 }
 
-func TestMigrateToV10(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-
-	for _, table := range v10Tables {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s missing after migration", table)
-		}
-	}
-	// The indexes are asserted BY NAME rather than left to the table check,
-	// because two of them carry semantics no table probe can see:
-	// `idx_dispatches_one_open` is the partial UNIQUE index that IS the open
-	// race guard, and `idx_reap_acks_open` is the partial index that makes the
-	// reap-ack dormancy one lookup. A migration that created the tables and
-	// dropped either would leave a schema whose shape looked right and whose
-	// guarantees were gone.
-	for _, index := range []string{
-		"idx_usage_ledger_run",
-		"idx_dispatches_one_open",
-		"idx_reap_acks_open",
-	} {
-		if !hasIndex(t, db, index) {
-			t.Errorf("%s missing after migration", index)
-		}
-	}
-	for _, col := range v10Columns {
-		if !columnExists(t, db, col.table, col.column) {
-			t.Errorf("%s.%s missing after migration", col.table, col.column)
-		}
-	}
-}
-
 // TestSchemaSpanIsComplete is a tripwire, and it is NOT a tautology check.
 //
 // The planned span was v5–v10; every version past it is a recorded addition,

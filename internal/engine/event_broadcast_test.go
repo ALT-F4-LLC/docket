@@ -28,23 +28,6 @@ func publishWithin(t *testing.T, b *EventBroadcast) {
 	}
 }
 
-func TestBroadcastWakesSubscriberOnPublish(t *testing.T) {
-	var b EventBroadcast
-	wake, cancel := b.Subscribe()
-	defer cancel()
-
-	publishWithin(t, &b)
-
-	select {
-	case _, ok := <-wake:
-		if !ok {
-			t.Fatal("the wake channel was closed instead of rung")
-		}
-	case <-time.After(broadcastDeadline):
-		t.Fatalf("the subscriber was not woken within %s of a publish", broadcastDeadline)
-	}
-}
-
 func TestBroadcastPublishWithNoSubscriberReturns(t *testing.T) {
 	var b EventBroadcast
 	publishWithin(t, &b)

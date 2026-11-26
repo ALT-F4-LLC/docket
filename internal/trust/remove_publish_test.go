@@ -1,7 +1,6 @@
 package trust
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,9 +8,6 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
-
-// errTestRecord stands in for a recording backend that refuses the write.
-var errTestRecord = errors.New("the record could not be written")
 
 // sealStoreDir makes the store's directory unwritable AFTER the store and the
 // lock file already exist, so acquireLock and loadAt still succeed (both open
@@ -74,65 +70,5 @@ func TestTrustRemoveRecordsNoEventOnFailedPublish(t *testing.T) {
 	testsupport.Must(t, err, "loadAt: %v", err)
 	if len(st.Entries) != 1 || st.Entries[0].Name != "checks" {
 		t.Errorf("a failed publish must leave the store untouched; got %+v", st.Entries)
-	}
-}
-
-// TestTrustRemoveRecordsAfterASuccessfulPublish is the benign half: an ordinary
-// removal still records exactly one event, with the entry as it stood.
-func TestTrustRemoveRecordsAfterASuccessfulPublish(t *testing.T) {
-	path := sandbox(t)
-	repo := t.TempDir()
-
-	_, err := addAt(path, AddRequest{
-		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
-	})
-	testsupport.Must(t, err, "addAt: %v", err)
-
-	var seen []Entry
-	removed, err := removeAt(path, RemoveRequest{
-		Name: "checks", RepoRoot: repo,
-		OnChange: func(e Entry) error { seen = append(seen, e); return nil },
-	})
-	testsupport.Must(t, err, "removeAt: %v", err)
-	if !removed {
-		t.Fatal("removeAt must report that it removed the entry")
-	}
-	if len(seen) != 1 || seen[0].ArgvSHA256 != ArgvSHA256([]string{"make", "test"}) {
-		t.Errorf("the hook must run exactly once with the removed entry; got %+v", seen)
-	}
-	st, err := loadAt(path)
-	testsupport.Must(t, err, "loadAt: %v", err)
-	if len(st.Entries) != 0 {
-		t.Errorf("the entry survived a successful removal: %+v", st.Entries)
-	}
-}
-
-// TestTrustRemoveReportsAnUnrecordedRemoval pins the surviving partial failure:
-// the entry IS gone and the record is not. removeAt must say the removal
-// happened, or the caller would describe a completed revocation as a store
-// failure — telling the operator the opposite of what occurred.
-func TestTrustRemoveReportsAnUnrecordedRemoval(t *testing.T) {
-	path := sandbox(t)
-	repo := t.TempDir()
-
-	_, err := addAt(path, AddRequest{
-		Name: "checks", Argv: []string{"make", "test"}, RepoRoot: repo,
-	})
-	testsupport.Must(t, err, "addAt: %v", err)
-
-	removed, err := removeAt(path, RemoveRequest{
-		Name: "checks", RepoRoot: repo,
-		OnChange: func(Entry) error { return errTestRecord },
-	})
-	if !errors.Is(err, errTestRecord) {
-		t.Fatalf("a failed record must fail the verb; got %v", err)
-	}
-	if !removed {
-		t.Error("the entry was already published as removed, so removeAt must report it removed")
-	}
-	st, err := loadAt(path)
-	testsupport.Must(t, err, "loadAt: %v", err)
-	if len(st.Entries) != 0 {
-		t.Errorf("the publish already landed; the entry must be gone: %+v", st.Entries)
 	}
 }

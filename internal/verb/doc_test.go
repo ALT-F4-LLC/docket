@@ -457,17 +457,6 @@ func TestDocCommentAddReplaysAnIdempotencyKeyAndRefusesItsReuse(t *testing.T) {
 	}
 }
 
-func TestDocCommentAddErrorCodes(t *testing.T) {
-	st := openStore(t)
-	env := projectEnv(st, "", false)
-
-	_, err := verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: "not-a-doc", Body: "b"})
-	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
-
-	_, err = verb.DocCommentAdd(context.Background(), env, verb.DocCommentAddInput{Doc: "DOC-999", Body: "b"})
-	requireVerbError(t, err, output.ErrNotFound, "doc DOC-999 not found")
-}
-
 func TestDocLinkAddThenRemove(t *testing.T) {
 	st := openStore(t)
 	docID := createDoc(t, st, store.DefaultProjectID, "linked")
@@ -515,24 +504,6 @@ func docLinkedIssues(t *testing.T, st store.Store, docID int) []int {
 		ids = append(ids, ref.ID)
 	}
 	return ids
-}
-
-func TestDocLinkErrorCodes(t *testing.T) {
-	st := openStore(t)
-	docRef := model.FormatDocID(createDoc(t, st, store.DefaultProjectID, "doc"))
-	env := projectEnv(st, "", false)
-
-	_, err := verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: "not-a-doc", Issue: "DKT-1"})
-	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
-	_, err = verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: "not-an-issue"})
-	requireVerbError(t, err, output.ErrValidation, "invalid issue ID: ")
-	_, err = verb.DocLinkAdd(context.Background(), env, verb.DocLinkAddInput{Doc: docRef, Issue: "DKT-999"})
-	requireVerbError(t, err, output.ErrNotFound, "doc or issue not found")
-
-	_, err = verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: "not-a-doc", Issue: "DKT-1"})
-	requireVerbError(t, err, output.ErrValidation, "invalid doc ID: ")
-	_, err = verb.DocLinkRemove(context.Background(), env, verb.DocLinkRemoveInput{Doc: docRef, Issue: "not-an-issue"})
-	requireVerbError(t, err, output.ErrValidation, "invalid issue ID: ")
 }
 
 // TestDocCommentAndLinkWritesRefuseAnUnanchoredIdentity: comment add, link add

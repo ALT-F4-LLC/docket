@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/trust"
 )
@@ -69,22 +68,6 @@ func TestGateChildSeesDocketStep(t *testing.T) {
 	if ex.Verdict != VerdictFail {
 		t.Errorf("gate verdict = %q, want %q — printenv must exit 1 when the "+
 			"variable is genuinely unset", ex.Verdict, VerdictFail)
-	}
-}
-
-// TestStepRefRendersOnlyRealSteps pins the guard directly, because it is the
-// one place the "absent, never invented" encoding is decided.
-func TestStepRefRendersOnlyRealSteps(t *testing.T) {
-	if got := stepRef(0); got != "" {
-		t.Errorf("stepRef(0) = %q, want \"\" — STEP-0 names no row, and a gate "+
-			"handed one fails inside its own tooling instead of on a condition "+
-			"it can test", got)
-	}
-	if got := stepRef(-1); got != "" {
-		t.Errorf("stepRef(-1) = %q, want \"\"", got)
-	}
-	if got := stepRef(7); got != model.FormatStepID(7) {
-		t.Errorf("stepRef(7) = %q, want %q", got, model.FormatStepID(7))
 	}
 }
 

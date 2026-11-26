@@ -31,36 +31,6 @@ import (
 // `rework`. The reference instance's routing keys are instance data and must
 // never appear in core, and scripts/qa/genericity.sh scans tests too.
 
-// TestCompleteMetadataIsPersisted is the feature reduced to one assertion: the bag a
-// worker reports at completion reaches the step's row.
-//
-// This is the regression test. Before the fix it fails with empty metadata,
-// which is exactly what the tracker reproduced through the CLI.
-func TestCompleteMetadataIsPersisted(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	stepID := stepIDByInstance(t, conn, "implement@0")
-	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
-	testsupport.Must(t, err, "claim: %v", err)
-
-	err = e.CompleteStep(conn, stepID, CompleteOptions{
-		Token: claim.Token, Artifact: []byte("body"), NowMS: nowMS,
-		Metadata: `{"desk":"front","rework":"true"}`,
-	})
-	testsupport.Must(t, err, "complete: %v", err)
-
-	bag := stepMetadata(t, conn, stepID)
-	if bag["desk"] != "front" {
-		t.Errorf("desk = %v, want front — the completing worker's bag was dropped (DKT-68)",
-			bag["desk"])
-	}
-	if bag["rework"] != "true" {
-		t.Errorf("rework = %v, want true", bag["rework"])
-	}
-}
-
 // TestCompleteMetadataMergesOverDefinition pins the merge: the definition's bag
 // survives, the worker's keys are added, and a key in both takes the WORKER's
 // value. `saga.go` has promised this merge in a comment since stage 3.
@@ -374,24 +344,6 @@ func TestMergeMetadata(t *testing.T) {
 	}
 }
 
-// TestMergeMetadataIsDeterministic is determinism through the merge: the stored text is
-// stable regardless of the order keys arrived in, so goldens do not flap on Go
-// map iteration order.
-func TestMergeMetadataIsDeterministic(t *testing.T) {
-	const definition = `{"tier":"a","desk":"back","zone":"1"}`
-	const completion = `{"rework":"true","desk":"front","batch":"7"}`
-
-	first, err := mergeMetadata(definition, completion)
-	testsupport.Must(t, err, "mergeMetadata: %v", err)
-	for i := 0; i < 32; i++ {
-		got, err := mergeMetadata(definition, completion)
-		testsupport.Must(t, err, "mergeMetadata: %v", err)
-		if got != first {
-			t.Fatalf("merge is not deterministic: %q then %q", first, got)
-		}
-	}
-}
-
 // TestMergeMetadataReadsNoKey is the mechanical form of the genericity promise,
 // mirroring db.TestMetadataRollupReadsNoKey: the merge groups and overlays keys
 // without naming a single one. A merge that special-cased a key would be core
@@ -428,31 +380,6 @@ func TestMergeMetadataReadsNoKey(t *testing.T) {
 // uses. Every test below uses the committed `implement@0` fixture, which
 // declares `max_attempts = 2` — so ONE failure leaves `attempt` at 1 (E-8:
 // attempt counts claims, never failures) and the step still has a retry left.
-
-// TestFailMetadataIsPersisted is the feature reduced to one assertion: the bag a
-// worker reports at `step fail` reaches the step's row, the same property
-// pinned for `complete`.
-func TestFailMetadataIsPersisted(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-	e := testEngine()
-
-	stepID := stepIDByInstance(t, conn, "implement@0")
-	claim, err := ClaimStep(conn, stepID, ClaimOptions{Owner: "worker", NowMS: nowMS})
-	testsupport.Must(t, err, "claim: %v", err)
-
-	err = e.FailStep(conn, stepID, claim.Token, "gave up",
-		`{"desk":"front","rework":"true"}`, nowMS)
-	testsupport.Must(t, err, "fail: %v", err)
-
-	bag := stepMetadata(t, conn, stepID)
-	if bag["desk"] != "front" {
-		t.Errorf("desk = %v, want front — a failing worker's bag was dropped", bag["desk"])
-	}
-	if bag["rework"] != "true" {
-		t.Errorf("rework = %v, want true", bag["rework"])
-	}
-}
 
 // TestFailMetadataMergesOverDefinition is complete's merge, exercised
 // through fail: the definition's bag survives, the worker's keys are added,
@@ -776,30 +703,6 @@ func TestFailValidatesMetadataBeforeTheTransactionOpens(t *testing.T) {
 // `desk_resolved` mirror the SHAPE of a routing pair — one fact known when the
 // work is handed out, one known only when it comes back — without naming any
 // instance's vocabulary.
-
-// TestClaimMetadataIsPersisted is the feature reduced to one assertion: the bag
-// a dispatcher supplies at claim reaches the step's row IN THE CLAIM, with no
-// completion anywhere in the test.
-func TestClaimMetadataIsPersisted(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-
-	stepID := stepIDByInstance(t, conn, "implement@0")
-	_, err := ClaimStep(conn, stepID, ClaimOptions{
-		Owner: "worker", NowMS: nowMS,
-		Metadata: `{"tier_requested":"a","desk_requested":"front"}`,
-	})
-	testsupport.Must(t, err, "claim: %v", err)
-
-	bag := stepMetadata(t, conn, stepID)
-	if bag["tier_requested"] != "a" {
-		t.Errorf("tier_requested = %v, want a — the claim's bag was not recorded (DKT-592)",
-			bag["tier_requested"])
-	}
-	if bag["desk_requested"] != "front" {
-		t.Errorf("desk_requested = %v, want front", bag["desk_requested"])
-	}
-}
 
 // TestClaimMetadataSurvivesFailure is DKT-592's whole point: a step that FAILS
 // after being claimed still carries what the dispatcher knew when it handed

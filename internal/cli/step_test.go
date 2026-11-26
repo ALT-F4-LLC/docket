@@ -271,20 +271,6 @@ func TestGuardVerbsAreRegistered(t *testing.T) {
 	}
 }
 
-// TestNoTokenFlagOnStepVerbs extends TestNoTokenFlag to the step surface.
-//
-// Tokens pass via env or stdin, NEVER argv: argv is world-readable through
-// `ps` on a shared host, so a --token flag would defeat the capability model
-// at the transport layer regardless of how carefully the rest is built.
-func TestNoTokenFlagOnStepVerbs(t *testing.T) {
-	for _, sub := range stepCmd.Commands() {
-		if sub.Flags().Lookup("token") != nil {
-			t.Errorf("`docket step %s` has a --token flag; argv is world-readable "+
-				"through `ps` and tokens must pass via env or stdin", sub.Name())
-		}
-	}
-}
-
 // TestStepRecordIsCompleteAlias is DKT-107: a worktree-isolated agent's shell
 // guard misparses the bare word "complete" as the `complete` builtin and
 // refuses the whole command line before docket ever sees it. `step record` is

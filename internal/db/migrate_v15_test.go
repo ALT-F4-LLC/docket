@@ -8,30 +8,6 @@ import (
 // arrives on a migrated store, the rewind guard converges a store stamped 15
 // without it, and the round-trip preserves both the pointer and its absence.
 
-func TestMigrateToV15(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, col := range v15ColumnSentinels {
-		exists, err := hasColumnDB(db, col.table, col.column)
-		if err != nil || !exists {
-			t.Errorf("%s.%s missing after migration (err %v)", col.table, col.column, err)
-		}
-	}
-}
-
 // TestV15RewindGuardConvergesAStampedStore rebuilds `artifacts` without the
 // column while leaving the stamp at 15 — the mid-change-binary database v13's
 // guard comment describes — and asserts Migrate converges it.

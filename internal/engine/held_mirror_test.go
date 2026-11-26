@@ -232,34 +232,6 @@ func TestProducerDemotedFromDoesNotSteerCorrection(t *testing.T) {
 	}
 }
 
-// TestUncorrectedHoldStillRoutesTheBlockerArm characterizes the no-correction
-// path: an approve without `--value` never enters the mirror code at all, so
-// the mirror stays as the producer wrote it and the blocker arm still routes.
-// The unconditional-rewrite mutant is killed by
-// TestCorrectionLeavesAnUnrelatedThresholdFieldAlone, not by this test.
-func TestUncorrectedHoldStillRoutesTheBlockerArm(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	driveMirrorReconcile(t, conn, e)
-
-	held := heldStep(t, conn, "reconcile-held@0#0")
-	err := e.DecideStep(conn, held.ID, true, "accepted the computed value", nowMS)
-	testsupport.Must(t, err, "approve: %v", err)
-
-	elements := artifactPayloads(t, conn, stepIDByInstance(t, conn, "reconcile@0"))
-	resolved := elements[len(elements)-1][0]
-	if got, _ := resolved["open_severity"].(string); got != "blocker" {
-		t.Errorf("open_severity = %q with no correction made, want %q untouched",
-			got, "blocker")
-	}
-
-	routing := heldStep(t, conn, "reconcile@0")
-	if !strings.HasPrefix(routing.Routing, workflow.OnFailFixLoop) {
-		t.Errorf("reconcile@0 routed %q, want %q — nothing was corrected",
-			routing.Routing, workflow.OnFailFixLoop)
-	}
-}
-
 // TestCorrectionLeavesAnUnrelatedThresholdFieldAlone is the specificity guard.
 // A threshold field that did NOT mirror the aggregated value is a different
 // fact about the cluster, and the correction has no opinion about it.

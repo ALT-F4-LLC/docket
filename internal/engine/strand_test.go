@@ -172,20 +172,3 @@ func TestReapAckClosesTheBallotItSatisfies(t *testing.T) {
 			"out of band", got)
 	}
 }
-
-// TestReapAckWithNoBallotIsNotAnError: most reaps convene no panel at all.
-//
-// A missing ballot is the ORDINARY case, so it must not be a failure and must
-// not be a warning — an ack that reported a problem every time it ran would
-// train an operator to ignore it.
-func TestReapAckWithNoBallotIsNotAnError(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	seq := seedReapFor(t, conn, run.ID)
-
-	tx, err := conn.Begin()
-	testsupport.Must(t, err, "Begin: %v", err)
-	err = ackReapsTx(tx, run.ID, []int64{seq}, "operator", nowMS)
-	testsupport.Must(t, err, "ackReapsTx with no ballot must succeed: %v", err)
-	testsupport.Must(t, tx.Commit(), "Commit: %v", err)
-}

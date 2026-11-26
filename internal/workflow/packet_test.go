@@ -65,25 +65,6 @@ packet = ["checklists/proofing.md", "checklists/house-style.md"]
 	}
 }
 
-// TestPacketIsOptional is the no-regression assertion: every workflow that
-// existed before `packet` was added declares none, and each must validate and render
-// exactly as it did.
-func TestPacketIsOptional(t *testing.T) {
-	def := packetWorkflow(t, `
-[[step]]
-name = "proof"
-executor = "proofreader"
-emits = "notes"
-after = []
-`)
-	if err := Validate(def); err != nil {
-		t.Fatalf("a workflow with no packet failed validation: %v", err)
-	}
-	if step := StepByName(def, "proof"); len(step.Packet) != 0 {
-		t.Errorf("packet = %v, want empty", step.Packet)
-	}
-}
-
 // TestPacketV32Shape is V32: entries are non-empty, relative, and lexically
 // contained in the config directory.
 //

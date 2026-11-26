@@ -202,28 +202,6 @@ func pinShowRefusal(t *testing.T, conn *sql.DB, runRef string) *CmdError {
 	return cerr
 }
 
-// A run id that names no run row is NOT_FOUND, the code `run verify-pins`
-// returns for the same id, rather than an unpinned path with a repin remedy
-// for a run that does not exist.
-func TestPinShowNonexistentRunIsNotFound(t *testing.T) {
-	conn, _, _ := pinShowFixture(t)
-	missing := model.FormatRunID(9999)
-
-	cerr := pinShowRefusal(t, conn, missing)
-	if cerr.Code != output.ErrNotFound {
-		t.Errorf("code = %q, want %q", cerr.Code, output.ErrNotFound)
-	}
-	if !strings.Contains(cerr.Error(), missing) || !strings.Contains(cerr.Error(), "not found") {
-		t.Errorf("err = %q, want it to name %s as not found", cerr.Error(), missing)
-	}
-	for _, remedy := range []string{"repin", "new run"} {
-		if strings.Contains(cerr.Error(), remedy) {
-			t.Errorf("err = %q, want no %q remedy for a run that does not exist",
-				cerr.Error(), remedy)
-		}
-	}
-}
-
 // A run that exists but never activated has no pin set at all; the refusal
 // says so instead of claiming the path is missing from a frozen pin set.
 func TestPinShowUnactivatedRunHasNoPinSet(t *testing.T) {

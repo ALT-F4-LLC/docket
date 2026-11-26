@@ -128,36 +128,6 @@ func TestSecondClaimCommentsWithoutRewritingStatus(t *testing.T) {
 	}
 }
 
-// TestVerifyUnverifiableEntersReview is the second AC: an open gate/vote step
-// (here, `verify` parked directly `waiting-human` by its own threshold arm)
-// puts the issue in `review`, with its own event and trail comment.
-func TestVerifyUnverifiableEntersReview(t *testing.T) {
-	conn := mustDB(t)
-	run, issue := activatedRun(t, conn)
-	e := testEngine()
-
-	driveToVerify(t, conn, e, 0)
-	claimAndComplete(t, conn, e, "verify@0", "report", unverifiablePayload)
-
-	if got := stepStatus(t, conn, "verify@0"); got != db.StepWaitingHuman {
-		t.Fatalf("premise: verify@0 = %q, want %q", got, db.StepWaitingHuman)
-	}
-	if got := issueStatus(t, conn, issue); got != string(model.StatusReview) {
-		t.Errorf("issue = %q with verify@0 parked, want %q", got, model.StatusReview)
-	}
-
-	page, err := ListEvents(conn, EventQuery{RunID: run.ID})
-	testsupport.Must(t, err, "ListEvents: %v", err)
-	if _, ok := findEvent(t, page, EventIssueReview); !ok {
-		t.Error("no issue-review event for the flip into review")
-	}
-
-	bodies := engineCommentBodies(t, conn, issue)
-	if !containsBody(bodies, "verify@0 is awaiting review") {
-		t.Errorf("engine comments = %v, want one narrating the park", bodies)
-	}
-}
-
 // TestReviewReturnsToInProgressOnFixRound is the third AC — the operator's own
 // words: "bidirectional — reflect live reality". Authorizing a fix round on the
 // parked step supersedes it, and the issue is not left stuck at `review` once

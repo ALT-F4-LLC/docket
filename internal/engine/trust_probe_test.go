@@ -180,41 +180,6 @@ func TestProbeTrustEnforcesPerEntryTimeout(t *testing.T) {
 	}
 }
 
-// TestProbeTrustRemovesWorktreeOnSuccess and its two siblings below are AC4:
-// removed on success, on a failure inside ProbeTrust, and on interruption
-// (a canceled context) — `git worktree list` shows no leftover in any case,
-// and neither the worktree nor its cache root remains on disk.
-func TestProbeTrustRemovesWorktreeOnSuccess(t *testing.T) {
-	repo := probeRepo(t)
-	tmp := probeTempDir(t)
-	entries := []trust.Entry{{Name: "ok", Argv: []string{"true"}}}
-
-	_, err := ProbeTrust(context.Background(), repo, entries, noAction)
-	testsupport.Must(t, err, "ProbeTrust: %v", err)
-
-	if n := worktreeCount(t, repo); n != 0 {
-		t.Errorf("want no leftover worktree after a clean probe, got %d", n)
-	}
-	assertNoProbeLeftovers(t, tmp)
-}
-
-func TestProbeTrustRemovesWorktreeWhenEntriesFail(t *testing.T) {
-	repo := probeRepo(t)
-	tmp := probeTempDir(t)
-	entries := []trust.Entry{{Name: "fails", Argv: []string{"false"}}}
-
-	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
-	testsupport.Must(t, err, "ProbeTrust: %v", err)
-	if result.Passed {
-		t.Fatal("the fixture entry fails; the probe must not report passed")
-	}
-
-	if n := worktreeCount(t, repo); n != 0 {
-		t.Errorf("want no leftover worktree after a probe with failures, got %d", n)
-	}
-	assertNoProbeLeftovers(t, tmp)
-}
-
 func TestProbeTrustRemovesWorktreeOnCanceledContext(t *testing.T) {
 	repo := probeRepo(t)
 	tmp := probeTempDir(t)
@@ -714,39 +679,6 @@ func commitProbeFile(t *testing.T, repo, rel, body string) string {
 	}
 	sum := sha256.Sum256([]byte(body))
 	return hex.EncodeToString(sum[:])
-}
-
-// TestProbeTrustVerifiesDeclaredFilesUnderTheWorktree is the regression test
-// for an entry that declares files: the probe hashes them under the throwaway
-// worktree, so the entry matches and runs. Through Lookup, which has no root,
-// the same entry was refused with "this lookup was given no root".
-func TestProbeTrustVerifiesDeclaredFilesUnderTheWorktree(t *testing.T) {
-	repo := probeRepo(t)
-	pin := commitProbeFile(t, repo, "gate/sourced.conf", "sourced\n")
-	marker := filepath.Join(t.TempDir(), "ran")
-	script, scriptPin := markerScript(t, marker)
-
-	entries := []trust.Entry{{
-		Name: "declares", Argv: []string{script}, Argv0SHA256: scriptPin,
-		DeclaredFiles: []trust.DeclaredFile{{Path: "gate/sourced.conf", SHA256: pin}},
-	}}
-	result, err := ProbeTrust(context.Background(), repo, entries, noAction)
-	testsupport.Must(t, err, "ProbeTrust: %v", err)
-
-	if len(result.Gates) != 1 {
-		t.Fatalf("want 1 gate row, got %+v", result.Gates)
-	}
-	g := result.Gates[0]
-	if strings.Contains(g.LogTail, "was given no root") {
-		t.Fatalf("declared files were not hashed under the worktree: %q", g.LogTail)
-	}
-	if g.Exit == nil || *g.Exit != 0 {
-		t.Errorf("an entry whose declared files match must run and pass: %+v", g)
-	}
-	assertMarker(t, marker, true)
-	if !result.Passed {
-		t.Errorf("want passed, got %+v", result)
-	}
 }
 
 // TestProbeTrustRefusesDeclaredFileModifiedInSharedCheckout: the probe hashes

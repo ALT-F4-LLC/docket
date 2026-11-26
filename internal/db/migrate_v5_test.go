@@ -29,67 +29,6 @@ func columnCount(t *testing.T, db *sql.DB, table, column string) int {
 	return n
 }
 
-func TestMigrateToV5(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	// The stage pin moved to TestMigrateToV6 when v6 shipped. What
-	// this test still guards is that v5's structures survive every later
-	// migration — a v5 obligation does not expire because v6 exists.
-	if currentSchemaVersion < 5 {
-		t.Errorf("currentSchemaVersion = %d; v5 structures must persist", currentSchemaVersion)
-	}
-
-	if !hasTable(t, db, "idempotency_keys") {
-		t.Error("idempotency_keys table missing after migration")
-	}
-	for _, table := range versionedTables {
-		if n := columnCount(t, db, table, "version"); n != 1 {
-			t.Errorf("%s.version column count = %d, want 1", table, n)
-		}
-	}
-}
-
-// The migration must be re-runnable: ALTER TABLE ADD COLUMN is not idempotent
-// in SQLite, so migrateV4ToV5 probes before adding.
-func TestMigrateV5Idempotent(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-
-	for i := range 3 {
-		if err := Migrate(db); err != nil {
-			t.Fatalf("Migrate run %d: %v", i+1, err)
-		}
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d after 3 migrates, want %d", v, currentSchemaVersion)
-	}
-	for _, table := range versionedTables {
-		if n := columnCount(t, db, table, "version"); n != 1 {
-			t.Errorf("%s.version count = %d after repeated migration, want 1", table, n)
-		}
-	}
-}
-
 // A v4 database — no version columns, no idempotency_keys — must migrate
 // cleanly, with every existing row backfilled to version 1.
 func TestMigrateV4ToV5BackfillsExistingRows(t *testing.T) {

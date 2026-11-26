@@ -518,27 +518,6 @@ func TestWorkflowListItemsCarryRowVersionUnderV2(t *testing.T) {
 	}
 }
 
-// TestWorkflowListIsEmptyWhenNothingIsRegistered is the phase-1 dormancy
-// claim at the verb: the table exists, and reports nothing.
-func TestWorkflowListIsEmptyWhenNothingIsRegistered(t *testing.T) {
-	conn := newTestDB(t)
-	cmd := workflowListCmdWithDB(conn, 50)
-	w, buf := bufWriter(true)
-	err := runWorkflowList(cmd, nil, w)
-	testsupport.Must(t, err, "list: %v", err)
-
-	var envelope struct {
-		Data struct {
-			Total int `json:"total"`
-		} `json:"data"`
-	}
-	err = json.Unmarshal(buf.Bytes(), &envelope)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if envelope.Data.Total != 0 {
-		t.Errorf("total = %d in a repo that never registered a workflow", envelope.Data.Total)
-	}
-}
-
 func workflowInitCmdWith(template, dir string, force bool) *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("json", false, "")

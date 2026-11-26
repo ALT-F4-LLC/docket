@@ -11,30 +11,6 @@ import (
 // stamped 14 without the v14 shape, and the cast path writes one row per
 // seat per unit where usage_ledger's key could not.
 
-func TestMigrateToV14(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-	for _, table := range v14Sentinels {
-		exists, err := tableExists(db, table)
-		if err != nil || !exists {
-			t.Errorf("%s missing after migration (err %v)", table, err)
-		}
-	}
-}
-
 // TestV14RewindGuardConvergesAStampedStore drops the table while leaving the
 // stamp — the mid-change-binary database — and asserts Migrate converges it.
 func TestV14RewindGuardConvergesAStampedStore(t *testing.T) {

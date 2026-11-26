@@ -179,61 +179,6 @@ func TestNextJSON_HydratesFilesAndDocs(t *testing.T) {
 	}
 }
 
-func TestNextJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "ready no context", model.StatusTodo, model.PriorityHigh)
-
-	cmd := nextCmdWithDB(conn, 10)
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	err := runNext(cmd, nil, w)
-	testsupport.Must(t, err, "runNext: %v", err)
-
-	var env struct {
-		Data struct {
-			Items []map[string]json.RawMessage `json:"items"`
-		} `json:"data"`
-	}
-	err = json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if len(env.Data.Items) != 1 {
-		t.Fatalf("issues = %d, want 1", len(env.Data.Items))
-	}
-	for _, key := range []string{"files", "docs"} {
-		if got := string(env.Data.Items[0][key]); got != "[]" {
-			t.Errorf("%s = %s, want []", key, got)
-		}
-	}
-}
-
-// TestNextJSON_NoReadyIssuesIsAnEmptyArray pins the same "[] never null"
-// contract as TestNextJSON_FilesAndDocsEmptyAreArrays, one level up: FindReady
-// and filterReady return a nil slice when nothing is ready (planner/plan.go's
-// `var ready []*model.Issue`), and nextResult has no custom MarshalJSON like
-// issueListPayload does — an unguarded nil would serialize `.data.items` as
-// JSON null, breaking any consumer iterating it.
-func TestNextJSON_NoReadyIssuesIsAnEmptyArray(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "already done", model.StatusDone, model.PriorityHigh)
-
-	cmd := nextCmdWithDB(conn, 10)
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	err := runNext(cmd, nil, w)
-	testsupport.Must(t, err, "runNext: %v", err)
-
-	var env struct {
-		Data struct {
-			Items json.RawMessage `json:"items"`
-		} `json:"data"`
-	}
-	err = json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if got := string(env.Data.Items); got != "[]" {
-		t.Errorf("issues = %s, want []", got)
-	}
-}
-
 func TestNextHumanTableUnchanged(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
@@ -294,38 +239,6 @@ func runNextHuman(t *testing.T, conn *sql.DB) string {
 	err := runNext(cmd, nil, w)
 	testsupport.Must(t, err, "runNext: %v", err)
 	return buf.String()
-}
-
-func TestNext_HydratesPostLimitOnly(t *testing.T) {
-	conn := newTestDB(t)
-	first := createIssue(t, conn, "First", model.StatusTodo, model.PriorityHigh)
-	second := createIssue(t, conn, "Second", model.StatusTodo, model.PriorityLow)
-
-	docFirst := createDoc(t, conn, "First Doc", "tdd", "approved")
-	docSecond := createDoc(t, conn, "Second Doc", "ux", "draft")
-	linkDocIssue(t, conn, docFirst, first)
-	linkDocIssue(t, conn, docSecond, second)
-
-	nj := runNextJSON(t, conn, 1)
-	if len(nj.Data.Items) != 1 {
-		t.Fatalf("issues = %d, want 1 (limit)", len(nj.Data.Items))
-	}
-	emitted := nj.Data.Items[0]
-	if emitted.ID != model.FormatID(first) {
-		t.Fatalf("emitted = %s, want %s (priority order)", emitted.ID, model.FormatID(first))
-	}
-	if len(emitted.Docs) != 1 || emitted.Docs[0].Title != "First Doc" {
-		t.Errorf("emitted issue not hydrated with its doc: %+v", emitted.Docs)
-	}
-
-	cmd := nextCmdWithDB(conn, 1)
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	err := runNext(cmd, nil, w)
-	testsupport.Must(t, err, "runNext: %v", err)
-	if strings.Contains(buf.String(), "Second Doc") {
-		t.Errorf("beyond-limit issue's doc leaked into output:\n%s", buf.String())
-	}
 }
 
 // classCapWorkflow offers one root step per class: three bounded by

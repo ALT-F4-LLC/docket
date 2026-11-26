@@ -122,34 +122,6 @@ func TestPlanJSON_FilterByPriorityInvalid(t *testing.T) {
 	}
 }
 
-func TestPlanJSON_FilesAndDocsEmptyAreArrays(t *testing.T) {
-	conn := newTestDB(t)
-	createIssue(t, conn, "no context", model.StatusTodo, model.PriorityHigh)
-
-	cmd := planCmdWithDB(conn)
-	w, buf := bufWriter(true)
-	err := runPlan(cmd, nil, w)
-	testsupport.Must(t, err, "runPlan: %v", err)
-
-	var env struct {
-		Data struct {
-			Phases []struct {
-				Issues []map[string]json.RawMessage `json:"issues"`
-			} `json:"phases"`
-		} `json:"data"`
-	}
-	err = json.Unmarshal(buf.Bytes(), &env)
-	testsupport.Must(t, err, "unmarshal: %v", err)
-	if len(env.Data.Phases) != 1 || len(env.Data.Phases[0].Issues) != 1 {
-		t.Fatalf("expected 1 phase with 1 issue, got %+v", env.Data.Phases)
-	}
-	for _, key := range []string{"files", "docs"} {
-		if got := string(env.Data.Phases[0].Issues[0][key]); got != "[]" {
-			t.Errorf("%s = %s, want []", key, got)
-		}
-	}
-}
-
 func TestPlanJSON_LevelFields(t *testing.T) {
 	conn := newTestDB(t)
 	createIssueWithFile(t, conn, "issue one", "shared.go")

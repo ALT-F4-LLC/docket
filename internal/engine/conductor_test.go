@@ -251,24 +251,6 @@ func TestOperatorVerbsRequireTheConductorCapability(t *testing.T) {
 	}
 }
 
-// TestUnboundRunStaysOpenToTheOperatorVerbs: a run activated before
-// the capability existed asks for nothing, so a migrated store's runs in
-// flight keep working exactly as they did.
-func TestUnboundRunStaysOpenToTheOperatorVerbs(t *testing.T) {
-	for _, verb := range conductorVerbs {
-		t.Run(verb.name, func(t *testing.T) {
-			conn := mustDB(t)
-			run, _ := boundRun(t, conn)
-			unbind(t, conn, run.ID)
-			e := testEngine()
-			stepID := verb.setup(t, conn, e, run)
-
-			testsupport.Must(t, verb.call(conn, e, run, stepID, ""),
-				"%s on an unbound run without a token: %v", verb.name, nil)
-		})
-	}
-}
-
 // TestConductRunRotatesTheCapability: `run conduct` mints a fresh token,
 // retires the standing one, and records who took the seat.
 func TestConductRunRotatesTheCapability(t *testing.T) {

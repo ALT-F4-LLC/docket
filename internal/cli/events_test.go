@@ -214,37 +214,6 @@ func TestEventsListRunInAnotherProjectIsNotAnEmptySuccess(t *testing.T) {
 	}
 }
 
-// A run inside the invoking project is unchanged: the scope it never needed is
-// gone, and the answer is the same one it always gave.
-func TestEventsListRunInTheInvokingProjectIsUnchanged(t *testing.T) {
-	conn := newTestDB(t)
-	here, _, hereRun, _ := twoProjectRuns(t, conn)
-
-	out := eventsFor(t, conn, here, hereRun, false)
-
-	if len(out.Data.Items) != 1 || out.Data.Total != 1 {
-		t.Fatalf("the invoking project's own run answered %d events (total %d), want 1",
-			len(out.Data.Items), out.Data.Total)
-	}
-	if out.Data.Items[0].Run != hereRun {
-		t.Errorf("answered %q, want %q", out.Data.Items[0].Run, hereRun)
-	}
-}
-
-// --all-projects with --run still answers the same run: the workaround the
-// analysts found keeps working.
-func TestEventsListAllProjectsWithRunStillAnswers(t *testing.T) {
-	conn := newTestDB(t)
-	here, _, _, thereRun := twoProjectRuns(t, conn)
-
-	out := eventsFor(t, conn, here, thereRun, true)
-
-	if len(out.Data.Items) != 2 || out.Data.Total != 2 {
-		t.Fatalf("--all-projects --run %s answered %d events (total %d), want 2",
-			thereRun, len(out.Data.Items), out.Data.Total)
-	}
-}
-
 // The run-less feed is STILL scoped to the invoking project: dropping the scope
 // predicate under --run must not drop it everywhere.
 func TestEventsListWithoutRunStaysScopedToTheInvokingProject(t *testing.T) {

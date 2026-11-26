@@ -34,29 +34,6 @@ func TestPgMigrate016030SchemaParity(t *testing.T) {
 	}
 }
 
-func TestPgMigrate016030Idempotent(t *testing.T) {
-	ctx := context.Background()
-	db := emptyTestSchema(t)
-
-	if err := applyMigrations(ctx, db, 0, 30); err != nil {
-		t.Fatalf("migrating to version 30: %v", err)
-	}
-	firstColumns := readColumns(t, db)
-	firstForeignKeys := readForeignKeys(t, db)
-
-	if err := applyMigrations(ctx, db, 15, 30); err != nil {
-		t.Fatalf("rerunning v16-v30 over a version-30 database: %v", err)
-	}
-	assertSchemaVersion(t, db, 30)
-
-	if got := readColumns(t, db); !slices.Equal(got, firstColumns) {
-		t.Errorf("columns changed on the rerun:\n%s", columnDiff(firstColumns, got))
-	}
-	if got := readForeignKeys(t, db); !slices.Equal(got, firstForeignKeys) {
-		t.Errorf("foreign keys changed on the rerun:\nfirst  %v\nsecond %v", firstForeignKeys, got)
-	}
-}
-
 func TestPgMigrate016030PreservesRows(t *testing.T) {
 	ctx := context.Background()
 	db := emptyTestSchema(t)

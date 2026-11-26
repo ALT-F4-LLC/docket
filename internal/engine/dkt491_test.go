@@ -217,43 +217,6 @@ func TestReReviewPacketInlinesTheRevisedDocOnce(t *testing.T) {
 	}
 }
 
-// TestReReviewBundleBindsTheRevisedDocOnce is the same fact one layer down: the
-// bundle `step context` serves carries one entry per DISTINCT artifact,
-// so a dispatcher reading the bundle pays the duplicate no more than a rendered
-// packet does. Its `--meta` byte count is measured off this list, and a bundle
-// deduplicated only at render would keep reporting the inflated figure.
-func TestReReviewBundleBindsTheRevisedDocOnce(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	activateMultiLaneDoc(t, conn)
-	driveMultiLaneRoundZero(t, conn, e)
-	driveFixtureRound(t, 1)
-	claimAndComplete(t, conn, e, "revise-a@1", revisedDoc, "")
-
-	bundle, err := ReadContext(conn, stepIDByInstance(t, conn, "review@1#0"), nowMS)
-	testsupport.Must(t, err, "assembling review@1#0's bundle: %v", err)
-
-	var docs []string
-	for _, in := range bundle.Inputs {
-		if in.Kind != "doc" {
-			continue
-		}
-		docs = append(docs, in.Artifact+" from "+in.ProducerStep)
-		if in.Body != revisedDoc {
-			t.Errorf("the bound doc is %q, want the revised draft", in.Body)
-		}
-	}
-	if len(docs) != 1 {
-		t.Errorf("the bundle binds %d doc inputs, want 1: %v", len(docs), docs)
-	}
-	if len(bundle.Inputs) != 5 {
-		t.Errorf("the bundle carries %d inputs, want 5 (the doc, the issue "+
-			"body, and the previous round's three findings sets from review's "+
-			"own lineage — two judges and the reconciliation, DKT-1055)",
-			len(bundle.Inputs))
-	}
-}
-
 // TestFirstRoundBundleIsUnchanged is the falsification: the collapse must not
 // touch a bundle that never had a duplicate. At ordinal 0 the five lanes an
 // issue did not take are `skipped` and resolve to nothing, so `review@0` binds

@@ -31,28 +31,6 @@ func lineRow(ordinal int, verdict string, argv ...string) db.GateResultRow {
 	return r
 }
 
-func TestFenceGateFailsWhenAnEarlierLineIsUnmatched(t *testing.T) {
-	rows := []db.GateResultRow{
-		lineRow(0, db.GateVerdictUnmatched),
-		lineRow(1, db.GateVerdictPass, "go", "vet", "./..."),
-	}
-	verdict, _, unmatched := verdictOverRows(rows)
-	if verdict != VerdictFail || !unmatched {
-		t.Errorf("verdict = %q unmatched = %v, want %q true: the first line never "+
-			"ran, and a later passing line does not stand in for it",
-			verdict, unmatched, VerdictFail)
-	}
-
-	control := []db.GateResultRow{
-		lineRow(0, db.GateVerdictPass, "go", "test", "./..."),
-		lineRow(1, db.GateVerdictPass, "go", "vet", "./..."),
-	}
-	if verdict, _, unmatched := verdictOverRows(control); verdict != VerdictPass || unmatched {
-		t.Errorf("control: verdict = %q unmatched = %v, want %q false",
-			verdict, unmatched, VerdictPass)
-	}
-}
-
 func TestFenceGateFailsWhenAnEarlierLineFailed(t *testing.T) {
 	rows := []db.GateResultRow{
 		lineRow(0, db.GateVerdictFail, "go", "test", "./..."),

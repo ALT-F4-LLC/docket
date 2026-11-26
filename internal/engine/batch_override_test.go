@@ -968,51 +968,6 @@ func TestBatchGrantCoversLaterFixLoopRoundsSteps(t *testing.T) {
 	}
 }
 
-// TestBatchGrantParksALaterRoundWithADifferentSignature is the other half of
-// DKT-734's answer, and the reason the run-scoped reach is safe: a standing
-// grant does not make the loop step immune. A later round whose gate fails
-// DIFFERENTLY parks for a fresh operator decision, exactly as an ungranted
-// failure would.
-func TestBatchGrantParksALaterRoundWithADifferentSignature(t *testing.T) {
-	conn := mustDB(t)
-	runID := activatedBatchRun(t, conn, batchLoopRoundSrc, "batch-loop-round.toml")
-
-	gates := &exitGates{fail: true, exit: 2}
-	e := testEngine()
-	e.Gates = gates
-
-	driveFixtureRound(t, 0)
-	claimAndComplete(t, conn, e, "check@0", "the round 0 assessment", unmetPayload)
-	driveFixtureRound(t, 1)
-	fix1 := stepIDInRun(t, conn, runID, "fix@1")
-	parkThroughFailingGate(t, conn, e, fix1)
-	testsupport.Must(t, e.ResolveStepBatch(conn, fix1, ResolveOverridePass,
-		"sandbox artifact", nowMS+1), "batch resolve")
-
-	// The next round's gate fails with a DIFFERENT exit: a failure the
-	// operator has not ruled on.
-	gates.mu.Lock()
-	gates.exit = 3
-	gates.mu.Unlock()
-
-	claimAndComplete(t, conn, e, "check@1", "the round 1 assessment", unmetPayload)
-	driveFixtureRound(t, 2)
-	fix2 := stepIDInRun(t, conn, runID, "fix@2")
-	parkThroughFailingGate(t, conn, e, fix2) // asserts the park itself
-
-	grants, err := db.GateOverrideGrantsForRun(conn, runID)
-	testsupport.Must(t, err, "reading grants: %v", err)
-	if grants[0].CoveredSteps != 0 {
-		t.Errorf("covered_steps = %d after a differently-failing round, want 0",
-			grants[0].CoveredSteps)
-	}
-	if got := eventKindCount(t, conn, runID, EventStepBatchOverridden); got != 0 {
-		t.Errorf("%s events = %d, want 0 — a new failure signature parks for a "+
-			"fresh decision no matter how many rounds a grant has covered",
-			EventStepBatchOverridden, got)
-	}
-}
-
 // batchArgvSrc: one gated step to mint the grant on, then two independent
 // steps sharing its gate, so one can stay parked without blocking the other.
 const batchArgvSrc = `

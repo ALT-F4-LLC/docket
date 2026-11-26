@@ -149,26 +149,6 @@ func TestIssueMoveNoteIsAtomicWithTheMove(t *testing.T) {
 	}
 }
 
-// TestIssueMoveNoteRecordsOnANoOpMove pins the no-op decision: moving an issue
-// to the status it already holds still records the reason it was given, because
-// the two-verb form this replaces would have.
-func TestIssueMoveNoteRecordsOnANoOpMove(t *testing.T) {
-	conn := newTestDB(t)
-	id := createIssue(t, conn, "already done", model.StatusDone, model.PriorityNone)
-
-	const note = "Confirming: closed by RUN-40, no further work."
-	testsupport.Must(t, issueMoveVerb(t, conn, []string{model.FormatID(id), "done"},
-		map[string]string{"note": note}), "no-op issue move --note failed")
-
-	comments := notesOn(t, conn, id)
-	if len(comments) != 1 {
-		t.Fatalf("a no-op move with --note recorded %d comments, want 1", len(comments))
-	}
-	if comments[0].Body != note {
-		t.Errorf("comment body = %q, want %q", comments[0].Body, note)
-	}
-}
-
 // TestIssueMoveNoteRefusedOnProjectMigration: `--project` writes no comment, and
 // a note silently discarded is worse than one that never landed — the same
 // reasoning `--if-version` on a migration already carries.

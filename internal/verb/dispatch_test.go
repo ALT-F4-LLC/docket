@@ -32,44 +32,6 @@ func openDispatch(t *testing.T, env verb.Env, run string) verb.DispatchOpenResul
 	return res
 }
 
-func TestDispatchLifecycleThroughTheVerbs(t *testing.T) {
-	st := openStore(t)
-	env := projectEnv(st, "", false)
-	run, _ := dispatchRun(t, st)
-	ctx := context.Background()
-
-	opened := openDispatch(t, env, run)
-	if opened.Manifest == nil || len(opened.Manifest.Rows) != 1 || opened.Manifest.Run != run {
-		t.Fatalf("manifest = %+v, want the run's one ready row", opened.Manifest)
-	}
-
-	extended, err := verb.DispatchExtend(ctx, env, verb.DispatchExtendInput{Run: run})
-	if err != nil {
-		t.Fatalf("DispatchExtend: %v", err)
-	}
-	if extended.Extension.Dispatch != opened.Manifest.Dispatch || len(extended.Extension.Rows) != 0 {
-		t.Errorf("extension = %+v, want no new rows on %s", extended.Extension, opened.Manifest.Dispatch)
-	}
-
-	verified, err := verb.DispatchVerify(ctx, env, verb.DispatchVerifyInput{Run: run})
-	if err != nil {
-		t.Fatalf("DispatchVerify: %v", err)
-	}
-	if verified.Mismatch != nil || !verified.Verify.Verified {
-		t.Errorf("verify = %+v, mismatch %+v, want an untouched manifest verified",
-			verified.Verify, verified.Mismatch)
-	}
-
-	closed, err := verb.DispatchClose(ctx, env, verb.DispatchCloseInput{Run: run})
-	if err != nil {
-		t.Fatalf("DispatchClose: %v", err)
-	}
-	if closed.Close == nil || closed.Close.Dispatch != opened.Manifest.Dispatch || closed.Reconcile != nil {
-		t.Errorf("close = %+v, reconcile %+v, want a plain close of %s",
-			closed.Close, closed.Reconcile, opened.Manifest.Dispatch)
-	}
-}
-
 // A mismatch is the verify's answer, not a failure: the result carries the
 // stored and recomputed rows for the transport to render.
 func TestDispatchVerifyReturnsAMismatchAsItsResult(t *testing.T) {

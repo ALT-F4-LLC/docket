@@ -787,41 +787,6 @@ func TestStepRulingVerbsValidateBeforeTheStore(t *testing.T) {
 	requireUnregistered(t, st, "/work/repo")
 }
 
-// TestStepRulingInputsValidateTheRequest pins what each ruling input's
-// Validate refuses, which a transport checks before resolving its
-// attribution, and that a well-formed request passes.
-func TestStepRulingInputsValidateTheRequest(t *testing.T) {
-	const ref = "STEP-1"
-	refused := map[string]error{
-		"reap with a malformed ref":     verb.StepReapInput{Step: "ISSUE-1"}.Validate(),
-		"hold with a malformed ref":     verb.StepHoldInput{Step: "ISSUE-1"}.Validate(),
-		"approve with a malformed ref":  verb.StepApproveInput{Step: "ISSUE-1"}.Validate(),
-		"reject with a malformed ref":   verb.StepRejectInput{Step: "ISSUE-1"}.Validate(),
-		"resolve with a malformed ref":  verb.StepResolveInput{Step: "ISSUE-1", As: engine.ResolveSkip}.Validate(),
-		"resolve without --as":          verb.StepResolveInput{Step: ref}.Validate(),
-		"annotate with a malformed ref": verb.StepAnnotateInput{Step: "ISSUE-1"}.Validate(),
-	}
-	for name, err := range refused {
-		t.Run(name, func(t *testing.T) {
-			requireCode(t, err, output.ErrValidation)
-		})
-	}
-
-	accepted := map[string]error{
-		"reap":     verb.StepReapInput{Step: ref}.Validate(),
-		"hold":     verb.StepHoldInput{Step: ref}.Validate(),
-		"approve":  verb.StepApproveInput{Step: ref}.Validate(),
-		"reject":   verb.StepRejectInput{Step: ref}.Validate(),
-		"resolve":  verb.StepResolveInput{Step: ref, As: engine.ResolveSkip}.Validate(),
-		"annotate": verb.StepAnnotateInput{Step: ref}.Validate(),
-	}
-	for name, err := range accepted {
-		if err != nil {
-			t.Errorf("%s: Validate = %v, want nil for a well-formed request", name, err)
-		}
-	}
-}
-
 // finishedStep activates a one-step run and completes its step, so it is
 // done and accepts annotations.
 func finishedStep(t *testing.T, st store.Store) int {

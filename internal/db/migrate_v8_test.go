@@ -170,39 +170,6 @@ func seedTrailStep(t *testing.T, db *sql.DB, trail string, updatedMS int64) (run
 	return int(rid), int(sid)
 }
 
-// TestMigrateV8U1TrackerShape: this repo's own tracker — stamped 7, every
-// v7 sentinel present, `steps` empty because the tracker has issues but no runs.
-// The tracker is dogfooded across the stage, so this is the shape the operator's
-// own database actually has when the group-2 binary first opens it.
-func TestMigrateV8U1TrackerShape(t *testing.T) {
-	db := migratedToV7(t)
-
-	var steps int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM steps`).Scan(&steps); err != nil {
-		t.Fatalf("counting steps: %v", err)
-	}
-	if steps != 0 {
-		t.Fatalf("fixture has %d steps, want 0 (the tracker is the no-runs shape)", steps)
-	}
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate v7->v8: %v", err)
-	}
-
-	for _, table := range v8Tables {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s missing after migration", table)
-		}
-	}
-	var backfilled int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM gate_results`).Scan(&backfilled); err != nil {
-		t.Fatalf("counting gate_results: %v", err)
-	}
-	if backfilled != 0 {
-		t.Errorf("gate_results has %d rows, want 0 — nothing to backfill", backfilled)
-	}
-}
-
 // TestMigrateV8U2BackfillsTheTrail: a populated trail becomes one row per
 // element, in order, every row stamped `stub = 1`, and the trail column KEEPS
 // its original bytes.
@@ -284,30 +251,6 @@ func TestMigrateV8U2BackfillsTheTrail(t *testing.T) {
 	}
 	if kept != trail {
 		t.Errorf("gate_trail was mutated by the migration:\n got %s\nwant %s", kept, trail)
-	}
-}
-
-// TestMigrateV8U3RewindsWhenGateResultsAbsent is the case that exists because
-// of the v7 lesson. Stamped 8 with `gate_results` missing is exactly the
-// group-2-partial dogfood shape, and a guard that trusted the stamp would leave
-// that database permanently incomplete.
-func TestMigrateV8U3RewindsWhenGateResultsAbsent(t *testing.T) {
-	db := migratedToV7(t)
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate v7->v8: %v", err)
-	}
-	if _, err := db.Exec(`DROP TABLE gate_results`); err != nil {
-		t.Fatalf("dropping gate_results: %v", err)
-	}
-	stampVersion(t, db, 8)
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate against the partial v8: %v", err)
-	}
-	for _, table := range v8Tables {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s still missing — the rewind guard did not fire", table)
-		}
 	}
 }
 

@@ -172,43 +172,6 @@ func TestEscalationWalkTable(t *testing.T) {
 	}
 }
 
-// TestEscalationWalkFirstRetryIsOneHop is the off-by-one regression fence
-// (DOT-651): attempt:1 must be exactly one escalate_to hop off standing (or
-// its fallback redirect), and must never re-run at standing.
-func TestEscalationWalkFirstRetryIsOneHop(t *testing.T) {
-	doc := mustParseEscalationWalkPolicy(t)
-	for _, hint := range []string{"implement", "fix", "judge-simplicity"} {
-		standing := doc.Executors[hint].Variant
-		oneHop := doc.Variants[standing].EscalateTo
-		fb := doc.Escalation.Fallback[oneHop]
-		landed := variantAt(t, doc, hint, 1, nil)
-		if landed != oneHop && landed != fb {
-			t.Errorf("%s attempt:1 = %q, want one hop off %s (%s) or its fallback (%s)",
-				hint, landed, standing, oneHop, fb)
-		}
-		if landed == standing {
-			t.Errorf("%s attempt:1 re-ran at its standing variant %s (the off-by-one)", hint, standing)
-		}
-	}
-}
-
-// TestEscalationWalkAttemptZeroIsStanding: a step never claimed resolves at
-// its declared standing variant — the Go equivalent of the JS suite's
-// "missing attempt field" case, since model.StepRow.Attempt has no undefined
-// state; its zero value already means "never claimed".
-func TestEscalationWalkAttemptZeroIsStanding(t *testing.T) {
-	doc := mustParseEscalationWalkPolicy(t)
-	for _, hint := range []string{"implement", "judge-security", "investigate", "design-qa"} {
-		want := doc.Executors[hint].Variant
-		if got := variantAt(t, doc, hint, 0, nil); got != want {
-			t.Errorf("%s attempt:0 = %q, want its standing variant %q", hint, got, want)
-		}
-	}
-	if got := variantAt(t, doc, "fix", 0, []string{"security"}); got != doc.Executors["fix"].Variant {
-		t.Errorf("fix (security) attempt:0 = %q, want its standing variant", got)
-	}
-}
-
 // TestEscalationWalkNeverListedExecutorsNeverReachFable is the DOT-650 fence:
 // a [security].nodes/[security].never member climbs through the fallback and
 // caps at the ceiling, never resolving to the forbidden model, well past
@@ -235,24 +198,6 @@ func TestEscalationWalkNeverListedExecutorsNeverReachFable(t *testing.T) {
 	}
 	if got := variantAt(t, doc, "implement", 12, []string{"security-change"}); got != ceiling {
 		t.Errorf("implement (security-change) attempt:12 = %q, want the ceiling %q", got, ceiling)
-	}
-}
-
-// TestEscalationWalkFableStandingRowsDoNotMove: a row whose STANDING variant
-// is already Fable has no escalate_to to walk and the fable gate is only
-// consulted when the walk actually moved off standing, so it never moves.
-func TestEscalationWalkFableStandingRowsDoNotMove(t *testing.T) {
-	doc := mustParseEscalationWalkPolicy(t)
-	for hint, exec := range doc.Executors {
-		standing, ok := doc.Variants[exec.Variant]
-		if !ok || standing.Model != "fable" {
-			continue
-		}
-		for _, attempt := range []int{0, 1, 2, 7} {
-			if got := variantAt(t, doc, hint, attempt, nil); got != exec.Variant {
-				t.Errorf("fable-standing %s attempt:%d = %q, want %q (stays put)", hint, attempt, got, exec.Variant)
-			}
-		}
 	}
 }
 

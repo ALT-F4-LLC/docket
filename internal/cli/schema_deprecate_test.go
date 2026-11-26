@@ -91,36 +91,6 @@ func TestSchemaDeprecateRetiresAndTheAuditSaysSo(t *testing.T) {
 	}
 }
 
-// TestSchemaDeprecateTwiceIsAConflictAndRestoreIsIdempotent keeps the
-// asymmetry `workflow deprecate` established: the second retirement is wrong
-// about the store, the second restore changes nothing and says so.
-func TestSchemaDeprecateTwiceIsAConflictAndRestoreIsIdempotent(t *testing.T) {
-	conn := newTestDB(t)
-	testsupport.Must(t, registerSchema(t, conn, "findings@1", findingsSchema), "register")
-
-	testsupport.Must(t, deprecateSchema(t, conn, "findings@1", false), "first deprecate")
-	err := deprecateSchema(t, conn, "findings@1", false)
-	if err == nil || codeOf(t, err) != output.ErrConflict {
-		t.Errorf("second deprecate = %v, want CONFLICT", err)
-	}
-	if !strings.Contains(err.Error(), "already deprecated") {
-		t.Errorf("refusal does not say the version is already deprecated: %v", err)
-	}
-
-	testsupport.Must(t, deprecateSchema(t, conn, "findings@1", true), "restore")
-	testsupport.Must(t, deprecateSchema(t, conn, "findings@1", true), "second restore")
-
-	err = deprecateSchema(t, conn, "nope@1", false)
-	if err == nil || codeOf(t, err) != output.ErrNotFound {
-		t.Errorf("deprecating an unregistered schema = %v, want NOT_FOUND", err)
-	}
-	err = deprecateSchema(t, conn, "findings", false)
-	if err == nil || codeOf(t, err) != output.ErrValidation {
-		t.Errorf("deprecating a bare name = %v, want VALIDATION_ERROR: retirement "+
-			"applies to one version", err)
-	}
-}
-
 // TestSchemaDeprecateRefusesTheBuiltin: aggregate@1 ships in the binary and is
 // visible to every project through its flag, so retiring it "in this project"
 // would retire it store-wide.

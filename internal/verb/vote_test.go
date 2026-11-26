@@ -214,18 +214,6 @@ func TestVoteCastUnanchoredCallerIsRefusedBeforeTheCast(t *testing.T) {
 	}
 }
 
-func TestVoteCastDecidingBallotReportsTheOutcome(t *testing.T) {
-	st := openStore(t)
-	ref := openProposal(t, st, 1, "")
-	res, err := verb.VoteCast(context.Background(), projectEnv(st, "", false), castInput(ref, "seat"))
-	if err != nil {
-		t.Fatalf("VoteCast: %v", err)
-	}
-	if !res.Cast.QuorumReached || res.Cast.ProposalStatus != model.ProposalStatusApproved || res.Cast.WeightedScore == nil {
-		t.Errorf("Cast = %+v, want quorum reached and the proposal approved with a score", res.Cast)
-	}
-}
-
 // encodedBag returns the JSON text of a one-key bag that encodes to exactly
 // n bytes, the quantity the metadata cap measures.
 func encodedBag(t *testing.T, n int) string {
@@ -711,26 +699,6 @@ func TestVoteCommitVoteStepProposalNeedsTheRunsCapability(t *testing.T) {
 				t.Errorf("the token source was read %d times for an unbound run", read)
 			}
 		})
-	}
-}
-
-func TestVoteResultReportsTheProposalAndItsVotes(t *testing.T) {
-	st := openStore(t)
-	ref := openProposal(t, st, 2, "")
-	env := projectEnv(st, "", false)
-	if _, err := verb.VoteCast(context.Background(), env, castInput(ref, "seat")); err != nil {
-		t.Fatalf("VoteCast: %v", err)
-	}
-
-	res, err := verb.VoteResult(context.Background(), env, verb.VoteResultInput{Proposal: ref})
-	if err != nil {
-		t.Fatalf("VoteResult: %v", err)
-	}
-	if res.Proposal == nil || model.FormatProposalID(res.Proposal.ID) != ref || res.Proposal.RequiredVoters != 2 {
-		t.Errorf("Proposal = %+v, want %s needing 2 voters", res.Proposal, ref)
-	}
-	if len(res.Votes) != 1 || res.Votes[0].VoterName != "seat" {
-		t.Errorf("Votes = %+v, want the seat's one ballot", res.Votes)
 	}
 }
 

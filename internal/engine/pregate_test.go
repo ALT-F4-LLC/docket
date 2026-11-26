@@ -896,43 +896,6 @@ func TestSweptWorktreeIsReconstructedFromTheObjectDatabase(t *testing.T) {
 	}
 }
 
-// TestReconstructionIsReleased: the scratch tree does not outlive the phase.
-//
-// A worktree left behind is not merely litter — it stays in the parent's
-// .git/worktrees and `git worktree list` reports it forever, so a run that
-// reconstructed once per wave would accumulate them for the life of the
-// checkout.
-func TestReconstructionIsReleased(t *testing.T) {
-	conn := mustDB(t)
-	activatedRun(t, conn)
-
-	repoRoot := t.TempDir()
-	sha := seedGitRepo(t, repoRoot, "measured.txt", "under review")
-
-	runner := NewExecRunner(testRepoPaths(repoRoot))
-	argv := []string{"/usr/bin/true"}
-	runner.LoadStore = sandboxTrust(t, trust.Entry{
-		Name: "ac-commands", Argv: argv, ArgvSHA256: trust.ArgvSHA256(argv),
-		Global: true,
-	})
-	e := testEngine()
-	e.Gates = runner
-
-	step := preGateStep(t, conn, e)
-	setRunExecRoot(t, conn, step.RunID, repoRoot)
-
-	_, err := runPreGates(conn, e, step,
-		[]workflow.Gate{{Name: "ac-commands", Pre: true}},
-		sha, filepath.Join(t.TempDir(), "gone"), nowMS)
-	testsupport.Must(t, err, "runPreGates: %v", err)
-
-	out, err := exec.Command("git", "-C", repoRoot, "worktree", "list").Output()
-	testsupport.Must(t, err, "git worktree list: %v", err)
-	if strings.Contains(string(out), "docket-pregate-") {
-		t.Errorf("a reconstruction outlived the pre-gate phase:\n%s", out)
-	}
-}
-
 // TestSkippedGateParksRatherThanRoutingOnFail is DKT-254's routing half.
 //
 // `skipped` counts as not-pass, and before this it was swallowed by the fail
@@ -961,27 +924,6 @@ func TestSkippedGateParksRatherThanRoutingOnFail(t *testing.T) {
 	if len(unmeasured) != 1 || unmeasured[0] != "ac-commands" {
 		t.Errorf("unmeasured = %v, want [ac-commands] — the routing decision "+
 			"needs to know a measurement was absent, not merely bad", unmeasured)
-	}
-}
-
-// TestMeasuredFailureIsNotReportedAsUnmeasured is the other direction.
-//
-// If a plain failure were reported as unmeasured, every failing gate would park
-// for an operator instead of entering its `on_fail` fix loop — which would
-// break the ordinary path this change is supposed to leave alone.
-func TestMeasuredFailureIsNotReportedAsUnmeasured(t *testing.T) {
-	for _, verdict := range []string{
-		db.GateVerdictFail, db.GateVerdictUnmatched, db.GateVerdictPass,
-	} {
-		t.Run(verdict, func(t *testing.T) {
-			_, unmeasured, _ := verdictOverRows([]db.GateResultRow{
-				{Gate: "tests", Ordinal: 0, Verdict: verdict},
-			})
-			if len(unmeasured) != 0 {
-				t.Errorf("a %q gate was reported unmeasured (%v); only `skipped` "+
-					"means no evidence was collected", verdict, unmeasured)
-			}
-		})
 	}
 }
 

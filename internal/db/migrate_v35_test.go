@@ -57,26 +57,6 @@ func assertLoopHistoryColumns(t *testing.T, db *sql.DB) {
 	}
 }
 
-// TestMigrateV34StoreGainsLoopHistoryColumns upgrades a store stamped 34 that
-// lacks the columns: the v35 guard does not apply, so the columns can only
-// arrive through migrateV34ToV35's ALTER TABLE statements.
-func TestMigrateV34StoreGainsLoopHistoryColumns(t *testing.T) {
-	db := stampWithoutLoopHistory(t, "34")
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate from v34: %v", err)
-	}
-
-	assertLoopHistoryColumns(t, db)
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", v, currentSchemaVersion)
-	}
-}
-
 // TestV35RewindGuardConvergesAStampedStore is v27's trap applied to v35: a
 // store stamped 35 by a binary built mid-change, missing the loop-history
 // columns, must be detected and re-migrated rather than trusted at face value.

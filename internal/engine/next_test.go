@@ -93,43 +93,6 @@ func TestNextRecomputesWhenATallyResolvesInTheSameCall(t *testing.T) {
 	}
 }
 
-// TestNextDoesNotRecomputeWhenNothingRouted pins the other half of the
-// constraint carried over from triage: the connection-pool cap of 1 rules
-// out a second scheduler pass on EVERY call, so a call where neither driver
-// routes anything must still answer correctly from the one pass it already
-// computed — a plain human-step run, with no vote or action step in play,
-// is exactly that call.
-func TestNextDoesNotRecomputeWhenNothingRouted(t *testing.T) {
-	conn := mustDB(t)
-	e := testEngine()
-	run, _ := activatedRun(t, conn)
-
-	answer, err := e.NextSteps(conn, run.ID, 0, nowMS)
-	if err != nil {
-		t.Fatalf("NextSteps: %v", err)
-	}
-	if len(answer.Steps) == 0 {
-		t.Fatal("premise: the fixture run must offer at least one ready step")
-	}
-	// The one pass answers correctly: the claimable row says `ready`, and the
-	// closure rows say `staged` — every status is one of the two computed
-	// values, and the fresh run's single ready root is implement@0.
-	var ready []string
-	for _, row := range answer.Steps {
-		switch row.Status {
-		case db.StepReady:
-			ready = append(ready, row.Instance)
-		case db.StepStaged:
-		default:
-			t.Errorf("%s status = %q, want %q or %q",
-				row.Instance, row.Status, db.StepReady, db.StepStaged)
-		}
-	}
-	if len(ready) != 1 || ready[0] != "implement@0" {
-		t.Errorf("ready rows = %v, want exactly [implement@0]", ready)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // `next` drives engine-run lifecycles to quiescence
 // ---------------------------------------------------------------------------

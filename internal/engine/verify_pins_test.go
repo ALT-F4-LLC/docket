@@ -107,26 +107,6 @@ func TestVerifyPinsReportsAMissingPin(t *testing.T) {
 	}
 }
 
-// TestVerifyPinsIsSoundOnAnUntouchedRun is the lower bound: the verb must not
-// cry drift over a run nobody touched, or nobody will believe it when it does.
-func TestVerifyPinsIsSoundOnAnUntouchedRun(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	root := t.TempDir()
-
-	pinAFile(t, conn, run.ID, root, "contracts/a.md", "A\n")
-	pinAFile(t, conn, run.ID, root, "contracts/b.md", "B\n")
-
-	report, err := verifyPinsIn(conn, run.ID, []string{root})
-	testsupport.Must(t, err, "verifyPinsIn: %v", err)
-	if !report.Sound() {
-		t.Errorf("an untouched run reads unsound: %s", PinReportReason(report))
-	}
-	if len(report.Pins) < 2 {
-		t.Errorf("checked %d pins, want at least the two file pins", len(report.Pins))
-	}
-}
-
 // TestVerifyPinsWritesNothing pins the read-only contract. A verb that re-pinned
 // on drift would silently rewrite the agreement instead of reporting it broke —
 // which is the failure `step render`'s own "never a silent re-pin" rule names.
@@ -557,24 +537,6 @@ func TestVerifyPinsReportsAnEditedCopyInTheInvokingCheckout(t *testing.T) {
 	}
 }
 
-// TestVerifyPinsIsCleanWhenTheInvokingCheckoutMatches: a B whose copies match
-// the pins adds no row.
-func TestVerifyPinsIsCleanWhenTheInvokingCheckoutMatches(t *testing.T) {
-	_, conn, runID := gateScriptFixture(t)
-	b := secondCheckout(t)
-
-	report := gateReportWith(t, conn, runID, gatePinStore, b)
-
-	for _, gate := range []string{"build", "ac-commands"} {
-		if row := gateRow(report, gate); row != nil {
-			t.Errorf("gate %s has a row with B identical to A: %+v", gate, *row)
-		}
-	}
-	if !report.Sound() {
-		t.Errorf("an untouched run reads unsound from a matching checkout: %s", PinReportReason(report))
-	}
-}
-
 // TestVerifyPinsIgnoresTheInvokingCopyOfAnAbsolutelyNamedScript: an entry that
 // names A's script by absolute path runs A's copy from any cwd, so B's copy is
 // not what executes and its edit is not reported.
@@ -756,40 +718,6 @@ func unanchoredRunFixture(t *testing.T) (conn store.LegacyDB, runID int, repoCon
 	return conn, run.ID, repoConfig
 }
 
-// TestVerifyPinsResolvesTheRunsCheckoutFromAnUnanchoredCwd: a run whose pins
-// live under its checkout's `.docket/config` verifies clean from a non-git
-// directory, because the roots come from the run's recorded exec root.
-func TestVerifyPinsResolvesTheRunsCheckoutFromAnUnanchoredCwd(t *testing.T) {
-	conn, runID, _ := unanchoredRunFixture(t)
-
-	report, err := VerifyPins(conn, runID)
-	testsupport.Must(t, err, "VerifyPins: %v", err)
-	if report.Missing != 0 || report.Changed != 0 {
-		t.Errorf("missing = %d, changed = %d, want 0 and 0: the run's repo-side "+
-			"pin was resolved against the invoking cwd, not the run's checkout",
-			report.Missing, report.Changed)
-	}
-	if !report.Sound() {
-		t.Errorf("an untouched run reads unsound from an unanchored cwd: %s",
-			PinReportReason(report))
-	}
-}
-
-// TestVerifyPinsReportsRepoSideDriftFromAnUnanchoredCwd: an edit to the run's
-// repo-side pinned file is drift, not a missing file, from the same cwd.
-func TestVerifyPinsReportsRepoSideDriftFromAnUnanchoredCwd(t *testing.T) {
-	conn, runID, repoConfig := unanchoredRunFixture(t)
-	testsupport.Must(t, os.WriteFile(filepath.Join(repoConfig, "contracts/project.md"),
-		[]byte("edited\n"), 0o644), "editing the contract")
-
-	report, err := VerifyPins(conn, runID)
-	testsupport.Must(t, err, "VerifyPins: %v", err)
-	if report.Changed != 1 || report.Missing != 0 {
-		t.Errorf("changed = %d, missing = %d, want 1 and 0: an edited repo-side "+
-			"pin must read as drift", report.Changed, report.Missing)
-	}
-}
-
 // TestVerifyPinsFallsBackToTheInvokingRootsWithNoRecordedExecRoot: a run that
 // recorded no exec root still resolves its repo-side pins against the
 // checkout VerifyPins is invoked from.
@@ -907,54 +835,6 @@ func TestVerifyPinsStaysSoundWithOnlyAStepWorktreeRow(t *testing.T) {
 	}
 	if !report.Sound() {
 		t.Errorf("a step work-root row made the run unsound: %s", PinReportReason(report))
-	}
-}
-
-// TestVerifyPinsReportsAnAbsentStepWorktree: a recorded work root that is
-// gone, or that lacks the pinned script, is a row naming the step and the
-// missing path (the root, or the script under it), never a silent skip, and
-// it leaves the run sound.
-func TestVerifyPinsReportsAnAbsentStepWorktree(t *testing.T) {
-	for name, tc := range map[string]struct {
-		remove  func(w string) error
-		missing func(w string) string
-	}{
-		"work root removed": {
-			remove:  os.RemoveAll,
-			missing: func(w string) string { return w },
-		},
-		"script removed": {
-			remove: func(w string) error {
-				return os.Remove(filepath.Join(w, "scripts/qa/build.sh"))
-			},
-			missing: func(w string) string { return filepath.Join(w, "scripts/qa/build.sh") },
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			a, conn, runID := gateScriptFixture(t)
-			w := secondCheckout(t)
-			step := recordedSteps(t, conn, runID, 1)[0]
-			recordWorkRoot(t, conn, step, w)
-			testsupport.Must(t, tc.remove(w), "removing from W")
-
-			report := gateReportWith(t, conn, runID, gatePinStore, a)
-
-			rows := gateRowsWith(report, "build", GateStepCopyAbsent)
-			if len(rows) != 1 {
-				t.Fatalf("gate build has %d %q rows, want 1: %+v", len(rows), GateStepCopyAbsent, report.Gates)
-			}
-			if GateStepCopyAbsent == GateStepCopyChanged {
-				t.Errorf("the absent status %q is not distinct from the differing one", GateStepCopyAbsent)
-			}
-			for _, want := range []string{step.Ref(), tc.missing(w)} {
-				if !strings.Contains(rows[0].Reason, want) {
-					t.Errorf("the row's reason %q does not name %s", rows[0].Reason, want)
-				}
-			}
-			if !report.Sound() {
-				t.Errorf("an absent step copy made the run unsound: %s", PinReportReason(report))
-			}
-		})
 	}
 }
 

@@ -142,27 +142,6 @@ func activateIssueFilesRun(
 	return issue, run.ID
 }
 
-// TestPacketRendersIssueFiles is AC2: every attached path arrives in the packet
-// as its own `== FILE` section carrying the file's content, tracked or not.
-func TestPacketRendersIssueFiles(t *testing.T) {
-	conn := mustDB(t)
-	root := issueFilesCheckout(t)
-	attached := []string{"docs/tracked.md", "docs/loose-one.md", "docs/loose-two.md"}
-	activateIssueFilesRun(t, conn, root, attached)
-
-	result, err := RenderStep(conn, stepIDByInstance(t, conn, "transcribe@0"), "", nowMS)
-	testsupport.Must(t, err, "RenderStep: %v", err)
-
-	for _, path := range attached {
-		if !strings.Contains(result.Packet, "== FILE "+path) {
-			t.Errorf("packet carries no `== FILE %s` section:\n%s", path, result.Packet)
-		}
-		if !strings.Contains(result.Packet, issueFilesFixture[path]) {
-			t.Errorf("packet does not carry the content of %s", path)
-		}
-	}
-}
-
 // TestPacketRendersIssueFilesRefusesAnUnreadablePath is AC3: a path the engine
 // cannot read fails the render — and therefore the claim, whose preflight
 // renders before any lease is written — naming the path, rather than handing

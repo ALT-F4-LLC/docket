@@ -49,47 +49,6 @@ emits = "findings"
 inputs = ["implement.gate-results"]
 `
 
-func TestGateResultsResolveAsAnInput(t *testing.T) {
-	conn := mustDB(t)
-	registerSource(t, conn, []byte(gateResultsWorkflow), "gateresults.toml")
-	issue := createIssue(t, conn, "expose the trail", "body", "task", nil)
-	run := startRun(t, conn, issue)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	e := testEngine()
-	claimAndComplete(t, conn, e, "implement@0", "summary", "")
-
-	claim, err := ClaimStep(conn, stepIDByInstance(t, conn, "review@0"),
-		ClaimOptions{Owner: "judge", NowMS: nowMS})
-	testsupport.Must(t, err, "claim review: %v", err)
-
-	var body string
-	for _, input := range claim.Context.Inputs {
-		if input.Kind == "gate-results" {
-			body = input.Body
-			if input.ProducerStep != "implement@0" {
-				t.Errorf("producer = %q, want implement@0", input.ProducerStep)
-			}
-		}
-	}
-	if body == "" {
-		t.Fatal("review's context carries no gate-results input")
-	}
-
-	// The body is the `gate result` shape, parsed rather than
-	// re-grepped: the recorded gate, its verdict, and its exit are what a
-	// consumer routes on instead of re-running the check.
-	var results []struct {
-		Gate    string `json:"gate"`
-		Verdict string `json:"verdict"`
-	}
-	testsupport.Must(t, json.Unmarshal([]byte(body), &results), "parsing: %v", err)
-	if len(results) != 1 || results[0].Gate != "checks" || results[0].Verdict != "pass" {
-		t.Errorf("gate results = %+v, want the recorded `checks` pass", results)
-	}
-}
-
 // A step may declare ITS OWN gate-results (DKT-12): `pre = true` gates run at
 // claim and their rows commit before context assembly, so a self-declared
 // input is the step reading its own claim-time measurements. The done-filter

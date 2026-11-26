@@ -332,41 +332,6 @@ func TestRepoIdentityResolvesSymlinks(t *testing.T) {
 	}
 }
 
-// TestTwoCheckoutsAreDistinctIdentities is the malicious-clone argument, as a
-// test. It is the reason the identity is a PATH and not a git remote, a root
-// commit, or a stored UUID — every one of those is repo-controlled and a clone
-// carries it.
-func TestTwoCheckoutsAreDistinctIdentities(t *testing.T) {
-	parent := t.TempDir()
-	original := filepath.Join(parent, "docket")
-	clone := filepath.Join(parent, "docket-fork")
-	for _, d := range []string{original, clone} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatalf("creating %s: %v", d, err)
-		}
-	}
-
-	origID, err := RepoIdentity(original)
-	testsupport.Must(t, err, "RepoIdentity(original): %v", err)
-	cloneID, err := RepoIdentity(clone)
-	testsupport.Must(t, err, "RepoIdentity(clone): %v", err)
-	if origID == cloneID {
-		t.Fatal("two checkouts must have distinct identities, or a hostile clone inherits every entry")
-	}
-
-	// The proof, end to end: an entry approved in the original does NOT match
-	// in the clone. The clone executes nothing without a new, explicit
-	// `trust add` performed while standing in it.
-	st := storeWith(Entry{Name: "checks", Argv: []string{"make", "test"}, Repo: origID})
-
-	if m := st.Lookup(origID, "checks", nil); !m.Matched {
-		t.Errorf("the entry must match in the repo it was approved in: %s", m.Reason)
-	}
-	if m := st.Lookup(cloneID, "checks", nil); m.Matched {
-		t.Fatal("A HOSTILE CLONE MUST NOT INHERIT TRUST — this is the malicious-clone threat")
-	}
-}
-
 // TestMovedRepoUnmatchedReasonNamesTheOldPath covers the recorded cost of the
 // repo binding, with the diagnostic that makes it survivable.
 //

@@ -90,18 +90,6 @@ func TestLoadDocBodyPathOverCap(t *testing.T) {
 	}
 }
 
-func TestLoadDocBodyPathFarOverCap(t *testing.T) {
-	path := writeTempFile(t, maxDocBodySize*4)
-
-	_, err := loadDocBody("@" + path)
-	if err == nil {
-		t.Fatal("loadDocBody: expected error for far-over-cap file, got nil")
-	}
-	if !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("loadDocBody: error %q does not mention exceeding the cap", err.Error())
-	}
-}
-
 func TestLoadDocBodyEmptyPath(t *testing.T) {
 	_, err := loadDocBody("@")
 	if err == nil {

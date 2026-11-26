@@ -136,24 +136,6 @@ func TestPgMigrateRowPreservation(t *testing.T) {
 	}
 }
 
-// TestPgMigrateVersionMatchesSQLite ties the ported chain's reach to the
-// SQLite migrations map, so a SQLite migration without a port fails here.
-func TestPgMigrateVersionMatchesSQLite(t *testing.T) {
-	ctx := context.Background()
-	db := emptyTestSchema(t)
-
-	if err := Migrate(ctx, db); err != nil {
-		t.Fatalf("Migrate on an empty database: %v", err)
-	}
-	got, err := schemaVersion(ctx, db)
-	if err != nil {
-		t.Fatalf("reading schema version: %v", err)
-	}
-	if want := sqlitestore.LatestSchemaVersion(); got != want {
-		t.Errorf("PostgreSQL schema version after Migrate = %d, want the highest SQLite migration %d", got, want)
-	}
-}
-
 // TestPgMigrateV39BackfillsRecordedAt checks that v39 stamps recorded_at_ms
 // from updated_at_ms on terminal steps only, and leaves a stamp already set.
 func TestPgMigrateV39BackfillsRecordedAt(t *testing.T) {

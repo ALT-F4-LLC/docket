@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"regexp"
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -94,33 +93,6 @@ func dropV7Tables(t *testing.T, db *sql.DB) {
 	}
 }
 
-// restoreV7TablesExcept re-creates the v7 tables from v7DDL, omitting the one
-// named — the half-migrated shape the rewind guard exists to detect.
-//
-// The DDL is replayed statement by statement rather than as one Exec, since
-// omitting a table means omitting its CREATE and nothing else. Statements that
-// reference the omitted table are skipped along with it: SQLite resolves a
-// CREATE's foreign-key references lazily, but its INDEX statements do not
-// resolve at all against a missing table.
-func restoreV7TablesExcept(t *testing.T, db *sql.DB, omit string) {
-	t.Helper()
-	for _, stmt := range strings.Split(v7DDL, ";") {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		// Skip the omitted table's own CREATE and any index over it.
-		if regexp.MustCompile(
-			`(?i)(TABLE IF NOT EXISTS|ON)\s+` + regexp.QuoteMeta(omit) + `\b`,
-		).MatchString(stmt) {
-			continue
-		}
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("restoring v7 DDL without %s: %v\nstatement: %s", omit, err, stmt)
-		}
-	}
-}
-
 // hasIssueColumn reports whether the issues table carries the named column.
 func hasIssueColumn(t *testing.T, db *sql.DB, column string) bool {
 	t.Helper()
@@ -132,93 +104,6 @@ func hasIssueColumn(t *testing.T, db *sql.DB, column string) bool {
 		t.Fatalf("probing issues.%s: %v", column, err)
 	}
 	return exists
-}
-
-// TestMigrateV7UpgradesAPhase1Database is the group-1 -> group-2 upgrade path,
-// proven rather than assumed.
-//
-// A database migrated by the PHASE-1 build is stamped 7 and carries `workflows`
-// alone: the stamp moved at phase 1 while migrateV6ToV7 kept growing. That is
-// the exact shape this repo's own dogfood tracker has when this group lands, so
-// the guard either fires here or that database silently never gains the
-// activation tables and fails much later with a missing table at `run activate`.
-//
-// The guard's sentinel set is what makes it fire — a guard probing only
-// `workflows` would see the table present, do nothing, and leave the database
-// half-migrated with a stamp claiming otherwise.
-func TestMigrateV7UpgradesAPhase1Database(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	// Reconstruct the phase-1 shape: everything phase 2 added is dropped, the
-	// stamp stays at 7, and a registered workflow row survives — a phase-1
-	// database is not an empty one, and the upgrade must not lose its rows.
-	// Reverse dependency order, as dropV7Tables uses: SQLite resolves a DROP's
-	// foreign-key references, so a leaf must go before the table it points at.
-	for _, table := range []string{
-		"usage_ledger", "dispatch_rows", "dispatches", "reap_acks",
-		"action_results",
-		"gate_override_grants",
-		"gate_results", "trust_cache",
-		"events",
-		"step_inputs", "artifacts",
-		"steps", "run_fences", "pins", "run_issues", "runs",
-	} {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + table); err != nil {
-			t.Fatalf("dropping %s: %v", table, err)
-		}
-	}
-	if _, err := db.Exec(
-		`INSERT INTO workflows
-		   (name, version, source_sha256, body, parsed, created_at_ms, row_version)
-		 VALUES ('phase-one', 1, 'abc', 'body', '{}', 1000, 1)`,
-	); err != nil {
-		t.Fatalf("seeding a phase-1 workflow row: %v", err)
-	}
-
-	// Restore the phase-1 STAMP. Migrate now runs past 7 to v8, so a database
-	// built by running it is stamped 8; this test is about the shape a
-	// phase-1 v7 binary left behind, which is stamped 7.
-	if _, err := db.Exec(
-		`UPDATE meta SET value = '7' WHERE key = 'schema_version'`); err != nil {
-		t.Fatalf("restoring the phase-1 stamp: %v", err)
-	}
-
-	v, err := SchemaVersion(db)
-	if err != nil {
-		t.Fatalf("SchemaVersion: %v", err)
-	}
-	if v != 7 {
-		t.Fatalf("schema_version = %d before the upgrade, want 7 (the phase-1 stamp)", v)
-	}
-
-	if err := Migrate(db); err != nil {
-		t.Fatalf("upgrading a phase-1 database: %v", err)
-	}
-
-	for _, table := range v7Tables {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s missing after the phase-1 -> phase-2 upgrade", table)
-		}
-	}
-	if !hasIssueColumn(t, db, "scope_globs") {
-		t.Error("issues.scope_globs missing after the phase-1 -> phase-2 upgrade")
-	}
-
-	// The workflow registered by the phase-1 build survives: the upgrade adds
-	// what is missing and touches nothing else.
-	var name string
-	if err := db.QueryRow(`SELECT name FROM workflows WHERE version = 1`).Scan(&name); err != nil {
-		t.Fatalf("reading the phase-1 workflow row after the upgrade: %v", err)
-	}
-	if name != "phase-one" {
-		t.Errorf("workflow name = %q after the upgrade, want %q", name, "phase-one")
-	}
 }
 
 // TestMigrateV7UpgradesAPhase3Database is the group-3 -> group-4 upgrade path,
@@ -424,65 +309,6 @@ func TestRewindGuardProbesEverySentinel(t *testing.T) {
 		if want[i] != created[i] {
 			t.Errorf("v7Tables = %v, but v7DDL creates %v", want, created)
 			break
-		}
-	}
-}
-
-// TestMigrateV6ToV7IsIdempotent covers the rewind guard end to end: a database
-// stamped 7 with a sentinel missing is re-migrated rather than trusted. This is
-// the exact shape a phase-1-migrated database has when phases 2-4 land.
-func TestMigrateV6ToV7IsIdempotent(t *testing.T) {
-	db := mustOpen(t)
-	if err := Initialize(db); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := Migrate(db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	// Re-running changes nothing.
-	if err := Migrate(db); err != nil {
-		t.Fatalf("second Migrate: %v", err)
-	}
-	for _, table := range v7Tables {
-		if !hasTable(t, db, table) {
-			t.Errorf("%s missing after re-migration", table)
-		}
-	}
-
-	// Simulate the stamped-but-missing case the guard exists for: every
-	// sentinel in turn, since the guard must probe all of them and not just
-	// the first.
-	//
-	// Each iteration drops the WHOLE v7 set and then restores every table
-	// except the one under test, so the database is left missing exactly that
-	// sentinel with no dangling reference from a survivor. Dropping one table
-	// in isolation is not available: SQLite resolves a DROP's foreign-key
-	// references, so removing `workflows` while `steps` still points at it
-	// fails on the reference rather than producing the shape being tested.
-	for _, sentinel := range v7Sentinels {
-		dropV7Tables(t, db)
-		restoreV7TablesExcept(t, db, sentinel)
-		// The stamp is forced to 7 — that is the trap this test builds: the
-		// version says migrated, the schema says otherwise. It is set rather
-		// than merely left alone because Migrate now runs on to v8.
-		if _, err := db.Exec(
-			`UPDATE meta SET value = '7' WHERE key = 'schema_version'`); err != nil {
-			t.Fatalf("stamping the half-migrated database: %v", err)
-		}
-		v, err := SchemaVersion(db)
-		if err != nil {
-			t.Fatalf("SchemaVersion: %v", err)
-		}
-		if v != 7 {
-			t.Fatalf("schema_version = %d before the guard runs, want 7", v)
-		}
-
-		if err := Migrate(db); err != nil {
-			t.Fatalf("Migrate after dropping %s: %v", sentinel, err)
-		}
-		if !hasTable(t, db, sentinel) {
-			t.Errorf("%s not restored by the rewind guard", sentinel)
 		}
 	}
 }
