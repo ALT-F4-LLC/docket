@@ -14,6 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 )
 
 const pinShowWorkflow = `
@@ -54,6 +55,7 @@ func pinShowStore(t *testing.T) (store.Store, string) {
 	}
 	t.Setenv("DOCKET_PATH", filepath.Dir(configDir))
 
+	storetest.SeedFile(t, dbPath)
 	st, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)

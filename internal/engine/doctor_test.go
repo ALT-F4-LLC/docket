@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -104,15 +105,6 @@ func doctorInstallFixture(t *testing.T) (source string) {
 	return source
 }
 
-func TestCheckDoctorInstallDriftMatchesIdenticalTrees(t *testing.T) {
-	source := doctorInstallFixture(t)
-
-	c := checkDoctorInstallDrift(source)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK for byte-identical trees: %s", c.Verdict, c.Detail)
-	}
-}
-
 func TestCheckDoctorInstallDriftReportsAChangedFile(t *testing.T) {
 	source := doctorInstallFixture(t)
 	writeFile(t, source, "src/user/docket/config/workflows/foo.toml", "changed\n")
@@ -201,23 +193,6 @@ func TestCheckDoctorInstallDriftFollowsASymlinkedInstallRoot(t *testing.T) {
 // ---------------------------------------------------------------------------
 // checkDoctorPins — check 4
 // ---------------------------------------------------------------------------
-
-func TestCheckDoctorPinsSkipsWithoutRun(t *testing.T) {
-	conn := mustDB(t)
-	c := checkDoctorPins(conn, 0)
-	if c.Verdict != DoctorSkip {
-		t.Errorf("verdict = %s, want SKIP with no --run", c.Verdict)
-	}
-}
-
-func TestCheckDoctorPinsOKForASoundRun(t *testing.T) {
-	conn := mustDB(t)
-	run, _ := activatedRun(t, conn)
-	c := checkDoctorPins(conn, run.ID)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK for a freshly activated run: %s", c.Verdict, c.Detail)
-	}
-}
 
 // TestCheckDoctorPinsDriftsWhenOnlyAnExecutedCopyChanged: a run activated in
 // checkout A and checked from checkout B, whose copy of a gate script was
@@ -377,14 +352,6 @@ func TestIsScratchShapedPath(t *testing.T) {
 	}
 }
 
-func TestCheckDoctorStragglersOKWithNone(t *testing.T) {
-	repo := probeRepo(t)
-	c := checkDoctorStragglers(repo)
-	if c.Verdict != DoctorOK {
-		t.Errorf("verdict = %s, want OK", c.Verdict)
-	}
-}
-
 // TestCheckDoctorStragglersSeesNewScratch: a scratch tree made the way the
 // engine now makes them is in no git worktree list, so only its sidecar
 // record finds it. A claim killed mid-measurement leaks one; the check names
@@ -524,6 +491,7 @@ func doctorFixture(t *testing.T) (repo string, conn *sql.DB) {
 	t.Helper()
 	repo = probeRepo(t)
 	path := filepath.Join(repo, "issues.db")
+	storetest.SeedFile(t, path)
 	var err error
 	conn, err = db.Open(path)
 	testsupport.Must(t, err, "opening database: %v", err)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/engine"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -21,7 +22,9 @@ const waitBound = 5 * time.Second
 
 func newEventStore(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := db.Open(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	conn, err := db.Open(storePath)
 	testsupport.Must(t, err, "opening database: %v", err)
 	t.Cleanup(func() { conn.Close() })
 	err = db.Initialize(conn)

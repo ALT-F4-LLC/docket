@@ -14,6 +14,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db/pgstore"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
@@ -66,7 +67,9 @@ func TestStoreContract(t *testing.T) {
 // the writer's database.
 func openSQLiteContractStore(t *testing.T) store.Store {
 	t.Helper()
-	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	st, err := store.OpenSQLite(storePath)
 	testsupport.Must(t, err, "OpenSQLite: %v", err)
 	t.Cleanup(func() { st.Close() })
 	err = st.Initialize()

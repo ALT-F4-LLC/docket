@@ -10,11 +10,14 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/api/client"
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 )
 
 func openConfigStore(t *testing.T) store.Store {
 	t.Helper()
-	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	st, err := store.OpenSQLite(storePath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}

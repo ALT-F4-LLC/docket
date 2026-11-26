@@ -12,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/db"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/pflag"
 )
@@ -25,7 +26,9 @@ func newVoteCreateStore(t *testing.T) *sql.DB {
 	testsupport.Must(t, err, "creating the store directory: %v", err)
 	t.Setenv("DOCKET_PATH", docketDir)
 
-	conn, err := db.Open(filepath.Join(docketDir, "issues.db"))
+	storePath := filepath.Join(docketDir, "issues.db")
+	storetest.SeedFile(t, storePath)
+	conn, err := db.Open(storePath)
 	testsupport.Must(t, err, "opening: %v", err)
 	t.Cleanup(func() { conn.Close() })
 	testsupport.Must(t, db.Initialize(conn), "Initialize: %v", err)

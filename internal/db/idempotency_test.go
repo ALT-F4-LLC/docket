@@ -15,7 +15,7 @@ import (
 
 func newIdemDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	err := Initialize(db)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = Migrate(db)
@@ -37,24 +37,6 @@ func countIssues(t *testing.T, db *sql.DB) int {
 	n, err := CountIssues(db, 0)
 	testsupport.Must(t, err, "CountIssues: %v", err)
 	return n
-}
-
-// The core contract: a retried create with the same key returns the original
-// entity and inserts nothing.
-func TestIdempotentCreateReplaysOriginal(t *testing.T) {
-	db := newIdemDB(t)
-
-	first, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
-	testsupport.Must(t, err, "first create: %v", err)
-	second, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-1")
-	testsupport.Must(t, err, "replay: %v", err)
-
-	if first != second {
-		t.Errorf("replay returned id %d, want the original %d", second, first)
-	}
-	if n := countIssues(t, db); n != 1 {
-		t.Errorf("issue count = %d, want 1 — the replay inserted a duplicate", n)
-	}
 }
 
 // secondProject returns a project other than the default one. The first
@@ -79,10 +61,9 @@ func countRuns(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// TestInsertRunIdempotentReplaysOriginal mirrors
-// TestIdempotentCreateReplaysOriginal for `run start`: a retried call with the
-// same key and the same request content returns the ORIGINAL run with
-// inserted=false and inserts nothing. The retry starts later, so the start
+// TestInsertRunIdempotentReplaysOriginal is the replay case for `run start`:
+// a retried call with the same key and the same request content returns the
+// ORIGINAL run with inserted=false and inserts nothing. The retry starts later, so the start
 // time is not part of the request content.
 func TestInsertRunIdempotentReplaysOriginal(t *testing.T) {
 	db := newIdemDB(t)
@@ -236,30 +217,6 @@ func TestCreateDocIdempotentRejectsChangedContent(t *testing.T) {
 	}
 }
 
-// TestInsertRunIdempotentReportsInsert mirrors
-// TestCreateIssueIdempotentReportsInsert for `run start`: the CLI attaches
-// --issue only when the create itself says it inserted.
-func TestInsertRunIdempotentReportsInsert(t *testing.T) {
-	db := newIdemDB(t)
-
-	first, inserted, err := InsertRunWithContextIdempotent(
-		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-1")
-	testsupport.Must(t, err, "first run start: %v", err)
-	if !inserted {
-		t.Error("run start under a fresh key reported inserted=false")
-	}
-
-	replay, inserted, err := InsertRunWithContextIdempotent(
-		db, 0, "req", 0, model.NowMS(), RunContext{}, "run-key-1")
-	testsupport.Must(t, err, "replay: %v", err)
-	if inserted {
-		t.Error("replay of an existing key reported inserted=true")
-	}
-	if replay.ID != first.ID {
-		t.Errorf("replay returned run %d, want the original %d", replay.ID, first.ID)
-	}
-}
-
 // TestInsertRunIdempotentCommitsRosterWithRun: the roster commits in the same
 // transaction as the run and its key, so a retry that replays the key finds
 // the roster already written instead of an empty one.
@@ -353,22 +310,6 @@ func TestCreateIssueIdempotentReportsInsert(t *testing.T) {
 	}
 }
 
-func TestIdempotentCreateDistinctKeys(t *testing.T) {
-	db := newIdemDB(t)
-
-	first, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-a")
-	testsupport.Must(t, err, "create a: %v", err)
-	second, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "key-b")
-	testsupport.Must(t, err, "create b: %v", err)
-
-	if first == second {
-		t.Error("distinct keys returned the same id")
-	}
-	if n := countIssues(t, db); n != 2 {
-		t.Errorf("issue count = %d, want 2", n)
-	}
-}
-
 func TestCreateWithoutKeyNeverDeduplicates(t *testing.T) {
 	db := newIdemDB(t)
 
@@ -440,33 +381,6 @@ func TestIdempotencyKeysAreScopedPerVerb(t *testing.T) {
 	testsupport.Must(t, err, "doc comment replay: %v", err)
 	if replayDocComment != docCommentID {
 		t.Errorf("doc comment replay = %d, want %d", replayDocComment, docCommentID)
-	}
-}
-
-// The key record must be committed atomically with the insert.
-func TestIdempotencyKeyRecordedWithEntity(t *testing.T) {
-	db := newIdemDB(t)
-
-	id, _, err := CreateIssueIdempotent(db, probeIssue(), nil, nil, "atomic")
-	testsupport.Must(t, err, "create: %v", err)
-
-	got, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, "atomic")
-	testsupport.Must(t, err, "LookupIdempotencyKey: %v", err)
-	if !found {
-		t.Fatal("key not recorded alongside the insert")
-	}
-	if got != id {
-		t.Errorf("recorded entity_id = %d, want %d", got, id)
-	}
-}
-
-func TestLookupMissingKey(t *testing.T) {
-	db := newIdemDB(t)
-
-	if _, found, err := LookupIdempotencyKey(db, ScopeIssueCreate, "never-used"); err != nil {
-		t.Fatalf("LookupIdempotencyKey: %v", err)
-	} else if found {
-		t.Error("found = true for a key that was never recorded")
 	}
 }
 

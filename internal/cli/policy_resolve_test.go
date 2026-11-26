@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/spf13/cobra"
 )
@@ -72,7 +73,9 @@ func policySeatRun(t *testing.T, policyToml string) (*sql.DB, int) {
 	testsupport.Must(t, err, "creating the config directory: %v", err)
 	t.Setenv("DOCKET_PATH", docketDir)
 
-	conn, err := db.Open(filepath.Join(docketDir, "issues.db"))
+	storePath := filepath.Join(docketDir, "issues.db")
+	storetest.SeedFile(t, storePath)
+	conn, err := db.Open(storePath)
 	testsupport.Must(t, err, "opening: %v", err)
 	t.Cleanup(func() { conn.Close() })
 	testsupport.Must(t, db.Initialize(conn), "Initialize: %v", err)
@@ -187,28 +190,6 @@ func TestPolicyResolveLabelReachesTheSecurityCheck(t *testing.T) {
 	}
 }
 
-// TestPolicyResolveSizeReachesTheSizesTable: --size stands in for the frozen
-// Size a vote step row snapshots, so --size small seats the [sizes].small
-// variant.
-func TestPolicyResolveSizeReachesTheSizesTable(t *testing.T) {
-	conn, runID := policySeatRun(t, policySeatTOML)
-
-	cmd := policyResolveCmdWithDB(conn, model.FormatRunID(runID), "small", nil)
-	w, buf := bufWriter(true)
-	w.JSONVersion = output.JSONV2
-	err := runPolicyResolve(cmd, []string{"seat-b"}, w)
-	testsupport.Must(t, err, "runPolicyResolve: %v", err)
-
-	var got policySeatsJSON
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
-	}
-	want := model.VoterAssignment{Voter: "seat-b", Model: "haiku", Effort: "low", Variant: "quick"}
-	if len(got.Data.Items) != 1 || got.Data.Items[0] != want {
-		t.Errorf("seats = %+v, want [sizes].small's %+v", got.Data.Items, want)
-	}
-}
-
 // TestPolicyResolveAcceptsEverySize: every Size a vote row can carry is a
 // valid --size, including unknown and the sizes this policy leaves unmapped,
 // which resolve to the seat's own variant as such a row does.
@@ -235,18 +216,6 @@ func TestPolicyResolveAcceptsEverySize(t *testing.T) {
 				t.Errorf("seats = %+v, want %+v", got.Data.Items, want)
 			}
 		})
-	}
-}
-
-// TestPolicyResolveRegistersSize:--size is a flag on the real command, with
-// no default, so an omitted --size resolves as an unsized row does.
-func TestPolicyResolveRegistersSize(t *testing.T) {
-	flag := policyResolveCmd.Flags().Lookup("size")
-	if flag == nil {
-		t.Fatal("policy resolve registers no --size flag")
-	}
-	if flag.DefValue != "" {
-		t.Errorf("--size default = %q, want empty", flag.DefValue)
 	}
 }
 

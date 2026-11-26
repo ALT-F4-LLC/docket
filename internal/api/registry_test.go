@@ -13,6 +13,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1"
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
 
@@ -44,6 +45,7 @@ func registryAuditStore(t *testing.T) store.Store {
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	t.Setenv("DOCKET_PATH", docketDir)
 
+	storetest.SeedFile(t, dbPath)
 	st, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)

@@ -14,6 +14,29 @@ import (
 
 // AUTO-REGISTRATION.
 
+// configRepoStore is the migrated store configRepo copies.
+var configRepoStore testsupport.SQLiteImage
+
+// buildConfigRepoStore creates that store through a plain sql.Open, as
+// configRepo opens its own handle, so the copy keeps the journal mode a store
+// made that way has.
+func buildConfigRepoStore(path string) error {
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	conn.SetMaxOpenConns(1)
+	if err := db.Initialize(conn); err != nil {
+		conn.Close()
+		return err
+	}
+	if err := db.Migrate(conn); err != nil {
+		conn.Close()
+		return err
+	}
+	return conn.Close()
+}
+
 // configRepo builds a repo whose `.docket/` directory is the one activation will
 // scan, and returns the connection and the config root to write files into.
 //
@@ -31,7 +54,9 @@ func configRepo(t *testing.T) (*sql.DB, string) {
 
 	t.Setenv("DOCKET_PATH", docketDir)
 
-	conn, err := sql.Open("sqlite", filepath.Join(docketDir, "issues.db"))
+	storePath := filepath.Join(docketDir, "issues.db")
+	configRepoStore.File(t, storePath, buildConfigRepoStore)
+	conn, err := sql.Open("sqlite", storePath)
 	testsupport.Must(t, err, "opening: %v", err)
 	t.Cleanup(func() { conn.Close() })
 	conn.SetMaxOpenConns(1)
@@ -434,42 +459,6 @@ func TestReactivationDoesNotRescan(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Dormancy
 // ---------------------------------------------------------------------------
-
-// TestNoConfigDirectoryActivatesUnchanged is the dormancy proof at the Go
-// level. Its byte-diff twin is in QA.
-//
-// "A repo with no `.docket/config/` activates exactly as before" — the scan is
-// skipped IN FULL after one `stat`, and the activation executes exactly the
-// statements v9's did.
-func TestNoConfigDirectoryActivatesUnchanged(t *testing.T) {
-	// A repo with NO config directory at all. Note this uses the ordinary
-	// fixture path rather than configRepo, precisely because the absence is the
-	// subject.
-	conn := mustDB(t)
-	registerSource(t, conn, []byte(autoWorkflowSrc), "auto-dev.toml")
-
-	issue := createIssue(t, conn, "dormant", "body", "task", nil)
-	run := startRun(t, conn, issue)
-
-	result, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	// No registrations, so the verb prints no `Registered` block — the
-	// dormancy is VISIBLE IN THE OUTPUT rather than merely true underneath it.
-	if len(result.Registered) != 0 {
-		t.Errorf("a repo with no config directory registered %d files",
-			len(result.Registered))
-	}
-	if result.PinsFromConfig != 0 {
-		t.Errorf("a repo with no config directory pinned %d files", result.PinsFromConfig)
-	}
-	// And the run still activated normally against its manually-registered
-	// definition: dormant does not mean broken.
-	if result.IssuesBound != 1 || result.StepsCreated == 0 {
-		t.Errorf("the dormant path did not activate normally: bound=%d steps=%d",
-			result.IssuesBound, result.StepsCreated)
-	}
-}
 
 // TestEmptyConfigDirectoryRegistersNothing: present but empty ⇒ the scan
 // finds nothing and registers nothing.

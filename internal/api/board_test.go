@@ -12,13 +12,16 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 )
 
 // boardClient serves a Service over a fresh, migrated SQLite store and returns
 // the store too, so a test can arrange the issues the board lists.
 func boardClient(t *testing.T) (docketv1connect.DocketServiceClient, store.Store) {
 	t.Helper()
-	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	st, err := store.OpenSQLite(storePath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}

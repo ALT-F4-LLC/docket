@@ -12,6 +12,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/api/docketv1/docketv1connect"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 )
 
 const schemaCallerIdentity = "/repos/schema-caller"
@@ -22,7 +23,9 @@ const schemaCallerIdentity = "/repos/schema-caller"
 // Docket-Project header would write somewhere the test does not look.
 func schemaService(t *testing.T) (docketv1connect.DocketServiceClient, store.Store, int) {
 	t.Helper()
-	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	st, err := store.OpenSQLite(storePath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}

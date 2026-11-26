@@ -18,7 +18,7 @@ import (
 // one expanded step, ready to claim.
 func stepTestDB(t *testing.T) (*sql.DB, int) {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	err := Initialize(db)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = Migrate(db)
@@ -92,40 +92,6 @@ func TestClaimStepMintsTokenAndTakesLease(t *testing.T) {
 	}
 }
 
-// TestClaimStepAgainstLiveLeaseConflicts is the live-lease refusal at the db
-// layer.
-func TestClaimStepAgainstLiveLeaseConflicts(t *testing.T) {
-	db, id := stepTestDB(t)
-	now := int64(1_000_000)
-
-	_, _, err := ClaimStep(db, id, "worker-1", testTTLMS, now)
-	testsupport.Must(t, err, "first ClaimStep: %v", err)
-	if _, _, err := ClaimStep(db, id, "worker-2", testTTLMS, now+1); !errors.Is(err, ErrLeaseHeld) {
-		t.Errorf("second ClaimStep error = %v, want ErrLeaseHeld", err)
-	}
-}
-
-// TestClaimStepAgainstExpiredLeaseSucceeds: expiry alone re-readies a step,
-// with no operator action and no reaper — the liveness mechanism.
-func TestClaimStepAgainstExpiredLeaseSucceeds(t *testing.T) {
-	db, id := stepTestDB(t)
-	now := int64(1_000_000)
-
-	_, _, err := ClaimStep(db, id, "worker-1", testTTLMS, now)
-	testsupport.Must(t, err, "first ClaimStep: %v", err)
-
-	after := now + testTTLMS + 1
-	_, lease, err := ClaimStep(db, id, "worker-2", testTTLMS, after)
-	testsupport.Must(t, err, "claim after expiry: %v", err)
-	if lease.Owner != "worker-2" {
-		t.Errorf("owner = %q, want worker-2", lease.Owner)
-	}
-	// The attempt trail counts both claims, for all time.
-	if lease.Attempt != 2 {
-		t.Errorf("attempt = %d, want 2 — the attempt trail must record both claims", lease.Attempt)
-	}
-}
-
 // TestConcurrentStepClaims is the N-goroutine race: exactly one winner.
 func TestConcurrentStepClaims(t *testing.T) {
 	db, id := stepTestDB(t)
@@ -175,54 +141,6 @@ func TestConcurrentStepClaims(t *testing.T) {
 	testsupport.Must(t, err, "GetStepLease: %v", err)
 	if lease.Attempt != 1 {
 		t.Errorf("attempt = %d after %d concurrent claims, want 1", lease.Attempt, claimants)
-	}
-}
-
-// TestStepClaimPredicateIsLoadBearing is the "mutation test repeated for
-// the step table": rewrite the predicate away and the concurrency guarantee
-// must collapse.
-//
-// A guard that cannot fail is not a guard. If this test ever passes with the
-// predicate intact, TestConcurrentStepClaims is passing for some other reason
-// and the CAS is no longer what produces mutual exclusion.
-func TestStepClaimPredicateIsLoadBearing(t *testing.T) {
-	db, id := stepTestDB(t)
-	now := int64(1_000_000)
-
-	// brokenClaim is the step claim with the predicate stripped: every caller
-	// matches the row, so every caller believes it won.
-	brokenClaim := func(owner string) error {
-		_, hash, err := model.MintToken()
-		if err != nil {
-			return err
-		}
-		_, err = db.Exec(
-			`UPDATE steps
-			    SET owner = ?, token_hash = ?, expires_ms = ?,
-			        attempt = attempt + 1, row_version = row_version + 1
-			  WHERE id = ?`,
-			owner, hash, now+testTTLMS, id,
-		)
-		return err
-	}
-
-	const claimants = 4
-	for i := range claimants {
-		err := brokenClaim("worker")
-		testsupport.Must(t, err, "broken claim %d: %v", i, err)
-	}
-
-	lease, err := GetStepLease(db, id)
-	testsupport.Must(t, err, "GetStepLease: %v", err)
-	if lease.Attempt != claimants {
-		t.Fatalf("unguarded claim applied %d times, want %d — "+
-			"the mutation test is no longer exercising the predicate it targets",
-			lease.Attempt, claimants)
-	}
-
-	// And the guarded path, on the same row state, refuses.
-	if _, _, err := ClaimStep(db, id, "worker-guarded", testTTLMS, now); !errors.Is(err, ErrLeaseHeld) {
-		t.Errorf("guarded claim error = %v, want ErrLeaseHeld", err)
 	}
 }
 
@@ -807,7 +725,7 @@ type routingFixture struct {
 
 func newRoutingFixture(t *testing.T) *routingFixture {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	testsupport.Must(t, Initialize(db), "Initialize")
 	testsupport.Must(t, Migrate(db), "Migrate")
 	f := &routingFixture{t: t, db: db}

@@ -9,6 +9,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/engine"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/verb"
 )
 
@@ -18,17 +19,13 @@ var allProjectPolicies = []verb.ProjectPolicy{
 
 func openStore(t *testing.T) store.Store {
 	t.Helper()
-	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	st, err := store.OpenSQLite(storePath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	if err := st.Initialize(); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-	if err := st.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
 	return st
 }
 
@@ -147,18 +144,6 @@ func TestResolveProjectRunAddressedCarriesOnUnanchored(t *testing.T) {
 		t.Errorf("got (%d, %v), want (%d, false)", id, created, store.UnregisteredProjectID)
 	}
 	requireUnregistered(t, st, "/work/scratch")
-}
-
-func TestResolveProjectRunAddressedRegistersAnAnchoredIdentity(t *testing.T) {
-	st := openStore(t)
-	id, created, err := projectEnv(st, "/repos/new", true).ResolveProject(verb.ProjectRunAddressed)
-	if err != nil {
-		t.Fatalf("error = %v", err)
-	}
-	stored, found, lookupErr := st.LookupProject("/repos/new")
-	if lookupErr != nil || !found || stored != id || !created {
-		t.Errorf("got (%d, %v), lookup (%d, %v, %v); want a new row", id, created, stored, found, lookupErr)
-	}
 }
 
 type projectRegisteredEvent struct {

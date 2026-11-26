@@ -20,6 +20,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 )
 
 // TestConductorRulesAreTransportAware: the daemon's Connect service decides
@@ -87,7 +88,9 @@ func TestConductorRulesAreTransportAware(t *testing.T) {
 
 func openTransportStore(t *testing.T) store.Store {
 	t.Helper()
-	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	storePath := filepath.Join(t.TempDir(), "issues.db")
+	storetest.SeedFile(t, storePath)
+	st, err := store.OpenSQLite(storePath)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}

@@ -14,9 +14,36 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 )
 
+// migratedFile is the migrated store seedMigratedFile copies.
+var migratedFile testsupport.SQLiteImage
+
+// seedMigratedFile writes a freshly migrated store to path, which must not
+// exist yet, so Initialize and Migrate on the store opened there change
+// nothing.
+func seedMigratedFile(t *testing.T, path string) {
+	t.Helper()
+	migratedFile.File(t, path, func(path string) error {
+		st, err := OpenSQLite(path)
+		if err != nil {
+			return err
+		}
+		if err := st.Initialize(); err != nil {
+			st.Close()
+			return err
+		}
+		if err := st.Migrate(); err != nil {
+			st.Close()
+			return err
+		}
+		return st.Close()
+	})
+}
+
 func openMigratedSQLite(t *testing.T) Store {
 	t.Helper()
-	st, err := OpenSQLite(filepath.Join(t.TempDir(), "issues.db"))
+	path := filepath.Join(t.TempDir(), "issues.db")
+	seedMigratedFile(t, path)
+	st, err := OpenSQLite(path)
 	testsupport.Must(t, err, "opening the store: %v", err)
 	t.Cleanup(func() { st.Close() })
 	testsupport.Must(t, st.Initialize(), "Initialize")

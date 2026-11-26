@@ -13,7 +13,7 @@ import (
 // leaseTestDB returns a migrated database with one issue, ready to claim.
 func leaseTestDB(t *testing.T) (*sql.DB, int) {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	err := Initialize(db)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = Migrate(db)

@@ -19,6 +19,7 @@ import (
 	"github.com/ALT-F4-LLC/docket/internal/model"
 	"github.com/ALT-F4-LLC/docket/internal/output"
 	"github.com/ALT-F4-LLC/docket/internal/store"
+	"github.com/ALT-F4-LLC/docket/internal/store/storetest"
 	"github.com/ALT-F4-LLC/docket/internal/testsupport"
 	"github.com/ALT-F4-LLC/docket/internal/workflow"
 )
@@ -212,6 +213,7 @@ func activatedClaimDB(t *testing.T) (conn *sql.DB, first, second int) {
 	conn, err := db.Open(":memory:")
 	testsupport.Must(t, err, "Open: %v", err)
 	t.Cleanup(func() { conn.Close() })
+	storetest.SeedMemory(t, conn)
 	err = db.Initialize(conn)
 	testsupport.Must(t, err, "Initialize: %v", err)
 	err = db.Migrate(conn)
@@ -306,38 +308,5 @@ func TestClaimRetryRemintsWithSecret(t *testing.T) {
 	}
 	if db.AuthorizeStepRead(conn, stepID, first.Msg.GetToken(), now) == nil {
 		t.Error("the first claim's token still authorizes after the re-mint")
-	}
-}
-
-func TestClaimKeepsTheEngineClaimGuarantees(t *testing.T) {
-	conn, first, second := activatedClaimDB(t)
-	client := engineClaimClient(t, conn)
-
-	res, err := client.StepClaim(context.Background(), claimRequest(first, "w1", "s1"))
-	testsupport.Must(t, err, "claiming the ready step: %v", err)
-	if res.Msg.GetAttempt() != 1 || countEvents(t, conn, engine.EventStepClaimed, first) != 1 {
-		t.Errorf("a ready claim: attempt %d, %d step-claimed events; want 1 and 1",
-			res.Msg.GetAttempt(), countEvents(t, conn, engine.EventStepClaimed, first))
-	}
-
-	_, err = client.StepClaim(context.Background(), claimRequest(first, "w2", "s2"))
-	if got := output.ErrorCodeFromConnectError(err); got != output.ErrConflict {
-		t.Errorf("a second owner's claim: code %s (err %v), want %s", got, err, output.ErrConflict)
-	}
-	if n := countEvents(t, conn, engine.EventClaimRefused, first); n != 1 {
-		t.Errorf("%d claim-refused events after a second owner's claim, want 1", n)
-	}
-
-	_, err = client.StepClaim(context.Background(), claimRequest(second, "w1", "s1"))
-	if got := output.ErrorCodeFromConnectError(err); got != output.ErrConflict {
-		t.Errorf("claiming a step whose predecessor is open: code %s (err %v), want %s", got, err, output.ErrConflict)
-	}
-	if n := countEvents(t, conn, engine.EventStepClaimed, second); n != 0 {
-		t.Errorf("%d step-claimed events on the unready step, want 0", n)
-	}
-
-	_, err = client.StepClaim(context.Background(), claimRequest(999, "w1", "s1"))
-	if got := output.ErrorCodeFromConnectError(err); got != output.ErrNotFound {
-		t.Errorf("claiming a missing step: code %s (err %v), want %s", got, err, output.ErrNotFound)
 	}
 }

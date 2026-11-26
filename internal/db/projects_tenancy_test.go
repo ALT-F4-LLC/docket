@@ -15,7 +15,7 @@ import (
 
 func tenancyDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := mustOpen(t)
+	db := mustOpenMigrated(t)
 	if err := Initialize(db); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}

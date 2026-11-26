@@ -13,7 +13,9 @@ import (
 
 func openMigratedDB(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := db.Open(filepath.Join(t.TempDir(), "issues.db"))
+	path := filepath.Join(t.TempDir(), "issues.db")
+	seedMigratedFile(t, path)
+	conn, err := db.Open(path)
 	testsupport.Must(t, err, "opening the database: %v", err)
 	t.Cleanup(func() { conn.Close() })
 	err = db.Initialize(conn)
@@ -77,6 +79,7 @@ func TestStoreOnCloseLeavesTheCallersDBOpen(t *testing.T) {
 func openLegacyPair(t *testing.T) (writer, reader *sql.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "issues.db")
+	seedMigratedFile(t, path)
 	writer, err := OpenSQLiteDB(path)
 	testsupport.Must(t, err, "OpenSQLiteDB: %v", err)
 	t.Cleanup(func() { writer.Close() })

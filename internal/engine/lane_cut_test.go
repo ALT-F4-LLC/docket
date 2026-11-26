@@ -146,7 +146,7 @@ func TestDispatchOpenReportsTruncation(t *testing.T) {
 	// AC4's absence half on this fixture: the example workflow declares no
 	// `[limits]` at all, so the manifest must carry no limits map rather than a
 	// map of zeros a relay would read as "no concurrency". The presence half
-	// needs a workflow that declares one — TestManifestCarriesPerClassLimits.
+	// needs a workflow that declares one — TestManifestCarriesEachClassCapSource.
 	if m.Limits != nil {
 		t.Errorf("manifest limits = %v over a workflow with no [limits] — "+
 			"unbounded must be an absence", m.Limits)
@@ -195,48 +195,5 @@ func TestNextSharesTheLaneCompleteCut(t *testing.T) {
 	if ready.Total != m.Total {
 		t.Errorf("next total = %d, manifest total = %d — both report the PRE-cut "+
 			"count of the same ready set", ready.Total, m.Total)
-	}
-}
-
-// TestManifestCarriesPerClassLimits is AC4 against a workflow that actually
-// declares `[limits]`: the example fixture declares none, so a manifest over it
-// legitimately carries no limits map at all.
-func TestManifestCarriesPerClassLimits(t *testing.T) {
-	conn := mustDB(t)
-	registerSource(t, conn, []byte(writeClassWorkflowSrc), "limits-fixture.toml")
-	issue := createIssue(t, conn, "limits fixture", "a body", "task", nil)
-	run := startRun(t, conn, issue)
-	_, err := activate(conn, run.ID)
-	testsupport.Must(t, err, "activate: %v", err)
-
-	m := openDispatch(t, conn, run.ID, 0, nowMS)
-
-	if got, ok := m.Limits["write"]; !ok || got != 1 {
-		t.Fatalf("manifest limits = %v, want write=1 from the merged [limits]",
-			m.Limits)
-	}
-	// Every class the rows carry with a finite declared max is present, and the
-	// expectation comes from the scheduler's own merged limits rather than from
-	// the manifest field under test.
-	defs, err := StepDefinitions(conn, run.ID)
-	testsupport.Must(t, err, "loading definitions: %v", err)
-	sched, err := readySnapshot(conn, run.ID, defs, nowMS)
-	testsupport.Must(t, err, "ready snapshot: %v", err)
-	for _, r := range m.Rows {
-		if r.Class == "" {
-			continue
-		}
-		want := sched.Limit(r.Class).Max
-		if want == 0 {
-			if _, present := m.Limits[r.Class]; present {
-				t.Errorf("manifest names class %q with no declared max — "+
-					"unbounded must be an absence, not a zero", r.Class)
-			}
-			continue
-		}
-		if m.Limits[r.Class] != want {
-			t.Errorf("manifest limit for class %q = %d, want %d",
-				r.Class, m.Limits[r.Class], want)
-		}
 	}
 }

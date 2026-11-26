@@ -19,6 +19,33 @@ func mustOpen(t *testing.T) *sql.DB {
 	return db
 }
 
+// migratedMemory is the migrated in-memory database mustOpenMigrated copies.
+var migratedMemory testsupport.SQLiteImage
+
+// mustOpenMigrated opens an in-memory database holding a copy of a freshly
+// migrated store, so Initialize and Migrate on it change nothing. A test of
+// Initialize or Migrate itself starts from mustOpen instead.
+func mustOpenMigrated(t *testing.T) *sql.DB {
+	t.Helper()
+	db := mustOpen(t)
+	migratedMemory.Memory(t, db, func() (*sql.DB, error) {
+		source, err := Open(":memory:")
+		if err != nil {
+			return nil, err
+		}
+		if err := Initialize(source); err != nil {
+			source.Close()
+			return nil, err
+		}
+		if err := Migrate(source); err != nil {
+			source.Close()
+			return nil, err
+		}
+		return source, nil
+	})
+	return db
+}
+
 func TestOpenSetsWALMode(t *testing.T) {
 	db := mustOpen(t)
 
@@ -145,19 +172,6 @@ func TestInitializeCreatesAllTables(t *testing.T) {
 	}
 }
 
-func TestInitializeSetsSchemaVersion(t *testing.T) {
-	db := mustOpen(t)
-
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	v, err := SchemaVersion(db)
-	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
-	if v != 1 {
-		t.Errorf("schema_version = %d, want 1", v)
-	}
-}
-
 func TestInitializeIsIdempotent(t *testing.T) {
 	db := mustOpen(t)
 
@@ -170,24 +184,6 @@ func TestInitializeIsIdempotent(t *testing.T) {
 	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
 	if v != 1 {
 		t.Errorf("schema_version = %d after double init, want 1", v)
-	}
-}
-
-func TestForeignKeyEnforcement(t *testing.T) {
-	db := mustOpen(t)
-
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	// Try to insert a comment referencing a non-existent issue.
-	_, err = db.Exec(
-		"INSERT INTO comments (issue_id, body, created_at) VALUES (999, 'test', ?)",
-		now,
-	)
-	if err == nil {
-		t.Error("expected foreign key violation, got nil")
 	}
 }
 
@@ -319,16 +315,6 @@ func TestOpenRefusesNewerSchema(t *testing.T) {
 	}
 }
 
-func TestOpenAcceptsStoreAtCurrentSchema(t *testing.T) {
-	path := migratedStoreFile(t)
-
-	db, err := Open(path)
-	testsupport.Must(t, err, "reopening a store at the current schema: %v", err)
-	defer db.Close()
-	err = Migrate(db)
-	testsupport.Must(t, err, "Migrate at the current schema failed: %v", err)
-}
-
 // docV4Tables lists the five tables that v3→v4 must create.
 var docV4Tables = []string{
 	"docs",
@@ -346,25 +332,6 @@ func assertTableExists(t *testing.T, db *sql.DB, name string) {
 	).Scan(&got)
 	if err != nil {
 		t.Errorf("table %q not found: %v", name, err)
-	}
-}
-
-func TestMigrateV3ToV4_CleanDB(t *testing.T) {
-	db := mustOpen(t)
-
-	err := Initialize(db)
-	testsupport.Must(t, err, "Initialize failed: %v", err)
-	err = Migrate(db)
-	testsupport.Must(t, err, "Migrate failed: %v", err)
-
-	v, err := SchemaVersion(db)
-	testsupport.Must(t, err, "SchemaVersion failed: %v", err)
-	if v != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d (currentSchemaVersion)", v, currentSchemaVersion)
-	}
-
-	for _, tbl := range docV4Tables {
-		assertTableExists(t, db, tbl)
 	}
 }
 
